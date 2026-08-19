@@ -40,6 +40,20 @@
 //! re-announce it. The entry records the [`NotifyOnceMarker`] it consumed as
 //! provenance — so a dead letter names the claim it holds — not as something
 //! the outbox later settles.
+//!
+//! # Filesystem roots
+//!
+//! Every entry point comes in a pair: an ambient one that resolves the config
+//! root from the process environment, and an `_in_root` sibling that takes an
+//! already-resolved one (#7505). The ambient wrapper resolves *once* and then
+//! threads that value, so a single drain pass cannot claim an entry in one
+//! installation and reschedule or dead-letter it in another — which would
+//! strand the entry in the first installation's `inflight/` until the reclaim
+//! window elapsed, exactly the loss this module exists to prevent.
+//!
+//! The transport an attempt is delivered through is *not* rooted here: it comes
+//! from the notification-transport registry that `notify::dispatch` resolves,
+//! which is config/extension-store state rather than queue state.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -214,22 +228,44 @@ impl NotifyOutboxDrainReport {
 // Paths
 // ---------------------------------------------------------------------------
 
-fn outbox_root() -> Option<PathBuf> {
-    crate::paths::homeboy()
-        .ok()
-        .map(|home| home.join("notify-outbox"))
+/// The queue directory below an already-resolved *config* root.
+fn outbox_root_in_root(config_root: &Path) -> PathBuf {
+    config_root.join("notify-outbox")
+}
+
+fn pending_dir_in_root(config_root: &Path) -> PathBuf {
+    outbox_root_in_root(config_root).join("pending")
+}
+
+fn inflight_dir_in_root(config_root: &Path) -> PathBuf {
+    outbox_root_in_root(config_root).join("inflight")
+}
+
+fn dead_letter_dir_in_root(config_root: &Path) -> PathBuf {
+    outbox_root_in_root(config_root).join("dead-letter")
+}
+
+/// The config root the ambient wrappers hang from.
+///
+/// `None` is "no queue is reachable", which every ambient entry point already
+/// degrades to a dropped notification rather than an error (see the module
+/// header). It is resolved once per public call and then threaded, so a single
+/// drain pass cannot claim an entry in one installation and release it in
+/// another.
+fn ambient_config_root() -> Option<PathBuf> {
+    crate::paths::homeboy().ok()
 }
 
 fn pending_dir() -> Option<PathBuf> {
-    outbox_root().map(|root| root.join("pending"))
+    Some(pending_dir_in_root(&ambient_config_root()?))
 }
 
 fn inflight_dir() -> Option<PathBuf> {
-    outbox_root().map(|root| root.join("inflight"))
+    Some(inflight_dir_in_root(&ambient_config_root()?))
 }
 
 fn dead_letter_dir() -> Option<PathBuf> {
-    outbox_root().map(|root| root.join("dead-letter"))
+    Some(dead_letter_dir_in_root(&ambient_config_root()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +314,28 @@ pub fn dispatch_with_outbox(
     event: &NotifyEvent,
     once_marker: Option<NotifyOnceMarker>,
 ) -> NotifyOutboxDispatch {
+    dispatch_with_outbox_inner(ambient_config_root().as_deref(), event, once_marker)
+}
+
+/// [`dispatch_with_outbox`] against an already-resolved config root.
+pub fn dispatch_with_outbox_in_root(
+    config_root: &Path,
+    event: &NotifyEvent,
+    once_marker: Option<NotifyOnceMarker>,
+) -> NotifyOutboxDispatch {
+    dispatch_with_outbox_inner(Some(config_root), event, once_marker)
+}
+
+/// `config_root` is `Option` rather than `&Path` so the ambient wrapper keeps
+/// its pre-injection laziness: an unresolvable home must still attempt inline
+/// delivery and report `Delivered`, and only the *queueing* step degrades to
+/// `Dropped`. Resolving eagerly and bailing would turn a deliverable event into
+/// a dropped one on a machine with no `HOME`.
+fn dispatch_with_outbox_inner(
+    config_root: Option<&Path>,
+    event: &NotifyEvent,
+    once_marker: Option<NotifyOnceMarker>,
+) -> NotifyOutboxDispatch {
     let outcome = notify::dispatch(event);
     if outcome.delivered {
         return NotifyOutboxDispatch {
@@ -291,7 +349,10 @@ pub fn dispatch_with_outbox(
             disposition: NotifyOutboxDisposition::Dropped,
         };
     }
-    let disposition = match enqueue_after_attempt(event, once_marker, outcome.error.clone()) {
+    let queued = config_root.and_then(|config_root| {
+        enqueue_after_attempt(config_root, event, once_marker, outcome.error.clone())
+    });
+    let disposition = match queued {
         Some(entry_id) => NotifyOutboxDisposition::Queued { entry_id },
         None => NotifyOutboxDisposition::Dropped,
     };
@@ -306,10 +367,20 @@ pub fn dispatch_with_outbox(
 /// Returns the entry id, or `None` when the queue could not be written —
 /// which is a dropped notification, never a caller error.
 pub fn enqueue(event: &NotifyEvent, once_marker: Option<NotifyOnceMarker>) -> Option<String> {
-    write_new_entry(event, once_marker, 0, Utc::now(), None)
+    enqueue_in_root(&ambient_config_root()?, event, once_marker)
+}
+
+/// [`enqueue`] against an already-resolved config root.
+pub fn enqueue_in_root(
+    config_root: &Path,
+    event: &NotifyEvent,
+    once_marker: Option<NotifyOnceMarker>,
+) -> Option<String> {
+    write_new_entry(config_root, event, once_marker, 0, Utc::now(), None)
 }
 
 fn enqueue_after_attempt(
+    config_root: &Path,
     event: &NotifyEvent,
     once_marker: Option<NotifyOnceMarker>,
     error: Option<String>,
@@ -317,10 +388,11 @@ fn enqueue_after_attempt(
     let now = Utc::now();
     let due = now
         + chrono::Duration::from_std(backoff_after(1)).unwrap_or_else(|_| chrono::Duration::zero());
-    write_new_entry(event, once_marker, 1, due, error)
+    write_new_entry(config_root, event, once_marker, 1, due, error)
 }
 
 fn write_new_entry(
+    config_root: &Path,
     event: &NotifyEvent,
     once_marker: Option<NotifyOnceMarker>,
     attempts: u32,
@@ -344,7 +416,7 @@ fn write_new_entry(
         last_error,
         once_marker,
     };
-    let path = pending_dir()?.join(format!("{entry_id}.json"));
+    let path = pending_dir_in_root(config_root).join(format!("{entry_id}.json"));
     write_entry(&path, &entry).then_some(entry_id)
 }
 
@@ -366,11 +438,29 @@ fn write_entry(path: &Path, entry: &NotifyOutboxEntry) -> bool {
 /// `Result`: a drain that cannot read its own directory has nothing to do, and
 /// that is not an error the daemon can act on.
 pub fn drain(now: DateTime<Utc>) -> NotifyOutboxDrainReport {
-    let mut report = NotifyOutboxDrainReport::empty();
-    let Some(pending) = pending_dir() else {
-        return report;
+    let Some(config_root) = ambient_config_root() else {
+        // No reachable queue: nothing to claim, nothing to release.
+        return NotifyOutboxDrainReport::empty();
     };
-    report.reclaimed = reclaim_stale_inflight(now);
+    drain_in_root(&config_root, now)
+}
+
+/// [`drain`] against an already-resolved config root.
+///
+/// Every directory this pass touches — `pending/`, `inflight/`, and
+/// `dead-letter/` — is derived from this one root and threaded through
+/// `reclaim`, `claim`, and `apply_attempt`. A claim taken in one installation
+/// can therefore never be released, rescheduled, or dead-lettered in another,
+/// which would strand the entry in the first installation's `inflight/` until
+/// its reclaim window elapsed.
+///
+/// Delivery itself (`notify::dispatch`) still resolves its transport from the
+/// ambient config; that is the notification *transport* registry, not this
+/// queue's state, and rooting it belongs to the config/extension-store layer.
+pub fn drain_in_root(config_root: &Path, now: DateTime<Utc>) -> NotifyOutboxDrainReport {
+    let mut report = NotifyOutboxDrainReport::empty();
+    let pending = pending_dir_in_root(config_root);
+    report.reclaimed = reclaim_stale_inflight(config_root, now);
 
     let mut due = due_entries(&pending, now);
     // Oldest deadline first, so a long-backed-off entry is not starved by a
@@ -382,7 +472,7 @@ pub fn drain(now: DateTime<Utc>) -> NotifyOutboxDrainReport {
     }
 
     for (_, path) in due {
-        let Some(claimed) = claim(&path) else {
+        let Some(claimed) = claim(config_root, &path) else {
             // Another drainer won the rename, or the entry vanished.
             continue;
         };
@@ -397,11 +487,11 @@ pub fn drain(now: DateTime<Utc>) -> NotifyOutboxDrainReport {
             });
             // An unparseable entry can never be delivered, and leaving it in
             // `pending/` would make every future pass re-read it forever.
-            move_to_dead_letter(&claimed);
+            move_to_dead_letter(config_root, &claimed);
             continue;
         };
         report.attempted += 1;
-        apply_attempt(&claimed, entry, now, &mut report);
+        apply_attempt(config_root, &claimed, entry, now, &mut report);
     }
     report
 }
@@ -435,8 +525,8 @@ fn due_entries(pending: &Path, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, PathBu
 /// entry both call `rename`; the loser's source no longer exists and it gets
 /// `ENOENT`, exactly as the second writer of the run-completion marker gets
 /// zero updated rows.
-fn claim(path: &Path) -> Option<PathBuf> {
-    let inflight = inflight_dir()?;
+fn claim(config_root: &Path, path: &Path) -> Option<PathBuf> {
+    let inflight = inflight_dir_in_root(config_root);
     if std::fs::create_dir_all(&inflight).is_err() {
         return None;
     }
@@ -445,6 +535,7 @@ fn claim(path: &Path) -> Option<PathBuf> {
 }
 
 fn apply_attempt(
+    config_root: &Path,
     claimed: &Path,
     mut entry: NotifyOutboxEntry,
     now: DateTime<Utc>,
@@ -481,10 +572,7 @@ fn apply_attempt(
             next_attempt_at: None,
             error: entry.last_error.clone(),
         });
-        let Some(dead) = dead_letter_dir() else {
-            let _ = std::fs::remove_file(claimed);
-            return;
-        };
+        let dead = dead_letter_dir_in_root(config_root);
         let path = dead.join(format!("{}.json", entry.entry_id));
         if !write_entry(&path, &entry) {
             // Nowhere to record it; dropping is still better than leaving a
@@ -508,10 +596,7 @@ fn apply_attempt(
         next_attempt_at: Some(entry.next_attempt_at.clone()),
         error: entry.last_error.clone(),
     });
-    let Some(pending) = pending_dir() else {
-        return;
-    };
-    let path = pending.join(format!("{}.json", entry.entry_id));
+    let path = pending_dir_in_root(config_root).join(format!("{}.json", entry.entry_id));
     if write_entry(&path, &entry) {
         let _ = std::fs::remove_file(claimed);
     }
@@ -521,10 +606,9 @@ fn apply_attempt(
 }
 
 /// Return entries abandoned by a drainer that died mid-attempt.
-fn reclaim_stale_inflight(now: DateTime<Utc>) -> usize {
-    let (Some(inflight), Some(pending)) = (inflight_dir(), pending_dir()) else {
-        return 0;
-    };
+fn reclaim_stale_inflight(config_root: &Path, now: DateTime<Utc>) -> usize {
+    let inflight = inflight_dir_in_root(config_root);
+    let pending = pending_dir_in_root(config_root);
     let Ok(entries) = std::fs::read_dir(&inflight) else {
         return 0;
     };
@@ -560,11 +644,8 @@ fn reclaim_stale_inflight(now: DateTime<Utc>) -> usize {
     reclaimed
 }
 
-fn move_to_dead_letter(claimed: &Path) {
-    let Some(dead) = dead_letter_dir() else {
-        let _ = std::fs::remove_file(claimed);
-        return;
-    };
+fn move_to_dead_letter(config_root: &Path, claimed: &Path) {
+    let dead = dead_letter_dir_in_root(config_root);
     if std::fs::create_dir_all(&dead).is_err() {
         let _ = std::fs::remove_file(claimed);
         return;
@@ -601,23 +682,39 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
 
 /// Every entry currently queued for redelivery, oldest deadline first.
 pub fn pending_entries() -> Vec<NotifyOutboxEntry> {
-    read_dir_entries(pending_dir())
+    read_dir_entries_opt(pending_dir())
+}
+
+/// [`pending_entries`] against an already-resolved config root.
+pub fn pending_entries_in_root(config_root: &Path) -> Vec<NotifyOutboxEntry> {
+    read_dir_entries(&pending_dir_in_root(config_root))
 }
 
 /// Every entry that exhausted its attempt budget.
 pub fn dead_letter_entries() -> Vec<NotifyOutboxEntry> {
-    read_dir_entries(dead_letter_dir())
+    read_dir_entries_opt(dead_letter_dir())
+}
+
+/// [`dead_letter_entries`] against an already-resolved config root.
+pub fn dead_letter_entries_in_root(config_root: &Path) -> Vec<NotifyOutboxEntry> {
+    read_dir_entries(&dead_letter_dir_in_root(config_root))
 }
 
 /// Entries currently claimed by a drain pass.
 pub fn inflight_entries() -> Vec<NotifyOutboxEntry> {
-    read_dir_entries(inflight_dir())
+    read_dir_entries_opt(inflight_dir())
 }
 
-fn read_dir_entries(dir: Option<PathBuf>) -> Vec<NotifyOutboxEntry> {
-    let Some(dir) = dir else {
-        return Vec::new();
-    };
+/// [`inflight_entries`] against an already-resolved config root.
+pub fn inflight_entries_in_root(config_root: &Path) -> Vec<NotifyOutboxEntry> {
+    read_dir_entries(&inflight_dir_in_root(config_root))
+}
+
+fn read_dir_entries_opt(dir: Option<PathBuf>) -> Vec<NotifyOutboxEntry> {
+    dir.map(|dir| read_dir_entries(&dir)).unwrap_or_default()
+}
+
+fn read_dir_entries(dir: &Path) -> Vec<NotifyOutboxEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -825,6 +922,54 @@ mod tests {
                 "{report:?}"
             );
         });
+    }
+
+    #[test]
+    fn injected_roots_own_independent_queues() {
+        // No `with_isolated_home`: an injected root must not consult the
+        // process environment at all, which is the whole point of the
+        // `_in_root` pair.
+        let left = tempfile::tempdir().expect("left root");
+        let right = tempfile::tempdir().expect("right root");
+
+        let entry_id = enqueue_in_root(left.path(), &event("run-left"), None).expect("queued");
+
+        let queued = pending_entries_in_root(left.path());
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].entry_id, entry_id);
+        assert_eq!(queued[0].event.run_id, "run-left");
+        assert!(pending_entries_in_root(right.path()).is_empty());
+    }
+
+    #[test]
+    fn a_drain_claims_and_releases_inside_the_root_it_was_given() {
+        // An unparseable entry exercises claim -> release without spawning a
+        // transport, so this asserts the drain's *own* state machine rather
+        // than delivery. A claim taken under one root and released under
+        // another would strand the entry until its reclaim window elapsed.
+        let root = tempfile::tempdir().expect("root");
+        let other = tempfile::tempdir().expect("other root");
+        let pending = pending_dir_in_root(root.path());
+        std::fs::create_dir_all(&pending).expect("seed pending");
+        std::fs::write(pending.join("corrupt.json"), b"{not json").expect("seed entry");
+
+        let report = drain_in_root(root.path(), Utc::now());
+
+        assert_eq!(report.unreadable, 1);
+        assert!(!pending.join("corrupt.json").exists());
+        assert!(
+            !inflight_dir_in_root(root.path())
+                .join("corrupt.json")
+                .exists(),
+            "the claim was released, not stranded in inflight"
+        );
+        assert!(
+            dead_letter_dir_in_root(root.path())
+                .join("corrupt.json")
+                .exists(),
+            "the release landed under the same root the claim was taken in"
+        );
+        assert!(!other.path().join("notify-outbox").exists());
     }
 
     #[test]

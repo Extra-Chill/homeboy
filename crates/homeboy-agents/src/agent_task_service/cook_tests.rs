@@ -5,23 +5,27 @@
 use super::super::cook_adoption::{
     adopt_cook_candidate, adopt_cook_candidate_with_dispatcher_and_backend,
     candidate_adoption_source, concrete_adoption_ai_model, resolve_adoption_target,
-    resolve_adoption_target_with_attempt,
+    resolve_adoption_target_with_attempt_in_stores,
 };
 use super::super::cook_baseline::git_output;
+use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
     cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
-    finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend_with_stores, moving_base_recovery_for_run,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
-    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
-    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
-    persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
-    CookReportInput, MovingBaseCookRecovery,
+    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
+    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
+    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
+    refreshed_moving_base_recovery, selected_candidate_task_id_in_store, CookReportInput,
+    MovingBaseCookRecovery,
 };
-use super::super::cook_recipe::persist_initial_recipe;
+use super::super::cook_recipe::{
+    persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
+};
 use super::*;
 use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
@@ -59,6 +63,31 @@ fn with_strict_config_lock(test: impl FnOnce()) {
     }
     let _env = StrictLockEnv;
     test();
+}
+
+/// `agent_task_lifecycle::submit_plan` against an explicitly injected store.
+///
+/// The ambient wrapper resolves its store from the process environment and
+/// admits through `paths::controller_runtimes_store()`, which stays
+/// process-global by design. A hermetic test must not enqueue against the
+/// operator's real admission queue, so runtime admission is supplied as stub
+/// evidence exactly as the rooted proofs in `agent_task_lifecycle::tests` do.
+/// Only the store and that admission edge change; the plan and the requested
+/// run identity are passed through untouched (#7505).
+fn submit_plan_in_test_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        None,
+        None,
+        None,
+        |_| Ok(serde_json::json!({})),
+    )
 }
 
 #[test]
@@ -1148,133 +1177,137 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
 
 #[test]
 fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let mut plan = AgentTaskPlan::new(
-            "selected-candidate",
-            vec![
-                AgentTaskRequest {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = AgentTaskPlan::new(
+        "selected-candidate",
+        vec![
+            AgentTaskRequest {
+                task_id: "winner".to_string(),
+                group_key: Some("candidate-group".to_string()),
+                ..batch_cook_options(
+                    "selected-candidate-template",
+                    Arc::new(AcceptedDetachedAttemptDispatcher),
+                )
+                .initial_plan
+                .tasks[0]
+                    .clone()
+            },
+            AgentTaskRequest {
+                task_id: "late-sibling".to_string(),
+                group_key: Some("candidate-group".to_string()),
+                ..batch_cook_options(
+                    "selected-candidate-template-two",
+                    Arc::new(AcceptedDetachedAttemptDispatcher),
+                )
+                .initial_plan
+                .tasks[0]
+                    .clone()
+            },
+        ],
+    );
+    plan.group_key = Some("candidate-group".to_string());
+    plan.options.candidate_completion =
+        crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
+    let run_id = "selected-candidate-run";
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    agent_task_lifecycle::record_run_aggregate_in_store(
+        &lifecycle_store,
+        run_id,
+        &plan,
+        &crate::agent_task_scheduler::AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+            totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                succeeded: 1,
+                cancelled: 1,
+                ..Default::default()
+            },
+            outcomes: vec![
+                crate::agent_task::AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "winner".to_string(),
-                    group_key: Some("candidate-group".to_string()),
-                    ..batch_cook_options(
-                        "selected-candidate-template",
-                        Arc::new(AcceptedDetachedAttemptDispatcher),
-                    )
-                    .initial_plan
-                    .tasks[0]
-                        .clone()
+                    status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    summary: None,
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: test_review_form_outputs(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: serde_json::json!({ "candidate_selection": {
+                        "policy": "first_green",
+                        "selected_task_id": "winner",
+                        "promotion_action": "promote_selected_candidate_only"
+                    }}),
                 },
-                AgentTaskRequest {
+                crate::agent_task::AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "late-sibling".to_string(),
-                    group_key: Some("candidate-group".to_string()),
-                    ..batch_cook_options(
-                        "selected-candidate-template-two",
-                        Arc::new(AcceptedDetachedAttemptDispatcher),
-                    )
-                    .initial_plan
-                    .tasks[0]
-                        .clone()
+                    status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
+                    summary: None,
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
                 },
             ],
-        );
-        plan.group_key = Some("candidate-group".to_string());
-        plan.options.candidate_completion =
-            crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
-        let run_id = "selected-candidate-run";
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_run_aggregate(
-            run_id,
-            &plan,
-            &crate::agent_task_scheduler::AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
-                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
-                    succeeded: 1,
-                    cancelled: 1,
-                    ..Default::default()
-                },
-                outcomes: vec![
-                    crate::agent_task::AgentTaskOutcome {
-                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                        task_id: "winner".to_string(),
-                        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                        summary: None,
-                        failure_classification: None,
-                        artifacts: Vec::new(),
-                        typed_artifacts: Vec::new(),
-                        evidence_refs: Vec::new(),
-                        diagnostics: Vec::new(),
-                        outputs: test_review_form_outputs(),
-                        workflow: None,
-                        follow_up: None,
-                        metadata: serde_json::json!({ "candidate_selection": {
-                            "policy": "first_green",
-                            "selected_task_id": "winner",
-                            "promotion_action": "promote_selected_candidate_only"
-                        }}),
-                    },
-                    crate::agent_task::AgentTaskOutcome {
-                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                        task_id: "late-sibling".to_string(),
-                        status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
-                        summary: None,
-                        failure_classification: None,
-                        artifacts: Vec::new(),
-                        typed_artifacts: Vec::new(),
-                        evidence_refs: Vec::new(),
-                        diagnostics: Vec::new(),
-                        outputs: Value::Null,
-                        workflow: None,
-                        follow_up: None,
-                        metadata: Value::Null,
-                    },
-                ],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .unwrap();
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
 
-        assert_eq!(
-            review_form_from_aggregate(&agent_task_lifecycle::read_aggregate(run_id).unwrap())
-                .unwrap(),
-            Some(test_review_form())
-        );
-        assert_eq!(
-            selected_candidate_task_id(run_id).unwrap(),
-            Some("winner".to_string())
-        );
-        let status = agent_task_lifecycle::run_status(run_id, None).unwrap();
-        let candidate = status
-            .candidate
-            .as_ref()
-            .expect("candidate status projection");
-        assert_eq!(candidate.policy, plan.options.candidate_completion);
-        assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
-        assert_eq!(candidate.candidates.len(), 2);
-        assert_eq!(
-            candidate.cancellation_supervision,
-            "scheduler_deferred_cleanup"
-        );
-        assert_eq!(
-            candidate.promotion_action.as_deref(),
-            Some("promote_selected_candidate_only")
-        );
-        let serialized = serde_json::to_value(&status).unwrap();
-        assert_eq!(serialized["candidate"]["policy"], "first_green");
-        assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
-        let mut legacy_json = serialized;
-        legacy_json
-            .as_object_mut()
-            .expect("status object")
-            .remove("candidate");
-        let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
-            serde_json::from_value(legacy_json).unwrap();
-        assert!(legacy.candidate.is_none());
-    });
+    assert_eq!(
+        review_form_from_aggregate(
+            &agent_task_lifecycle::read_aggregate_in_store(&lifecycle_store, run_id).unwrap()
+        )
+        .unwrap(),
+        Some(test_review_form())
+    );
+    assert_eq!(
+        selected_candidate_task_id_in_store(&lifecycle_store, run_id).unwrap(),
+        Some("winner".to_string())
+    );
+    let status = agent_task_lifecycle::run_status_in_store(&lifecycle_store, run_id, None).unwrap();
+    let candidate = status
+        .candidate
+        .as_ref()
+        .expect("candidate status projection");
+    assert_eq!(candidate.policy, plan.options.candidate_completion);
+    assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
+    assert_eq!(candidate.candidates.len(), 2);
+    assert_eq!(
+        candidate.cancellation_supervision,
+        "scheduler_deferred_cleanup"
+    );
+    assert_eq!(
+        candidate.promotion_action.as_deref(),
+        Some("promote_selected_candidate_only")
+    );
+    let serialized = serde_json::to_value(&status).unwrap();
+    assert_eq!(serialized["candidate"]["policy"], "first_green");
+    assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
+    let mut legacy_json = serialized;
+    legacy_json
+        .as_object_mut()
+        .expect("status object")
+        .remove("candidate");
+    let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
+        serde_json::from_value(legacy_json).unwrap();
+    assert!(legacy.candidate.is_none());
 }
 
 #[test]
@@ -1574,15 +1607,6 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
     let mut sibling = options.initial_plan.tasks[0].clone();
     sibling.task_id = "sibling".to_string();
     options.initial_plan.tasks.push(sibling);
-
-    // Seed only the run record, in the lifecycle root, so materialization never
-    // needs the ambient controller-runtime admission lock. The recipe and the
-    // Cook index below are the spine's own writes.
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
-            Ok(serde_json::json!({}))
-        })
-        .expect("seed the run record in the lifecycle root");
 
     let error = run_cook_with_boundaries_observed_inner_with_stores(
         &recipe_store,
@@ -3655,6 +3679,107 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
 }
 
 #[test]
+fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut winner = batch_cook_options(
+        "concurrent-first-cook",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    winner.initial_plan.plan_id = "creator-plan".to_string();
+    let mut loser = winner.clone();
+    loser.initial_plan.plan_id = "loser-plan".to_string();
+
+    let barrier = Arc::new(Barrier::new(2));
+    set_initial_recipe_creation_barrier_for_test(Some(Arc::clone(&barrier)));
+    let (winner_result, loser_result) = std::thread::scope(|scope| {
+        let winner = scope.spawn(|| {
+            run_cook_with_boundaries_reported_with_stores(
+                &store,
+                &lifecycle_store,
+                winner,
+                UnusedExecutor,
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+                None,
+                false,
+            )
+        });
+        let loser = scope.spawn(|| {
+            run_cook_with_boundaries_reported_with_stores(
+                &store,
+                &lifecycle_store,
+                loser,
+                UnusedExecutor,
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+                None,
+                false,
+            )
+        });
+        (winner.join().unwrap(), loser.join().unwrap())
+    });
+    set_initial_recipe_creation_barrier_for_test(None);
+
+    let outcomes = [winner_result.unwrap(), loser_result.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.value.status == "in_flight")
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.value.status == "durable_failure")
+            .count(),
+        1
+    );
+    let recipe = store
+        .load_recipe("concurrent-first-cook")
+        .expect("creator recipe");
+    let creator_options = super::super::reconstruct_options_with_dispatcher(
+        &recipe,
+        Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+    )
+    .expect("creator options");
+    let record_before = lifecycle_store
+        .read_record(&creator_options.initial_run_id)
+        .expect("queued creator record");
+    let plan_before = lifecycle_store
+        .read_controller_plan(&creator_options.initial_run_id)
+        .expect("creator controller plan");
+    let aggregate_before = agent_task_lifecycle::read_aggregate_in_store(
+        &lifecycle_store,
+        &creator_options.initial_run_id,
+    )
+    .ok();
+
+    assert_eq!(record_before.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        lifecycle_store
+            .read_record(&creator_options.initial_run_id)
+            .expect("creator record remains queued")
+            .state,
+        record_before.state
+    );
+    assert_eq!(
+        lifecycle_store
+            .read_controller_plan(&creator_options.initial_run_id)
+            .expect("creator plan remains immutable"),
+        plan_before
+    );
+    assert_eq!(
+        agent_task_lifecycle::read_aggregate_in_store(
+            &lifecycle_store,
+            &creator_options.initial_run_id,
+        )
+        .ok(),
+        aggregate_before
+    );
+}
+
+#[test]
 fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     let mut options = batch_cook_options(
         "initial-review-form-contract",
@@ -3702,6 +3827,35 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
             .output_declarations
             .iter()
             .filter(|declaration| declaration.name == "review_form")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
+    let mut options = batch_cook_options(
+        "controller-owned-gate-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.gates.verify = vec!["cargo test --locked -p homeboy-agents".to_string()];
+    options.gates.private_verify = vec!["private-gate --token secret".to_string()];
+
+    project_controller_owned_gate_contract(&mut options);
+
+    let instructions = &options.initial_plan.tasks[0].instructions;
+    assert!(instructions.contains("Declared deterministic gates are controller-owned."));
+    assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
+    assert!(instructions.contains("1 private deterministic gate(s)"));
+    assert!(!instructions.contains("private-gate --token secret"));
+    assert!(instructions.contains("focused check only when it directly reduces uncertainty"));
+    assert!(instructions.contains("authoritative final gate evidence separately"));
+
+    project_controller_owned_gate_contract(&mut options);
+    assert_eq!(
+        options.initial_plan.tasks[0]
+            .instructions
+            .matches("Declared deterministic gates are controller-owned.")
             .count(),
         1
     );
@@ -6549,33 +6703,40 @@ fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
 
 #[test]
 fn recipe_recovery_rejects_foreign_lifecycle_record_before_indexing() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-recipe-foreign-record";
-        let run_id = "cook-recipe-foreign-record-attempt-1";
-        let mut options = batch_cook_options(
-            cook_id,
-            Arc::new(RecordingDetachedAttemptDispatcher {
-                dispatches: Arc::new(AtomicUsize::new(0)),
-            }),
-        );
-        options.initial_run_id = run_id.to_string();
-        persist_initial_recipe(&options).expect("persist recipe");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
-            .expect("persist foreign lifecycle record");
-        agent_task_lifecycle::record_cook_attempt("other-cook", 1, run_id)
-            .expect("bind foreign Cook ownership");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let cook_id = "cook-recipe-foreign-record";
+    let run_id = "cook-recipe-foreign-record-attempt-1";
+    let mut options = batch_cook_options(
+        cook_id,
+        Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    options.initial_run_id = run_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    submit_plan_in_test_store(&lifecycle_store, &options.initial_plan, Some(run_id))
+        .expect("persist foreign lifecycle record");
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, "other-cook", 1, run_id)
+        .expect("bind foreign Cook ownership");
 
-        let error = super::super::cook_pre_execution::recover_recipe_attempt(cook_id)
-            .expect_err("foreign lifecycle record is rejected");
-        assert!(error.message.contains("belongs to a different Cook"));
-        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("no local index written"));
-        assert_eq!(
-            agent_task_lifecycle::exact_record(run_id)
-                .expect("foreign record remains")
-                .metadata["cook_id"],
-            "other-cook"
-        );
-    });
+    let error = recover_recipe_attempt_with_stores(&recipe_store, &lifecycle_store, cook_id)
+        .expect_err("foreign lifecycle record is rejected");
+    assert!(error.message.contains("belongs to a different Cook"));
+    assert!(
+        !agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, cook_id)
+            .expect("no local index written")
+    );
+    assert_eq!(
+        agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)
+            .expect("foreign record remains")
+            .metadata["cook_id"],
+        "other-cook"
+    );
 }
 
 #[test]
@@ -9310,26 +9471,41 @@ fn adoption_rejects_aggregate_free_cancelled_runs_without_pre_provider_evidence(
 
 #[test]
 fn adoption_by_run_id_keeps_the_existing_lifecycle_record() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-existing-run";
-        let run_id = "cook-adopt-existing-run-attempt-1";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = run_id.to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
-            .expect("persist lifecycle record");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link cook attempt");
+    // One context, two stores: the ambient resolver built both roots from the
+    // same environment, so a single hermetic root reproduces that topology
+    // exactly while mutating no process state (#7505).
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-existing-run";
+    let run_id = "cook-adopt-existing-run-attempt-1";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist lifecycle record");
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, cook_id, 1, run_id)
+        .expect("link cook attempt");
 
-        let (record, recipe) =
-            resolve_adoption_target(run_id).expect("adoption resolves existing run");
+    let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        run_id,
+        None,
+    )
+    .expect("adoption resolves existing run");
 
-        assert_eq!(recipe.cook_id, cook_id);
-        assert_eq!(record.run_id, run_id);
-        assert_eq!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Queued
-        );
-    });
+    assert_eq!(recipe.cook_id, cook_id);
+    assert_eq!(record.run_id, run_id);
+    assert_eq!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Queued
+    );
 }
 
 #[test]
@@ -9359,30 +9535,45 @@ fn adoption_by_cook_id_selects_the_existing_recipe_attempt_record() {
 
 #[test]
 fn adoption_by_cook_id_uses_the_first_of_repeated_equivalent_recipe_attempts() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-equivalent-attempts";
-        let first_run_id = "cook-adopt-equivalent-attempts-1";
-        let second_run_id = "cook-adopt-equivalent-attempts-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = first_run_id.to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &options.initial_plan)
-            .expect("persist second recipe attempt");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(first_run_id))
-            .expect("persist first lifecycle record");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(second_run_id))
-            .expect("persist second lifecycle record");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, first_run_id)
-            .expect("index first attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, second_run_id)
-            .expect("make later failed attempt the mutable index target");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-equivalent-attempts";
+    let first_run_id = "cook-adopt-equivalent-attempts-1";
+    let second_run_id = "cook-adopt-equivalent-attempts-2";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = first_run_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    recipe_store
+        .record_recipe_attempt(cook_id, 2, second_run_id, &options.initial_plan)
+        .expect("persist second recipe attempt");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, first_run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist first lifecycle record");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, second_run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist second lifecycle record");
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, cook_id, 1, first_run_id)
+        .expect("index first attempt");
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, second_run_id)
+        .expect("make later failed attempt the mutable index target");
 
-        let (record, recipe) = resolve_adoption_target(cook_id)
-            .expect("equivalent attempts resolve deterministically");
+    let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        None,
+    )
+    .expect("equivalent attempts resolve deterministically");
 
-        assert_eq!(recipe.cook_id, cook_id);
-        assert_eq!(record.run_id, first_run_id);
-    });
+    assert_eq!(recipe.cook_id, cook_id);
+    assert_eq!(record.run_id, first_run_id);
 }
 
 #[test]
@@ -10056,211 +10247,295 @@ fn large_cook_index_selects_the_deterministic_top_64_window() {
 
 #[test]
 fn adoption_by_cook_id_rejects_conflicting_recipe_attempts_with_explicit_choices() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-conflicting-attempts";
-        let first_run_id = "cook-adopt-conflicting-attempts-1";
-        let second_run_id = "cook-adopt-conflicting-attempts-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = first_run_id.to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-        let mut conflicting_plan = options.initial_plan.clone();
-        conflicting_plan.plan_id = "conflicting-plan".to_string();
-        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
-            .expect("persist conflicting second recipe attempt");
-        agent_task_lifecycle::submit_plan(&conflicting_plan, Some(second_run_id))
-            .expect("persist exact conflicting attempt record without Cook metadata");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-conflicting-attempts";
+    let first_run_id = "cook-adopt-conflicting-attempts-1";
+    let second_run_id = "cook-adopt-conflicting-attempts-2";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = first_run_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    let mut conflicting_plan = options.initial_plan.clone();
+    conflicting_plan.plan_id = "conflicting-plan".to_string();
+    recipe_store
+        .record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
+        .expect("persist conflicting second recipe attempt");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&conflicting_plan, second_run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist exact conflicting attempt record without Cook metadata");
 
-        let error = resolve_adoption_target(cook_id)
-            .expect_err("conflicting recipe adoption requires an explicit run id");
+    let error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        None,
+    )
+    .expect_err("conflicting recipe adoption requires an explicit run id");
 
-        assert_eq!(error.details["field"], "cook_recipe.attempts");
-        assert!(error.message.contains(first_run_id));
-        assert!(error.message.contains(second_run_id));
-        assert!(error
-            .message
-            .contains(&format!("homeboy agent-task adopt {cook_id} --attempt 1")));
+    assert_eq!(error.details["field"], "cook_recipe.attempts");
+    assert!(error.message.contains(first_run_id));
+    assert!(error.message.contains(second_run_id));
+    assert!(error
+        .message
+        .contains(&format!("homeboy agent-task adopt {cook_id} --attempt 1")));
 
-        let (record, recipe) = resolve_adoption_target(second_run_id)
-            .expect("an exact existing attempt run id selects its owning recipe");
-        assert_eq!(recipe.cook_id, cook_id);
-        assert_eq!(record.run_id, second_run_id);
-    });
+    let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        second_run_id,
+        None,
+    )
+    .expect("an exact existing attempt run id selects its owning recipe");
+    assert_eq!(recipe.cook_id, cook_id);
+    assert_eq!(record.run_id, second_run_id);
 }
 
 #[test]
 fn adoption_attempt_selector_disambiguates_a_first_run_id_equal_to_its_cook_id() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-attempt-id-collision";
-        let second_run_id = "cook-adopt-attempt-id-collision-attempt-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = cook_id.to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-        let mut conflicting_plan = options.initial_plan.clone();
-        conflicting_plan.plan_id = "attempt-two-policy".to_string();
-        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
-            .expect("persist conflicting second recipe attempt");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(cook_id))
-            .expect("persist first lifecycle record");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-attempt-id-collision";
+    let second_run_id = "cook-adopt-attempt-id-collision-attempt-2";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = cook_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    let mut conflicting_plan = options.initial_plan.clone();
+    conflicting_plan.plan_id = "attempt-two-policy".to_string();
+    recipe_store
+        .record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
+        .expect("persist conflicting second recipe attempt");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, cook_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist first lifecycle record");
 
-        let error = resolve_adoption_target(cook_id)
-            .expect_err("conflicting attempts require an explicit selector");
-        assert!(error.message.contains("--attempt 1"));
-        assert!(error.message.contains("plan attempt-two-policy"));
+    let error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        None,
+    )
+    .expect_err("conflicting attempts require an explicit selector");
+    assert!(error.message.contains("--attempt 1"));
+    assert!(error.message.contains("plan attempt-two-policy"));
 
-        let (record, recipe) = resolve_adoption_target_with_attempt(cook_id, Some(1))
-            .expect("attempt selector resolves the first attempt despite the ID collision");
-        assert_eq!(recipe.cook_id, cook_id);
-        assert_eq!(record.run_id, cook_id);
-    });
+    let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        Some(1),
+    )
+    .expect("attempt selector resolves the first attempt despite the ID collision");
+    assert_eq!(recipe.cook_id, cook_id);
+    assert_eq!(record.run_id, cook_id);
 }
 
 #[test]
 fn adoption_attempt_selector_resolves_cook_and_child_run_ids_to_the_same_attempt() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-attempt-id-forms";
-        let child_run_id = "cook-adopt-attempt-id-forms-attempt-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = "cook-adopt-attempt-id-forms-attempt-1".to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-        let mut second_plan = options.initial_plan.clone();
-        second_plan.plan_id = "attempt-two-policy".to_string();
-        super::super::record_recipe_attempt(cook_id, 2, child_run_id, &second_plan)
-            .expect("persist second recipe attempt");
-        agent_task_lifecycle::submit_plan(&second_plan, Some(child_run_id))
-            .expect("persist second lifecycle record");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-attempt-id-forms";
+    let child_run_id = "cook-adopt-attempt-id-forms-attempt-2";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = "cook-adopt-attempt-id-forms-attempt-1".to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    let mut second_plan = options.initial_plan.clone();
+    second_plan.plan_id = "attempt-two-policy".to_string();
+    recipe_store
+        .record_recipe_attempt(cook_id, 2, child_run_id, &second_plan)
+        .expect("persist second recipe attempt");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&second_plan, child_run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist second lifecycle record");
 
-        let (cook_record, cook_recipe) = resolve_adoption_target_with_attempt(cook_id, Some(2))
-            .expect("Cook id selects attempt two");
-        let (run_record, run_recipe) = resolve_adoption_target_with_attempt(child_run_id, Some(2))
-            .expect("child attempt run id selects the same attempt");
+    let (cook_record, cook_recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        Some(2),
+    )
+    .expect("Cook id selects attempt two");
+    let (run_record, run_recipe) = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        child_run_id,
+        Some(2),
+    )
+    .expect("child attempt run id selects the same attempt");
 
-        assert_eq!(cook_recipe.cook_id, cook_id);
-        assert_eq!(run_recipe.cook_id, cook_recipe.cook_id);
-        assert_eq!(cook_record.run_id, child_run_id);
-        assert_eq!(run_record.run_id, cook_record.run_id);
+    assert_eq!(cook_recipe.cook_id, cook_id);
+    assert_eq!(run_recipe.cook_id, cook_recipe.cook_id);
+    assert_eq!(cook_record.run_id, child_run_id);
+    assert_eq!(run_record.run_id, cook_record.run_id);
 
-        let cook_error = resolve_adoption_target_with_attempt(cook_id, Some(3))
-            .expect_err("Cook id rejects an undeclared attempt");
-        let run_error = resolve_adoption_target_with_attempt(child_run_id, Some(3))
-            .expect_err("child attempt run id rejects the same undeclared attempt");
-        assert_eq!(run_error.details, cook_error.details);
-        assert_eq!(run_error.message, cook_error.message);
-    });
+    let cook_error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        Some(3),
+    )
+    .expect_err("Cook id rejects an undeclared attempt");
+    let run_error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        child_run_id,
+        Some(3),
+    )
+    .expect_err("child attempt run id rejects the same undeclared attempt");
+    assert_eq!(run_error.details, cook_error.details);
+    assert_eq!(run_error.message, cook_error.message);
 }
 
 #[test]
 fn adoption_rejects_an_id_that_is_a_cook_and_another_cooks_attempt() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let shared_id = "cook-adoption-ambiguous-id";
-        let mut cook_options =
-            batch_cook_options(shared_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        cook_options.initial_run_id = "cook-adoption-ambiguous-id-attempt-1".to_string();
-        super::super::persist_initial_recipe(&cook_options).expect("persist Cook recipe");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let shared_id = "cook-adoption-ambiguous-id";
+    let mut cook_options =
+        batch_cook_options(shared_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    cook_options.initial_run_id = "cook-adoption-ambiguous-id-attempt-1".to_string();
+    recipe_store
+        .persist_initial_recipe(&cook_options)
+        .expect("persist Cook recipe");
 
-        let foreign_cook_id = "cook-adoption-foreign-owner";
-        let foreign_options =
-            batch_cook_options(foreign_cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        super::super::persist_initial_recipe(&foreign_options)
-            .expect("persist foreign Cook recipe");
-        super::super::record_recipe_attempt(
-            foreign_cook_id,
-            2,
-            shared_id,
-            &foreign_options.initial_plan,
-        )
+    let foreign_cook_id = "cook-adoption-foreign-owner";
+    let foreign_options =
+        batch_cook_options(foreign_cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    recipe_store
+        .persist_initial_recipe(&foreign_options)
+        .expect("persist foreign Cook recipe");
+    recipe_store
+        .record_recipe_attempt(foreign_cook_id, 2, shared_id, &foreign_options.initial_plan)
         .expect("record foreign attempt with the colliding id");
-        let foreign_recipe =
-            super::super::load_recipe(foreign_cook_id).expect("reload foreign Cook recipe");
-        assert!(foreign_recipe
-            .attempts
-            .iter()
-            .any(|attempt| attempt.run_id == shared_id));
-        assert_eq!(
-            super::super::load_recipe_for_attempt(shared_id)
-                .expect("find foreign recipe by its attempt")
-                .expect("foreign attempt is persisted")
-                .cook_id,
-            foreign_cook_id
-        );
+    let foreign_recipe = recipe_store
+        .load_recipe(foreign_cook_id)
+        .expect("reload foreign Cook recipe");
+    assert!(foreign_recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == shared_id));
+    assert_eq!(
+        recipe_store
+            .load_recipe_for_attempt(shared_id)
+            .expect("find foreign recipe by its attempt")
+            .expect("foreign attempt is persisted")
+            .cook_id,
+        foreign_cook_id
+    );
 
-        let error = resolve_adoption_target_with_attempt(shared_id, Some(1))
-            .expect_err("cross-Cook identifier collision fails closed");
-        assert_eq!(error.details["field"], "run_or_cook_id");
-        assert!(error.message.contains(shared_id));
-        assert!(error.message.contains(foreign_cook_id));
-    });
+    let error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        shared_id,
+        Some(1),
+    )
+    .expect_err("cross-Cook identifier collision fails closed");
+    assert_eq!(error.details["field"], "run_or_cook_id");
+    assert!(error.message.contains(shared_id));
+    assert!(error.message.contains(foreign_cook_id));
 }
 
 #[test]
 fn adoption_ambiguity_describes_policy_choices_without_sensitive_config() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adopt-policy-summary";
-        let first_run_id = "cook-adopt-policy-summary-attempt-1";
-        let second_run_id = "cook-adopt-policy-summary-attempt-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.initial_run_id = first_run_id.to_string();
-        options.to_worktree = "homeboy@policy-destination".to_string();
-        options.base = "release".to_string();
-        options.head = Some("fix/policy-summary".to_string());
-        options.task_base_sha = Some("base-sha".to_string());
-        options.no_finalize = false;
-        options.protected_branches = vec!["release".to_string()];
-        options.gates.verify = vec!["echo super-secret-gate-value".to_string()];
-        options.gates.private_verify = vec!["private-check".to_string()];
-        options.initial_plan.tasks[0].executor.backend = "provider-one".to_string();
-        options.initial_plan.tasks[0].executor.selector = Some("primary".to_string());
-        options.initial_plan.tasks[0].executor.model = Some("model-one".to_string());
-        options.initial_plan.tasks[0].executor.config = serde_json::json!({
-            "api_token": "super-secret-config-value"
-        });
-        options.initial_plan.tasks[0].policy.apply = "review".to_string();
-        super::super::persist_initial_recipe(&options).expect("persist recipe");
-
-        let mut second_plan = options.initial_plan.clone();
-        second_plan.plan_id = "attempt-two-policy".to_string();
-        second_plan.tasks[0].executor.backend = "provider-two".to_string();
-        second_plan.tasks[0].executor.selector = Some("fallback".to_string());
-        second_plan.tasks[0].executor.model = Some("model-two".to_string());
-        second_plan.tasks[0].policy.apply = "publish".to_string();
-        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
-            .expect("persist policy-different attempt");
-
-        let error = resolve_adoption_target(cook_id).expect_err("policies require selection");
-        for expected in [
-            "destination=homeboy@policy-destination",
-            "base=release",
-            "head=fix/policy-summary",
-            "task-base=base-sha",
-            "gates=public:1/private:1",
-            "provider/model=provider-one/primary@model-one",
-            "provider/model=provider-two/fallback@model-two",
-            "review/publication=review-ready/protected:1",
-            "task-policy=workspace/artifacts_only/review",
-            "task-policy=workspace/artifacts_only/publish",
-            "--attempt 1",
-        ] {
-            assert!(
-                error.message.contains(expected),
-                "missing {expected}: {error}"
-            );
-        }
-        assert!(!error.message.contains("super-secret-gate-value"));
-        assert!(!error.message.contains("super-secret-config-value"));
-        assert!(!error.message.contains("api_token"));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adopt-policy-summary";
+    let first_run_id = "cook-adopt-policy-summary-attempt-1";
+    let second_run_id = "cook-adopt-policy-summary-attempt-2";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = first_run_id.to_string();
+    options.to_worktree = "homeboy@policy-destination".to_string();
+    options.base = "release".to_string();
+    options.head = Some("fix/policy-summary".to_string());
+    options.task_base_sha = Some("base-sha".to_string());
+    options.no_finalize = false;
+    options.protected_branches = vec!["release".to_string()];
+    options.gates.verify = vec!["echo super-secret-gate-value".to_string()];
+    options.gates.private_verify = vec!["private-check".to_string()];
+    options.initial_plan.tasks[0].executor.backend = "provider-one".to_string();
+    options.initial_plan.tasks[0].executor.selector = Some("primary".to_string());
+    options.initial_plan.tasks[0].executor.model = Some("model-one".to_string());
+    options.initial_plan.tasks[0].executor.config = serde_json::json!({
+        "api_token": "super-secret-config-value"
     });
+    options.initial_plan.tasks[0].policy.apply = "review".to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+
+    let mut second_plan = options.initial_plan.clone();
+    second_plan.plan_id = "attempt-two-policy".to_string();
+    second_plan.tasks[0].executor.backend = "provider-two".to_string();
+    second_plan.tasks[0].executor.selector = Some("fallback".to_string());
+    second_plan.tasks[0].executor.model = Some("model-two".to_string());
+    second_plan.tasks[0].policy.apply = "publish".to_string();
+    recipe_store
+        .record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
+        .expect("persist policy-different attempt");
+
+    let error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        None,
+    )
+    .expect_err("policies require selection");
+    for expected in [
+        "destination=homeboy@policy-destination",
+        "base=release",
+        "head=fix/policy-summary",
+        "task-base=base-sha",
+        "gates=public:1/private:1",
+        "provider/model=provider-one/primary@model-one",
+        "provider/model=provider-two/fallback@model-two",
+        "review/publication=review-ready/protected:1",
+        "task-policy=workspace/artifacts_only/review",
+        "task-policy=workspace/artifacts_only/publish",
+        "--attempt 1",
+    ] {
+        assert!(
+            error.message.contains(expected),
+            "missing {expected}: {error}"
+        );
+    }
+    assert!(!error.message.contains("super-secret-gate-value"));
+    assert!(!error.message.contains("super-secret-config-value"));
+    assert!(!error.message.contains("api_token"));
 }
 
 #[test]
 fn adoption_rejects_unknown_run_or_cook_ids() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let error = resolve_adoption_target("unknown-adoption-target")
-            .expect_err("unknown adoption target fails closed");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let error = resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        "unknown-adoption-target",
+        None,
+    )
+    .expect_err("unknown adoption target fails closed");
 
-        assert_eq!(error.details["field"], "run_or_cook_id");
-        assert!(error
-            .message
-            .contains("unknown agent-task run or durable cook id"));
-    });
+    assert_eq!(error.details["field"], "run_or_cook_id");
+    assert!(error
+        .message
+        .contains("unknown agent-task run or durable cook id"));
 }
 
 #[derive(Default)]
@@ -11551,38 +11826,48 @@ fn finalization_claims_isolate_identical_run_ids_across_lifecycle_stores() {
 
 #[test]
 fn review_form_follow_up_finalization_replays_its_durable_claim_after_restart() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-review-form-restart";
-        let run_id = "cook-review-form-restart-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id).unwrap();
-        let options = promotion_claim_options(cook_id, run_id);
-        let promotion = promotion(run_id);
-        let calls = Arc::new(AtomicUsize::new(0));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-review-form-restart";
+    let run_id = "cook-review-form-restart-attempt-2";
+    let plan = AgentTaskPlan::new(cook_id, Vec::new());
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, run_id)
+        .unwrap();
+    let options = promotion_claim_options(cook_id, run_id);
+    let promotion = promotion(run_id);
+    let calls = Arc::new(AtomicUsize::new(0));
 
-        for _ in 0..2 {
-            let calls = Arc::clone(&calls);
-            let mut finalize =
-                move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(serde_json::json!({"status": "review_ready", "review_form": true}))
-                };
-            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
-        }
+    for _ in 0..2 {
+        let calls = Arc::clone(&calls);
+        let mut finalize =
+            move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"status": "review_ready", "review_form": true}))
+            };
+        finalize_with_operation_claim_in_store(
+            &lifecycle_store,
+            &options,
+            run_id,
+            &promotion,
+            &mut finalize,
+        )
+        .unwrap();
+    }
 
-        let operation_key = finalization_operation_key(run_id, &promotion);
-        let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)
+    let operation_key = finalization_operation_key(run_id, &promotion);
+    let claim =
+        agent_task_lifecycle::operation_claim_in_store(&lifecycle_store, run_id, &operation_key)
             .unwrap()
             .expect("review-form finalization claim");
-        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
-        assert_eq!(claim.result.unwrap()["review_form"], true);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "restart only revalidates publication"
-        );
-    });
+    assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+    assert_eq!(claim.result.unwrap()["review_form"], true);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "restart only revalidates publication"
+    );
 }
 
 #[test]
@@ -12048,6 +12333,56 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
             .get("cook_finalization")
             .is_some());
     }
+}
+
+#[test]
+fn cook_observer_failures_write_only_to_the_explicit_lifecycle_store() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(left_context.data_dir(), right_context.data_dir());
+
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let run_id = "same-cook-observer-run";
+    let plan = AgentTaskPlan::new("observer-root-proof", Vec::new());
+
+    for store in [&left, &right] {
+        store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("seed the same run id in each lifecycle root");
+    }
+    let right_before = right.read_record(run_id).expect("right record before");
+    let observer = |_: &CookProgressEvent<'_>| {
+        Err(Error::internal_io(
+            "Broken pipe (os error 32)",
+            Some("write submitting client stdout".to_string()),
+        ))
+    };
+
+    report_cook_progress_with_activity(
+        &left,
+        Some(&observer),
+        "same-cook-observer",
+        run_id,
+        "promotion",
+        1,
+        None,
+        None,
+    )
+    .expect("observer failure remains non-authoritative");
+
+    let left_record = left.read_record(run_id).expect("left record after");
+    assert_eq!(
+        left_record.metadata["cook_observer_events"][0]["kind"],
+        "delivery_failed"
+    );
+    assert_eq!(
+        left_record.metadata["cook_observer_events"][0]["phase"],
+        "promotion"
+    );
+    let right_after = right.read_record(run_id).expect("right record after");
+    assert_eq!(right_after.metadata, right_before.metadata);
+    assert_eq!(right_after.updated_at, right_before.updated_at);
 }
 
 #[test]
@@ -12921,62 +13256,66 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
 
 #[test]
 fn cook_rejects_test_claim_without_matching_durable_gate() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-8058-mismatch";
-        let plan = AgentTaskPlan::new("cook-8058", Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        let options = AgentTaskCookServiceOptions {
-            cook_id: "cook-8058".to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
-            to_worktree: "homeboy@8058".to_string(),
-            source_worktree_path: None,
-            provider_command: None,
-            provider_invocation: None,
-            gates: VerifyGateOptions {
-                verify: vec!["cargo test unsupported".to_string()],
-                private_verify: Vec::new(),
-                private_gate_reveal: Default::default(),
-                ..VerifyGateOptions::default()
-            },
-            max_attempts: 1,
-            no_finalize: false,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: Some("task-candidate-base".to_string()),
-            head: Some("fix/8058".to_string()),
-            title: "Close #8058".to_string(),
-            commit_message: "test".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: vec!["main".to_string()],
-            ai_tool: "fixture-provider".to_string(),
-            ai_model: Some("fixture-model".to_string()),
-            ai_used_for: "Drafted test coverage.".to_string(),
-            attempt_dispatcher: None,
-            harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
-        };
-        // Finalization eligibility is checked before the test-claim contract and
-        // requires a non-empty gate set, so clearing the gates outright never
-        // reaches the check this test names. Keep the gate green but private:
-        // eligible to finalize, yet not visible evidence that can back a
-        // published test claim.
-        let mut unsupported = promotion(run_id);
-        unsupported.deterministic_gates[0].visibility =
-            homeboy_core::gate::HomeboyGateVisibility::Private;
-        let error = finalize_cook_pr_with_backend(
-            &options,
-            run_id,
-            &unsupported,
-            &mut CaptureBackend::default(),
-        )
-        .expect_err("unsupported test claim is rejected");
-        assert!(
-            error
-                .message
-                .contains("matching successful visible durable gate"),
-            "{error}"
-        );
-    });
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let run_id = "cook-8058-mismatch";
+    let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    let options = AgentTaskCookServiceOptions {
+        cook_id: "cook-8058".to_string(),
+        initial_run_id: run_id.to_string(),
+        initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
+        to_worktree: "homeboy@8058".to_string(),
+        source_worktree_path: None,
+        provider_command: None,
+        provider_invocation: None,
+        gates: VerifyGateOptions {
+            verify: vec!["cargo test unsupported".to_string()],
+            private_verify: Vec::new(),
+            private_gate_reveal: Default::default(),
+            ..VerifyGateOptions::default()
+        },
+        max_attempts: 1,
+        no_finalize: false,
+        draft_pr: false,
+        base: "main".to_string(),
+        task_base_sha: Some("task-candidate-base".to_string()),
+        head: Some("fix/8058".to_string()),
+        title: "Close #8058".to_string(),
+        commit_message: "test".to_string(),
+        source_refs: Vec::new(),
+        protected_branches: vec!["main".to_string()],
+        ai_tool: "fixture-provider".to_string(),
+        ai_model: Some("fixture-model".to_string()),
+        ai_used_for: "Drafted test coverage.".to_string(),
+        attempt_dispatcher: None,
+        harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
+    };
+    // Finalization eligibility is checked before the test-claim contract and
+    // requires a non-empty gate set, so clearing the gates outright never
+    // reaches the check this test names. Keep the gate green but private:
+    // eligible to finalize, yet not visible evidence that can back a
+    // published test claim.
+    let mut unsupported = promotion(run_id);
+    unsupported.deterministic_gates[0].visibility =
+        homeboy_core::gate::HomeboyGateVisibility::Private;
+    let error = finalize_cook_pr_with_backend_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &unsupported,
+        &mut CaptureBackend::default(),
+    )
+    .expect_err("unsupported test claim is rejected");
+    assert!(
+        error
+            .message
+            .contains("matching successful visible durable gate"),
+        "{error}"
+    );
 }
 
 #[test]

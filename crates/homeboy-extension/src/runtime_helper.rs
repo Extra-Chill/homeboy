@@ -6,7 +6,7 @@ use homeboy_extension_contract::RuntimeHelperRequirement;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod assets;
 
@@ -160,15 +160,39 @@ fn helper_revision(helper: &RuntimeHelper) -> String {
     )
 }
 
+/// Runtime-helper directory below an injected Homeboy config root.
+fn runtime_dir_in_roots(config_root: &Path) -> PathBuf {
+    config_root.join("runtime")
+}
+
+/// Ambient runtime-helper directory.
+///
+/// This is the boundary for the `<config>/runtime` tree, and it cannot move
+/// outward: the only production caller of [`ensure_all_helpers`] is
+/// `execution::build_exec_env`, which constructs the *subprocess environment*
+/// and is deliberately left ambient. An unresolvable config root still degrades
+/// to a process temp directory rather than failing helper materialization.
+fn ambient_runtime_dir() -> PathBuf {
+    paths::homeboy()
+        .map(|config_root| runtime_dir_in_roots(&config_root))
+        .unwrap_or_else(|_| env::temp_dir().join("homeboy-runtime"))
+}
+
 /// Materialize manifest-declared helpers under an identity-and-revision path.
 /// The content-addressed path keeps an admitted extension's helper immutable if
 /// another command later refreshes the core runtime helpers.
 pub fn provision_declared_helpers(
     requirements: &[RuntimeHelperRequirement],
 ) -> Result<Vec<RuntimeHelperProvision>> {
-    let runtime_dir = paths::homeboy()
-        .map(|path| path.join("runtime/helpers"))
-        .unwrap_or_else(|_| env::temp_dir().join("homeboy-runtime/helpers"));
+    provision_declared_helpers_in_dir(&ambient_runtime_dir().join("helpers"), requirements)
+}
+
+/// Materialize manifest-declared helpers below an explicitly supplied
+/// content-addressed helper directory.
+fn provision_declared_helpers_in_dir(
+    runtime_dir: &Path,
+    requirements: &[RuntimeHelperRequirement],
+) -> Result<Vec<RuntimeHelperProvision>> {
     let mut provisions = Vec::with_capacity(requirements.len());
     for requirement in requirements {
         let id = requirement.id.trim();
@@ -288,10 +312,17 @@ fn declared_helpers() -> Result<Vec<DeclaredRuntimeHelper>> {
 
 /// Ensure all runtime helpers are written and return (env_var, path) pairs.
 pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
-    let runtime_dir = paths::homeboy()
-        .map(|path| path.join("runtime"))
-        .unwrap_or_else(|_| env::temp_dir().join("homeboy-runtime"));
-    fs::create_dir_all(&runtime_dir).map_err(|e| {
+    ensure_all_helpers_in_dir(&ambient_runtime_dir())
+}
+
+/// Ensure all runtime helpers are written below an explicitly supplied runtime
+/// directory and return (env_var, path) pairs.
+///
+/// The returned pairs are handed to subprocess environment construction by the
+/// caller; this function resolves and writes files, it does not read process
+/// environment for path roots.
+fn ensure_all_helpers_in_dir(runtime_dir: &Path) -> Result<Vec<(String, String)>> {
+    fs::create_dir_all(runtime_dir).map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some("create homeboy runtime directory".to_string()),
@@ -300,7 +331,7 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
 
     let mut env_pairs = Vec::with_capacity(HELPERS.len());
     for helper in HELPERS {
-        let path = ensure_helper(&runtime_dir, helper)?;
+        let path = ensure_helper(runtime_dir, helper)?;
         env_pairs.push((
             helper.env_var.to_string(),
             path.to_string_lossy().to_string(),
@@ -308,7 +339,7 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
     }
 
     for helper in declared_helpers()? {
-        let path = ensure_declared_helper(&runtime_dir, &helper)?;
+        let path = ensure_declared_helper(runtime_dir, &helper)?;
         env_pairs.push((helper.env_var, path.to_string_lossy().to_string()));
     }
 

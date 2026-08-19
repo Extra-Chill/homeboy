@@ -293,6 +293,18 @@ pub(super) fn audit_internal(
     // Cross-file detectors (duplication, dead code) still receive the full
     // corpus below because their correctness for an in-scope file depends on
     // evidence from out-of-scope files (matching bodies, external references).
+    //
+    // The two exact-duplicate passes are the exception, and the reason the
+    // narrowing above could not close the timeout on its own: the duplication
+    // family is this repository's largest finding population and it consumed the
+    // whole corpus. `detect_duplicates_scoped` / `detect_duplicate_groups_scoped`
+    // (#12587) split that cross-file work in two — seed the candidate
+    // `(method_name, body_hash)` keys from the scoped subset, then expand each
+    // surviving key against the FULL corpus for counterpart evidence. So they
+    // still see every out-of-scope counterpart, and the subset is passed only as
+    // the seed, never as a replacement for the corpus. The remaining five passes
+    // (intra-method, near-duplicate, cross-name, skeleton, parallel
+    // implementation) have no scoped variant and stay on the full corpus.
     let scoped_fingerprints: Option<(HashSet<String>, Vec<&fingerprint::FileFingerprint>)> =
         scoped_execution.file_filter.map(|filter| {
             let scope_started = std::time::Instant::now();
@@ -343,6 +355,13 @@ pub(super) fn audit_internal(
 
     // Per-file detector input: the scoped subset when in changed-scope mode,
     // else the full corpus. Cross-file detectors keep using `all_fingerprints`.
+    //
+    // It doubles as the duplication family's SEED corpus (the scoped entry points
+    // take both, and still expand against `all_fingerprints`). Both arms satisfy
+    // the `scoped ⊆ all` precondition those entry points require: the changed-scope
+    // arm is a `filter` over `all_fingerprints`, and the unscoped arm is
+    // `all_fingerprints` itself — which is exactly the `(all, all)` delegation the
+    // unscoped `detect_duplicates` / `detect_duplicate_groups` already perform.
     let per_file_fingerprints: &[&fingerprint::FileFingerprint] = scoped_fingerprints
         .as_ref()
         .map(|(_, subset)| subset.as_slice())
@@ -398,7 +417,13 @@ pub(super) fn audit_internal(
     let (duplication_unit, descriptor_outcomes, artifact_portability_unit) =
         std::thread::scope(|scope| {
             let duplication = spawn_or_run(scope, || {
-                run_duplication_family(plan, &all_fingerprints, &convention_methods, &audit_config)
+                run_duplication_family(
+                    plan,
+                    per_file_fingerprints,
+                    &all_fingerprints,
+                    &convention_methods,
+                    &audit_config,
+                )
             });
             let artifact = spawn_or_run(scope, || {
                 run_artifact_portability(plan, component_id, &audit_config)
@@ -694,8 +719,20 @@ struct DuplicationUnit {
 /// serial one span for span. Under
 /// `HOMEBOY_AUDIT_DETECTOR_THREADS=1`, `spawn_or_run` runs each pass inline at its
 /// start point, which reproduces the original serial execution exactly.
+///
+/// `scoped_fingerprints` is the changed-scope seed corpus (#12583). The two
+/// exact-duplicate passes use the scope-seeded entry points, which seed candidate
+/// `(method_name, body_hash)` keys from it and then expand each candidate against
+/// the full `all_fingerprints` corpus, so counterpart evidence from out-of-scope
+/// files is still found. It must be a SUBSET of `all_fingerprints`; in unscoped
+/// mode the caller passes `all_fingerprints` itself, which is the same `(all, all)`
+/// delegation the unscoped `detect_duplicates` / `detect_duplicate_groups` perform.
+/// The other five passes have no scoped variant and take the full corpus, so this
+/// adds a third immutable input without adding a data dependency: every pass is
+/// still a pure function of borrowed, shared inputs.
 fn run_duplication_family(
     plan: &AuditExecutionPlan,
+    scoped_fingerprints: &[&fingerprint::FileFingerprint],
     all_fingerprints: &[&fingerprint::FileFingerprint],
     convention_methods: &HashSet<String>,
     audit_config: &AuditConfig,
@@ -707,7 +744,13 @@ fn run_duplication_family(
             time_audit_detector_isolated(
                 "detector.duplication.exact",
                 enabled,
-                || duplication::detect_duplicates(all_fingerprints, convention_methods),
+                || {
+                    duplication::detect_duplicates_scoped(
+                        scoped_fingerprints,
+                        all_fingerprints,
+                        convention_methods,
+                    )
+                },
                 Vec::new,
             )
         });
@@ -715,7 +758,12 @@ fn run_duplication_family(
             time_audit_detector_isolated(
                 "detector.duplication.groups",
                 enabled,
-                || duplication::detect_duplicate_groups(all_fingerprints),
+                || {
+                    duplication::detect_duplicate_groups_scoped(
+                        scoped_fingerprints,
+                        all_fingerprints,
+                    )
+                },
                 Vec::new,
             )
         });
@@ -808,6 +856,13 @@ struct ArtifactPortabilityUnit {
 /// concurrently with the other detector families. The scan-statistics logging
 /// stays with the caller, which is what keeps the log lines in their original
 /// order.
+///
+/// The `None` artifact root is not a gap: the engine holds no injected roots
+/// yet, and `None` makes the detector anchor on the root reported by the
+/// recorded-artifact provider that supplied the runs. When `audit_internal`
+/// grows a `PathRoots`, pass `Some(roots.artifacts())` here — and register the
+/// provider with `audit_artifact_provider::register_in_roots` for the same
+/// roots, or the two halves disagree (#7505).
 fn run_artifact_portability(
     plan: &AuditExecutionPlan,
     component_id: &str,
@@ -818,11 +873,12 @@ fn run_artifact_portability(
         plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
-                artifact_portability::run_report(component_id)
+                artifact_portability::run_report(component_id, None)
             } else {
                 artifact_portability::run_report_with_config(
                     component_id,
                     &audit_config.artifact_portability,
+                    None,
                 )
             }
         },
@@ -891,18 +947,20 @@ fn audit_root_only(
     );
 
     // `artifact_portability` stays hand-sequenced (logs scan statistics even
-    // when empty), mirroring the full path.
+    // when empty), mirroring the full path. See `run_artifact_portability` for
+    // why the artifact root is `None` here.
     let artifact_portability_report = time_audit_detector(
         timing,
         "detector.artifact_portability",
         plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
-                artifact_portability::run_report(component_id)
+                artifact_portability::run_report(component_id, None)
             } else {
                 artifact_portability::run_report_with_config(
                     component_id,
                     &audit_config.artifact_portability,
+                    None,
                 )
             }
         },
@@ -972,3 +1030,7 @@ fn audit_root_only(
 #[cfg(test)]
 #[path = "engine_corpus_test.rs"]
 mod engine_corpus_test;
+
+#[cfg(test)]
+#[path = "engine_duplication_scope_test.rs"]
+mod engine_duplication_scope_test;

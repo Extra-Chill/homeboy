@@ -5,17 +5,23 @@ use std::path::{Path, PathBuf};
 /// Environment variable selecting the root for rig-specific mutable state.
 pub const RIG_REGISTRY_ROOT_ENV: &str = "HOMEBOY_RIG_REGISTRY_ROOT";
 
+/// Root for rig-specific mutable state, defaulting to an already-resolved
+/// config root.
+///
+/// `RIG_REGISTRY_ROOT_ENV` still outranks the supplied root, exactly as it
+/// outranks `homeboy()` on the ambient path — the injected root replaces the
+/// *default*, not the operator override.
+pub fn rig_registry_root_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_from_env(env::var(RIG_REGISTRY_ROOT_ENV).ok(), config_root)
+}
+
 /// Root for rig-specific mutable state.
 ///
 /// An unset or blank override retains the historical `homeboy()` root. This
 /// intentionally scopes only rig registries; general Homeboy configuration is
 /// unaffected.
 pub fn rig_registry_root() -> Result<PathBuf> {
-    let default_root = homeboy()?;
-    Ok(rig_registry_root_from_env(
-        env::var(RIG_REGISTRY_ROOT_ENV).ok(),
-        &default_root,
-    ))
+    Ok(rig_registry_root_in_root(&homeboy()?))
 }
 
 /// Resolve a rig registry root from an explicit environment value.
@@ -29,60 +35,120 @@ pub fn rig_registry_root_from_env(value: Option<String>, default_root: &Path) ->
         .unwrap_or_else(|| default_root.to_path_buf())
 }
 
+/// Rigs directory below an already-resolved config root.
+pub fn rigs_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("rigs")
+}
+
 /// Rigs directory (~/.config/homeboy/rigs/)
 pub fn rigs() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("rigs"))
+    Ok(rigs_in_root(&homeboy()?))
+}
+
+/// Rig config file path below an already-resolved config root.
+pub fn rig_config_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rigs_in_root(config_root).join(format!("{}.json", id))
 }
 
 /// Rig config file path (~/.config/homeboy/rigs/{id}.json)
 pub fn rig_config(id: &str) -> Result<PathBuf> {
-    Ok(rigs()?.join(format!("{}.json", id)))
+    Ok(rig_config_in_root(&homeboy()?, id))
+}
+
+/// Installed rig package directory below an already-resolved config root.
+pub fn rig_packages_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("rig-packages")
 }
 
 /// Installed rig package directory (~/.config/homeboy/rig-packages/)
 pub fn rig_packages() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("rig-packages"))
+    Ok(rig_packages_in_root(&homeboy()?))
+}
+
+/// Cloned rig package path below an already-resolved config root.
+pub fn rig_package_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rig_packages_in_root(config_root).join(id)
 }
 
 /// Cloned rig package path (~/.config/homeboy/rig-packages/{id}/)
 pub fn rig_package(id: &str) -> Result<PathBuf> {
-    Ok(rig_packages()?.join(id))
+    Ok(rig_package_in_root(&homeboy()?, id))
+}
+
+/// Rig source metadata directory below an already-resolved config root.
+pub fn rig_sources_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("rig-sources")
 }
 
 /// Rig source metadata directory (~/.config/homeboy/rig-sources/)
 pub fn rig_sources() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("rig-sources"))
+    Ok(rig_sources_in_root(&homeboy()?))
+}
+
+/// Rig source metadata file below an already-resolved config root.
+pub fn rig_source_metadata_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rig_sources_in_root(config_root).join(format!("{}.json", id))
 }
 
 /// Rig source metadata file (~/.config/homeboy/rig-sources/{id}.json)
 pub fn rig_source_metadata(id: &str) -> Result<PathBuf> {
-    Ok(rig_sources()?.join(format!("{}.json", id)))
+    Ok(rig_source_metadata_in_root(&homeboy()?, id))
+}
+
+/// Stack source metadata directory below an already-resolved config root.
+pub fn stack_sources_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("stack-sources")
 }
 
 /// Stack source metadata directory (~/.config/homeboy/stack-sources/)
 pub fn stack_sources() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("stack-sources"))
+    Ok(stack_sources_in_root(&homeboy()?))
+}
+
+/// Stack source metadata file below an already-resolved config root.
+pub fn stack_source_metadata_in_root(config_root: &Path, id: &str) -> PathBuf {
+    stack_sources_in_root(config_root).join(format!("{}.json", id))
 }
 
 /// Stack source metadata file (~/.config/homeboy/stack-sources/{id}.json)
 pub fn stack_source_metadata(id: &str) -> Result<PathBuf> {
-    Ok(stack_sources()?.join(format!("{}.json", id)))
+    Ok(stack_source_metadata_in_root(&homeboy()?, id))
+}
+
+/// Rig state directory below an already-resolved config root.
+pub fn rig_state_dir_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rigs_in_root(config_root).join(format!("{}.state", id))
 }
 
 /// Rig state directory (~/.config/homeboy/rigs/{id}.state/)
 /// Holds service PIDs, logs, and last check results.
 pub fn rig_state_dir(id: &str) -> Result<PathBuf> {
-    Ok(rigs()?.join(format!("{}.state", id)))
+    Ok(rig_state_dir_in_root(&homeboy()?, id))
+}
+
+/// Rig state file below an already-resolved config root.
+pub fn rig_state_file_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rig_state_dir_in_root(config_root, id).join("state.json")
 }
 
 /// Rig state file (~/.config/homeboy/rigs/{id}.state/state.json)
 pub fn rig_state_file(id: &str) -> Result<PathBuf> {
-    Ok(rig_state_dir(id)?.join("state.json"))
+    Ok(rig_state_file_in_root(&homeboy()?, id))
+}
+
+/// Rig service logs directory below an already-resolved config root.
+pub fn rig_logs_dir_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rig_state_dir_in_root(config_root, id).join("logs")
 }
 
 /// Rig service logs directory (~/.config/homeboy/rigs/{id}.state/logs/)
 pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
-    Ok(rig_state_dir(id)?.join("logs"))
+    Ok(rig_logs_dir_in_root(&homeboy()?, id))
+}
+
+/// Rig-owned baseline root below an already-resolved config root.
+pub fn rig_baseline_root_in_root(config_root: &Path, id: &str) -> PathBuf {
+    rig_state_dir_in_root(config_root, id).join("baselines")
 }
 
 /// Rig-owned baseline root (~/.config/homeboy/rigs/{id}.state/baselines/).
@@ -91,22 +157,37 @@ pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
 /// in the target component checkout. The component repo may be unrelated to
 /// Homeboy and must stay clean.
 pub fn rig_baseline_root(id: &str) -> Result<PathBuf> {
-    Ok(rig_state_dir(id)?.join("baselines"))
+    Ok(rig_baseline_root_in_root(&homeboy()?, id))
+}
+
+/// Active rig run leases below an already-resolved config root.
+pub fn rig_leases_dir_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("rig-leases")
 }
 
 /// Active rig run leases (~/.config/homeboy/rig-leases/).
 pub fn rig_leases_dir() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("rig-leases"))
+    Ok(rig_leases_dir_in_root(&homeboy()?))
+}
+
+/// Stacks directory below an already-resolved config root.
+pub fn stacks_in_root(config_root: &Path) -> PathBuf {
+    rig_registry_root_in_root(config_root).join("stacks")
 }
 
 /// Stacks directory (~/.config/homeboy/stacks/)
 pub fn stacks() -> Result<PathBuf> {
-    Ok(rig_registry_root()?.join("stacks"))
+    Ok(stacks_in_root(&homeboy()?))
+}
+
+/// Stack config file path below an already-resolved config root.
+pub fn stack_config_in_root(config_root: &Path, id: &str) -> PathBuf {
+    stacks_in_root(config_root).join(format!("{}.json", id))
 }
 
 /// Stack config file path (~/.config/homeboy/stacks/{id}.json)
 pub fn stack_config(id: &str) -> Result<PathBuf> {
-    Ok(stacks()?.join(format!("{}.json", id)))
+    Ok(stack_config_in_root(&homeboy()?, id))
 }
 
 #[cfg(test)]

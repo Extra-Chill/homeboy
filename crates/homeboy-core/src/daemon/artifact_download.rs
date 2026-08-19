@@ -2,7 +2,7 @@ use serde_json::json;
 use std::fs::{self, File};
 use std::io::Write;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::artifact_links::{public_artifact_url, viewer_links};
 use crate::error::{Error, Result};
@@ -117,7 +117,12 @@ fn resolve_artifact_download(
         match store.get_artifact_for_run_token(run_id, &decoded_artifact_token)? {
             Some(artifact) => artifact,
             None => {
-                return artifact_store_download(run_id, artifact_token, &decoded_artifact_token)
+                return artifact_store_download(
+                    &store.artifact_root()?,
+                    run_id,
+                    artifact_token,
+                    &decoded_artifact_token,
+                )
             }
         }
     } else {
@@ -267,11 +272,15 @@ fn resolve_artifact_store_download(
     run_id: &str,
     artifact_token: &str,
 ) -> Result<ResolvedArtifactResponse> {
+    // This route resolves a locator directly and never consults the run store,
+    // so the ambient artifact root is the honest boundary here.
+    let artifact_root = paths::artifact_root()?;
     let decoded = decode_uri_component(artifact_token);
-    artifact_store_download(run_id, artifact_token, &decoded)
+    artifact_store_download(&artifact_root, run_id, artifact_token, &decoded)
 }
 
 fn artifact_store_download(
+    artifact_root: &Path,
     run_id: &str,
     artifact_token: &str,
     decoded_artifact_token: &str,
@@ -287,7 +296,7 @@ fn artifact_store_download(
             None,
         )
     })?;
-    let path = safe_artifact_store_path(&locator)?;
+    let path = safe_artifact_store_path_in_root(artifact_root, &locator)?;
     let metadata = fs::metadata(&path).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -339,7 +348,7 @@ fn artifact_store_download(
     )))
 }
 
-fn safe_artifact_store_path(locator: &str) -> Result<PathBuf> {
+fn safe_artifact_store_path_in_root(artifact_root: &Path, locator: &str) -> Result<PathBuf> {
     let locator_path = PathBuf::from(locator);
     if locator_path.is_absolute()
         || locator_path
@@ -353,7 +362,7 @@ fn safe_artifact_store_path(locator: &str) -> Result<PathBuf> {
             None,
         ));
     }
-    Ok(paths::artifact_root()?.join(locator_path))
+    Ok(artifact_root.join(locator_path))
 }
 
 fn artifact_sync_manifest(run_id: &str) -> Result<ResolvedArtifactResponse> {

@@ -61,8 +61,27 @@ impl OperationRecordStore {
         owner_run_ref: &str,
         update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
     ) -> Result<OperationRecord> {
-        let _lock = lock()?;
-        let path = record_path(owner_run_ref)?;
+        Self::update_in_roots(
+            paths::PathRoots::from_environment()?.data(),
+            owner_run_ref,
+            update,
+        )
+    }
+
+    /// [`update`](Self::update) against an explicitly injected data root.
+    ///
+    /// The lock and the record path are now derived from one resolution. The
+    /// ambient form resolved the data root twice — once inside `lock()` and
+    /// again inside `record_path()` — so a repoint between them could have
+    /// serialized against one home's `.lock` while replacing the other home's
+    /// record (#7505).
+    fn update_in_roots(
+        data_root: &Path,
+        owner_run_ref: &str,
+        update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
+    ) -> Result<OperationRecord> {
+        let _lock = lock_in_roots(data_root)?;
+        let path = record_path_in_roots(data_root, owner_run_ref);
         let current = read_path(&path)?;
         let next = update(current)?;
         if next.owner_run_ref != owner_run_ref {
@@ -86,8 +105,9 @@ impl OperationRecordStore {
     }
 
     pub fn load(owner_run_ref: &str) -> Result<Option<OperationRecord>> {
-        let _lock = lock()?;
-        read_path(&record_path(owner_run_ref)?)
+        let roots = paths::PathRoots::from_environment()?;
+        let _lock = lock_in_roots(roots.data())?;
+        read_path(&record_path_in_roots(roots.data(), owner_run_ref))
     }
 
     /// Claims finalization before an external provider call. A live lease is
@@ -196,8 +216,9 @@ impl OperationRecordStore {
         subject: &str,
         pending_only: bool,
     ) -> Result<Vec<OperationRecord>> {
-        let _lock = lock()?;
-        let dir = store_dir()?;
+        let roots = paths::PathRoots::from_environment()?;
+        let _lock = lock_in_roots(roots.data())?;
+        let dir = store_dir_in_roots(roots.data());
         let mut records = Vec::new();
         if !dir.exists() {
             return Ok(records);
@@ -232,23 +253,27 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn store_dir() -> Result<PathBuf> {
-    let database = paths::observation_db()?;
-    let root = database
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("observation database has no parent"))?;
-    Ok(root.join("operation-records"))
+/// The operation-record store below an explicitly injected data root.
+///
+/// The ambient form resolved `paths::observation_db()` and took its parent.
+/// `observation_db()` is `homeboy_data()?.join("homeboy.sqlite")`, so that
+/// parent is exactly the data root: the database path was only ever a detour
+/// through it, and this store has never read or written the database itself.
+/// Naming the data root directly removes both the detour and the infallible
+/// `parent()` failure branch it required.
+fn store_dir_in_roots(data_root: &Path) -> PathBuf {
+    data_root.join("operation-records")
 }
 
-fn record_path(owner_run_ref: &str) -> Result<PathBuf> {
-    Ok(store_dir()?.join(format!(
+fn record_path_in_roots(data_root: &Path, owner_run_ref: &str) -> PathBuf {
+    store_dir_in_roots(data_root).join(format!(
         "{}.json",
         paths::sanitize_path_segment(owner_run_ref)
-    )))
+    ))
 }
 
-fn lock() -> Result<std::fs::File> {
-    let dir = store_dir()?;
+fn lock_in_roots(data_root: &Path) -> Result<std::fs::File> {
+    let dir = store_dir_in_roots(data_root);
     fs::create_dir_all(&dir)
         .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?;
     let file = OpenOptions::new()

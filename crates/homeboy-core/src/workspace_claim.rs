@@ -334,6 +334,13 @@ impl WorkspaceAuthority {
 }
 
 /// One durable state file and lock per normalized portable workspace identity.
+///
+/// Cloning is a handle copy: the store owns no in-memory coordination state, so
+/// every clone addresses the exact same durable root. That is what lets one
+/// resolved authority be threaded into a renewal thread instead of each
+/// heartbeat re-resolving an ambient root and silently renewing in a different
+/// installation than the one that registered the lease.
+#[derive(Clone)]
 pub struct WorkspaceClaimStore {
     root: PathBuf,
 }

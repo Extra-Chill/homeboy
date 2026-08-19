@@ -787,8 +787,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         aliased.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(aliased.details["field"], "run_id");
     assert_eq!(
-        aliased.message,
+        aliased.details["problem"],
         "detached Cook id already resolves to an existing Cook attempt"
     );
     assert_eq!(
@@ -806,8 +807,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         collided.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(collided.details["field"], "run_id");
     assert_eq!(
-        collided.message,
+        collided.details["problem"],
         "detached Cook id collides with an existing non-handoff run"
     );
     assert_eq!(
@@ -888,8 +890,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         fenced.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(fenced.details["field"], "cook_id");
     assert_eq!(
-        fenced.message,
+        fenced.details["problem"],
         "detached Cook handoff was cancelled before its attempt could materialize"
     );
 
@@ -1195,8 +1198,9 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         contradicted.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(contradicted.details["field"], "execution_placement_outcome");
     assert_eq!(
-        contradicted.message,
+        contradicted.details["problem"],
         "verified placement outcome contradicts the durable routing decision"
     );
 
@@ -1403,6 +1407,501 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
             .expect("the second root still holds an unsuperseded submission stamp"),
         "an adoption made in the injected store must not decide the second root"
     );
+}
+
+#[test]
+fn run_reentry_siblings_re_enter_only_the_injected_store() {
+    // Re-entry is the family that decides whether a durable run may run *again*:
+    // resume, retry, and the quarantine/re-arm pair that gates both. Absence in a
+    // second root is a uselessly weak negative for that — a root the work never
+    // reached is equally "not resumed", "not retried" and "not re-armed". What
+    // separates a leak from a clean rooting is whether the second root is still
+    // *eligible*, so both roots are seeded with the same four identities in the
+    // same pre-re-entry shape: a retry source, a resumable queued run, a clean
+    // queued run, and a quarantined queued run. Every act below is made through
+    // a sibling handed `seeded`, and the second root is then asserted to be
+    // still retryable, still resumable, still quarantinable and still
+    // quarantined — none of which is true of state some other call consumed.
+    //
+    // Four guards are proved directionally rather than by absence: the same call
+    // with the same run id is answered one way by one root and the opposite way
+    // by the other, decided only by which store was injected.
+    //
+    // No environment is mutated: both roots come from
+    // `HermeticTestContext::path_roots()`.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let other_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), other_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let other =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(other_context.path_roots());
+
+    let retry_source = "rooted-reentry-retry-source";
+    let cook_id = "rooted-reentry-cook";
+    let first_successor = "rooted-reentry-cook-attempt-1-successor";
+    let second_successor = "rooted-reentry-retry-second";
+    let resume_target = "rooted-reentry-resume";
+    let quarantine_target = "rooted-reentry-quarantine";
+    let rearm_target = "rooted-reentry-rearm";
+    let plan = test_plan();
+
+    // A run submitted with a stub admission carries `controller_runtime: {}` — a
+    // pin naming no immutable executable. Every lifecycle mutation validates the
+    // pin before it runs, and that validation resolves
+    // `paths::controller_runtimes_store()`, which is machine-global by design
+    // and would be the operator's real home here. A record with no pin at all is
+    // the shape the pin validators explicitly tolerate and return early on, so
+    // the seed drops the stub rather than reaching a root this test does not
+    // own. Controller admission itself is likewise never driven: the retry below
+    // is handed a stub admission and no queue projection, exactly as the
+    // detached-handoff and run-outcome proofs do.
+    let seed_queued = |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+                       run_id: &str| {
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit the same run identity into both roots");
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record
+                    .ensure_metadata_object()
+                    .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+                true
+            })
+            .expect("seed an unpinned queued record into both roots");
+    };
+
+    for lifecycle_store in [&seeded, &other] {
+        for run_id in [retry_source, resume_target, quarantine_target, rearm_target] {
+            seed_queued(lifecycle_store, run_id);
+        }
+        // The quarantined half of the pair, identical in both roots.
+        quarantine_queued_run_exact_in_store(lifecycle_store, rearm_target, "seeded quarantine")
+            .expect("seed the same operator quarantine into both roots");
+        assert_eq!(
+            lifecycle_store
+                .read_record(rearm_target)
+                .expect("read the seeded quarantine back")
+                .metadata["queue_quarantine"]["operator_reason"],
+            "seeded quarantine",
+            "both roots start from the identical quarantined state"
+        );
+    }
+
+    // Reserve one retry successor, resume one run, quarantine one clean run and
+    // re-arm the quarantined one — all through siblings handed `seeded`.
+    let reserved = retry_with_runtime_admission_in_store(
+        &seeded,
+        retry_source,
+        Some(first_successor),
+        false,
+        true,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect("reserve a retry successor in the injected store");
+    assert_eq!(reserved.run_id, first_successor);
+
+    let resumed = mark_resuming_in_store(&seeded, resume_target)
+        .expect("resume the queued run in the injected store");
+    assert_eq!(resumed.state, AgentTaskRunState::Running);
+
+    quarantine_queued_run_exact_in_store(&seeded, quarantine_target, "operator halted this run")
+        .expect("quarantine the clean queued run in the injected store");
+    rearm_quarantined_run_in_store(&seeded, rearm_target)
+        .expect("re-arm the quarantined run in the injected store");
+
+    // The positive: every re-entry decision is durable in the store handed in.
+    let reserved_record = seeded
+        .read_record(first_successor)
+        .expect("the injected store holds the reserved successor");
+    assert_eq!(reserved_record.metadata["retry_of"], retry_source);
+    assert_eq!(reserved_record.metadata["retried_from"], retry_source);
+    assert_eq!(reserved_record.metadata["retry_root"], retry_source);
+    let seeded_source = seeded
+        .read_record(retry_source)
+        .expect("read the injected store's retry source back");
+    assert_eq!(seeded_source.metadata["retries"], json!([first_successor]));
+    assert_eq!(seeded_source.metadata["retry_root"], retry_source);
+    let seeded_resume = seeded
+        .read_record(resume_target)
+        .expect("read the injected store's resumed run back");
+    assert_eq!(seeded_resume.state, AgentTaskRunState::Running);
+    assert!(seeded_resume.metadata.get("resume_requested_at").is_some());
+    assert_eq!(
+        seeded
+            .read_record(quarantine_target)
+            .expect("read the injected store's quarantined run back")
+            .metadata["queue_quarantine"]["operator_reason"],
+        "operator halted this run"
+    );
+    assert!(
+        seeded
+            .read_record(rearm_target)
+            .expect("read the injected store's re-armed run back")
+            .metadata
+            .get("queue_quarantine")
+            .is_none(),
+        "the re-arm must clear the marker in the store that was handed in"
+    );
+
+    // The negative, absence first: the second root holds all four identities and
+    // observed none of it. The successor is absent from its records *and* from
+    // its indexed retry lineage, which is the read a claim would double-book on.
+    assert!(
+        other.read_record(first_successor).is_err(),
+        "the second root must not hold a successor reserved through the injected store"
+    );
+    assert!(
+        other
+            .read_retry_successors(retry_source)
+            .expect("the second root's own retry lineage")
+            .is_empty(),
+        "the second root's indexed lineage must not observe the injected store's reservation"
+    );
+    let untouched_source = other
+        .read_record(retry_source)
+        .expect("the second root still has its own retry source");
+    assert!(untouched_source.metadata.get("retries").is_none());
+    assert!(untouched_source.metadata.get("retry_root").is_none());
+    let untouched_resume = other
+        .read_record(resume_target)
+        .expect("the second root still has its own resumable run");
+    assert!(untouched_resume
+        .metadata
+        .get("resume_requested_at")
+        .is_none());
+    assert!(
+        other
+            .read_record(quarantine_target)
+            .expect("the second root still has its own clean queued run")
+            .metadata
+            .get("queue_quarantine")
+            .is_none(),
+        "second root must not observe the quarantine written through the injected store"
+    );
+
+    // Then the stronger half: the second root is not merely missing the
+    // evidence, it is still in its *original eligible* state. Its retry source
+    // is still unreserved, its resumable run is still queued, and its
+    // quarantined run is still quarantined with the reason it was seeded with.
+    assert_eq!(untouched_source.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched_resume.state, AgentTaskRunState::Queued);
+    let untouched_rearm = other
+        .read_record(rearm_target)
+        .expect("the second root still has its own quarantined run");
+    assert_eq!(untouched_rearm.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        untouched_rearm.metadata["queue_quarantine"]["operator_reason"], "seeded quarantine",
+        "a re-arm made through the injected store must not clear the second root's quarantine"
+    );
+
+    // DIRECTIONAL PAIR 1. The identical resume, for the identical run id, is
+    // admitted by the root that re-armed it and refused by the root where it is
+    // still quarantined. The quarantine guard lives inside `mark_running`'s
+    // mutation closure, so this is the assertion that it reads the injected
+    // store rather than an ambient copy of the same identity.
+    assert_eq!(
+        mark_resuming_in_store(&seeded, rearm_target)
+            .expect("the injected store re-armed this run, so it may resume")
+            .state,
+        AgentTaskRunState::Running
+    );
+    let still_quarantined = mark_resuming_in_store(&other, rearm_target)
+        .expect_err("the second root's run is still quarantined and must refuse to resume");
+    assert_eq!(
+        still_quarantined.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert_eq!(still_quarantined.details["field"], "run_id");
+    assert_eq!(
+        still_quarantined.details["problem"],
+        "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance"
+    );
+
+    // DIRECTIONAL PAIR 2. The identical re-arm, for the identical run id, is
+    // accepted by the root that holds the quarantine and refused by the root
+    // that never observed it.
+    assert!(rearm_quarantined_run_in_store(&seeded, quarantine_target)
+        .expect("the injected store holds this quarantine and can clear it")
+        .metadata
+        .get("queue_quarantine")
+        .is_none());
+    let never_quarantined = rearm_quarantined_run_in_store(&other, quarantine_target)
+        .expect_err("the second root never observed this quarantine");
+    assert_eq!(never_quarantined.details["field"], "run_id");
+    assert_eq!(
+        never_quarantined.details["problem"],
+        "only an exact queued quarantined run can be re-armed"
+    );
+
+    // DIRECTIONAL PAIR 3. The identical Cook retry-successor lookup, for the
+    // identical source and attempt, finds the reservation in the root it was
+    // made in and nothing in the other. A caller reads `None` as authority to
+    // create a reservation, so this is the read that would mint a second
+    // successor over a live one.
+    assert_eq!(
+        find_unbound_cook_retry_successor_in_store(&seeded, retry_source, cook_id, 1, &plan)
+            .expect("the injected store's own retry lineage")
+            .map(|record| record.run_id),
+        Some(first_successor.to_string())
+    );
+    assert!(
+        find_unbound_cook_retry_successor_in_store(&other, retry_source, cook_id, 1, &plan)
+            .expect("the second root's own retry lineage")
+            .is_none(),
+        "a reservation made in the injected store must not be adopted by the second root"
+    );
+
+    // DIRECTIONAL PAIR 4, and the remaining eligibility proofs. The identical
+    // retry request, for the identical source, is refused by the root that
+    // already holds an active successor and admitted by the root that does not —
+    // which is simultaneously the proof that the second root is still retryable.
+    let active = retry_with_runtime_admission_in_store(
+        &seeded,
+        retry_source,
+        Some(second_successor),
+        false,
+        true,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect_err("the injected store's active successor forbids a second reservation");
+    assert_eq!(
+        active.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert!(
+        active.message.contains(first_successor),
+        "the refusal must name the injected store's own active successor: {}",
+        active.message
+    );
+    assert_eq!(
+        retry_with_runtime_admission_in_store(
+            &other,
+            retry_source,
+            Some(second_successor),
+            false,
+            true,
+            None,
+            |_| Ok(json!({})),
+        )
+        .expect("the second root holds no active successor and is still retryable")
+        .run_id,
+        second_successor
+    );
+
+    // The second root is still resumable and still quarantinable on its own
+    // state, and its own quarantine is still clearable.
+    assert_eq!(
+        mark_resuming_in_store(&other, resume_target)
+            .expect("the second root's queued run is still resumable")
+            .state,
+        AgentTaskRunState::Running
+    );
+    assert_eq!(
+        quarantine_queued_run_exact_in_store(&other, quarantine_target, "second root quarantine")
+            .expect("the second root's clean queued run is still quarantinable")
+            .metadata["queue_quarantine"]["operator_reason"],
+        "second root quarantine"
+    );
+    assert!(rearm_quarantined_run_in_store(&other, rearm_target)
+        .expect("the second root still owns the quarantine it was seeded with")
+        .metadata
+        .get("queue_quarantine")
+        .is_none());
+}
+
+#[test]
+fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root() {
+    // The positive half of this proof is cheap; the negative half is the point.
+    // A read sibling that ignored its store parameter and resolved the ambient
+    // root would still satisfy every assertion below against `seeded`, because
+    // the state really is there. Only a second, differently-rooted store can
+    // distinguish "read the store I was handed" from "read whatever the process
+    // environment points at" (#7505). No environment is mutated here: both
+    // roots come from `HermeticTestContext::path_roots()`.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let empty_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), empty_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let empty =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(empty_context.path_roots());
+
+    let cook_id = "rooted-read-cook";
+    let attempt_run_id = "rooted-read-cook-attempt-1-a";
+    let plan = test_plan();
+    seeded
+        .submit_plan_with_runtime_admission(&plan, attempt_run_id, |_| Ok(json!({})))
+        .expect("submit attempt into the seeded store");
+    seeded
+        .write_cook_index_attempt(cook_id, 1, attempt_run_id, now_timestamp(), None)
+        .expect("register the Cook attempt in the seeded store");
+    seeded
+        .write_aggregate(attempt_run_id, &succeeded_aggregate(&plan))
+        .expect("persist the attempt aggregate in the seeded store");
+    let aggregate_path = seeded.aggregate_path(attempt_run_id);
+
+    // Every read answers from the store it was handed.
+    assert_eq!(
+        exact_record_in_store(&seeded, attempt_run_id)
+            .expect("exact record")
+            .run_id,
+        attempt_run_id
+    );
+    assert!(run_record_exists_in_store(&seeded, attempt_run_id).expect("record exists"));
+    assert!(run_record_exists_readonly_in_store(&seeded, attempt_run_id)
+        .expect("record exists read-only"));
+    assert!(run_record_exists_resolved_in_store(&seeded, cook_id).expect("resolved record exists"));
+    assert!(cook_index_exists_in_store(&seeded, cook_id).expect("cook index exists"));
+    assert_eq!(
+        cook_index_in_store(&seeded, cook_id)
+            .expect("cook index")
+            .latest_run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        resolve_run_id_in_store(&seeded, cook_id).expect("resolve cook alias"),
+        attempt_run_id
+    );
+    assert_eq!(
+        persisted_status_in_store(&seeded, cook_id)
+            .expect("persisted status")
+            .run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        durable_local_read_in_store(&seeded, cook_id)
+            .expect("durable local read")
+            .record
+            .run_id,
+        attempt_run_id
+    );
+    assert!(exact_durable_local_read_in_store(&seeded, attempt_run_id)
+        .expect("exact durable local read")
+        .aggregate
+        .is_some());
+    assert_eq!(
+        load_plan_in_store(&seeded, cook_id)
+            .expect("load plan")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        load_controller_plan_in_store(&seeded, cook_id)
+            .expect("load controller plan")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        artifacts_in_store(&seeded, attempt_run_id)
+            .expect("artifacts")
+            .run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        read_aggregate_in_store(&seeded, cook_id)
+            .expect("aggregate through the Cook alias")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        read_attempt_aggregate_in_store(&seeded, attempt_run_id)
+            .expect("attempt aggregate")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        run_id_for_aggregate_path_in_store(&seeded, &aggregate_path)
+            .expect("aggregate path lookup"),
+        Some(attempt_run_id.to_string())
+    );
+    assert_eq!(
+        running_owner_pid_in_store(&seeded, attempt_run_id).expect("owner pid"),
+        None
+    );
+    assert!(
+        !has_active_provider_execution_in_store(&seeded, attempt_run_id)
+            .expect("provider execution predicate")
+    );
+    assert_eq!(
+        reconcile_scope_run_ids_in_store(&seeded, cook_id).expect("reconcile scope"),
+        vec![attempt_run_id.to_string()]
+    );
+    assert!(
+        find_unbound_cook_retry_successor_in_store(&seeded, attempt_run_id, cook_id, 2, &plan)
+            .expect("retry successor lookup")
+            .is_none()
+    );
+    let (records, _) = read_records_with_health_in_store(&seeded).expect("registry snapshot");
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![attempt_run_id]
+    );
+    let (bounded, _) =
+        read_records_with_health_bounded_in_store(&seeded, 10).expect("bounded registry snapshot");
+    assert_eq!(bounded.len(), 1);
+    let (all_records, _) =
+        read_all_records_with_health_in_store(&seeded).expect("unbounded registry snapshot");
+    assert_eq!(all_records.len(), 1);
+
+    // The negative: an identically-named identity in a second root is absent.
+    // Any sibling that reached for the ambient root would answer these from the
+    // seeded state above and fail here.
+    assert!(!run_record_exists_in_store(&empty, attempt_run_id).expect("no record in second root"));
+    assert!(!run_record_exists_readonly_in_store(&empty, attempt_run_id)
+        .expect("no record in second root"));
+    assert!(!run_record_exists_resolved_in_store(&empty, cook_id)
+        .expect("no resolved record in second root"));
+    assert!(!cook_index_exists_in_store(&empty, cook_id).expect("no cook index in second root"));
+    assert!(cook_index_in_store(&empty, cook_id).is_err());
+    assert!(exact_record_in_store(&empty, attempt_run_id).is_err());
+    assert_eq!(
+        resolve_run_id_in_store(&empty, cook_id).expect("unresolvable alias echoes the id"),
+        cook_id
+    );
+    assert!(persisted_status_in_store(&empty, cook_id).is_err());
+    assert!(durable_local_read_in_store(&empty, cook_id).is_err());
+    assert!(exact_durable_local_read_in_store(&empty, attempt_run_id).is_err());
+    assert!(load_plan_in_store(&empty, cook_id).is_err());
+    assert!(load_controller_plan_in_store(&empty, cook_id).is_err());
+    assert!(artifacts_in_store(&empty, attempt_run_id).is_err());
+    assert!(read_aggregate_in_store(&empty, cook_id).is_err());
+    assert!(read_attempt_aggregate_in_store(&empty, attempt_run_id).is_err());
+    assert!(running_owner_pid_in_store(&empty, attempt_run_id).is_err());
+    assert!(has_active_provider_execution_in_store(&empty, attempt_run_id).is_err());
+    assert_eq!(
+        run_id_for_aggregate_path_in_store(&empty, &aggregate_path)
+            .expect("aggregate path lookup in second root"),
+        None
+    );
+    assert_eq!(
+        reconcile_scope_run_ids_in_store(&empty, cook_id).expect("reconcile scope in second root"),
+        vec![cook_id.to_string()]
+    );
+    assert!(
+        find_unbound_cook_retry_successor_in_store(&empty, attempt_run_id, cook_id, 2, &plan)
+            .expect("retry successor lookup in second root")
+            .is_none()
+    );
+    assert!(read_records_with_health_in_store(&empty)
+        .expect("registry snapshot in second root")
+        .0
+        .is_empty());
+    assert!(read_records_with_health_bounded_in_store(&empty, 10)
+        .expect("bounded registry snapshot in second root")
+        .0
+        .is_empty());
+    assert!(read_all_records_with_health_in_store(&empty)
+        .expect("unbounded registry snapshot in second root")
+        .0
+        .is_empty());
 }
 
 #[test]

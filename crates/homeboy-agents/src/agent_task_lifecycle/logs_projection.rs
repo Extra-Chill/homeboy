@@ -8,15 +8,43 @@ use serde_json::Value;
 use super::*;
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
-    logs_with_raw(run_id, false)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    logs_in_store(&lifecycle_store, run_id)
+}
+
+/// [`logs`] against explicitly injected durable lifecycle roots.
+pub fn logs_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunLog> {
+    logs_with_raw_in_store(lifecycle_store, run_id, false)
 }
 
 pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    logs_with_raw_in_store(&lifecycle_store, run_id, include_raw)
+}
+
+/// [`logs_with_raw`] against explicitly injected durable lifecycle roots.
+///
+/// This projection is a genuine read: the Cook-alias resolution, the record
+/// read, and the aggregate read are the only durable touches, and every event
+/// helper below it works from the record and aggregate already in hand. Both
+/// reads have to name the same installation anyway — resolving the record in
+/// one home and its aggregate in another would report the event stream of a run
+/// that never produced it, and would do so without failing (#7505).
+pub fn logs_with_raw_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    include_raw: bool,
+) -> Result<AgentTaskRunLog> {
     // Logs are terminal inspection, not runner reconciliation. The durable
     // record remains readable when a runner is unavailable or wedged.
-    let record = persisted_status(run_id)?;
+    let record = persisted_status_in_store(lifecycle_store, run_id)?;
     let run_id = record.run_id.clone();
-    let (events, artifact_refs, raw_events) = match store::read_aggregate(&run_id) {
+    // `run_id` is already the resolved identity, so this is the store's own
+    // exact aggregate read rather than the alias-resolving lifecycle_ops one.
+    let (events, artifact_refs, raw_events) = match lifecycle_store.read_aggregate(&run_id) {
         Ok(aggregate) => {
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
             (aggregate.events, refs, Vec::new())

@@ -1,12 +1,10 @@
 use homeboy_engine_primitives::content_hash;
-use std::path::PathBuf;
 
 use homeboy_core::config::ConfigEntity;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::paths;
 
 use super::types::*;
-use super::validation::validate_service_tunnel;
+use super::validation::{validate_service_tunnel, validate_service_tunnel_in_root};
 use super::{load, save};
 
 pub fn native_preview_token_sha256(token: &str) -> String {
@@ -44,14 +42,23 @@ impl ConfigEntity for ServiceTunnel {
         Error::service_tunnel_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(paths::homeboy()?
-            .join("service-tunnels")
-            .join(format!("{}.json", id)))
-    }
+    // `config_path` is deliberately not overridden, and neither is
+    // `config_path_in_root`. The override this replaces was
+    // `paths::homeboy()?.join("service-tunnels").join("{id}.json")` — byte for
+    // byte what the trait default produces, because `DIR_NAME` is already
+    // `"service-tunnels"`. It was this crate's only ambient root resolution.
+    //
+    // Deleting it matters twice over. It moved the reach to
+    // `ConfigEntity::config_dir`, the single place the campaign roots it once
+    // for every entity; and because the rooted default now resolves
+    // `{config_root}/service-tunnels/{id}.json`, an ambient override spelling
+    // the same path from process-global state would have *shadowed* the root
+    // the generic CRUD layer supplies — resolving correctly under ambient use
+    // and silently wrongly under an injected root (#7505). `Runner`, `Fleet`,
+    // and `Schedule` rely on the same default for the same reason.
 
-    fn validate(&self) -> Result<()> {
-        validate_service_tunnel(self)
+    fn validate_in_root(&self, config_root: &std::path::Path) -> Result<()> {
+        validate_service_tunnel_in_root(config_root, self)
     }
 
     fn aliases(&self) -> &[String] {

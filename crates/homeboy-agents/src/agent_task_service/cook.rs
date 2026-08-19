@@ -38,8 +38,10 @@ use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget,
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
+#[cfg(test)]
+use super::cook_pre_execution::materialize_initial_cook_attempt_with_stores;
 use super::cook_pre_execution::{
-    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
+    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
     with_pre_execution_phase, CookExecutionPreparation,
@@ -53,7 +55,7 @@ use super::cook_promotion::{
     refreshed_moving_base_recovery, retryable_provider_discovery_failure,
     retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
-use super::cook_recipe::CookRecipeStore;
+use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
@@ -460,7 +462,8 @@ fn report_cook_progress_with_activity(
             // The observer is the submitting client's output channel. Once the
             // progress record exists, a broken client pipe is evidence about
             // observation, never authority to stop promotion or finalization.
-            let _ = agent_task_lifecycle::record_cook_observer_event(
+            let _ = agent_task_lifecycle::record_cook_observer_event_in_store(
+                lifecycle_store,
                 run_id,
                 phase,
                 bounded_error_diagnostic(&error),
@@ -937,6 +940,53 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
             request.instructions.push_str(
                 "\n\nThis is a non-publishable attempt workspace. controller-owned publication is not attempted by this provider: produce the commit or patch and reviewer-facing dossier, but do not push, create a pull request, release, or deploy. Homeboy's controller finalization handles any authorized publication after this attempt.",
             );
+        }
+    }
+}
+
+/// Make the controller/provider verification boundary explicit before the
+/// immutable Cook recipe is persisted. This keeps a provider attempt focused
+/// on a patch instead of duplicating the final gate population in its isolated
+/// workspace. Private gate programs deliberately remain undisclosed.
+fn project_controller_owned_gate_contract(options: &mut AgentTaskCookServiceOptions) {
+    let public_gates = options
+        .gates
+        .verify
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>();
+    let private_gate_count = options.gates.private_verify.len();
+    if public_gates.is_empty() && private_gate_count == 0 {
+        return;
+    }
+
+    let mut instructions = vec![
+        "Declared deterministic gates are controller-owned. Homeboy runs them after it harvests your candidate, so use this attempt for the source change and a focused check only when it directly reduces uncertainty.".to_string(),
+    ];
+    if !public_gates.is_empty() {
+        instructions.push(format!(
+            "Controller-owned final gates: {}.",
+            public_gates.join(", ")
+        ));
+    }
+    if private_gate_count > 0 {
+        instructions.push(format!(
+            "Homeboy also owns {private_gate_count} private deterministic gate(s); their programs are intentionally withheld from this attempt."
+        ));
+    }
+    instructions.push(
+        "Report any focused command you run and its result in the reviewer-facing verification evidence; Homeboy records the authoritative final gate evidence separately."
+            .to_string(),
+    );
+    let contract = instructions.join("\n");
+
+    for request in &mut options.initial_plan.tasks {
+        if !request
+            .instructions
+            .contains("Declared deterministic gates are controller-owned.")
+        {
+            request.instructions.push_str("\n\n");
+            request.instructions.push_str(&contract);
         }
     }
 }
@@ -3956,7 +4006,46 @@ where
         allow_historical_terminal,
     ) {
         Ok(result) => result,
-        Err(error) => return durable_cook_error_report_with_store(store, &failure_options, error),
+        Err(error) => {
+            // Once the attempt exists, a controller-side validation failure has
+            // not reached a provider and must retain the pre-execution contract.
+            if let Ok(mut record) = lifecycle_store.read_record(&failure_options.initial_run_id) {
+                if error.details["cook_materialized_by_invocation"] == true
+                    && store.data_root() == lifecycle_store.data_root()
+                    && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+                {
+                    let phase = pre_execution_failure_phase(&error, None);
+                    record_pre_execution_failure(
+                        lifecycle_store,
+                        &failure_options.initial_plan,
+                        &failure_options.initial_run_id,
+                        &error,
+                        phase,
+                    )?;
+                    record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
+                }
+                if error.retryable != Some(true)
+                    && record.metadata["pre_execution_failure"]["phase"].as_str()
+                        == Some("cook_pre_execution")
+                {
+                    return Ok(pre_execution_failure_report(
+                        failure_options.cook_id.clone(),
+                        vec![AgentTaskCookAttemptReport {
+                            attempt: 1,
+                            run_id: failure_options.initial_run_id.clone(),
+                            run_state: format!("{:?}", record.state),
+                            aggregate_path: record.aggregate_path.clone(),
+                            promotion: None,
+                            feedback: None,
+                        }],
+                        pre_execution_failure_details(Some(&record), &error),
+                        error,
+                        Some(&failure_options.initial_run_id),
+                    ));
+                }
+            }
+            return durable_cook_error_report_with_store(store, &failure_options, error);
+        }
     };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
@@ -3978,7 +4067,8 @@ where
             return durable_cook_error_report_with_store(store, &failure_options, error);
         }
         if phase == "terminal" {
-            if let Err(error) = agent_task_lifecycle::record_cook_terminal_result(
+            if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
+                lifecycle_store,
                 run_id,
                 result.exit_code == 0,
                 result.exit_code,
@@ -4117,6 +4207,7 @@ where
             &options.initial_plan.options.execution_budget,
         )?;
     }
+    project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
@@ -4169,26 +4260,26 @@ where
         .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
         .transpose()?
         .flatten();
-    let existing_recipe = store.recipe_exists(&options.cook_id);
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
     // like an unsafe post-gate correction because the durable lineage now has
     // more attempts than the caller's one-attempt input.
-    let recipe = if existing_recipe {
-        let recipe = store.load_recipe(&options.cook_id)?;
-        if recipe
-            .attempts
-            .iter()
-            .any(|attempt| attempt.run_id == options.initial_run_id)
-        {
-            recipe
-        } else {
-            store.persist_initial_recipe(&options)?
-        }
-    } else {
+    if !store.recipe_exists(&options.cook_id) {
         lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
-        store.persist_initial_recipe(&options)?
+    }
+    let recipe_materialization = match store.load_recipe(&options.cook_id) {
+        Ok(recipe)
+            if recipe
+                .attempts
+                .iter()
+                .any(|attempt| attempt.run_id == options.initial_run_id) =>
+        {
+            InitialRecipeMaterialization::reused(recipe)
+        }
+        Ok(_) | Err(_) => store.persist_initial_recipe_with_outcome(&options)?,
     };
+    let existing_recipe = !recipe_materialization.created;
+    let recipe = recipe_materialization.recipe;
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
@@ -4232,7 +4323,12 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    materialize_initial_cook_attempt_with_stores(store, lifecycle_store, &options)?;
+    let materialized_by_invocation = materialize_initial_cook_attempt_with_stores_outcome(
+        store,
+        lifecycle_store,
+        &options,
+        recipe_materialization.created,
+    )?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -4243,7 +4339,10 @@ where
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        validate_cook_workspace(&options)?;
+        validate_cook_workspace(&options).map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
     }
     validate_cook_candidate_group(&options.initial_plan)?;
     // Reserve the source tree's projected copy before the scheduler creates its
@@ -4410,6 +4509,7 @@ where
         {
             let error = with_pre_execution_phase(error, "gate_declaration_preflight");
             record_pre_execution_failure(
+                lifecycle_store,
                 &options.initial_plan,
                 &options.initial_run_id,
                 &error,
@@ -4456,6 +4556,7 @@ where
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
         record_pre_execution_failure(
+            lifecycle_store,
             &options.initial_plan,
             &options.initial_run_id,
             &error,
@@ -4507,7 +4608,7 @@ where
     if !verification_pending_continuation {
         if let Some(dispatcher) = &options.attempt_dispatcher {
             if let Err(error) = dispatcher.prepare_for_cook() {
-                agent_task_lifecycle::record_pre_execution_failure(
+                lifecycle_store.record_pre_execution_failure(
                     &options.initial_run_id,
                     &options.initial_plan,
                     dispatcher.pre_execution_failure_phase(),
@@ -4862,7 +4963,8 @@ where
                                 // how "was this run expensive?" stops being a
                                 // question only answerable by having watched it.
                                 if !tick.is_empty() {
-                                    let _ = agent_task_lifecycle::record_cook_supervision(
+                                    let _ = agent_task_lifecycle::record_cook_supervision_in_store(
+                                        heartbeat_lifecycle_store,
                                         &heartbeat_run_id,
                                         attempt,
                                         (!tick.sample.is_empty())
@@ -4902,11 +5004,13 @@ where
                                                 ),
                                         }),
                                     };
-                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
+                                    let _ =
+                                        agent_task_lifecycle::record_cook_supervision_stop_in_store(
+                                            heartbeat_lifecycle_store,
                                         &heartbeat_run_id,
                                         attempt,
                                         outcome,
-                                    );
+                                        );
                                 }
                                 // A deadline that only fired at attempt and
                                 // gate boundaries would not bound a single
@@ -4952,11 +5056,13 @@ where
                                                 ),
                                         }),
                                     };
-                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
-                                        &heartbeat_run_id,
-                                        attempt,
-                                        outcome,
-                                    );
+                                    let _ =
+                                        agent_task_lifecycle::record_cook_supervision_stop_in_store(
+                                            heartbeat_lifecycle_store,
+                                            &heartbeat_run_id,
+                                            attempt,
+                                            outcome,
+                                        );
                                 }
                             }
                         });
@@ -4979,7 +5085,11 @@ where
                     // Baseline cleanup runs when the dispatch scope exits. Restore
                     // the exact continuation contract only after that cleanup so
                     // retry never loses its controller-owned plan.
-                    agent_task_lifecycle::persist_controller_plan(&run_id, dispatch_plan)?;
+                    agent_task_lifecycle::persist_controller_plan_in_store(
+                        lifecycle_store,
+                        &run_id,
+                        dispatch_plan,
+                    )?;
                 }
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record)
@@ -4989,7 +5099,13 @@ where
                             &error,
                             options.attempt_dispatcher.as_deref(),
                         );
-                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        record_pre_execution_failure(
+                            lifecycle_store,
+                            &plan,
+                            &run_id,
+                            &error,
+                            phase,
+                        )?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                     Ok(record) => Some(record),
@@ -4998,12 +5114,18 @@ where
                             &error,
                             options.attempt_dispatcher.as_deref(),
                         );
-                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        record_pre_execution_failure(
+                            lifecycle_store,
+                            &plan,
+                            &run_id,
+                            &error,
+                            phase,
+                        )?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                 };
                 let pre_execution_failure = pre_execution_failure_details(record.as_ref(), &error);
-                agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
+                lifecycle_store.record_cook_attempt(&cook_id, attempt, &run_id)?;
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -5366,7 +5488,8 @@ where
                 } else {
                     "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
                 };
-                agent_task_lifecycle::record_cook_controller_failure(
+                agent_task_lifecycle::record_cook_controller_failure_in_store(
+                    lifecycle_store,
                     &run_id,
                     &bounded_error_diagnostic(&error),
                 )?;
@@ -5994,12 +6117,6 @@ fn cook_attempt_needs_execution_with_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return cook_attempt_needs_execution(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .map(|record| cook_run_record_needs_execution(&record))

@@ -2498,12 +2498,15 @@ impl JobStore {
         // The terminal job is already durable. Cleanup is intentionally best
         // effort so an authority-store I/O failure cannot hide its outcome.
         if let Some(lease) = terminal_owner_lease.1 {
-            if let Ok(root) = crate::paths::homeboy_data() {
-                if let Err(error) = crate::workspace_claim::WorkspaceClaimStore::new(
-                    root.join("daemon-workspace-claims"),
-                )
-                .release_owner(&lease, timestamp_ms())
-                {
+            // Release through the exact factory that registered the lease.
+            // `JobStore` carries no data root -- its `persistence.path` hangs
+            // off the daemon *config* root (`daemon_jobs_file`), not the data
+            // root the claim authority lives under -- so this reach stays
+            // ambient. It must at least not rebuild the store name by hand:
+            // a duplicated literal here is a release addressing a store the
+            // register never wrote to.
+            if let Ok(store) = crate::daemon::daemon_workspace_claim_store() {
+                if let Err(error) = store.release_owner(&lease, timestamp_ms()) {
                     let _ = self.record_workspace_owner_cleanup_failure(job_id, &error);
                 }
             }

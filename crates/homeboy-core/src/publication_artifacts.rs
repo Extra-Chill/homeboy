@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use crate::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 use crate::observation::{ArtifactRecord, ObservationStore};
-use crate::{paths, Result};
+use crate::Result;
 
 pub(crate) fn index_published_artifact_refs(
     store: &ObservationStore,
@@ -25,7 +25,11 @@ pub(crate) fn index_published_artifact_refs(
         Err(_) => return Ok(()),
     };
 
-    let artifact_root = paths::artifact_root()?;
+    // The store's own root, not the ambient one. Every locator resolved below
+    // is checked for existence and materialized under this root, so a store
+    // opened on an injected root would otherwise have its artifacts looked for
+    // in a different installation and reported `Missing`.
+    let artifact_root = store.artifact_root()?;
     let mut source_bases = Vec::new();
     for source_path in source_paths {
         if let Some(parent) = source_path.parent() {

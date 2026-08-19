@@ -1,10 +1,9 @@
 //! Schedules as reviewable configuration entities.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
-use crate::paths;
 
 use super::types::Schedule;
 
@@ -24,13 +23,15 @@ impl ConfigEntity for Schedule {
         Error::schedule_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(paths::homeboy()?
-            .join("schedules")
-            .join(format!("{}.json", id)))
-    }
+    // No `config_path_in_root` override: the rooted default already resolves
+    // `{config_root}/schedules/{id}.json`. The removed ambient override spelled
+    // exactly that path from process-global state, which would have shadowed
+    // the root the generic CRUD layer supplies.
 
-    fn validate(&self) -> Result<()> {
+    /// Reads no other entity, so `_config_root` is unused — but the hook is
+    /// rooted-only by design, so this cannot drift into an ambient override
+    /// that the rooted CRUD layer would silently skip.
+    fn validate_in_root(&self, _config_root: &Path) -> Result<()> {
         if self.id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "id",
@@ -201,6 +202,14 @@ mod tests {
     use super::*;
     use crate::schedule::types::{Cadence, NotifyPolicy, OverlapPolicy};
 
+    /// `Schedule::validate_in_root` reads no other entity, so the root it is
+    /// handed is never touched. Naming that keeps it explicit at each call
+    /// site — and keeps these pure-validation tests free of any dependence on
+    /// where the process thinks its config lives.
+    fn unused_root() -> &'static Path {
+        Path::new("/unused-config-root")
+    }
+
     fn schedule() -> Schedule {
         Schedule {
             id: "nightly-harvest".to_string(),
@@ -221,7 +230,9 @@ mod tests {
 
     #[test]
     fn a_complete_schedule_validates() {
-        schedule().validate().expect("valid schedule");
+        schedule()
+            .validate_in_root(unused_root())
+            .expect("valid schedule");
     }
 
     #[test]
@@ -230,7 +241,7 @@ mod tests {
             command: Some(Vec::new()),
             ..schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     /// Half-configured notification silently never delivers, so it is refused
@@ -243,7 +254,7 @@ mod tests {
             ..schedule()
         };
         let error = invalid
-            .validate()
+            .validate_in_root(unused_root())
             .expect_err("half-configured notification");
         assert!(error.to_string().contains("route"), "got: {error}");
 
@@ -252,7 +263,7 @@ mod tests {
             notification_route: Some("discord:v1:channel:1".to_string()),
             ..schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     #[test]
@@ -265,7 +276,7 @@ mod tests {
             ]),
             ..schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     fn exec_schedule() -> Schedule {
@@ -292,7 +303,9 @@ mod tests {
 
     #[test]
     fn an_exec_schedule_validates() {
-        exec_schedule().validate().expect("valid exec schedule");
+        exec_schedule()
+            .validate_in_root(unused_root())
+            .expect("valid exec schedule");
     }
 
     #[test]
@@ -301,7 +314,7 @@ mod tests {
             command: Some(vec!["triage".to_string()]),
             ..exec_schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     #[test]
@@ -312,7 +325,7 @@ mod tests {
             steps: Vec::new(),
             ..exec_schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     /// Programs run directly, never through a shell. An operator writing a
@@ -336,7 +349,7 @@ mod tests {
                 ..exec_schedule()
             };
             let error = invalid
-                .validate()
+                .validate_in_root(unused_root())
                 .expect_err("shell syntax must be refused");
             assert!(
                 error.to_string().contains("not through a shell"),
@@ -359,7 +372,7 @@ mod tests {
             ..exec_schedule()
         };
         valid
-            .validate()
+            .validate_in_root(unused_root())
             .expect("arguments are not shell-interpreted");
     }
 
@@ -386,7 +399,9 @@ mod tests {
             }],
             ..schedule()
         };
-        let error = invalid.validate().expect_err("ambiguous declaration");
+        let error = invalid
+            .validate_in_root(unused_root())
+            .expect_err("ambiguous declaration");
         assert!(error.to_string().contains("not both"), "got: {error}");
     }
 
@@ -409,7 +424,9 @@ mod tests {
             ],
             ..schedule()
         };
-        let error = invalid.validate().expect_err("empty step");
+        let error = invalid
+            .validate_in_root(unused_root())
+            .expect_err("empty step");
         assert!(error.to_string().contains("Step 2"), "got: {error}");
     }
 
@@ -424,7 +441,7 @@ mod tests {
             }],
             ..schedule()
         };
-        assert!(invalid.validate().is_err());
+        assert!(invalid.validate_in_root(unused_root()).is_err());
     }
 
     #[test]

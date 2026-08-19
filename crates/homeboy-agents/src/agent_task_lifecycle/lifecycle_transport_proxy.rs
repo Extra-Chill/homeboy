@@ -240,7 +240,19 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
 /// once claimed, so a snapshot polled before the claim legitimately has no
 /// target. Accept an absent target (the expected-Lab handoff is authority) and
 /// only reject a target that names a *different* runner.
-pub(crate) fn bind_pending_lab_handoff_snapshot(
+///
+/// Binding is a durable write — it replaces `record` with whatever acceptance
+/// persisted — so the installation it commits into has to be the one its caller
+/// is reconciling. A binding written to another home would leave the caller's
+/// own record permanently unbound while snapshot validation kept rejecting a
+/// perfectly valid runner job (#7505).
+///
+/// There is deliberately no ambient wrapper any more. Both callers —
+/// `reconcile_runner_job_snapshot_in_store` and
+/// `project_terminal_runner_result_in_store` — are rooted and already hold the
+/// store whose record they are binding.
+pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
@@ -296,17 +308,24 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
         // The runner can finish and mirror its aggregate before the controller
         // projects the daemon snapshot. Preserve that terminal outcome while
         // attaching the authoritative job identity needed for validation.
-        *record =
-            record_runner_job_identity(&record.run_id, &runner_id, &snapshot.job.id.to_string())?;
+        *record = record_runner_job_identity_in_store(
+            lifecycle_store,
+            &record.run_id,
+            &runner_id,
+            &snapshot.job.id.to_string(),
+        )?;
         return Ok(());
     }
-    *record = record_detached_lab_run(DetachedLabRunRecord {
-        run_id: &record.run_id,
-        runner_id: &runner_id,
-        runner_job_id: &snapshot.job.id.to_string(),
-        remote_workspace: &remote_workspace,
-        remote_command: &remote_command,
-    })?;
+    *record = record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &record.run_id,
+            runner_id: &runner_id,
+            runner_job_id: &snapshot.job.id.to_string(),
+            remote_workspace: &remote_workspace,
+            remote_command: &remote_command,
+        },
+    )?;
     Ok(())
 }
 
@@ -314,7 +333,8 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
 /// record when it has a planned (pre-acceptance) execution intent but no
 /// accepted runner job yet.
 ///
-/// This is the recovery-safe fallback for [`bind_pending_lab_handoff_snapshot`]:
+/// This is the recovery-safe fallback for
+/// [`bind_pending_lab_handoff_snapshot_in_store`]:
 /// it only yields a runner when the execution record is *planned* (not yet
 /// bound to a job id) and names this exact run, so binding a replacement job
 /// cannot latch onto a terminal or mismatched execution record.

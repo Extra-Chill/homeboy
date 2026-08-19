@@ -128,7 +128,17 @@ pub struct ArtifactCleanupOptions {
 /// ordering and limit, so a small root cannot consume the budget before a
 /// larger eligible artifact is considered.
 pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
-    try_run_automatic_artifact_retention(roots)?.ok_or_else(|| {
+    let data_root = homeboy_paths::homeboy_data()?;
+    run_automatic_artifact_retention_in_root(&data_root, roots)
+}
+
+/// [`run_automatic_artifact_retention`] against an explicitly injected data
+/// root, which is where the cross-process retention lock lives.
+pub fn run_automatic_artifact_retention_in_root(
+    data_root: &Path,
+    roots: Vec<PathBuf>,
+) -> Result<ArtifactCleanupOutput> {
+    try_run_automatic_artifact_retention_in_root(data_root, roots)?.ok_or_else(|| {
         Error::internal_unexpected(
             "automatic artifact retention is already running; remeasure capacity before admitting work",
         )
@@ -143,6 +153,16 @@ pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactC
 /// whether an artifact is safe to remove. An unmeasurable filesystem is not
 /// rejected; that is distinct from a measured reserve breach.
 pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
+    let data_root = homeboy_paths::homeboy_data()?;
+    admit_reconstructable_artifact_work_in_root(&data_root, roots)
+}
+
+/// [`admit_reconstructable_artifact_work`] against an explicitly injected data
+/// root, which is where the cross-process retention lock lives.
+pub fn admit_reconstructable_artifact_work_in_root(
+    data_root: &Path,
+    roots: Vec<PathBuf>,
+) -> Result<()> {
     let retention = crate::defaults::load_config().retention;
     let roots = existing_unique_roots(roots);
     if roots.is_empty() || retention.reconstructable_artifact_reserve_bytes == 0 {
@@ -170,7 +190,7 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
 
     // A busy owner is not treated as success: every caller still measures below
     // and deterministically admits or refuses from the current filesystem facts.
-    let _ = try_run_automatic_artifact_retention_with_config(&roots, &retention)?;
+    let _ = try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention)?;
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
@@ -198,11 +218,28 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
 pub fn try_run_automatic_artifact_retention(
     roots: Vec<PathBuf>,
 ) -> Result<Option<ArtifactCleanupOutput>> {
+    let data_root = homeboy_paths::homeboy_data()?;
+    try_run_automatic_artifact_retention_in_root(&data_root, roots)
+}
+
+/// [`try_run_automatic_artifact_retention`] against an explicitly injected data
+/// root.
+///
+/// The cross-process exclusion this pass depends on is an `FsIndexLock` under
+/// the data root, while the roots it reclaims from are supplied by the caller.
+/// Resolving the lock's root ambiently meant two passes over the *same*
+/// repository roots could take locks in two different installations and fail to
+/// exclude each other.
+pub fn try_run_automatic_artifact_retention_in_root(
+    data_root: &Path,
+    roots: Vec<PathBuf>,
+) -> Result<Option<ArtifactCleanupOutput>> {
     let retention = crate::defaults::load_config().retention;
-    try_run_automatic_artifact_retention_with_config(&roots, &retention)
+    try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention)
 }
 
 fn try_run_automatic_artifact_retention_with_config(
+    data: &Path,
     roots: &[PathBuf],
     retention: &crate::defaults::RetentionConfig,
 ) -> Result<Option<ArtifactCleanupOutput>> {
@@ -212,7 +249,6 @@ fn try_run_automatic_artifact_retention_with_config(
     else {
         return Ok(None);
     };
-    let data = homeboy_paths::homeboy_data()?;
     let lock = FsIndexLockConfig {
         // Retention has its own deadline. An extra minute avoids stealing a
         // live owner at that boundary while recovering a crashed owner.
@@ -223,7 +259,7 @@ fn try_run_automatic_artifact_retention_with_config(
         ),
         ..AUTOMATIC_ARTIFACT_RETENTION_LOCK
     };
-    let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(&data, lock)? else {
+    let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(data, lock)? else {
         return Ok(None);
     };
     run_automatic_artifact_retention_in(roots, retention, SystemTime::now()).map(Some)
@@ -2616,6 +2652,7 @@ mod tests {
                 .expect("hold retention owner");
 
             let result = try_run_automatic_artifact_retention_with_config(
+                &homeboy_paths::homeboy_data().expect("data root"),
                 &[repo.path().to_path_buf()],
                 &crate::defaults::RetentionConfig::default(),
             )
