@@ -5585,6 +5585,52 @@ pub fn cook_index_exists_in_store(
     Ok(lifecycle_store.cook_index_exists(&sanitize_run_id(cook_id)))
 }
 
+/// The durable child identity reserved by a detached Cook handoff before its
+/// Cook index is published. The parent remains the cancellation and reattach
+/// identity; this is read-side authority only while the handoff is pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedCookMaterializingAttempt {
+    pub cook_id: String,
+    pub run_id: String,
+}
+
+/// Resolve a detached Cook parent's known materializing child before Cook-index
+/// publication. A published index supersedes the reservation, and an absent
+/// child remains a parent read while submission is still in progress.
+pub fn resolve_detached_cook_materializing_attempt(
+    cook_id: &str,
+) -> Result<Option<DetachedCookMaterializingAttempt>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    resolve_detached_cook_materializing_attempt_in_store(&lifecycle_store, cook_id)
+}
+
+/// [`resolve_detached_cook_materializing_attempt`] against explicitly injected
+/// durable lifecycle roots.
+pub fn resolve_detached_cook_materializing_attempt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<Option<DetachedCookMaterializingAttempt>> {
+    let cook_id = sanitize_run_id(cook_id);
+    if lifecycle_store.cook_index_exists(&cook_id) {
+        return Ok(None);
+    }
+    let Ok(parent) = lifecycle_store.read_record(&cook_id) else {
+        return Ok(None);
+    };
+    let handoff = &parent.metadata["detached_cook_handoff"];
+    if handoff["cook_id"] != cook_id || handoff["state"] != "pending" {
+        return Ok(None);
+    }
+    let Some(run_id) = handoff["materializing_attempt_run_id"].as_str() else {
+        return Ok(None);
+    };
+    let run_id = sanitize_run_id(run_id);
+    if lifecycle_store.read_record(&run_id).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(DetachedCookMaterializingAttempt { cook_id, run_id }))
+}
+
 #[cfg(test)]
 pub(crate) fn replace_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
     store::write_cook_index_for_test(index)

@@ -59,6 +59,7 @@ pub(super) struct CookReaderTarget {
     pub(super) selection: Option<Value>,
     pub(super) cook_alias: Option<Value>,
     pub(super) exact: bool,
+    resolution: &'static str,
 }
 
 pub(super) fn resolve_cook_reader_target(
@@ -80,14 +81,30 @@ pub(super) fn resolve_cook_reader_target(
             selection: None,
             cook_alias,
             exact: true,
+            resolution: "exact_record",
         });
     }
     if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
+        if let Some(materializing) =
+            agent_task_lifecycle::resolve_detached_cook_materializing_attempt(run_or_cook_id)?
+        {
+            return Ok(CookReaderTarget {
+                run_id: materializing.run_id.clone(),
+                selection: None,
+                cook_alias: Some(json!({
+                    "cook_id": materializing.cook_id,
+                    "materializing_attempt_run_id": materializing.run_id,
+                })),
+                exact: false,
+                resolution: "detached_materializing_attempt",
+            });
+        }
         return Ok(CookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
             cook_alias: None,
             exact: false,
+            resolution: "default",
         });
     }
     let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
@@ -107,6 +124,7 @@ pub(super) fn resolve_cook_reader_target(
         })),
         selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
         exact: false,
+        resolution: "default",
     })
 }
 
@@ -476,7 +494,7 @@ fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &Co
         let mut identity = json!({
             "requested_run_id": requested_run_id,
             "resolved_run_id": target.run_id,
-            "resolution": if target.exact { "exact_record" } else { "default" },
+            "resolution": target.resolution,
         });
         if let Some(cook_alias) = &target.cook_alias {
             identity["cook_alias"] = cook_alias.clone();
