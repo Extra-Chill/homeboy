@@ -190,6 +190,25 @@ impl AgentTaskLifecycleStore {
         ObservationStore::open_readonly_in_roots(&self.roots)
     }
 
+    /// Open this store's observation database with the same startup artifact
+    /// maintenance the ambient `ObservationStore::open_initialized()` performs.
+    ///
+    /// This is deliberately not [`Self::open_observation_initialized`]. The two
+    /// are not interchangeable: the lifecycle opener defers report-only artifact
+    /// maintenance so a lifecycle transition can proceed while another process
+    /// owns SQLite's writer lock, while this one first reconciles unfinished
+    /// artifact publications and backfills artifact handles. Rooting a caller
+    /// that used the ambient `open_initialized()` therefore has to come here, or
+    /// the reroot would silently change what that caller sees — the hazard
+    /// #12618 recorded against `substantive_candidate_in_aggregate` (#7505).
+    ///
+    /// Like every opener on this store, BOTH roots come from `self`: the
+    /// database below `data` and the artifact tree it indexes below `artifacts`,
+    /// which `PathRoots` carries separately.
+    pub(crate) fn open_observation_maintained(&self) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_in_roots(&self.roots)
+    }
+
     pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         homeboy_core::config::with_config_lock_at(self.roots.config(), operation)
     }
@@ -1477,13 +1496,15 @@ fn validate_cook_index_attempt_in_store(
     Ok(())
 }
 
-pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
-    default_store()?.read_records()
-}
-
-/// The store-rooted counterpart of [`read_records`], following the same bound
-/// and the same health projection but reading this store's own observation
-/// database instead of `paths::observation_db()`.
+/// The store-rooted body of [`AgentTaskLifecycleStore::read_records`], following
+/// the same bound and the same health projection but reading this store's own
+/// observation database instead of `paths::observation_db()`.
+///
+/// The ambient `read_records()` free shim that used to sit above this is gone.
+/// Its last caller was `reconcile_active_lab_runner_handoffs`, a queue scan that
+/// mutates every row it selects — expiring, terminalizing, and reconciling them
+/// — so it now scans the store it was handed rather than deciding from one
+/// installation's queue and committing into another (#7505).
 fn read_records_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<Vec<AgentTaskRunRecord>> {

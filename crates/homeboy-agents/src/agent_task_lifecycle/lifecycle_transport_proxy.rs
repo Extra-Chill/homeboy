@@ -240,24 +240,17 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
 /// once claimed, so a snapshot polled before the claim legitimately has no
 /// target. Accept an absent target (the expected-Lab handoff is authority) and
 /// only reject a target that names a *different* runner.
-pub(crate) fn bind_pending_lab_handoff_snapshot(
-    record: &mut AgentTaskRunRecord,
-    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
-) -> Result<()> {
-    bind_pending_lab_handoff_snapshot_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        record,
-        snapshot,
-    )
-}
-
-/// The store-rooted counterpart of [`bind_pending_lab_handoff_snapshot`].
 ///
-/// Binding is a durable write — it replaces `record` with whatever
-/// acceptance persisted — so the installation it commits into has to be the one
-/// its caller is reconciling. A binding written to another home would leave the
-/// caller's own record permanently unbound while snapshot validation kept
-/// rejecting a perfectly valid runner job (#7505).
+/// Binding is a durable write — it replaces `record` with whatever acceptance
+/// persisted — so the installation it commits into has to be the one its caller
+/// is reconciling. A binding written to another home would leave the caller's
+/// own record permanently unbound while snapshot validation kept rejecting a
+/// perfectly valid runner job (#7505).
+///
+/// There is deliberately no ambient wrapper any more. Both callers —
+/// `reconcile_runner_job_snapshot_in_store` and
+/// `project_terminal_runner_result_in_store` — are rooted and already hold the
+/// store whose record they are binding.
 pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
@@ -340,7 +333,8 @@ pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
 /// record when it has a planned (pre-acceptance) execution intent but no
 /// accepted runner job yet.
 ///
-/// This is the recovery-safe fallback for [`bind_pending_lab_handoff_snapshot`]:
+/// This is the recovery-safe fallback for
+/// [`bind_pending_lab_handoff_snapshot_in_store`]:
 /// it only yields a runner when the execution record is *planned* (not yet
 /// bound to a job id) and names this exact run, so binding a replacement job
 /// cannot latch onto a terminal or mismatched execution record.
