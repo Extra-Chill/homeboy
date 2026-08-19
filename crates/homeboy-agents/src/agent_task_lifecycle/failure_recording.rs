@@ -109,22 +109,6 @@ pub(crate) fn record_pre_execution_failure_in_store(
     Ok(failed_record)
 }
 
-/// Record a post-provider transport/handoff failure without terminalizing a run
-/// that already produced a candidate (#9377). The existing durable record — its
-/// state, aggregate, artifacts, and provider handles — is preserved verbatim;
-/// only a recoverable `transport_follow_up_failure` marker is stamped so
-/// controller reconciliation can adopt the completed candidate rather than
-/// rerunning the provider. The failure stays `retryable` so recovery is
-/// attempted, and never regresses a terminal candidate to `Failed`.
-fn record_transport_follow_up_failure(
-    record: AgentTaskRunRecord,
-    phase: &str,
-    error: &Error,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_transport_follow_up_failure_in_store(&lifecycle_store, record, phase, error)
-}
-
 fn record_transport_follow_up_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     mut record: AgentTaskRunRecord,
@@ -1203,17 +1187,6 @@ fn terminal_artifact_projection_readiness_for_record_with(
             )
             .to_string(),
     ))
-}
-
-/// Project finalized executor artifacts into the standard observation registry.
-/// The lifecycle aggregate remains the source of task semantics; the registry
-/// supplies the canonical retrievable-byte index used by `runs artifact get`.
-pub(crate) fn project_terminal_artifacts(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    project_terminal_artifacts_in_store(&store, record, aggregate)
 }
 
 fn project_terminal_artifacts_in_store(

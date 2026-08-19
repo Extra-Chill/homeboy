@@ -1702,10 +1702,6 @@ fn record_from_run_with_schema_policy(
     Ok(record)
 }
 
-fn read_mirrored_aggregate(run_id: &str) -> Result<Option<AgentTaskAggregate>> {
-    read_mirrored_aggregate_in_store(&default_store()?, run_id)
-}
-
 fn read_mirrored_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
