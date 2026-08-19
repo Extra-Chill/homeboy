@@ -711,6 +711,23 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn record_metadata_value(
+        &self,
+        run_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<()> {
+        let run_id = sanitize_run_id(run_id);
+        self.mutate_record(&run_id, |record| {
+            record
+                .ensure_metadata_object()
+                .insert(key.to_string(), value.clone());
+            record.updated_at = Some(super::now_timestamp());
+            true
+        })
+        .map(|_| ())
+    }
+
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_bounded_in_store(self, run_id)
     }
@@ -1714,10 +1731,6 @@ fn record_from_run_with_schema_policy(
         }
     }
     Ok(record)
-}
-
-fn read_mirrored_aggregate(run_id: &str) -> Result<Option<AgentTaskAggregate>> {
-    read_mirrored_aggregate_in_store(&default_store()?, run_id)
 }
 
 fn read_mirrored_aggregate_in_store(

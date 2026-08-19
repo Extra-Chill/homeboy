@@ -2449,18 +2449,6 @@ pub fn running_owner_pid_in_store(
         .owner_pid())
 }
 
-/// Persist the controller-owned Cook phase independently of provider output.
-/// This gives foreground observers a restart-safe liveness source without
-/// treating an arbitrary provider transcript line as durable state.
-pub fn record_cook_progress(
-    run_id: &str,
-    phase: &str,
-    attempt: u32,
-    detail: Option<&str>,
-) -> Result<AgentTaskRunRecord> {
-    record_cook_progress_with_activity(run_id, phase, attempt, detail, None)
-}
-
 /// Persist the controller-owned Cook phase into an explicitly rooted store.
 pub fn record_cook_progress_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2616,18 +2604,6 @@ pub fn record_cook_progress_with_activity_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook progress record was unchanged"))
 }
 
-/// Persist a failed foreground observer delivery without changing the Cook's
-/// controller-owned progress. Observers are notification sinks, so their
-/// transport lifetime cannot determine whether a durable operation continues.
-pub fn record_cook_observer_event(
-    run_id: &str,
-    phase: &str,
-    diagnostic: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_observer_event_in_store(&lifecycle_store, run_id, phase, diagnostic)
-}
-
 pub fn record_cook_observer_event_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -2670,26 +2646,6 @@ const MAX_COOK_RESOURCE_SAMPLES: usize = 240;
 /// Supervision events retained. Decisions are announced on escalation only, so
 /// a run reaches a handful of these, not hundreds.
 const MAX_COOK_SUPERVISION_EVENTS: usize = 32;
-
-/// Persist one supervision tick: the resource observation, plus any decision
-/// the policy reached on it.
-///
-/// The two land in different places on purpose. The **timeline** is a rolling
-/// window of what the run cost, which answers "was this expensive?" and is
-/// naturally lossy at the head. The **events** are the decisions Homeboy took,
-/// which answer "why was this stopped?" and must not be evicted by a long tail
-/// of routine samples. Collapsing them into one array would let an hour of
-/// quiet heartbeats push the stop decision out of the evidence that exists to
-/// explain the stop (#7015).
-pub fn record_cook_supervision(
-    run_id: &str,
-    attempt: u32,
-    sample: Option<Value>,
-    decisions: Vec<Value>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_supervision_in_store(&lifecycle_store, run_id, attempt, sample, decisions)
-}
 
 pub fn record_cook_supervision_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2742,22 +2698,6 @@ pub fn record_cook_supervision_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook supervision record was unchanged"))
 }
 
-/// Persist the outcome of a supervision-ordered termination.
-///
-/// Recorded separately from the decision that ordered it because the two can
-/// disagree: a policy can order a stop that the host then fails to carry out
-/// (a pid that survives SIGKILL, a non-Unix host with no process-tree
-/// cancellation at all). Evidence that shows only the order would let a reader
-/// conclude a run was stopped when it was not.
-pub fn record_cook_supervision_stop(
-    run_id: &str,
-    attempt: u32,
-    outcome: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_supervision_stop_in_store(&lifecycle_store, run_id, attempt, outcome)
-}
-
 pub fn record_cook_supervision_stop_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -2785,19 +2725,6 @@ pub fn record_cook_supervision_stop_in_store(
         true
     })?;
     record.ok_or_else(|| Error::internal_unexpected("Cook supervision stop was unchanged"))
-}
-
-/// Bind the Cook's authoritative command result to its terminal progress
-/// record. Provider and gate state alone cannot establish whether publication
-/// completed, so readers use this positive completion fact rather than a list
-/// of success-status strings.
-pub fn record_cook_terminal_result(
-    run_id: &str,
-    terminal_success: bool,
-    exit_code: i32,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_terminal_result_in_store(&lifecycle_store, run_id, terminal_success, exit_code)
 }
 
 pub fn record_cook_terminal_result_in_store(
@@ -3379,15 +3306,6 @@ pub(crate) fn trusted_dispatcher_kind(kind: &str) -> Option<String> {
 
 fn queue_quarantine_remediation() -> &'static str {
     "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
-}
-
-fn quarantine_queued_run(
-    record: &AgentTaskRunRecord,
-    plan: Option<&AgentTaskPlan>,
-    error: &Error,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    quarantine_queued_run_in_store(&lifecycle_store, record, plan, error)
 }
 
 /// Retain the redacted admission diagnostic on the record inside the store the
@@ -4708,14 +4626,17 @@ pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
 }
 
 pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
-    store::mutate_record(&sanitize_run_id(run_id), |record| {
-        record
-            .ensure_metadata_object()
-            .insert(key.to_string(), value.clone());
-        record.updated_at = Some(now_timestamp());
-        true
-    })
-    .map(|_| ())
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_metadata_value_in_store(&lifecycle_store, run_id, key, value)
+}
+
+pub(crate) fn record_metadata_value_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    key: &str,
+    value: Value,
+) -> Result<()> {
+    lifecycle_store.record_metadata_value(run_id, key, value)
 }
 
 /// Reserve one successor for the complete retry lineage before admitting it.
@@ -5664,6 +5585,52 @@ pub fn cook_index_exists_in_store(
     Ok(lifecycle_store.cook_index_exists(&sanitize_run_id(cook_id)))
 }
 
+/// The durable child identity reserved by a detached Cook handoff before its
+/// Cook index is published. The parent remains the cancellation and reattach
+/// identity; this is read-side authority only while the handoff is pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedCookMaterializingAttempt {
+    pub cook_id: String,
+    pub run_id: String,
+}
+
+/// Resolve a detached Cook parent's known materializing child before Cook-index
+/// publication. A published index supersedes the reservation, and an absent
+/// child remains a parent read while submission is still in progress.
+pub fn resolve_detached_cook_materializing_attempt(
+    cook_id: &str,
+) -> Result<Option<DetachedCookMaterializingAttempt>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    resolve_detached_cook_materializing_attempt_in_store(&lifecycle_store, cook_id)
+}
+
+/// [`resolve_detached_cook_materializing_attempt`] against explicitly injected
+/// durable lifecycle roots.
+pub fn resolve_detached_cook_materializing_attempt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<Option<DetachedCookMaterializingAttempt>> {
+    let cook_id = sanitize_run_id(cook_id);
+    if lifecycle_store.cook_index_exists(&cook_id) {
+        return Ok(None);
+    }
+    let Ok(parent) = lifecycle_store.read_record(&cook_id) else {
+        return Ok(None);
+    };
+    let handoff = &parent.metadata["detached_cook_handoff"];
+    if handoff["cook_id"] != cook_id || handoff["state"] != "pending" {
+        return Ok(None);
+    }
+    let Some(run_id) = handoff["materializing_attempt_run_id"].as_str() else {
+        return Ok(None);
+    };
+    let run_id = sanitize_run_id(run_id);
+    if lifecycle_store.read_record(&run_id).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(DetachedCookMaterializingAttempt { cook_id, run_id }))
+}
+
 #[cfg(test)]
 pub(crate) fn replace_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
     store::write_cook_index_for_test(index)
@@ -5931,10 +5898,6 @@ fn substantive_candidate_from_aggregate(
         destination_provenance,
         recorded_at: now_timestamp(),
     })
-}
-
-fn substantive_candidate(run_id: &str) -> Option<(String, String)> {
-    substantive_candidate_in_store(run_id, None)
 }
 
 fn substantive_candidate_in_store(
@@ -6253,15 +6216,6 @@ pub(crate) fn record_promotion_in_store(
         )?;
     }
     Ok(record)
-}
-
-pub fn record_acceptance_verdict(
-    run_id: &str,
-    verdict: AgentTaskAcceptanceVerdict,
-    evidence_refs: Vec<String>,
-    token: String,
-) -> Result<AgentTaskRunRecord> {
-    record_acceptance_verdict_with_feedback(run_id, verdict, evidence_refs, token, None)
 }
 
 /// Record a verdict against an explicitly rooted store. The thin delegation to
@@ -6651,11 +6605,6 @@ pub(crate) fn record_cook_moving_base_recovery_in_store(
         Some(record) => Ok(record),
         None => lifecycle_store.read_record(&run_id),
     }
-}
-
-pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    clear_cook_moving_base_recovery_in_store(&lifecycle_store, run_id)
 }
 
 pub(crate) fn clear_cook_moving_base_recovery_in_store(

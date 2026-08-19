@@ -25,7 +25,7 @@ use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
-use homeboy_core::notify::{NotifyDelivery, NotifyEvent, NotifyOutcome};
+use homeboy_core::notify::{terminal_rejection_result, NotifyDelivery, NotifyEvent, NotifyOutcome};
 use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDisposition};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -139,13 +139,16 @@ fn terminal_outcome(
         "delivered"
     } else if matches!(disposition, NotifyOutboxDisposition::Queued { .. }) {
         "queued"
+    } else if matches!(disposition, NotifyOutboxDisposition::Rejected { .. }) {
+        "rejected"
     } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) {
         "not_configured"
     } else {
         "failed"
     };
     let outbox_entry_id = match disposition {
-        NotifyOutboxDisposition::Queued { entry_id } => Some(entry_id.clone()),
+        NotifyOutboxDisposition::Queued { entry_id }
+        | NotifyOutboxDisposition::Rejected { entry_id } => Some(entry_id.clone()),
         _ => None,
     };
     json!({
@@ -159,6 +162,8 @@ fn terminal_outcome(
         "error_class": error_class,
         "outbox_entry_id": outbox_entry_id,
         "transport_result": safe_transport_result(outcome.result.as_ref()),
+        "rejection_reason": terminal_rejection_result(outcome.result.as_ref()).map(|rejection| rejection.reason_code),
+        "validation_context": terminal_rejection_context(outcome.result.as_ref()),
     })
 }
 
@@ -173,6 +178,9 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         "route_kind",
         "retryable",
         "truncated",
+        "reason_code",
+        "validation_code",
+        "validation_field",
     ];
     let object = result?.as_object()?;
     let mut safe = Map::new();
@@ -191,6 +199,18 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         }
     }
     (!safe.is_empty()).then_some(Value::Object(safe))
+}
+
+fn terminal_rejection_context(result: Option<&Value>) -> Option<Value> {
+    let rejection = terminal_rejection_result(result)?;
+    let mut context = Map::new();
+    if let Some(value) = rejection.validation_code {
+        context.insert("validation_code".to_string(), Value::String(value));
+    }
+    if let Some(value) = rejection.validation_field {
+        context.insert("validation_field".to_string(), Value::String(value));
+    }
+    (!context.is_empty()).then_some(Value::Object(context))
 }
 
 fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifySubject {
@@ -456,7 +476,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         // Nothing durable exists — no transport is configured, or the queue
         // could not be written. Release, exactly as before, so a later
         // terminal observer is eligible to try again.
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(
                 &report.cook_id,
             );
@@ -658,7 +678,7 @@ pub fn batch_terminal(
                 BATCH_TERMINAL_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ =
                 crate::agent_task_lifecycle::release_cook_terminal_notification_claim(subject_id);
         }
@@ -930,7 +950,7 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
                 RUN_RECONCILED_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(run_id);
         }
     }

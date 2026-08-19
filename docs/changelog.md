@@ -4,6 +4,46 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.21] - 2026-08-19
+
+### Changed
+- root Cook selection-required metadata
+- delete the ambient twins nothing calls anymore
+
+### Fixed
+- retain timeout candidates after rotation failure
+
+## [0.350.20] - 2026-08-19
+
+### Changed
+- revert the pending-handoff migration the full suite caught
+
+## [0.350.19] - 2026-08-19
+
+### Changed
+- revert the seven mark_running migrations that broke main
+
+## [0.350.18] - 2026-08-19
+
+### Changed
+- stop the rooted offload tests reaching the operator's runtime store
+- root submit_and_persist tests in an injected store
+- root 5 handoff_and_proxy transport-proxy tests in an injected store
+- root the transport-proxy snapshot reconcile in an injected store
+
+## [0.350.17] - 2026-08-19
+
+### Changed
+- root 12 status_and_recovery tests in an injected store
+- root 20 handoff/proxy tests in an injected lifecycle store
+- root 17 terminal_and_reconcile tests in an injected store
+- root transport-proxy recovery and reconcile in a store
+
+### Fixed
+- elect initial recipe ownership
+- bind failures to materialization
+- verify materialized failure ownership
+
 ## [0.350.16] - 2026-08-19
 
 ### Changed

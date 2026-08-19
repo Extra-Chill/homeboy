@@ -468,14 +468,6 @@ pub(crate) fn promote_or_load_attempt_in_store(
     Ok(promotion)
 }
 
-/// A selector is accepted only from the route authority written by
-/// `cook-continue`; normal Cook promotion retains automatic selection.
-fn continuation_artifact_id(run_id: &str) -> Result<Option<String>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    continuation_artifact_id_in_store(&lifecycle_store, run_id)
-}
-
 fn continuation_artifact_id_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,

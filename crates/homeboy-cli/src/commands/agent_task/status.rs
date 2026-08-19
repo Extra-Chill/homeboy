@@ -59,6 +59,7 @@ pub(super) struct CookReaderTarget {
     pub(super) selection: Option<Value>,
     pub(super) cook_alias: Option<Value>,
     pub(super) exact: bool,
+    resolution: &'static str,
 }
 
 pub(super) fn resolve_cook_reader_target(
@@ -80,14 +81,30 @@ pub(super) fn resolve_cook_reader_target(
             selection: None,
             cook_alias,
             exact: true,
+            resolution: "exact_record",
         });
     }
     if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
+        if let Some(materializing) =
+            agent_task_lifecycle::resolve_detached_cook_materializing_attempt(run_or_cook_id)?
+        {
+            return Ok(CookReaderTarget {
+                run_id: materializing.run_id.clone(),
+                selection: None,
+                cook_alias: Some(json!({
+                    "cook_id": materializing.cook_id,
+                    "materializing_attempt_run_id": materializing.run_id,
+                })),
+                exact: false,
+                resolution: "detached_materializing_attempt",
+            });
+        }
         return Ok(CookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
             cook_alias: None,
             exact: false,
+            resolution: "default",
         });
     }
     let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
@@ -107,6 +124,7 @@ pub(super) fn resolve_cook_reader_target(
         })),
         selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
         exact: false,
+        resolution: "default",
     })
 }
 
@@ -476,7 +494,7 @@ fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &Co
         let mut identity = json!({
             "requested_run_id": requested_run_id,
             "resolved_run_id": target.run_id,
-            "resolution": if target.exact { "exact_record" } else { "default" },
+            "resolution": target.resolution,
         });
         if let Some(cook_alias) = &target.cook_alias {
             identity["cook_alias"] = cook_alias.clone();
@@ -505,19 +523,32 @@ fn attach_cook_notification_delivery(
         return;
     };
     if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
-        outcome["retry_command"] = Value::String(agent_task_service_direct::cook_continue_command(
+        let resend_command = Value::String(agent_task_service_direct::cook_continue_command(
             None, cook_id, false, None,
         ));
+        outcome["resend_command"] = resend_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["retry_command"] = resend_command;
+        outcome["inspect_command"] =
+            Value::String(format!("homeboy agent-task status {cook_id} --full"));
     }
-    if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
-        outcome["configuration_command"] = Value::String(
-            "homeboy config set /notifications/default_transport '<installed-transport-id>'"
-                .to_string(),
-        );
+    if let Some(configuration_command) = notification_repair_command(&outcome) {
+        let configuration_command = Value::String(configuration_command);
+        outcome["repair_command"] = configuration_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["configuration_command"] = configuration_command;
     }
     if let Value::Object(fields) = value {
         fields.insert("notification_delivery".to_string(), outcome);
     }
+}
+
+fn notification_repair_command(outcome: &Value) -> Option<String> {
+    (outcome.get("status").and_then(Value::as_str) == Some("not_configured")
+        && outcome.get("route_classification").and_then(Value::as_str) != Some("explicit"))
+    .then(|| {
+        "homeboy config set /notifications/default_transport '<installed-transport-id>'".to_string()
+    })
 }
 
 /// A Cook owns the provider attempt's publication lifecycle. Once it records a
@@ -1137,22 +1168,33 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("retry_command"))
+        .and_then(|delivery| delivery.get("inspect_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("retry terminal notification", command)
+            CommandNextAction::new("inspect terminal notification", command)
+                .with_kind(CommandNextActionKind::Show),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("resend_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("resend terminal notification", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("configuration_command"))
+        .and_then(|delivery| delivery.get("repair_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("configure terminal notifications", command)
+            CommandNextAction::new("repair terminal notifications", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
@@ -4356,6 +4398,11 @@ fn compact_status_summary_with_aggregate(
                 "status",
                 "error_class",
                 "transport_result",
+                "rejection_reason",
+                "validation_context",
+                "inspect_command",
+                "repair_command",
+                "resend_command",
                 "retry_command",
                 "configuration_command",
             ],
@@ -6840,7 +6887,7 @@ mod tests {
                     "route_classification": "explicit",
                     "status": "failed",
                     "error_class": "transport_spawn_failed",
-                    "retry_command": "homeboy agent-task cook-continue cook-1",
+                    "resend_command": "homeboy agent-task cook-continue cook-1",
                     "raw_destination": "must-not-appear"
                 }
             }),
@@ -6849,12 +6896,26 @@ mod tests {
 
         assert_eq!(summary["notification_delivery"]["status"], "failed");
         assert_eq!(
-            summary["notification_delivery"]["retry_command"],
+            summary["notification_delivery"]["resend_command"],
             "homeboy agent-task cook-continue cook-1"
         );
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn explicit_notification_routes_do_not_suggest_changing_the_default_transport() {
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "explicit"
+        }))
+        .is_none());
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "default"
+        }))
+        .is_some());
     }
 
     #[test]
