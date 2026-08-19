@@ -647,11 +647,19 @@ fn schedule_recovery_children(
 /// Execute one durable child. The filesystem lock is deliberately held for the
 /// complete side-effecting phase: an expired SQLite lease permits a replacement
 /// to *try* takeover, but never to overlap a still-live local process.
+///
+/// The ambient trio is resolved once here and the config root is handed to the
+/// lock. There is deliberately no injected sibling of this function: the child
+/// lease it arbitrates comes from `ObservationStore::open_initialized`, which
+/// resolves its own database path from ambient state inside `homeboy-core`.
+/// Accepting injected roots while the store stayed ambient would let the lock
+/// and the lease disagree about which home they arbitrate (#7505).
 pub fn run_scheduled_terminal_runner_exec_recovery_child(
     child_id: &str,
     child_token: &str,
 ) -> Result<Option<RunnerExecRecoveryDiagnostic>> {
     let store = ObservationStore::open_initialized()?;
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let Some(child) = store.get_run(child_id)? else {
         return Ok(None);
     };
@@ -674,7 +682,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
             return Ok(None);
         }
     };
-    let Some(_lock) = try_acquire_child_lock(child_id)? else {
+    let Some(_lock) = try_acquire_child_lock_in_roots(roots.config(), child_id)? else {
         let mut metadata = child.metadata_json;
         metadata["phase"] = json!("deferred_live_worker");
         metadata["inspection_action"] = json!(format!("homeboy runs show {child_id}"));
@@ -757,8 +765,17 @@ fn terminalize_child_error(
     Ok(())
 }
 
-fn try_acquire_child_lock(child_id: &str) -> Result<Option<std::fs::File>> {
-    let root = homeboy_core::paths::homeboy()?.join("runner-exec-recovery");
+/// Take the single-writer lock for one recovery child under an explicitly
+/// injected config root.
+///
+/// The lock file has to live in the same home as the observation store that
+/// hands out the child lease, or two controllers on different homes would each
+/// believe they held the only lock for the same child id (#7505).
+fn try_acquire_child_lock_in_roots(
+    config_root: &std::path::Path,
+    child_id: &str,
+) -> Result<Option<std::fs::File>> {
+    let root = config_root.join("runner-exec-recovery");
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),

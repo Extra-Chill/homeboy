@@ -607,7 +607,11 @@ impl ConfigEntity for Runner {
         Error::runner_not_found(id, suggestions)
     }
 
-    fn validate(&self) -> Result<()> {
+    /// The backing server is loaded from the *same* root the runner is being
+    /// written to. Loading it from the process root would accept an SSH runner
+    /// into one installation on the strength of a server that only exists in
+    /// another.
+    fn validate_in_root(&self, config_root: &std::path::Path) -> Result<()> {
         if matches!(self.kind, RunnerKind::Ssh) {
             let server_id = self.server_id.as_deref().ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -617,7 +621,7 @@ impl ConfigEntity for Runner {
                     None,
                 )
             })?;
-            server::load(server_id)?;
+            server::load_in_root(config_root, server_id)?;
         }
 
         server::validate_runner_settings(&self.settings, "concurrency_limit", None)?;
@@ -626,7 +630,7 @@ impl ConfigEntity for Runner {
         Ok(())
     }
 
-    fn dependents(_id: &str) -> Result<Vec<String>> {
+    fn dependents_in_root(_config_root: &std::path::Path, _id: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
 }
@@ -1505,7 +1509,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
                     None,
                 ));
             }
-            runner.validate()?;
+            config::validate(&runner)?;
             config::save(&runner)?;
             Ok(CreateResult {
                 id: runner.id.clone(),

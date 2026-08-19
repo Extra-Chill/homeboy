@@ -7,7 +7,9 @@ mod io;
 mod policy;
 
 pub use io::{
-    config_exists, config_file_value, config_path, load_config, reset_config, save_config,
+    config_exists, config_exists_in_root, config_file_value, config_file_value_in_root,
+    config_path, config_path_in_root, load_config, load_config_uncached_in_root, reset_config,
+    reset_config_in_root, save_config, save_config_in_root,
 };
 pub use policy::resolve_release_gate_local_hot_policy_from;
 pub use policy::{

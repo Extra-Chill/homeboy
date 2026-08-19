@@ -76,6 +76,16 @@ pub(super) fn capture_baseline(
     cwd: &str,
     source_snapshot: Option<&SourceSnapshot>,
 ) -> Result<BaselineCapture> {
+    let artifact_root = paths::artifact_root()?;
+    capture_baseline_in_root(&artifact_root, cwd, source_snapshot)
+}
+
+/// [`capture_baseline`] against an explicitly injected artifact root.
+pub(super) fn capture_baseline_in_root(
+    artifact_root: &Path,
+    cwd: &str,
+    source_snapshot: Option<&SourceSnapshot>,
+) -> Result<BaselineCapture> {
     let cwd_path = Path::new(cwd);
     if !cwd_path.is_dir() {
         return Err(Error::validation_invalid_argument(
@@ -85,7 +95,7 @@ pub(super) fn capture_baseline(
             None,
         ));
     }
-    let scratch = create_scratch_dir("baseline")?;
+    let scratch = create_scratch_dir_in_root(artifact_root, "baseline")?;
     let baseline_path = scratch.path.join("baseline");
     let excludes = source_snapshot
         .map(|snapshot| snapshot.sync_excludes.clone())
@@ -107,7 +117,40 @@ pub(super) fn capture_patch_report(
     baseline: &BaselineCapture,
     exit_code: i32,
 ) -> Result<PatchCaptureReport> {
-    let after_scratch = create_scratch_dir("after")?;
+    let artifact_root = paths::artifact_root()?;
+    capture_patch_report_in_root(
+        &artifact_root,
+        job_id,
+        runner_id,
+        cwd,
+        command,
+        source_snapshot,
+        baseline,
+        exit_code,
+    )
+}
+
+/// [`capture_patch_report`] against an explicitly injected artifact root.
+///
+/// The scratch directory and the published `.diff` artifact now come from one
+/// resolution. They used to resolve `artifact_root()` independently inside a
+/// single capture, so the path recorded in the run record could name a
+/// different installation from the one the diff was computed in.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Mirrors capture_patch_report with the artifact root made explicit."
+)]
+pub(super) fn capture_patch_report_in_root(
+    artifact_root: &Path,
+    job_id: uuid::Uuid,
+    runner_id: &str,
+    cwd: &str,
+    command: &[String],
+    source_snapshot: Option<&SourceSnapshot>,
+    baseline: &BaselineCapture,
+    exit_code: i32,
+) -> Result<PatchCaptureReport> {
+    let after_scratch = create_scratch_dir_in_root(artifact_root, "after")?;
     let after_path = after_scratch.path.join("after");
     let cwd_path = Path::new(cwd);
     copy_dir_filtered(cwd_path, &after_path, cwd_path, &baseline.excludes)?;
@@ -119,7 +162,12 @@ pub(super) fn capture_patch_report(
     let patch_artifact_path = if patch.trim().is_empty() {
         None
     } else {
-        Some(write_patch_artifact(&run_id, &artifact_id, &patch)?)
+        Some(write_patch_artifact_in_root(
+            artifact_root,
+            &run_id,
+            &artifact_id,
+            &patch,
+        )?)
     };
     let patch_artifact_path_string = patch_artifact_path
         .as_ref()
@@ -153,8 +201,8 @@ pub(super) fn capture_patch_report(
     Ok(report)
 }
 
-fn create_scratch_dir(label: &str) -> Result<ScratchDir> {
-    let path = paths::artifact_root()?
+fn create_scratch_dir_in_root(artifact_root: &Path, label: &str) -> Result<ScratchDir> {
+    let path = artifact_root
         .join("_scratch")
         .join(format!("patch-{label}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&path).map_err(|err| {
@@ -166,8 +214,13 @@ fn create_scratch_dir(label: &str) -> Result<ScratchDir> {
     Ok(ScratchDir { path })
 }
 
-fn write_patch_artifact(run_id: &str, artifact_id: &str, patch: &str) -> Result<PathBuf> {
-    let path = paths::artifact_root()?
+fn write_patch_artifact_in_root(
+    artifact_root: &Path,
+    run_id: &str,
+    artifact_id: &str,
+    patch: &str,
+) -> Result<PathBuf> {
+    let path = artifact_root
         .join(run_id)
         .join(format!("{artifact_id}.diff"));
     if let Some(parent) = path.parent() {

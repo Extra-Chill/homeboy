@@ -58,7 +58,14 @@ pub fn run_with_options(
 ) -> CmdResult<RunnerDoctorOutput> {
     let target = target::resolve(runner_id)?;
     let mut report = match &target {
-        target::RunnerTarget::Local { id, runner } => local::report(id, runner.as_ref(), &options),
+        target::RunnerTarget::Local { id, runner } => {
+            // The local probe's artifact root is the only filesystem root this
+            // command reads, so it is resolved once here at the entry point
+            // rather than inside the probe. The SSH branch resolves its root on
+            // the remote host and deliberately does not take this one.
+            let artifact_root = crate::core::paths::artifact_root().ok();
+            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
+        }
         target::RunnerTarget::Ssh {
             id,
             runner,

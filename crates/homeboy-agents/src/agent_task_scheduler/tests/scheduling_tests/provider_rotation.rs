@@ -725,6 +725,9 @@ mod provider_rotation_tests {
     fn timed_out_attempt_rotates_after_recovering_a_malformed_scratch_index() {
         struct TimeoutThenSuccessExecutor {
             calls: AtomicUsize,
+            cancellation: std::sync::mpsc::Sender<()>,
+            cancel_calls: Arc<AtomicUsize>,
+            cancellation_receiver: Mutex<std::sync::mpsc::Receiver<()>>,
             scratch_index: std::path::PathBuf,
             scratch_roots: Arc<Mutex<Vec<String>>>,
         }
@@ -743,10 +746,19 @@ mod provider_rotation_tests {
                 );
                 if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     fs::write(&self.scratch_index, "{ stale").expect("corrupt stale index");
-                    std::thread::sleep(Duration::from_millis(100));
+                    self.cancellation_receiver
+                        .lock()
+                        .expect("cancellation receiver")
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("scheduler cancelled the timed-out first attempt");
                     return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
                 }
                 outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+            }
+
+            fn cancel(&self, _task_id: &str) {
+                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+                let _ = self.cancellation.send(());
             }
         }
 
@@ -758,20 +770,22 @@ mod provider_rotation_tests {
             .join(run_id)
             .join("resources.json");
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
+        let (cancellation, cancellation_receiver) = std::sync::mpsc::channel();
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
         let scheduler = AgentTaskScheduler::new(TimeoutThenSuccessExecutor {
             calls: AtomicUsize::new(0),
-            scratch_index,
+            cancellation,
+            cancel_calls: Arc::clone(&cancel_calls),
+            cancellation_receiver: Mutex::new(cancellation_receiver),
+            scratch_index: scratch_index.clone(),
             scratch_roots: Arc::clone(&scratch_roots),
         })
         .with_run_id(run_id);
         let mut plan = plan_with_tasks(1);
-        // The first attempt must exceed its timeout and still return inside
-        // timeout_with_grace (timeout + 100ms), and the second must finish
-        // within the timeout. A 1ms budget made the second a race that any
-        // loaded machine lost, because the scheduler's own dispatch and
-        // finalization are charged to the attempt. 60ms timeout with a 100ms
-        // provider sleep keeps both orderings with ~40ms of margin either way.
-        plan.tasks[0].limits.timeout_ms = Some(60);
+        // The first worker returns only after the scheduler reaches the normal
+        // timeout cancellation path, so test scheduling cannot decide whether
+        // this is a timeout or a successful attempt.
+        plan.tasks[0].limits.timeout_ms = Some(500);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run record");
@@ -779,12 +793,23 @@ mod provider_rotation_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][0]["status"],
+            "timeout"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][1]["status"],
+            "succeeded"
+        );
         let scratch_roots = scratch_roots.lock().expect("scratch roots").clone();
         assert_eq!(scratch_roots.len(), 2);
         assert_ne!(
             scratch_roots[0], scratch_roots[1],
             "the rotated provider receives a new scratch root"
         );
+        serde_json::from_str::<Value>(&fs::read_to_string(scratch_index).expect("scratch index"))
+            .expect("malformed scratch index recovered");
         assert!(aggregate.events.iter().any(|event| {
             event.message.as_deref()
                 == Some("provider rotation queued: entry 1 of 1; backend=fallback-backend-a, model=not recorded")

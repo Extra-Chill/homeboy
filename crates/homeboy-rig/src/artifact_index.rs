@@ -53,7 +53,30 @@ pub fn for_completed_rig_run(
     status: &str,
     pipeline: Option<&PipelineOutcome>,
 ) -> Option<RigRunArtifactIndex> {
-    let artifact_root = homeboy_core::artifact_root().ok()?;
+    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
+    for_completed_rig_run_in_roots(roots.artifacts(), store, rig, run_id, status, pipeline)
+}
+
+/// [`for_completed_rig_run`] against an explicitly injected artifact root.
+///
+/// The injection point exists because this function writes the index file
+/// under the artifact root and then records that same path *into* `store`. The
+/// ambient form resolved the root with no reference to whichever home `store`
+/// was opened against, so a caller holding a non-ambient store would index a
+/// file that store's home does not contain. Callers that own both should pass
+/// the root the store was opened with.
+///
+/// `ObservationStore` does not expose the roots it resolved, so the ambient
+/// wrapper above is currently the only production caller; closing that half
+/// needs `homeboy-core` (#7505).
+pub fn for_completed_rig_run_in_roots(
+    artifact_root: &Path,
+    store: &ObservationStore,
+    rig: &RigSpec,
+    run_id: &str,
+    status: &str,
+    pipeline: Option<&PipelineOutcome>,
+) -> Option<RigRunArtifactIndex> {
     let run_artifact_root = artifact_root.join(run_id);
     let artifact_index_path = run_artifact_root.join("rig-artifact-index.json");
     let artifacts = store.list_artifacts(run_id).unwrap_or_default();
@@ -61,7 +84,7 @@ pub fn for_completed_rig_run(
         &rig.id,
         run_id,
         status,
-        &artifact_root,
+        artifact_root,
         &artifact_index_path,
         &artifacts,
         pipeline.map(failed_step_refs).unwrap_or_default(),
@@ -87,17 +110,39 @@ pub fn for_run_with_artifacts(
     run: &RunRecord,
     artifacts: &[ArtifactRecord],
 ) -> Option<RigRunArtifactIndex> {
+    // Guard before resolving. This is called once per run while rendering a
+    // run listing, and the ambient form only reached the artifact root after
+    // rejecting non-rig runs; resolving first would put three environment
+    // reads on every non-rig row.
+    if run.rig_id.is_none() || run.kind != "rig" {
+        return None;
+    }
+    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
+    for_run_with_artifacts_in_roots(roots.artifacts(), run, artifacts)
+}
+
+/// [`for_run_with_artifacts`] against an explicitly injected artifact root.
+///
+/// Read-only: this reports where the index for an already-recorded run lives.
+/// It is rooted anyway because the paths it renders are handed to operators as
+/// retrieval commands, and a report naming one home's index while the records
+/// came from another is exactly the kind of quiet disagreement #7505 exists to
+/// remove.
+pub fn for_run_with_artifacts_in_roots(
+    artifact_root: &Path,
+    run: &RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> Option<RigRunArtifactIndex> {
     let rig_id = run.rig_id.as_ref()?;
     if run.kind != "rig" {
         return None;
     }
-    let artifact_root = homeboy_core::artifact_root().ok()?;
     let artifact_index_path = artifact_root.join(&run.id).join("rig-artifact-index.json");
     Some(build(
         rig_id,
         &run.id,
         &run.status,
-        &artifact_root,
+        artifact_root,
         &artifact_index_path,
         artifacts,
         failed_step_refs_from_metadata(&run.metadata_json),

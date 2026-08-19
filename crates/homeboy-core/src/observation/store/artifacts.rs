@@ -2640,7 +2640,7 @@ mod tests {
                 connection,
                 path: database.clone(),
                 readonly: false,
-                artifact_root: None,
+                roots: None,
             };
             let staging = home.path().join("retry.staging");
             let final_path = home.path().join("retry.final");

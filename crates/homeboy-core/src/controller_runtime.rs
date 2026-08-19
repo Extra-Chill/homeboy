@@ -877,11 +877,43 @@ pub fn admit_current_for_with_cancellation_check(
 /// Return the durable admission view used by lifecycle status output.
 pub fn admission_status(request_id: &str) -> Result<Value> {
     let root = runtime_root()?;
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
-    let mut queue = read_admission_queue(&lock_path)?;
+    admission_status_at(&root, request_id)
+}
+
+/// Read the durable admission view from an explicitly selected
+/// controller-runtime store. Lifecycle stores use this to keep same-ID isolated
+/// roots independent, mirroring [`cancel_admission_at`].
+///
+/// This read is wholly rooted, which is why it gets an `_at` form when the
+/// admitting siblings do not. The projection below resolves nothing but the
+/// admission queue beneath `runtime_root`, so a rooted status can never report
+/// this installation's queue position against another installation's owner.
+/// `pin_current`, `admit_current_for`, `activate_installed_generation`,
+/// `migrate_legacy_pin`, and `recover_pin` all also publish into the
+/// content-addressed pin store, which is deliberately process-global (#7505);
+/// rooting only their queue half is exactly the split this campaign forbids.
+/// Nothing here touches that store.
+pub fn admission_status_at(runtime_root: &Path, request_id: &str) -> Result<Value> {
+    fs::create_dir_all(runtime_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create controller runtime directory".to_string()),
+        )
+    })?;
+    admission_status_at_lock_path(&runtime_root.join(ADMISSION_LOCK_DIR), request_id)
+}
+
+/// Project the admission view from an already-resolved admission lock path.
+///
+/// Every durable queue helper in this module is keyed on the lock path, so both
+/// entry points converge here rather than rebuilding the projection — and the
+/// queued-admission wait loop, which is already handed an explicit lock path,
+/// reads its own position through this instead of re-resolving the ambient root.
+fn admission_status_at_lock_path(lock_path: &Path, request_id: &str) -> Result<Value> {
+    let mut queue = read_admission_queue(lock_path)?;
     // Status reads never rewrite the durable queue. They still hide expired
     // waiters immediately; the next writer compacts them atomically.
-    reclaim_stale_admission_entries(&lock_path, &mut queue);
+    reclaim_stale_admission_entries(lock_path, &mut queue);
     let requests = queue["requests"].as_array().cloned().unwrap_or_default();
     let position = requests
         .iter()
@@ -1583,7 +1615,10 @@ fn acquire_queued_admission_lock_with_timeout(
     let mut backoff = timings.poll;
     let mut observed_position = None;
     loop {
-        let status = admission_status(request_id)?;
+        // Read the queue this wait was handed a path into. Reading the ambient
+        // root here would let a waiter enqueued under an explicit store poll a
+        // different installation's queue for its own position.
+        let status = admission_status_at_lock_path(path, request_id)?;
         if status["state"] == "none" {
             return Err(
                 Error::internal_unexpected("controller admission request was cancelled")

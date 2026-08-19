@@ -2143,7 +2143,9 @@ fn provider_response_validation_distinguishes_json_schema_and_required_field_err
                 argv: vec![
                     "sh".to_string(),
                     "-c".to_string(),
-                    format!("printf '%s' '{response}'"),
+                    "printf '%s' \"$1\"".to_string(),
+                    "sh".to_string(),
+                    response.to_string(),
                 ],
                 ..Default::default()
             },

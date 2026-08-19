@@ -2031,19 +2031,25 @@ fn reserve_admission(
     }
     // Register before committing the admission so reconciliation cannot win the
     // inter-store window. A failed commit is rolled back below.
-    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(
-        workspace_owner_request
-            .as_ref()
-            .map(|request| {
-                daemon_workspace_claim_store()?.register_owner(
-                    request.workspace.clone(),
-                    request.owner_id.clone(),
-                    request.ttl_ms,
-                    workspace_claim_now_ms(),
-                )
-            })
-            .transpose()?,
-    );
+    //
+    // The authority is resolved here and handed to the guard with the lease:
+    // the rollback path must release against the exact store the register wrote
+    // to. Resolution stays inside the `map` so a request without an owner still
+    // never needs a resolvable home.
+    let registered_owner_lease = workspace_owner_request
+        .as_ref()
+        .map(|request| -> Result<PendingOwnerRegistration> {
+            let store = daemon_workspace_claim_store()?;
+            let lease = store.register_owner(
+                request.workspace.clone(),
+                request.owner_id.clone(),
+                request.ttl_ms,
+                workspace_claim_now_ms(),
+            )?;
+            Ok((store, lease))
+        })
+        .transpose()?;
+    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(registered_owner_lease);
     let reservation = match idempotency_key {
         Some(idempotency_key) => job_store.create_or_renew_admission_at(
             metadata,
@@ -2097,9 +2103,28 @@ fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> R
     ))
 }
 
-fn daemon_workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
-    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
-        crate::paths::homeboy_data()?.join("daemon-workspace-claims"),
+/// Directory name of the daemon-owned workspace claim authority.
+///
+/// It lives here as a constant because a second copy of this literal in
+/// `api_jobs` once let a terminal release address a store the register never
+/// wrote to. One name, one authority.
+const DAEMON_WORKSPACE_CLAIMS_DIR: &str = "daemon-workspace-claims";
+
+/// Construct the daemon claim authority below an already-resolved data root.
+///
+/// Callers that hold a lease across register/renew/release resolve this once
+/// and thread the value, so the whole trio addresses one installation even if
+/// the ambient environment is repointed underneath them.
+pub(crate) fn daemon_workspace_claim_store_in_root(
+    data_root: &std::path::Path,
+) -> crate::workspace_claim::WorkspaceClaimStore {
+    crate::workspace_claim::WorkspaceClaimStore::new(data_root.join(DAEMON_WORKSPACE_CLAIMS_DIR))
+}
+
+pub(crate) fn daemon_workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore>
+{
+    Ok(daemon_workspace_claim_store_in_root(
+        &crate::paths::homeboy_data()?,
     ))
 }
 
@@ -2107,30 +2132,49 @@ fn workspace_claim_now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
+/// A registered direct-owner lease bound to the exact authority that issued it.
+///
+/// The pair is deliberately inseparable: a lease is never observable without
+/// the store it was registered through, so no release path can resolve a second
+/// root and quietly address a different installation.
+type PendingOwnerRegistration = (
+    crate::workspace_claim::WorkspaceClaimStore,
+    crate::workspace_claim::WorkspaceOwnerLease,
+);
+
 /// Owns a direct workspace lease until a durable job or admission has recorded
 /// the exact token and epoch. Drop closes panic and early-return windows.
+///
+/// The claim authority is captured alongside the lease rather than re-resolved
+/// in `rollback_error`/`drop`. A release that resolves its own root can address
+/// a different installation than the register did, which leaves the real lease
+/// live in the original home while reporting a clean rollback.
 struct PendingWorkspaceOwnerLease {
-    lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+    owned: Option<PendingOwnerRegistration>,
 }
 
 impl PendingWorkspaceOwnerLease {
-    fn new(lease: Option<crate::workspace_claim::WorkspaceOwnerLease>) -> Self {
-        Self { lease }
+    fn new(owned: Option<PendingOwnerRegistration>) -> Self {
+        Self { owned }
     }
 
     fn lease(&self) -> Option<&crate::workspace_claim::WorkspaceOwnerLease> {
-        self.lease.as_ref()
+        self.owned.as_ref().map(|(_, lease)| lease)
     }
 
     fn disarm(mut self) -> Option<crate::workspace_claim::WorkspaceOwnerLease> {
-        self.lease.take()
+        self.owned.take().map(|(_, lease)| lease)
     }
 
     fn rollback_error(&mut self, error: &mut Error) {
-        let Some(lease) = self.lease.take() else {
+        let Some((store, lease)) = self.owned.take() else {
             return;
         };
-        let cleanup = daemon_workspace_claim_store().and_then(|store| {
+        type Cleanup = Result<(
+            Result<()>,
+            Option<crate::workspace_claim::WorkspaceOwnerReleaseRecovery>,
+        )>;
+        let cleanup = (|| -> Cleanup {
             let release = store.release_owner(&lease, workspace_claim_now_ms());
             let recovery = release
                 .as_ref()
@@ -2138,7 +2182,7 @@ impl PendingWorkspaceOwnerLease {
                 .map(|release_error| store.record_owner_release_failure(&lease, release_error))
                 .transpose()?;
             Ok((release, recovery))
-        });
+        })();
         let (released, cleanup_error, recovery) = match cleanup {
             Ok((Ok(()), _)) => (true, None, None),
             Ok((Err(release_error), recovery)) => {
@@ -2158,11 +2202,10 @@ impl PendingWorkspaceOwnerLease {
 
 impl Drop for PendingWorkspaceOwnerLease {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
+        let Some((store, lease)) = self.owned.take() else {
             return;
         };
-        let _ = daemon_workspace_claim_store()
-            .and_then(|store| store.release_owner(&lease, workspace_claim_now_ms()));
+        let _ = store.release_owner(&lease, workspace_claim_now_ms());
     }
 }
 
@@ -2204,10 +2247,16 @@ struct DirectWorkspaceOwnerRenewer {
 }
 
 impl DirectWorkspaceOwnerRenewer {
+    /// `claim_store` is the authority the lease was registered through. It is
+    /// passed in rather than resolved here because this loop runs on its own
+    /// thread: re-resolving an ambient root per heartbeat lets the renewal land
+    /// in a different installation than the registration, which expires the
+    /// claim under a still-running worker while every renewal reports success.
     fn start(
         job_id: Uuid,
         lease: crate::workspace_claim::WorkspaceOwnerLease,
         job_store: JobStore,
+        claim_store: crate::workspace_claim::WorkspaceClaimStore,
         cancellation_requested: Arc<AtomicBool>,
     ) -> Self {
         let (stop, shutdown) = mpsc::channel();
@@ -2218,8 +2267,8 @@ impl DirectWorkspaceOwnerRenewer {
                 .is_err()
             {
                 let mut recovery_lease = lease.clone();
-                let outcome = (|| {
-                    let store = daemon_workspace_claim_store()?;
+                let outcome = (|| -> Result<crate::workspace_claim::WorkspaceOwnerLease> {
+                    let store = &claim_store;
                     let renewed = store.renew_owner(
                         &lease,
                         crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
@@ -2238,10 +2287,9 @@ impl DirectWorkspaceOwnerRenewer {
                     Err(error) => {
                         cancellation_requested.store(true, Ordering::SeqCst);
                         // If the authority advanced but the job write failed,
-                        // retain the exact new token for startup reconciliation.
-                        if let Ok(store) = daemon_workspace_claim_store() {
-                            let _ = store.record_owner_release_failure(&recovery_lease, &error);
-                        }
+                        // retain the exact new token for startup reconciliation
+                        // in the same authority the renewal advanced.
+                        let _ = claim_store.record_owner_release_failure(&recovery_lease, &error);
                         let _ = job_store.fail_with_data(
                             job_id,
                             "workspace owner lease renewal failed",
@@ -2475,8 +2523,19 @@ fn release_admission(
         job_id,
         workspace_owner_lease.as_ref(),
     )?;
-    if let Some(lease) = workspace_owner_lease.as_ref() {
-        if !daemon_workspace_claim_store()?.validate_owner(lease, workspace_claim_now_ms())? {
+    // Resolve the authority once for the whole release. The liveness gate below
+    // and the release at the end of this function must address the same store:
+    // validating in one installation and releasing in another is a gate that
+    // passes while the real lease stays held.
+    let workspace_owner_store = match workspace_owner_lease.as_ref() {
+        Some(_) => Some(daemon_workspace_claim_store()?),
+        None => None,
+    };
+    if let (Some(lease), Some(store)) = (
+        workspace_owner_lease.as_ref(),
+        workspace_owner_store.as_ref(),
+    ) {
+        if !store.validate_owner(lease, workspace_claim_now_ms())? {
             return Err(Error::validation_invalid_argument(
                 "workspace_owner_lease",
                 "direct workspace owner lease is no longer live",
@@ -2519,10 +2578,11 @@ fn release_admission(
             job_store.cancel(job_id, "admission reservation released")?
         }
     };
-    if let Some(lease) = workspace_owner_lease.as_ref() {
-        if let Err(error) =
-            daemon_workspace_claim_store()?.release_owner(lease, workspace_claim_now_ms())
-        {
+    if let (Some(lease), Some(store)) = (
+        workspace_owner_lease.as_ref(),
+        workspace_owner_store.as_ref(),
+    ) {
+        if let Err(error) = store.release_owner(lease, workspace_claim_now_ms()) {
             let _ = job_store.record_workspace_owner_cleanup_failure(job_id, &error);
         }
     }
@@ -2568,10 +2628,19 @@ fn renew_admission(
         workspace_owner_lease.as_ref(),
         now,
     )?;
+    // One authority for the renewal and for every recovery path below it. The
+    // renewal advances the durable owner epoch; a cleanup that resolved its own
+    // root could release the replacement in an installation that never received
+    // it, stranding the real replacement lease live.
+    let workspace_owner_store = match workspace_owner_lease.as_ref() {
+        Some(_) => Some(daemon_workspace_claim_store()?),
+        None => None,
+    };
     let renewed_workspace_owner_lease = workspace_owner_lease
         .as_ref()
-        .map(|lease| {
-            daemon_workspace_claim_store()?.renew_owner(
+        .zip(workspace_owner_store.as_ref())
+        .map(|(lease, store)| {
+            store.renew_owner(
                 lease,
                 crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
                 workspace_claim_now_ms(),
@@ -2588,8 +2657,15 @@ fn renew_admission(
     let reservation = match reservation {
         Ok(reservation) => reservation,
         Err(mut error) => {
-            if let Some(renewed) = renewed_workspace_owner_lease.as_ref() {
-                let cleanup = daemon_workspace_claim_store().and_then(|store| {
+            if let (Some(renewed), Some(store)) = (
+                renewed_workspace_owner_lease.as_ref(),
+                workspace_owner_store.as_ref(),
+            ) {
+                type RenewalCleanup = Result<(
+                    Result<()>,
+                    Option<crate::workspace_claim::WorkspaceOwnerReleaseRecovery>,
+                )>;
+                let cleanup = (|| -> RenewalCleanup {
                     let release = store.release_owner(renewed, workspace_claim_now_ms());
                     let recovery = release
                         .as_ref()
@@ -2599,7 +2675,7 @@ fn renew_admission(
                         })
                         .transpose()?;
                     Ok((release, recovery))
-                });
+                })();
                 let terminal = job_store.fail_admission_renewal_after_owner_replacement_failure(
                     job_id,
                     &token,
@@ -2611,8 +2687,7 @@ fn renew_admission(
                     .as_ref()
                     .err()
                     .map(|terminal_error| {
-                        daemon_workspace_claim_store()?
-                            .record_owner_release_failure(renewed, terminal_error)
+                        store.record_owner_release_failure(renewed, terminal_error)
                     })
                     .transpose();
                 error.details["workspace_owner_lease_renewal_recovery"] = json!({
@@ -2967,20 +3042,29 @@ fn enqueue_exec_job(
     } else {
         None
     };
-    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(
-        request
-            .workspace_owner_request
-            .as_ref()
-            .map(|owner| {
-                daemon_workspace_claim_store()?.register_owner(
-                    owner.workspace.clone(),
-                    owner.owner_id.clone(),
-                    owner.ttl_ms,
-                    workspace_claim_now_ms(),
-                )
-            })
-            .transpose()?,
-    );
+    // One resolution for the whole direct-owner lifetime. The pre-spawn
+    // validate, the renewal thread, and the rollback guard below all address
+    // this exact authority instead of each re-resolving an ambient root.
+    let registered_owner_lease = request
+        .workspace_owner_request
+        .as_ref()
+        .map(|owner| -> Result<PendingOwnerRegistration> {
+            let store = daemon_workspace_claim_store()?;
+            let lease = store.register_owner(
+                owner.workspace.clone(),
+                owner.owner_id.clone(),
+                owner.ttl_ms,
+                workspace_claim_now_ms(),
+            )?;
+            Ok((store, lease))
+        })
+        .transpose()?;
+    // The exact authority the registration used, carried into the execution
+    // closure for the pre-spawn validate and the renewal heartbeat.
+    let workspace_owner_claim_store = registered_owner_lease
+        .as_ref()
+        .map(|(store, _)| store.clone());
+    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(registered_owner_lease);
     if let Some(lease) = pending_owner_lease.lease() {
         run_ref_metadata["workspace_owner_lease"] = serde_json::to_value(lease)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
@@ -3018,8 +3102,11 @@ fn enqueue_exec_job(
             capacity,
             move |job| {
                 let mut plan = plan;
-                if let Some(lease) = workspace_owner_lease.as_ref() {
-                    if !daemon_workspace_claim_store()?.validate_owner(lease, workspace_claim_now_ms())? {
+                if let (Some(lease), Some(claim_store)) = (
+                    workspace_owner_lease.as_ref(),
+                    workspace_owner_claim_store.as_ref(),
+                ) {
+                    if !claim_store.validate_owner(lease, workspace_claim_now_ms())? {
                         return Err(Error::validation_invalid_argument(
                             "workspace_owner_lease",
                             "direct workspace owner lease is no longer live before process spawn",
@@ -3080,14 +3167,20 @@ fn enqueue_exec_job(
                 );
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
                 let cancellation_requested = Arc::new(AtomicBool::new(false));
-                let _workspace_owner_renewer = workspace_owner_lease.clone().map(|lease| {
-                    DirectWorkspaceOwnerRenewer::start(
-                        job.job_id(),
-                        lease,
-                        workspace_owner_renewal_store.clone(),
-                        Arc::clone(&cancellation_requested),
-                    )
-                });
+                // The heartbeat inherits the registration's authority rather
+                // than resolving its own on the renewal thread.
+                let _workspace_owner_renewer = workspace_owner_lease
+                    .clone()
+                    .zip(workspace_owner_claim_store.clone())
+                    .map(|(lease, claim_store)| {
+                        DirectWorkspaceOwnerRenewer::start(
+                            job.job_id(),
+                            lease,
+                            workspace_owner_renewal_store.clone(),
+                            claim_store,
+                            Arc::clone(&cancellation_requested),
+                        )
+                    });
                 let stall_evidence = Arc::new(Mutex::new(None));
                 let progress_job = job.clone();
                 let progress_liveness = Arc::clone(&liveness);
@@ -4240,7 +4333,10 @@ mod tests {
     fn admission_commit_failure_releases_owner() {
         with_isolated_home(|_| {
             let lease = register_direct_owner("admission-failure");
-            let mut pending = PendingWorkspaceOwnerLease::new(Some(lease.clone()));
+            let mut pending = PendingWorkspaceOwnerLease::new(Some((
+                daemon_workspace_claim_store().expect("owner store"),
+                lease.clone(),
+            )));
             let mut error = Error::internal_io("injected admission commit failure", None);
             pending.rollback_error(&mut error);
             assert_owner_live(&lease, false);
@@ -4297,7 +4393,10 @@ mod tests {
     fn queue_commit_failure_releases_owner() {
         with_isolated_home(|_| {
             let lease = register_direct_owner("queue-failure");
-            let pending = PendingWorkspaceOwnerLease::new(Some(lease.clone()));
+            let pending = PendingWorkspaceOwnerLease::new(Some((
+                daemon_workspace_claim_store().expect("owner store"),
+                lease.clone(),
+            )));
             // Drop is the panic/early-return fallback around queue persistence.
             drop(pending);
             assert_owner_live(&lease, false);

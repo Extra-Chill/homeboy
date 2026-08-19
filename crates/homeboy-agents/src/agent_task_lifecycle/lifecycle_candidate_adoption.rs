@@ -10,7 +10,19 @@
 
 use super::*;
 
-pub(crate) fn project_cook_alias_adoption(
+/// Project the authoritative candidate adoption of a Cook alias onto its parent
+/// record, reading and rewriting every indexed attempt in the injected store.
+///
+/// This walks the Cook index and *writes back* each attempt whose adoption it
+/// reconciles, so the attempt reads and the attempt writes have to land in the
+/// same installation the index itself was read from. Resolved ambiently while
+/// the caller held explicit roots, this would have reported a parent adoption
+/// assembled from another home's attempts (#7505).
+///
+/// There is no ambient wrapper: `status_in_store` is the only caller, and the
+/// store it hands down is the one its own caller injected.
+pub(crate) fn project_cook_alias_adoption_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     index: &AgentTaskCookIndex,
 ) -> Result<()> {
@@ -23,11 +35,11 @@ pub(crate) fn project_cook_alias_adoption(
     )> = None;
 
     for (index_order, indexed_attempt) in index.attempts.iter().enumerate() {
-        let Ok(mut attempt_record) = store::read_record(&indexed_attempt.run_id) else {
+        let Ok(mut attempt_record) = lifecycle_store.read_record(&indexed_attempt.run_id) else {
             continue;
         };
         if reconcile_candidate_adoption(&mut attempt_record) {
-            store::write_record(&attempt_record)?;
+            lifecycle_store.write_record(&attempt_record)?;
         }
         let Some(adoption) = attempt_record.candidate_adoption else {
             continue;

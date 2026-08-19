@@ -76,8 +76,12 @@ impl AgentTaskLifecycleStore {
             .join("index.json")
     }
 
+    /// The observation database below these roots.
+    ///
+    /// Delegates to `paths` so this can never name a different file than the
+    /// path `ObservationStore::*_in_roots` opens for the same roots.
     pub fn observation_db_path(&self) -> PathBuf {
-        self.roots.data().join("homeboy.sqlite")
+        paths::observation_db_in_root(self.roots.data())
     }
 
     pub(crate) fn data_root(&self) -> PathBuf {
@@ -100,6 +104,17 @@ impl AgentTaskLifecycleStore {
         &self,
     ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
         super::workspace_claims::workspace_claim_store_at(self.data_root())
+    }
+
+    /// Terminal workspace authority bound to this store's own roots.
+    ///
+    /// Authority receipts and their release markers are a permission gate over
+    /// a retained runner workspace, so they must be read and written in the
+    /// same installation the record lives in (#7505).
+    pub(crate) fn workspace_terminal_authority_store(
+        &self,
+    ) -> super::workspace_authority::WorkspaceTerminalAuthorityStore {
+        super::workspace_authority::WorkspaceTerminalAuthorityStore::from_roots(&self.roots)
     }
 
     /// Submit an exact run identity using this store's durable lifecycle roots.
@@ -162,14 +177,36 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at_roots(
-            self.observation_db_path(),
-            self.artifact_root(),
-        )
+        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
     }
 
+    /// Read the observation store through this store's own roots.
+    ///
+    /// This previously injected only the database path and left artifact
+    /// resolution ambient, so a reader opened from injected roots reported
+    /// artifacts against a different root than the database it read them from
+    /// (#7505).
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
-        ObservationStore::open_readonly_at(self.observation_db_path())
+        ObservationStore::open_readonly_in_roots(&self.roots)
+    }
+
+    /// Open this store's observation database with the same startup artifact
+    /// maintenance the ambient `ObservationStore::open_initialized()` performs.
+    ///
+    /// This is deliberately not [`Self::open_observation_initialized`]. The two
+    /// are not interchangeable: the lifecycle opener defers report-only artifact
+    /// maintenance so a lifecycle transition can proceed while another process
+    /// owns SQLite's writer lock, while this one first reconciles unfinished
+    /// artifact publications and backfills artifact handles. Rooting a caller
+    /// that used the ambient `open_initialized()` therefore has to come here, or
+    /// the reroot would silently change what that caller sees — the hazard
+    /// #12618 recorded against `substantive_candidate_in_aggregate` (#7505).
+    ///
+    /// Like every opener on this store, BOTH roots come from `self`: the
+    /// database below `data` and the artifact tree it indexes below `artifacts`,
+    /// which `PathRoots` carries separately.
+    pub(crate) fn open_observation_maintained(&self) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_in_roots(&self.roots)
     }
 
     pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -569,6 +606,19 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_run_aggregate_in_store(self, run_id, plan, aggregate)
     }
 
+    /// Whether this store's observation record predates typed agent-task
+    /// metadata, so a legacy row can be resubmitted rather than rejected.
+    ///
+    /// The answer is a property of one observation database, so it has to be
+    /// read from the same roots the caller is about to write the replacement
+    /// record into (#7505).
+    pub(crate) fn record_lacks_typed_metadata(&self, run_id: &str) -> Result<bool> {
+        Ok(self
+            .open_observation_initialized()?
+            .get_run(run_id)?
+            .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
+    }
+
     /// Check this store for one exact durable run identity without Cook alias
     /// resolution.
     pub fn record_exists(&self, run_id: &str) -> Result<bool> {
@@ -576,6 +626,49 @@ impl AgentTaskLifecycleStore {
             .open_observation_initialized()?
             .get_run(run_id)?
             .is_some())
+    }
+
+    /// Check this store for one exact durable run identity without creating its
+    /// observation database, running migrations, or triggering startup repair.
+    pub fn record_exists_readonly(&self, run_id: &str) -> Result<bool> {
+        Ok(self.open_observation_readonly()?.get_run(run_id)?.is_some())
+    }
+
+    /// This store's bounded page of raw durable agent-task observation rows.
+    ///
+    /// Record-health reconciliation classifies rows it cannot parse into typed
+    /// records, so it cannot go through [`AgentTaskLifecycleStore::read_records`],
+    /// which silently drops them. It needs the raw rows — and it needs them from
+    /// the same roots it is about to commit the repaired record, or the
+    /// quarantine stamp, back into (#7505).
+    pub(crate) fn observation_runs(&self) -> Result<Vec<RunRecord>> {
+        observation_runs_bounded_in_store(self, 1000)
+    }
+
+    /// Read this store's bounded durable registry snapshot with the health
+    /// summary of the records that could not be parsed.
+    pub fn read_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        self.read_records_with_health_bounded(1000)
+    }
+
+    pub fn read_records_with_health_bounded(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        records_with_health(observation_runs_bounded_in_store(self, limit)?)
+    }
+
+    /// Read every durable registry record in this store without a display bound.
+    pub fn read_all_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        let store = self.open_observation_readonly()?;
+        records_with_health(store.list_runs_all(RunListFilter {
+            kind: Some("agent-task".to_string()),
+            ..Default::default()
+        })?)
     }
 
     /// Register a Cook attempt using this store's record, lock, index, and
@@ -659,17 +752,14 @@ impl AgentTaskLifecycleStore {
     /// receipt first, then the workspace owner lease.
     pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
         let record = self.read_record(run_id)?;
-        super::workspace_authority::WorkspaceTerminalAuthorityStore::new(
-            self.data_root(),
-            self.roots.config().to_path_buf(),
-        )
-        .persist_terminal_from_record(&record)
-        .and_then(|_| {
-            super::workspace_claims::release_terminal_record_workspace_owner_in_store(
-                &super::workspace_claims::workspace_claim_store_at(self.data_root()),
-                &record,
-            )
-        })
+        self.workspace_terminal_authority_store()
+            .persist_terminal_from_record(&record)
+            .and_then(|_| {
+                super::workspace_claims::release_terminal_record_workspace_owner_in_store(
+                    &super::workspace_claims::workspace_claim_store_at(self.data_root()),
+                    &record,
+                )
+            })
     }
 
     pub fn write_aggregate_and_record(
@@ -744,10 +834,11 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
     Ok(plan)
 }
 
-pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    read_controller_plan_in_store(&default_store()?, run_id)
-}
-
+/// The controller-owned plan is read only through a resolved store now: the
+/// last ambient caller was record-health reconciliation, which had to read the
+/// plan and commit the record it reconstructs from that plan into the same home
+/// (#7505). There is deliberately no `store::read_controller_plan` shim left to
+/// reach for.
 fn read_controller_plan_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -768,17 +859,15 @@ fn read_controller_plan_in_store(
     Ok(plan)
 }
 
-pub(super) fn controller_plan_path(run_id: &str) -> Result<PathBuf> {
-    Ok(default_store()?.controller_plan_path(run_id))
-}
-
 /// Controller lifecycle operations resolve the plan from their durable run
 /// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
 /// evidence after a Lab projection and is never controller execution authority.
-pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    read_controller_plan_for_execution_in_store(&default_store()?, run_id)
-}
-
+///
+/// There is no ambient `store::` shim for this any more: the migration branch
+/// below rewrites `plan.json`, so the last caller —
+/// `load_plan_for_execution` — now resolves one store and hands it here rather
+/// than letting the Cook-alias resolution and the plan rewrite land in
+/// separately resolved homes (#7505).
 fn read_controller_plan_for_execution_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -1364,9 +1453,7 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
 /// Check an existing observation store without creating its directory, running
 /// migrations, or triggering startup repair work.
 pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_readonly()?
-        .get_run(run_id)?
-        .is_some())
+    default_store()?.record_exists_readonly(run_id)
 }
 
 pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
@@ -1409,19 +1496,15 @@ fn validate_cook_index_attempt_in_store(
     Ok(())
 }
 
-pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_initialized_for_lifecycle()?
-        .get_run(run_id)?
-        .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
-}
-
-pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
-    Ok(read_records_with_health()?.0)
-}
-
-/// The store-rooted counterpart of [`read_records`], following the same bound
-/// and the same health projection but reading this store's own observation
-/// database instead of `paths::observation_db()`.
+/// The store-rooted body of [`AgentTaskLifecycleStore::read_records`], following
+/// the same bound and the same health projection but reading this store's own
+/// observation database instead of `paths::observation_db()`.
+///
+/// The ambient `read_records()` free shim that used to sit above this is gone.
+/// Its last caller was `reconcile_active_lab_runner_handoffs`, a queue scan that
+/// mutates every row it selects — expiring, terminalizing, and reconciling them
+/// — so it now scans the store it was handed rather than deciding from one
+/// installation's queue and committing into another (#7505).
 fn read_records_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<Vec<AgentTaskRunRecord>> {
@@ -1466,24 +1549,15 @@ fn read_retry_successors_in_store(
     page.runs.iter().map(record_from_run).collect()
 }
 
-pub(super) fn read_records_with_health(
-) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    read_records_with_health_bounded(1000)
-}
-
 pub(super) fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    records_with_health(observation_runs_bounded(limit)?)
+    default_store()?.read_records_with_health_bounded(limit)
 }
 
 pub(super) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    let store = ObservationStore::open_readonly()?;
-    records_with_health(store.list_runs_all(RunListFilter {
-        kind: Some("agent-task".to_string()),
-        ..Default::default()
-    })?)
+    default_store()?.read_all_records_with_health()
 }
 
 fn records_with_health(
@@ -1503,15 +1577,10 @@ fn records_with_health(
     Ok((records, health))
 }
 
-pub(super) fn observation_runs() -> Result<Vec<RunRecord>> {
-    observation_runs_bounded(1000)
-}
-
-fn observation_runs_bounded(limit: usize) -> Result<Vec<RunRecord>> {
-    let store = ObservationStore::open_readonly()?;
-    store.list_runs(bounded_agent_task_filter(limit))
-}
-
+/// Raw durable rows are read only through a resolved store now. The last
+/// ambient caller was record-health reconciliation, whose scan decides which
+/// rows to migrate or quarantine and must therefore read the same observation
+/// database those writes land in (#7505).
 fn observation_runs_bounded_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     limit: usize,

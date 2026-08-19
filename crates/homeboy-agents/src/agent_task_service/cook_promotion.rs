@@ -369,7 +369,7 @@ pub(crate) fn selected_candidate_task_id(run_id: &str) -> Result<Option<String>>
     selected_candidate_task_id_in_store(&lifecycle_store, run_id)
 }
 
-fn selected_candidate_task_id_in_store(
+pub(crate) fn selected_candidate_task_id_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<String>> {
