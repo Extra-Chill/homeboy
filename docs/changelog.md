@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.20] - 2026-08-19
+
+### Changed
+- revert the pending-handoff migration the full suite caught
+
 ## [0.350.19] - 2026-08-19
 
 ### Changed
