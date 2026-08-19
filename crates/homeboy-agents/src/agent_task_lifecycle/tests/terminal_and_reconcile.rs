@@ -510,7 +510,7 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let attempt_run_id = "cook-7970-attempt-1-staging-failure";
     let plan = test_plan();
-    record_lab_offload_phase_in_store(
+    record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: attempt_run_id,
@@ -521,6 +521,7 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("pre-acceptance attempt record");
 
@@ -572,7 +573,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let run_id = "cook-preacceptance-recovery";
     let plan = test_plan();
-    record_lab_offload_phase_in_store(
+    record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: run_id,
@@ -583,6 +584,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("pre-acceptance attempt record");
     record_pre_execution_failure_in_store(
@@ -679,7 +681,7 @@ fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
     plan.tasks[0].instructions = "implement the original user task".to_string();
     plan.tasks[0].workspace.root = Some("/materialized/worktree".to_string());
     plan.rebuild_homeboy_plan();
-    let record = record_lab_offload_phase_in_store(
+    let record = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: "failed-lab-cook",
@@ -690,6 +692,7 @@ fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("controller records user plan before pending handoff");
     let persisted =
@@ -748,7 +751,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
         "branch": "main",
         "head": "abc123",
     });
-    let materializing = record_lab_offload_phase_in_store(
+    let materializing = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: "agent-task-pre-execution",
@@ -759,6 +762,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             provider_rotation: Some(&json!({"entries": [{"model": "openai/gpt-5.6-terra"}]})),
             durable_plan: None,
         },
+        &stub_lab_offload_submission,
     )
     .expect("materialization phase persisted");
 
@@ -772,7 +776,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
     );
     assert!(materializing.metadata.get("runner_job_id").is_none());
 
-    let hydrating = record_lab_offload_phase_in_store(
+    let hydrating = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: "agent-task-pre-execution",
@@ -783,6 +787,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             provider_rotation: None,
             durable_plan: None,
         },
+        &stub_lab_offload_submission,
     )
     .expect("hydration phase persisted");
     assert_eq!(hydrating.metadata["phase"], "hydrating");
@@ -826,7 +831,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let run_id = "long-pre-submission-materialization";
     let plan = test_plan();
-    let materializing = record_lab_offload_phase_in_store(
+    let materializing = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: run_id,
@@ -837,6 +842,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("persist pre-submission materialization");
 
@@ -849,7 +855,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
             .expect("read-side reconciliation"),
         0
     );
-    let hydrating = record_lab_offload_phase_in_store(
+    let hydrating = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: run_id,
@@ -860,6 +866,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("long setup remains controller-owned");
     assert_eq!(hydrating.state, AgentTaskRunState::Queued);
@@ -871,7 +878,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
         Some("controller cancelled during setup"),
     )
     .expect("terminalize setup record");
-    let after_terminal_phase = record_lab_offload_phase_in_store(
+    let after_terminal_phase = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
             requested_run_id: run_id,
@@ -882,6 +889,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
             provider_rotation: None,
             durable_plan: Some(&plan),
         },
+        &stub_lab_offload_submission,
     )
     .expect("terminal phase write is a no-op");
     assert_eq!(after_terminal_phase, cancelled);
@@ -1831,7 +1839,7 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    record_lab_offload_planned_in_store(
+    record_lab_offload_planned_with_submission_in_store(
         &lifecycle_store,
         LabOffloadProxyPlan {
             run_id: "agent-task-handoff-failure",
@@ -1840,6 +1848,7 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
             remote_command: &command,
             durable_plan: None,
         },
+        &stub_lab_offload_submission,
     )
     .expect("planned proxy");
     let plan =
