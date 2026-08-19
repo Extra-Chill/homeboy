@@ -58,7 +58,24 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
 pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    accepted_lab_runner_job_identity_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`accepted_lab_runner_job_identity`].
+///
+/// This is the read half of Lab acceptance, and `record_detached_lab_run_in_store`
+/// is the write half. An acceptance committed into one installation and then
+/// verified against another's record would report "not accepted" for a run that
+/// is already bound — the mirror image of the double-acceptance the write side
+/// refuses — so both halves have to name the same store (#7505).
+pub(crate) fn accepted_lab_runner_job_identity_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
+    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(accepted_lab_runner_job_identity_from_record(&record))
 }
 
@@ -660,10 +677,38 @@ pub fn project_terminal_runner_exec_result(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<bool> {
+    project_terminal_runner_exec_result_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of [`project_terminal_runner_exec_result`].
+///
+/// This finalizes an observation run: it reads the row, decides from that row's
+/// own `kind`, terminal status, and artifact-promotion checkpoint whether to
+/// project at all, and then commits the result with `finish_run`. The decision
+/// and the write are the same row, so they have to be the same database — a
+/// projection that read one installation's row and finished another's would
+/// either refuse a valid terminal result or overwrite an unrelated run.
+///
+/// The observation store is opened through
+/// [`AgentTaskLifecycleStore::open_observation_maintained`], not the lifecycle
+/// opener: the ambient body used `ObservationStore::open_initialized()`, which
+/// runs startup artifact maintenance, and this path gates on a durable
+/// artifact-promotion checkpoint. Rooting it through the maintenance-deferring
+/// lifecycle opener would have changed behaviour rather than just its home
+/// (#7505).
+pub(crate) fn project_terminal_runner_exec_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<bool> {
     if !snapshot.job.status.is_terminal() {
         return Ok(false);
     }
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(false);
     };

@@ -15,10 +15,59 @@ pub struct DetachedLabRunRecord<'a> {
     pub remote_command: &'a [String],
 }
 
+/// How a Lab offload entry point materializes a durable run that is not already
+/// present in the store it was handed.
+///
+/// Every entry point in this module reads its record first and submits only on
+/// the fall-through, and that submission is the one reach a rooted Lab offload
+/// function still makes past its lifecycle store: `submit_plan_in_store` admits
+/// through `homeboy_core::controller_runtime`, whose FIFO admission queue and
+/// content-addressed pin store hang off the *process* data root and are
+/// machine-global on purpose (#7505, #12608). That is not the split this
+/// campaign forbids — an admission is not lifecycle state, and rooting only
+/// half of it is explicitly the wrong fix — but it is a real limit, so the seam
+/// is named rather than hidden. A caller that has already decided admission (a
+/// hermetic test, or a controller that admitted once for a whole dispatch)
+/// supplies its own submission and reaches nothing process-global at all; the
+/// shape mirrors `AgentTaskLifecycleStore::submit_plan_with_runtime_admission`.
+pub(crate) type LabOffloadSubmission<'a> =
+    &'a dyn Fn(&AgentTaskLifecycleStore, &AgentTaskPlan, &str) -> Result<AgentTaskRunRecord>;
+
+/// The controller's own submission: the machine-global controller-runtime
+/// admission a real Lab dispatch must take before it owns a durable run.
+fn admitted_lab_offload_submission(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    submit_plan_in_store(lifecycle_store, plan, Some(run_id))
+}
+
 /// Atomically persist a daemon-accepted Lab job before a caller can inspect its
 /// snapshot. The typed identity keeps every acceptance path on the canonical
 /// run/runner/job comparison used by reconciliation and terminal projection.
 pub fn bind_accepted_lab_runner_job(
+    identity: &homeboy_core::lab_contract::RunnerJobIdentity,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<AgentTaskRunRecord> {
+    bind_accepted_lab_runner_job_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        identity,
+        remote_workspace,
+        remote_command,
+    )
+}
+
+/// The store-rooted counterpart of [`bind_accepted_lab_runner_job`].
+///
+/// Acceptance is a durable transfer of one run to one runner daemon, so the
+/// validation, the record it is validated against, and the accepted handoff
+/// written back all have to name the same installation. Rooting only the
+/// wrapper would leave the daemon's authoritative binding landing wherever the
+/// process environment happened to point (#7505).
+pub(crate) fn bind_accepted_lab_runner_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     identity: &homeboy_core::lab_contract::RunnerJobIdentity,
     remote_workspace: &str,
     remote_command: &[String],
@@ -31,13 +80,16 @@ pub fn bind_accepted_lab_runner_job(
             None,
         ));
     }
-    record_detached_lab_run(DetachedLabRunRecord {
-        run_id: &identity.run_id,
-        runner_id: &identity.runner_id,
-        runner_job_id: &identity.runner_job_id,
-        remote_workspace,
-        remote_command,
-    })
+    record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &identity.run_id,
+            runner_id: &identity.runner_id,
+            runner_job_id: &identity.runner_job_id,
+            remote_workspace,
+            remote_command,
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -55,13 +107,56 @@ pub struct LabOffloadProxyPlan<'a> {
 /// a Lab. The runner owns child execution; this record owns the stable local
 /// identity and is reconciled from that child once it is accepted.
 pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<AgentTaskRunRecord> {
-    record_lab_offload_proxy(
+    record_lab_offload_planned_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        input,
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_offload_planned`].
+pub(crate) fn record_lab_offload_planned_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: LabOffloadProxyPlan<'_>,
+) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_planned_with_submission_in_store(
+        lifecycle_store,
+        input,
+        &admitted_lab_offload_submission,
+    )
+}
+
+/// Persist the controller-owned parent using a caller-supplied submission for
+/// the run that does not exist yet. See [`LabOffloadSubmission`].
+pub(crate) fn record_lab_offload_planned_with_submission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: LabOffloadProxyPlan<'_>,
+    submit: LabOffloadSubmission<'_>,
+) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_proxy_in_store(
+        lifecycle_store,
         input.run_id,
         input.runner_id,
         input.remote_workspace,
         input.remote_command,
         input.durable_plan,
+        submit,
     )
+}
+
+/// The controller-owned setup progress recorded before a runner job exists.
+///
+/// The ambient entry point keeps its positional signature; the rooted siblings
+/// take this instead so they stay inside the argument budget and read the same
+/// way as [`DetachedLabRunRecord`] and [`LabOffloadProxyPlan`].
+#[derive(Debug, Clone)]
+pub struct LabOffloadPhaseRecord<'a> {
+    pub requested_run_id: &'a str,
+    pub runner_id: &'a str,
+    pub phase: &'a str,
+    pub remote_workspace: Option<&'a str>,
+    pub source_checkout: Option<&'a Value>,
+    pub provider_rotation: Option<&'a Value>,
+    pub durable_plan: Option<&'a AgentTaskPlan>,
 }
 
 /// Persist controller-owned setup progress before a runner job exists.
@@ -74,13 +169,53 @@ pub fn record_lab_offload_phase(
     provider_rotation: Option<&Value>,
     durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
-    let placeholder_workspace = remote_workspace.unwrap_or("pending");
-    let mut record = record_lab_offload_proxy(
-        requested_run_id,
-        runner_id,
+    record_lab_offload_phase_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        LabOffloadPhaseRecord {
+            requested_run_id,
+            runner_id,
+            phase,
+            remote_workspace,
+            source_checkout,
+            provider_rotation,
+            durable_plan,
+        },
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_offload_phase`].
+///
+/// The proxy read-or-submit, the phase metadata decided from what it returned,
+/// and the write-back are one operation. Resolving the proxy in one home and
+/// committing the phase into another would leave a run advertising a setup
+/// phase that its own record never entered (#7505).
+pub(crate) fn record_lab_offload_phase_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: LabOffloadPhaseRecord<'_>,
+) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_phase_with_submission_in_store(
+        lifecycle_store,
+        input,
+        &admitted_lab_offload_submission,
+    )
+}
+
+/// Persist controller-owned setup progress using a caller-supplied submission
+/// for the run that does not exist yet. See [`LabOffloadSubmission`].
+pub(crate) fn record_lab_offload_phase_with_submission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: LabOffloadPhaseRecord<'_>,
+    submit: LabOffloadSubmission<'_>,
+) -> Result<AgentTaskRunRecord> {
+    let placeholder_workspace = input.remote_workspace.unwrap_or("pending");
+    let mut record = record_lab_offload_proxy_in_store(
+        lifecycle_store,
+        input.requested_run_id,
+        input.runner_id,
         placeholder_workspace,
         &[],
-        durable_plan,
+        input.durable_plan,
+        submit,
     )?;
     if record.state.is_terminal() {
         return Ok(record);
@@ -88,18 +223,18 @@ pub fn record_lab_offload_phase(
     record.updated_at = Some(now_timestamp());
     let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
     let metadata = record.ensure_metadata_object();
-    record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
+    record_lab_offload_phase_metadata(metadata, input.phase, &phase_started_at);
     metadata.insert("provider_state".to_string(), json!("pending"));
-    if let Some(remote_workspace) = remote_workspace {
+    if let Some(remote_workspace) = input.remote_workspace {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
     }
-    if let Some(source_checkout) = source_checkout {
+    if let Some(source_checkout) = input.source_checkout {
         metadata.insert("source_checkout".to_string(), source_checkout.clone());
     }
-    if let Some(provider_rotation) = provider_rotation {
+    if let Some(provider_rotation) = input.provider_rotation {
         metadata.insert("provider_rotation".to_string(), provider_rotation.clone());
     }
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -111,7 +246,26 @@ pub fn record_lab_offload_phase_executions(
     phase: &str,
     execution_ids: impl IntoIterator<Item = String>,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record_lab_offload_phase_executions_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        phase,
+        execution_ids,
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_offload_phase_executions`].
+///
+/// The terminal guard is read from the same record the execution ids are
+/// written back onto, so a staging job cannot be recorded against a run that
+/// another installation already finished (#7505).
+pub(crate) fn record_lab_offload_phase_executions_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    execution_ids: impl IntoIterator<Item = String>,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record.state.is_terminal() {
         return Ok(record);
     }
@@ -131,7 +285,7 @@ pub fn record_lab_offload_phase_executions(
         "materialization_resume".to_string(),
         json!("resume reuses the controller proxy and recorded completed staging"),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -141,7 +295,26 @@ pub fn record_lab_staging_controller_job(
     runner_id: &str,
     controller_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record_lab_staging_controller_job_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        controller_job_id,
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_staging_controller_job`].
+///
+/// The staging job id is the controller's only handle on a materialization it
+/// can outlive, so the terminal guard and the binding must name one record in
+/// one installation (#7505).
+pub(crate) fn record_lab_staging_controller_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    controller_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record.state.is_terminal() {
         return Ok(record);
     }
@@ -158,7 +331,7 @@ pub fn record_lab_staging_controller_job(
         json!(runner_id),
     );
     metadata.insert("materialization_owner".to_string(), json!("controller_job"));
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -178,7 +351,31 @@ pub fn record_lab_admission_reservation(
     reservation_job_id: &str,
     lease_expires_at_ms: u64,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record_lab_admission_reservation_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        daemon_lease_id,
+        reservation_job_id,
+        lease_expires_at_ms,
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_admission_reservation`].
+///
+/// The whole point of this write is that an operator can find the run holding a
+/// reservation. A reservation named in one installation while the run it names
+/// lives in another is exactly the unfindable state #9163 forced manual
+/// job-id cancellation for, so the read and the write are one home (#7505).
+pub(crate) fn record_lab_admission_reservation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    daemon_lease_id: &str,
+    reservation_job_id: &str,
+    lease_expires_at_ms: u64,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record.state.is_terminal() {
         return Ok(record);
     }
@@ -199,7 +396,7 @@ pub fn record_lab_admission_reservation(
             "cancel_command": format!("homeboy agent-task cancel {record_run_id}"),
         }),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -210,7 +407,26 @@ pub fn record_lab_staging_controller_failure(
     phase: &str,
     controller_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record_lab_staging_controller_failure_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        phase,
+        controller_job_id,
+    )
+}
+
+/// The store-rooted counterpart of [`record_lab_staging_controller_failure`].
+///
+/// This is terminal-stage evidence about one run, and the retry command it
+/// publishes is only actionable in the installation the record lives in, so the
+/// read and the write name the same store (#7505).
+pub(crate) fn record_lab_staging_controller_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    controller_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "lab_staging_controller_failure".to_string(),
@@ -223,7 +439,7 @@ pub fn record_lab_staging_controller_failure(
         }),
     );
     record.updated_at = Some(now_timestamp());
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -282,6 +498,26 @@ pub(crate) fn record_detached_lab_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     input: DetachedLabRunRecord<'_>,
 ) -> Result<AgentTaskRunRecord> {
+    record_detached_lab_run_with_submission_in_store(
+        lifecycle_store,
+        input,
+        &admitted_lab_offload_submission,
+    )
+}
+
+/// Accept a detached Lab run, submitting a not-yet-present run through a
+/// caller-supplied submission. See [`LabOffloadSubmission`].
+///
+/// This is the fall-through the acceptance path has always had: a runner
+/// daemon can accept a job whose controller-side record does not exist here
+/// yet, or exists only as an untyped legacy row. Naming the submission is what
+/// lets a caller that has already decided admission keep this whole operation
+/// inside the store it handed in.
+pub(crate) fn record_detached_lab_run_with_submission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: DetachedLabRunRecord<'_>,
+    submit: LabOffloadSubmission<'_>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
     let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let plan = detached_lab_plan(&run_id, &input);
@@ -291,10 +527,10 @@ pub(crate) fn record_detached_lab_run_in_store(
             if error.code == ErrorCode::InternalJsonError
                 && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
         {
-            submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?
+            submit(lifecycle_store, &plan, &run_id)?
         }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-            submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?
+            submit(lifecycle_store, &plan, &run_id)?
         }
         Err(error) => return Err(error),
     };
@@ -507,30 +743,21 @@ pub(crate) fn record_detached_lab_run_in_store(
     Ok(record)
 }
 
-fn record_lab_offload_proxy(
-    requested_run_id: &str,
-    runner_id: &str,
-    remote_workspace: &str,
-    remote_command: &[String],
-    durable_plan: Option<&AgentTaskPlan>,
-) -> Result<AgentTaskRunRecord> {
-    record_lab_offload_proxy_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        requested_run_id,
-        runner_id,
-        remote_workspace,
-        remote_command,
-        durable_plan,
-    )
-}
-
-pub(crate) fn record_lab_offload_proxy_in_store(
+/// Persist the controller-owned Lab proxy inside an explicitly rooted store.
+///
+/// There is deliberately no ambient sibling of this any more. Its two callers
+/// — `record_lab_offload_planned` and `record_lab_offload_phase` — are the
+/// public entry points, and each now resolves exactly one root and hands it
+/// here, rather than this helper resolving a second one behind whichever store
+/// they were given (#7505).
+fn record_lab_offload_proxy_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     requested_run_id: &str,
     runner_id: &str,
     remote_workspace: &str,
     remote_command: &[String],
     durable_plan: Option<&AgentTaskPlan>,
+    submit: LabOffloadSubmission<'_>,
 ) -> Result<AgentTaskRunRecord> {
     validate_lab_handoff_plan(durable_plan)?;
     let run_id = sanitize_run_id(requested_run_id);
@@ -564,17 +791,11 @@ pub(crate) fn record_lab_offload_proxy_in_store(
             if error.code == ErrorCode::InternalJsonError
                 && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
         {
-            submit_plan_in_store(
-                lifecycle_store,
-                durable_plan.unwrap_or(&plan),
-                Some(&run_id),
-            )?
+            submit(lifecycle_store, durable_plan.unwrap_or(&plan), &run_id)?
         }
-        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => submit_plan_in_store(
-            lifecycle_store,
-            durable_plan.unwrap_or(&plan),
-            Some(&run_id),
-        )?,
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+            submit(lifecycle_store, durable_plan.unwrap_or(&plan), &run_id)?
+        }
         Err(error) => return Err(error),
     };
     if let Some(problem) = record.lab_handoff_validation_error() {

@@ -787,8 +787,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         aliased.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(aliased.details["field"], "run_id");
     assert_eq!(
-        aliased.message,
+        aliased.details["problem"],
         "detached Cook id already resolves to an existing Cook attempt"
     );
     assert_eq!(
@@ -806,8 +807,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         collided.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(collided.details["field"], "run_id");
     assert_eq!(
-        collided.message,
+        collided.details["problem"],
         "detached Cook id collides with an existing non-handoff run"
     );
     assert_eq!(
@@ -888,8 +890,9 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
         fenced.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(fenced.details["field"], "cook_id");
     assert_eq!(
-        fenced.message,
+        fenced.details["problem"],
         "detached Cook handoff was cancelled before its attempt could materialize"
     );
 
@@ -1195,8 +1198,9 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         contradicted.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(contradicted.details["field"], "execution_placement_outcome");
     assert_eq!(
-        contradicted.message,
+        contradicted.details["problem"],
         "verified placement outcome contradicts the durable routing decision"
     );
 
@@ -1610,8 +1614,9 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
         still_quarantined.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(still_quarantined.details["field"], "run_id");
     assert_eq!(
-        still_quarantined.message,
+        still_quarantined.details["problem"],
         "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance"
     );
 
@@ -1625,8 +1630,9 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
         .is_none());
     let never_quarantined = rearm_quarantined_run_in_store(&other, quarantine_target)
         .expect_err("the second root never observed this quarantine");
+    assert_eq!(never_quarantined.details["field"], "run_id");
     assert_eq!(
-        never_quarantined.message,
+        never_quarantined.details["problem"],
         "only an exact queued quarantined run can be re-armed"
     );
 

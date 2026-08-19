@@ -1,13 +1,16 @@
 //! Durable, versioned input boundary for cook continuation scheduling.
 
 use homeboy_engine_primitives::content_hash;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Barrier, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
@@ -20,10 +23,40 @@ use homeboy_core::{paths, Error, Result};
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
 
+#[cfg(test)]
+static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
+    LazyLock::new(|| Mutex::new((None, 0)));
+
+#[cfg(test)]
+pub(crate) fn set_initial_recipe_creation_barrier_for_test(barrier: Option<Arc<Barrier>>) {
+    let mut hook = INITIAL_RECIPE_CREATION_BARRIER
+        .lock()
+        .expect("initial recipe creation barrier");
+    *hook = (barrier, 0);
+}
+
 /// Durable Cook storage bound to explicit filesystem roots.
 #[derive(Clone, Debug)]
 pub struct CookRecipeStore {
     data_root: PathBuf,
+}
+
+/// Result of publishing Cook's initial durable recipe.
+///
+/// `created` is elected by the exclusive recipe write, not by a caller's
+/// observation of the store before it starts materializing an attempt.
+pub(crate) struct InitialRecipeMaterialization {
+    pub(crate) recipe: AgentTaskCookRecipe,
+    pub(crate) created: bool,
+}
+
+impl InitialRecipeMaterialization {
+    pub(crate) fn reused(recipe: AgentTaskCookRecipe) -> Self {
+        Self {
+            recipe,
+            created: false,
+        }
+    }
 }
 
 impl CookRecipeStore {
@@ -94,6 +127,14 @@ impl CookRecipeStore {
         &self,
         options: &AgentTaskCookServiceOptions,
     ) -> Result<AgentTaskCookRecipe> {
+        self.persist_initial_recipe_with_outcome(options)
+            .map(|materialization| materialization.recipe)
+    }
+
+    pub(crate) fn persist_initial_recipe_with_outcome(
+        &self,
+        options: &AgentTaskCookServiceOptions,
+    ) -> Result<InitialRecipeMaterialization> {
         persist_initial_recipe_in_store(self, options)
     }
 
@@ -316,12 +357,31 @@ pub fn persist_initial_recipe(
 fn persist_initial_recipe_in_store(
     store: &CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
-) -> Result<AgentTaskCookRecipe> {
+) -> Result<InitialRecipeMaterialization> {
     recover_pending_supersession(store, &options.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
+    #[cfg(test)]
+    let barrier = {
+        let mut hook = INITIAL_RECIPE_CREATION_BARRIER
+            .lock()
+            .expect("initial recipe creation barrier");
+        if hook.1 < 2 {
+            hook.1 += 1;
+            hook.0.clone()
+        } else {
+            None
+        }
+    };
+    #[cfg(test)]
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
     if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
-        return Ok(existing);
+        return Ok(InitialRecipeMaterialization {
+            recipe: existing,
+            created: false,
+        });
     }
     if store.recipe_exists(&recipe.cook_id) {
         let existing = store.load_recipe(&recipe.cook_id)?;
@@ -362,10 +422,95 @@ fn persist_initial_recipe_in_store(
         };
         write_supersession(store, &supersession)?;
         complete_supersession(store, &supersession)?;
-        return Ok(recipe);
+        return Ok(InitialRecipeMaterialization {
+            recipe,
+            created: false,
+        });
     }
-    store.persist_recipe(&recipe)?;
-    Ok(recipe)
+    if persist_recipe_exclusively(store, &recipe)? {
+        return Ok(InitialRecipeMaterialization {
+            recipe,
+            created: true,
+        });
+    }
+    // Another controller won creation after our read. Its immutable recipe is
+    // authoritative: a concurrent loser may reuse it only when compatible,
+    // never enter the normal correction/supersession path.
+    let winner = store.load_recipe(&recipe.cook_id)?;
+    if recipe_mismatch_fields(&winner, &recipe).is_empty() {
+        return Ok(InitialRecipeMaterialization::reused(winner));
+    }
+    Err(Error::validation_invalid_argument(
+        "cook_recipe",
+        "concurrent Cook creation conflicts with the durable recipe",
+        Some(recipe.cook_id),
+        None,
+    ))
+}
+
+fn persist_recipe_exclusively(
+    store: &CookRecipeStore,
+    recipe: &AgentTaskCookRecipe,
+) -> Result<bool> {
+    let path = store.recipe_path(&recipe.cook_id);
+    let directory = path.parent().expect("recipe path has parent");
+    fs::create_dir_all(directory)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let json = serde_json::to_string_pretty(recipe).map_err(|error| {
+        Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let staging = write_recipe_staging_file(directory, format!("{json}\n").as_bytes())?;
+    let installed = match fs::hard_link(&staging, &path) {
+        Ok(()) => {
+            sync_directory(directory)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            ));
+        }
+    };
+    fs::remove_file(&staging).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(staging.display().to_string()))
+    })?;
+    if installed {
+        sync_directory(directory)?;
+    }
+    Ok(installed)
+}
+
+fn write_recipe_staging_file(directory: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let staging = directory.join(format!(".recipe-{}.tmp", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&staging).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(staging.display().to_string()))
+    })?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&staging);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(staging.display().to_string()),
+        ));
+    }
+    Ok(staging)
+}
+
+fn sync_directory(directory: &Path) -> Result<()> {
+    File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(directory.display().to_string()))
+        })
 }
 
 /// Validate a Cook recipe against durable state without writing it. Fanout

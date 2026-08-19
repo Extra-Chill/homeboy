@@ -10,6 +10,34 @@ use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 
 pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
+    reconcile_active_lab_runner_handoffs_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+    )
+}
+
+/// The store-rooted counterpart of [`reconcile_active_lab_runner_handoffs`].
+///
+/// This is a queue scan that mutates every row it selects, so the scan and its
+/// consequences have to name one installation. The queue itself is read from
+/// this store's own observation database, and each of the three follow-ups is
+/// dispatched to the rooted sibling that takes its lock and commits its record
+/// in the same home:
+///
+/// * `reconcile_pending_runner_submission_intent_in_store` replays a submission
+///   key and binds the acceptance it gets back;
+/// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
+///   store's `run_dir` and terminalizes;
+/// * `status_in_store` takes two advisory locks of its own and has roughly
+///   twenty durable write sites.
+///
+/// Selecting a run from one installation's queue and then expiring or
+/// terminalizing it in another is the exact shape #7505 exists to stop: the
+/// handoff lock would be held where nobody contends for it, so an acceptance
+/// racing this expiry would not be excluded by it, and the terminal record
+/// would land beside a queue row that still reads `Running`.
+pub fn reconcile_active_lab_runner_handoffs_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
     let mut pending_intent_run_ids = Vec::new();
@@ -17,7 +45,7 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
     // Scan the stored snapshot so this operation owns and reports its expiry
     // mutations. `list_records` refreshes through `status`, which also expires
     // pending handoffs as a user-visible read-side convergence guarantee.
-    for record in store::read_records()? {
+    for record in lifecycle_store.read_records()? {
         if record.state == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
             accepted_run_ids.push(record.run_id);
         } else if has_pending_runner_submission_intent(&record) {
@@ -29,20 +57,30 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
 
     let mut reconciled = 0;
     for run_id in pending_intent_run_ids {
-        if reconcile_pending_runner_submission_intent(&run_id)? {
+        if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &run_id)? {
             reconciled += 1;
         }
     }
     for run_id in expired_run_ids {
-        if expire_unaccepted_lab_handoff(&run_id)? {
+        if expire_unaccepted_lab_handoff_in_store(lifecycle_store, &run_id)? {
             reconciled += 1;
         }
     }
     for run_id in accepted_run_ids {
         // `status` owns snapshot validation, persistence, and the exact
         // no-PID daemon-loss projection. A bad remote record must not prevent
-        // unrelated activity from being listed.
-        if status(&run_id).is_ok() {
+        // unrelated activity from being listed. This is the rooted body the
+        // ambient `status` entry point delegates to, with its own defaults:
+        // `AgentTaskStatusOptions::default()` and a Cook-alias-resolving
+        // (non-exact) read, which is exactly what `status` passed.
+        if status_in_store(
+            lifecycle_store,
+            &run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .is_ok()
+        {
             reconciled += 1;
         }
     }
