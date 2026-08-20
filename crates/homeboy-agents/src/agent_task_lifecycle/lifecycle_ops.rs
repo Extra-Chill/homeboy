@@ -21,20 +21,17 @@ pub(super) fn lab_handoff_acceptance_timeout_seconds() -> i64 {
         .unwrap_or(LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS)
 }
 
-/// Merge a completed deferred-cleanup candidate into its timeout outcome.
+// The ambient `reconcile_deferred_candidate()` shim that used to sit above this
+// resolved a root and delegated straight here. It had no callers, so it was a
+// resolution point that existed for nobody (#7505).
+
+/// Merge a completed deferred-cleanup candidate into its timeout outcome,
+/// inside an explicitly rooted store.
 ///
 /// The worker owns the mutable workspace until it exits; this lifecycle-side
 /// operation is the only place where its immutable recovery result is adopted.
 /// A per-run advisory lock makes concurrent status/artifact/Cook readers
 /// reread and persist one coherent aggregate and terminal projection.
-pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
-    reconcile_deferred_candidate_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-    )
-}
-
-/// The store-rooted counterpart of [`reconcile_deferred_candidate`].
 ///
 /// The advisory lock is the whole point of this operation, so it must be taken
 /// in the same installation the record, aggregate, plan, and terminal
@@ -1395,32 +1392,17 @@ where
     )
 }
 
-pub(crate) fn submit_plan_with_runtime_admission_on_runner<F, A>(
-    plan: &AgentTaskPlan,
-    requested_run_id: Option<&str>,
-    execution_runner_id: Option<String>,
-    admit_runtime: F,
-) -> Result<AgentTaskRunRecord>
-where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    submit_plan_with_runtime_admission_in_store(
-        &lifecycle_store,
-        plan,
-        requested_run_id,
-        execution_runner_id,
-        None,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
-        admit_runtime,
-    )
-}
-
 // `submit_plan_with_runtime_admission_on_runner_with_metadata` lived here. Its
 // only caller was the retry admission, which now calls
 // `submit_plan_with_runtime_admission_in_store` with the store it was handed
 // rather than resolving a second one from the environment (#7505).
+//
+// `submit_plan_with_runtime_admission_on_runner` lived here too, and went the
+// same way for a weaker reason: it never had a caller at all. It resolved a
+// root from the environment and passed it to
+// `submit_plan_with_runtime_admission_in_store` with an explicit
+// `execution_runner_id`, which is what every remaining caller already does with
+// the store it was handed (#7505).
 
 pub(crate) fn submit_plan_with_runtime_admission_in_store<F, A>(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2493,15 +2475,15 @@ pub fn record_cook_controller_failure_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook controller failure record was unchanged"))
 }
 
+// The ambient `clear_cook_controller_failure()` shim that used to sit above
+// this resolved a root and delegated straight here. It had no callers, so it
+// was a resolution point that existed for nobody (#7505).
+
+/// Clear a durable controller failure inside an explicitly rooted store.
+///
 /// A successful explicit rearm starts a new continuation pass. Its prior
 /// controller failure remains in the failed continuation artifact, but must not
 /// be presented as the cause of a later terminal promotion or finalization.
-pub fn clear_cook_controller_failure(run_id: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    clear_cook_controller_failure_in_store(&lifecycle_store, run_id)
-}
-
-/// Clear a durable controller failure inside an explicitly rooted store.
 ///
 /// This is the erasing half of [`record_cook_controller_failure_in_store`] and
 /// has to follow the same root. An ambient reach would leave the injected
