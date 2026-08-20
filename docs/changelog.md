@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.27] - 2026-08-20
+
+### Changed
+- root the Cook retry boundary
+
+### Fixed
+- scope checksum coverage to the assets cargo-dist checksums
+
 ## [0.350.26] - 2026-08-20
 
 ### Changed
