@@ -1415,6 +1415,133 @@ fn verify_published_distinguishes_an_unpublished_release_from_a_broken_one() {
     );
 }
 
+/// Run `verify-published`'s asset step under the runner's shell with a mocked
+/// `gh`, returning (exit code, combined output) plus the commands `gh` saw.
+fn run_verify_published_step(
+    host_result: &str,
+    release_json: Option<&str>,
+) -> (i32, String, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let verify = job_section(release_workflow(), "verify-published");
+    let script = step_run_script(verify, "name: Verify planned release assets");
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-verify-published-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("temp bin");
+    let log = dir.join("gh.log");
+    std::fs::write(&log, "").expect("write gh log");
+
+    // `gh api` succeeds only when the release is published; a draft or absent
+    // release 404s on `releases/tags/{tag}`, which is a non-zero exit here.
+    let api_branch = match release_json {
+        Some(body) => {
+            let fixture = dir.join("release-fixture.json");
+            std::fs::write(&fixture, body).expect("write release fixture");
+            format!("cat {}", fixture.display())
+        }
+        None => "exit 1".to_owned(),
+    };
+    std::fs::write(
+        bin.join("gh"),
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$1 $2\" >> {log}\n\
+             if [ \"$1\" = api ]; then {api_branch}; fi\n",
+            log = log.display(),
+        ),
+    )
+    .expect("write mock gh");
+    let mut perms = std::fs::metadata(bin.join("gh"))
+        .expect("mock gh metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(bin.join("gh"), perms).expect("mark mock gh executable");
+
+    let script_path = dir.join("verify.sh");
+    std::fs::write(&script_path, &script).expect("write script");
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .current_dir(&dir)
+        .env("PATH", path)
+        .env("RELEASE_TAG", "v0.350.25")
+        .env("HOST_RESULT", host_result)
+        .env("GITHUB_REPOSITORY", "Extra-Chill/homeboy")
+        .env("EXPECTED_ASSETS", r#"["payload.tar.gz"]"#)
+        .output()
+        .expect("verify-published step should run");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    (output.status.code().unwrap_or(-1), combined, calls)
+}
+
+/// A failed `host` must be diagnosed from the release, not from an assumption.
+///
+/// This guard used to `exit 1` on a non-success host result without ever
+/// calling the API, reporting "The tag exists with no GitHub Release" as
+/// though it had looked. For v0.350.22 through v0.350.25 that was false: each
+/// release was published complete with all 14 assets while `host` failed on a
+/// post-publish assertion (#12701). The run must stay red either way — #8567
+/// requires a broken publish chain be loud — but the operator must be pointed
+/// at the failing step, not at a release state that was never observed.
+#[test]
+fn verify_published_diagnoses_a_failed_host_from_the_observed_release() {
+    let published = serde_json::json!({
+        "draft": false,
+        "assets": [{"name": "payload.tar.gz", "state": "uploaded", "size": 1}],
+    })
+    .to_string();
+
+    let (code, output, calls) = run_verify_published_step("failure", Some(&published));
+
+    assert_eq!(code, 1, "a failed host must still fail the run: {output}");
+    assert!(
+        calls.iter().any(|call| call.starts_with("api ")),
+        "the guard must read the release before judging it, saw: {calls:?}"
+    );
+    assert!(
+        output.contains("IS published"),
+        "an intact release must be reported as intact so the operator inspects \
+         the failing job instead of the release: {output}"
+    );
+    assert!(
+        !output.contains("The tag exists with no GitHub Release"),
+        "the guard must not assert an unobserved state as fact: {output}"
+    );
+
+    // The same host failure with nothing published keeps the original,
+    // now-accurate diagnosis.
+    let (code, output, _) = run_verify_published_step("failure", None);
+    assert_eq!(
+        code, 1,
+        "an unpublished release must fail the run: {output}"
+    );
+    assert!(
+        output.contains("no published GitHub Release exists"),
+        "an absent release must still be named as absent: {output}"
+    );
+}
+
 /// Extract the shell body of a `run: |` step so its BEHAVIOUR can be exercised
 /// rather than string-matched. Asserting the effect is the whole point: the
 /// audit gate in #10685 passed for weeks because its test asserted the command
