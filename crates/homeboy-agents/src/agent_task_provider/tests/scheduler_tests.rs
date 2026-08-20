@@ -4,7 +4,7 @@ use crate::agent_task::AgentTaskArtifactDeclaration;
 use crate::agent_task_scheduler::{
     AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -82,11 +82,10 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
     crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
         .expect("bind runner snapshot");
 
-    let aggregate =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]))
-        .run(plan);
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ))
+    .run(plan);
 
     assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
     let provider_observation: serde_json::Value =
@@ -145,11 +144,10 @@ fn remapped_lab_cook_rejects_runner_snapshot_drift_before_provider_spawn() {
         .expect("replace runner git directory");
     std::fs::create_dir(runner.join(".git")).expect("new runner git directory");
 
-    let aggregate =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]))
-        .run(plan);
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ))
+    .run(plan);
 
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(
@@ -216,11 +214,10 @@ fn isolated_cook_rejects_source_identity_drift_before_snapshotting() {
     std::fs::write(source.join(".git"), "gitdir: ../replaced-gitdir\n")
         .expect("replace source gitdir reference");
 
-    let aggregate =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]))
-        .run(AgentTaskPlan::new("source-drift-cook", vec![request]));
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ))
+    .run(AgentTaskPlan::new("source-drift-cook", vec![request]));
 
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(
@@ -240,10 +237,9 @@ fn scheduler_dispatches_extension_provider_command() {
         script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'ok',outputs:{issue_number:3447}}));")
     );
     let (request, provider) = request("task-a", command);
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-a", vec![request]));
 
@@ -273,10 +269,10 @@ fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests()
     let mut editing = no_op.clone();
     editing.task_id = "task-editing".to_string();
     editing.executor.config["no_op"] = json!(false);
-    let scheduler = AgentTaskScheduler::new(
+    let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
             .with_path_roots(roots.clone()),
-    )
+    ))
     .with_scratch_root(roots.data().to_path_buf());
 
     let aggregate = scheduler.run(AgentTaskPlan::new(
@@ -306,18 +302,16 @@ fn executor_artifact_paths_are_distinct_per_run() {
             script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:req.artifacts_path}));")
         );
         let (request, provider) = request("same-task", command);
-        let first =
-            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                provider.clone(),
-            ]))
-            .with_run_id("run-one")
-            .run(AgentTaskPlan::new("plan", vec![request.clone()]));
-        let second =
-            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                provider,
-            ]))
-            .with_run_id("run-two")
-            .run(AgentTaskPlan::new("plan", vec![request]));
+        let first = AgentTaskScheduler::new(Arc::new(
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider.clone()]),
+        ))
+        .with_run_id("run-one")
+        .run(AgentTaskPlan::new("plan", vec![request.clone()]));
+        let second = AgentTaskScheduler::new(Arc::new(
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+        ))
+        .with_run_id("run-two")
+        .run(AgentTaskPlan::new("plan", vec![request]));
 
         assert_ne!(first.outcomes[0].summary, second.outcomes[0].summary);
     }
@@ -326,7 +320,8 @@ fn executor_artifact_paths_are_distinct_per_run() {
 #[test]
 fn scheduler_reports_missing_extension_provider() {
     let (request, _provider) = request("task-missing-provider", "unused".to_string());
-    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+    let scheduler =
+        AgentTaskScheduler::new(Arc::new(ExtensionProviderAgentTaskExecutor::default()));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-provider", vec![request]));
 
@@ -349,10 +344,9 @@ fn scheduler_reports_provider_selector_mismatch() {
     provider.id = "example.synthetic-agent-task-executor".to_string();
     provider.backend = "synthetic-runtime".to_string();
     provider.cli.reserved_selector_hints = vec!["codex".to_string()];
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-selector-mismatch", vec![request]));
 
@@ -378,10 +372,9 @@ fn scheduler_reports_provider_selector_mismatch() {
 fn scheduler_reports_missing_provider_capability() {
     let (mut request, provider) = request("task-missing-capability", "unused".to_string());
     request.executor.required_capabilities = vec!["workspace_write".to_string()];
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-capability", vec![request]));
 
@@ -412,10 +405,9 @@ fn scheduler_reports_missing_provider_capability() {
 fn scheduler_normalizes_malformed_provider_output() {
     let command = format!("node {}", script("process.stdout.write('{not json');"));
     let (request, provider) = request("task-malformed-provider", command);
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-malformed-provider", vec![request]));
 
@@ -600,10 +592,10 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
     let (request, provider) = request("task-empty-stdout-recorded", command);
     let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
     let run_id = "run-empty-provider-output";
-    let scheduler = AgentTaskScheduler::new(
+    let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
             .with_path_roots(roots.clone()),
-    )
+    ))
     .with_scratch_root(roots.data().to_path_buf());
 
     lifecycle_store
@@ -642,10 +634,9 @@ fn provider_timeout_returns_structured_outcome() {
     let command = format!("node {}", script("setInterval(() => {}, 1000);"));
     let (mut request, provider) = request("task-timeout", command);
     request.limits.timeout_ms = Some(50);
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-timeout", vec![request]));
 
@@ -743,10 +734,9 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            primary, fallback,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![primary, fallback]),
+    ));
     let mut plan = AgentTaskPlan::new("plan-stalled-rotation", vec![request]);
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
         entries: vec![AgentTaskProviderRotationEntry {
@@ -903,10 +893,9 @@ fn provider_command_receives_executor_config_env() {
     request.executor.config = json!({ "marker": "configured" });
     provider.extension_id = Some("wordpress".to_string());
     provider.extension_path = Some("/tmp/homeboy-extension".to_string());
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-config", vec![request]));
 
@@ -936,10 +925,10 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
     plan.options.retry.retryable_failure_classifications =
         vec![AgentTaskFailureClassification::ExecutionFailed];
 
-    let aggregate = AgentTaskScheduler::new(
+    let aggregate = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
             .with_path_roots(roots.clone()),
-    )
+    ))
     .with_scratch_root(roots.data().to_path_buf())
     .run(plan);
 
@@ -996,10 +985,9 @@ fn provider_command_receives_declared_secret_env() {
     );
     let (mut request, provider) = request("task-secret-env", command);
     request.executor.secret_env = vec![secret_name.clone()];
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env", vec![request]));
 
@@ -1030,10 +1018,9 @@ fn provider_command_receives_canonical_secret_env_plan_without_values() {
         extra: BTreeMap::new(),
     }];
     request.executor.secret_env = vec![secret_name.clone()];
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env-plan", vec![request]));
 
@@ -1059,10 +1046,9 @@ fn missing_declared_secret_env_fails_before_provider_spawn() {
     );
     let (mut request, provider) = request("task-missing-secret-env", command);
     request.executor.secret_env = vec![secret_name.clone()];
-    let scheduler =
-        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-            provider,
-        ]));
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-secret-env", vec![request]));
 
@@ -1090,7 +1076,8 @@ fn fixture_backend_produces_deterministic_smoke_artifacts() {
         "artifact_root": artifact_root.path().display().to_string(),
         "changed_file": "docs/smoke.md"
     });
-    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+    let scheduler =
+        AgentTaskScheduler::new(Arc::new(ExtensionProviderAgentTaskExecutor::default()));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-fixture", vec![request]));
 
@@ -1120,7 +1107,8 @@ fn fixture_backend_classifies_empty_runtime_bundle() {
         "artifact_root": artifact_root.path().display().to_string(),
         "mode": "empty_runtime_bundle"
     });
-    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+    let scheduler =
+        AgentTaskScheduler::new(Arc::new(ExtensionProviderAgentTaskExecutor::default()));
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-empty-runtime", vec![request]));
 

@@ -23,8 +23,25 @@ pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
 
     fn cancel(&self, _task_id: &str) {}
 }
-pub struct AgentTaskScheduler<E> {
-    executor: Arc<E>,
+
+/// The one shape an executor takes once it reaches the scheduler.
+///
+/// Execution dispatch is a runtime choice -- extension provider, test double,
+/// bench harness -- and never a compile-time one, so the executor is carried as
+/// an erased shared pointer rather than a type parameter. The trait is
+/// object-safe by construction: `execute` and `cancel` both take `&self`,
+/// neither is generic, and neither mentions `Self` in return position.
+///
+/// Sharing is the whole point. A Cook hands the executor to each retry attempt
+/// and each parallel branch, and `Arc` makes that a refcount bump onto one
+/// underlying adapter instead of a copy -- which matters, because a provider
+/// adapter holds real state. `AgentTaskScheduler` has always stored its executor
+/// behind an `Arc`, so this is the ownership model that was already in effect,
+/// now written into the type.
+pub type SharedAgentTaskExecutor = Arc<dyn AgentTaskExecutorAdapter>;
+
+pub struct AgentTaskScheduler {
+    executor: SharedAgentTaskExecutor,
     run_id: Option<String>,
     harvest_context: HarvestExecutionContext,
     lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
@@ -32,19 +49,16 @@ pub struct AgentTaskScheduler<E> {
     scratch_root: Option<std::path::PathBuf>,
 }
 
-impl<E> AgentTaskScheduler<E>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    pub fn new(executor: E) -> Self {
+impl AgentTaskScheduler {
+    pub fn new(executor: SharedAgentTaskExecutor) -> Self {
         Self::new_controller(executor)
     }
 
     /// Construct a controller-local scheduler that intentionally ignores
     /// ambient Lab transport metadata.
-    pub fn new_controller(executor: E) -> Self {
+    pub fn new_controller(executor: SharedAgentTaskExecutor) -> Self {
         Self {
-            executor: Arc::new(executor),
+            executor,
             run_id: None,
             harvest_context: HarvestExecutionContext::default(),
             lifecycle_store: None,
@@ -1843,4 +1857,51 @@ fn first_non_empty_json_string<'a>(
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
     })
+}
+
+#[cfg(test)]
+mod executor_erasure_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingExecutor(Arc<AtomicUsize>);
+
+    impl AgentTaskExecutorAdapter for CountingExecutor {
+        fn execute(
+            &self,
+            _request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            unreachable!("this fixture exercises the bound and cancel(), never execution");
+        }
+
+        fn cancel(&self, _task_id: &str) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// What the real call sites do: take the executor by value and hand a clone
+    /// onward, once per retry attempt and once per parallel branch.
+    fn dispatch_then_hand_on(executor: SharedAgentTaskExecutor) -> SharedAgentTaskExecutor {
+        executor.cancel("task");
+        executor.clone()
+    }
+
+    #[test]
+    fn cloning_a_shared_executor_shares_one_underlying_executor() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let executor: SharedAgentTaskExecutor = Arc::new(CountingExecutor(Arc::clone(&calls)));
+
+        let cloned = dispatch_then_hand_on(executor);
+        cloned.cancel("task");
+
+        // Cloning must share one executor rather than duplicate it. Retry
+        // attempts hand out clones and a provider adapter holds real state --
+        // per-clone copies would silently give each attempt its own.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "both the original and its clone must dispatch to the same executor"
+        );
+    }
 }

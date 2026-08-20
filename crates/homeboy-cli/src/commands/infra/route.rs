@@ -1170,7 +1170,9 @@ fn run_split_placement_cook(
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
             *controller,
-            homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+            std::sync::Arc::new(
+                homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+            ),
             Some(dispatcher),
             Some(&progress),
             provenance,

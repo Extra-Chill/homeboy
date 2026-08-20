@@ -16,7 +16,7 @@ use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
+    AgentTaskAggregate, AgentTaskPlan, SharedAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
@@ -205,7 +205,10 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request(&args)?;
-    run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+    run_cook_with_executor(
+        args,
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
+    )
 }
 
 /// Resolve the same pre-provisioning Cook inputs used by execution. This path
@@ -1008,18 +1011,17 @@ mod preview_tests {
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     continue_cook_with(
         args,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )
 }
 
-pub(crate) fn continue_cook_with<E, F>(
+pub(crate) fn continue_cook_with<F>(
     args: CookContinueArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
 ) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: Fn(
             &Value,
         ) -> homeboy::core::Result<
@@ -1032,14 +1034,13 @@ where
 /// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
 /// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
 /// observation-only until the attempt becomes terminal.
-fn continue_cook_with_queued_execution<E, F>(
+fn continue_cook_with_queued_execution<F>(
     args: CookContinueArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
     execute_queued_attempt: bool,
 ) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: Fn(
             &Value,
         ) -> homeboy::core::Result<
@@ -1170,13 +1171,12 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn consume_queued_cook_retry_with<E, F>(
+pub(crate) fn consume_queued_cook_retry_with<F>(
     args: CookContinueArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
 ) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: Fn(
             &Value,
         ) -> homeboy::core::Result<
@@ -1189,15 +1189,14 @@ where
 /// A retry reservation creates a queued record before its external dispatch.
 /// Claim that effect separately so competing `retry --run` consumers converge
 /// on one dispatcher invocation.
-fn dispatch_queued_cook_retry<E, F>(
+fn dispatch_queued_cook_retry<F>(
     recipe: &homeboy::agents::agent_task_service::AgentTaskCookRecipe,
     run_id: &str,
     full: bool,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
 ) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: Fn(
             &Value,
         ) -> homeboy::core::Result<
@@ -2543,23 +2542,20 @@ pub(crate) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value
     .map(|value| (value, 0))
 }
 
-pub(super) fn run_cook_with_executor<E>(args: AgentTaskCookArgs, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+pub(super) fn run_cook_with_executor(
+    args: AgentTaskCookArgs,
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     run_cook_with_executor_and_dispatcher(args, executor, None)
 }
 
-pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
+pub(crate) fn run_cook_with_executor_and_dispatcher(
     args: AgentTaskCookArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     run_cook_with_executor_and_dispatcher_with_progress(
         args,
         executor,
@@ -2569,18 +2565,15 @@ where
     )
 }
 
-pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
+pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     mut args: AgentTaskCookArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -3670,7 +3663,7 @@ pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     run_loaded_plan(
         plan,
         record_run_id.as_deref(),
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
@@ -3696,14 +3689,11 @@ fn emit_runner_lifecycle_progress(plan: &AgentTaskPlan, run_id: Option<&str>) {
     }
 }
 
-pub(super) fn run_loaded_plan<E>(
+pub(super) fn run_loaded_plan(
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     let result = agent_task_service::run_loaded_plan(plan, record_run_id, executor)?;
     let value =
         if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
@@ -3718,18 +3708,15 @@ pub(super) fn run_submitted(args: RunArgs) -> CmdResult<Value> {
     run_submitted_with_executor(
         args.run_id,
         args.timeout_ms,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-pub(super) fn run_submitted_with_executor<E>(
+pub(super) fn run_submitted_with_executor(
     run_id: String,
     timeout_ms: Option<u64>,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     let result =
         agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
     Ok((
@@ -3739,23 +3726,20 @@ where
 }
 
 pub(super) fn run_next(args: RunNextArgs) -> CmdResult<Value> {
-    run_next_with_executor_and_fanout(ExtensionProviderAgentTaskExecutor::discover(), args.fanout)
+    run_next_with_executor_and_fanout(
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
+        args.fanout,
+    )
 }
 
-pub(super) fn run_next_with_executor<E>(executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+pub(super) fn run_next_with_executor(executor: SharedAgentTaskExecutor) -> CmdResult<Value> {
     run_next_with_executor_and_fanout(executor, None)
 }
 
-pub(super) fn run_next_with_executor_and_fanout<E>(
-    executor: E,
+pub(super) fn run_next_with_executor_and_fanout(
+    executor: SharedAgentTaskExecutor,
     fanout_id: Option<String>,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     let scoped_run_ids = fanout_id
         .as_deref()
         .map(homeboy::agents::agent_tasks::batch::owned_child_run_ids)
@@ -3798,27 +3782,24 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
         args.bridge,
         args.since_cursor,
         args.full,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-pub(super) fn run_resume_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
+pub(super) fn run_resume_with_executor(
+    run_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     run_resume_with_executor_and_bridge(run_id, false, None, false, executor)
 }
 
-pub(super) fn run_resume_with_executor_and_bridge<E>(
+pub(super) fn run_resume_with_executor_and_bridge(
     run_id: String,
     bridge: bool,
     since_cursor: Option<u64>,
     full: bool,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     let needs_transport_recovery =
         bridge && agent_task_service::terminal_transport_recovery_required(&run_id);
     if needs_transport_recovery {
@@ -3851,18 +3832,17 @@ where
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
     retry_with(
         args,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )
 }
 
-pub(super) fn retry_with<E, F>(
+pub(super) fn retry_with<F>(
     args: RetryArgs,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
 ) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: Fn(
             &Value,
         ) -> homeboy::core::Result<

@@ -17,14 +17,13 @@ const COMMAND_GATE_DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 pub(super) const RUN_COMMAND_DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const COMMAND_GATE_OUTPUT_CAP_BYTES: usize = 64 * 1024;
 
-pub(super) fn execute_controller_action<E, D>(
+pub(super) fn execute_controller_action<D>(
     record: &mut AgentTaskLoopControllerRecord,
     action_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<AgentTaskRunResult<ControllerActionReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     execute_controller_action_with_runner_availability(
@@ -36,15 +35,14 @@ where
     )
 }
 
-pub(super) fn execute_controller_action_with_runner_availability<E, D, F>(
+pub(super) fn execute_controller_action_with_runner_availability<D, F>(
     record: &mut AgentTaskLoopControllerRecord,
     action_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
     mut runner_availability: F,
 ) -> Result<AgentTaskRunResult<ControllerActionReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
     F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
 {
@@ -444,14 +442,13 @@ fn first_action_diagnostic_message(
         .map(|diagnostic| diagnostic.message.clone())
 }
 
-pub(super) fn execute_claimed_controller_action<E, D>(
+pub(super) fn execute_claimed_controller_action<D>(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<(Value, i32)>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     match &action.action {
@@ -710,17 +707,16 @@ pub(super) fn execute_request_changes_action(
     ))
 }
 
-pub(super) fn execute_spawn_task_action<E, D>(
+pub(super) fn execute_spawn_task_action<D>(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,
     dedupe_key: &str,
     entity_id: Option<&str>,
     request: &Value,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<(Value, i32)>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let request = hydrate_consumed_artifacts(record, request);
@@ -918,7 +914,7 @@ fn request_with_controller_dispatch_identity(
     clippy::too_many_arguments,
     reason = "controller action keeps lifecycle state, dispatch identity, and provider contract explicit"
 )]
-pub(super) fn execute_fan_out_action<E, D>(
+pub(super) fn execute_fan_out_action<D>(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,
     dedupe_key: &str,
@@ -929,11 +925,10 @@ pub(super) fn execute_fan_out_action<E, D>(
     max_items: usize,
     fail_fast: bool,
     request_template: &Value,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<(Value, i32)>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let expanded_entity_ids = if entity_ids.is_empty() {
@@ -1447,18 +1442,17 @@ pub(super) fn collect_capped_command_output(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_route_finding_action<E, D>(
+pub(super) fn execute_route_finding_action<D>(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,
     finding: &controller::AgentTaskLoopFindingPacket,
     dedupe_key: &str,
     entity_id: Option<&str>,
     request_template: &Value,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<(Value, i32)>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let entity_id = ensure_finding_entity(record, finding, entity_id);

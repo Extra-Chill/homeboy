@@ -653,7 +653,7 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
 
         let error = super::super::run::run_cook_with_executor(
             *cook,
-            ExtensionProviderAgentTaskExecutor::default(),
+            Arc::new(ExtensionProviderAgentTaskExecutor::default()),
         )
         .expect_err("queue-only cook must fail before resolving its worktree");
 
@@ -762,7 +762,7 @@ fn cook_goal_frames_explicit_prompt_without_creating_another_provider_cell() {
 
         run_cook_with_executor_and_dispatcher(
             *cook,
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             Some(Arc::new(RecipeOnlyDispatcher)),
         )
         .expect("persist Cook recipe before provider dispatch");
@@ -830,7 +830,7 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
 
         run_cook_with_executor_and_dispatcher(
             *cook,
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             Some(Arc::new(RecipeOnlyDispatcher)),
         )
         .expect("persist Cook recipe before provider dispatch");
@@ -970,8 +970,11 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
             let AgentTaskCommand::Cook(cook) = agent_task.command else {
                 panic!("cook command")
             };
-            run_cook_with_executor(*cook, ExtensionProviderAgentTaskExecutor::default())
-                .expect_err("invalid Cook input is rejected before provider ensure");
+            run_cook_with_executor(
+                *cook,
+                Arc::new(ExtensionProviderAgentTaskExecutor::default()),
+            )
+            .expect_err("invalid Cook input is rejected before provider ensure");
         }
         assert!(
             !ensured.exists(),
@@ -1525,7 +1528,7 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
             handle,
             "--no-finalize".to_string(),
         ]);
-        let executor = CountingExecutor::default();
+        let executor = Arc::new(CountingExecutor::default());
         let error = run_cook_with_executor(args, executor.clone())
             .expect_err("inactive managed destination must fail before execution");
 

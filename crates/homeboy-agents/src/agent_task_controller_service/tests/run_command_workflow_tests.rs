@@ -63,7 +63,7 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
 
         let result = run_next(
             "repo-loop-command",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &CapturingDispatchHook::default(),
         )
         .expect("run command action");
@@ -162,7 +162,7 @@ fn run_command_workflow_inherits_dispatch_default_cwd() {
 
         let result = run_next(
             "repo-loop-command-cwd",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &CapturingDispatchHook::default(),
         )
         .expect("run command action");
@@ -227,7 +227,7 @@ fn run_command_workflow_times_out_instead_of_blocking_controller() {
         init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
         let result = run_next(
             "repo-loop-command-timeout",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &CapturingDispatchHook::default(),
         )
         .expect("run command action");
@@ -299,7 +299,7 @@ fn run_command_workflow_timeout_kills_child_process_group() {
         init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
         let result = run_next(
             "repo-loop-command-process-group-timeout",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &CapturingDispatchHook::default(),
         )
         .expect("run command action");

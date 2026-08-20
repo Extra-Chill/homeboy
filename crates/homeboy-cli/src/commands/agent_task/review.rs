@@ -1,5 +1,6 @@
 use clap::Args;
 use serde_json::Value;
+use std::sync::Arc;
 
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
@@ -502,7 +503,7 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
                 accept_inherited_failures: args.accept_inherited_failures,
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-            ExtensionProviderAgentTaskExecutor::discover(),
+            Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         )?;
     let exit_code = result.exit_code;
     let cook_id = result.value.cook_id.clone();

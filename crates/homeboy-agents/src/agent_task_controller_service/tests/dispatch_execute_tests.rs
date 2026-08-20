@@ -93,7 +93,7 @@ fn execute_controller_action_marks_blocked_no_local_fallback_policy() {
             },
             "policy matched",
         );
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
         let dispatch = CapturingDispatchHook::default();
 
         let result = execute_controller_action_with_runner_availability(
@@ -155,7 +155,7 @@ fn execute_controller_action_dispatches_an_available_runner_target() {
             },
             "policy matched",
         );
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
         let dispatch = CapturingDispatchHook::default();
 
         let result = execute_controller_action_with_runner_availability(
@@ -228,7 +228,7 @@ fn execute_controller_dispatch_injects_action_scoped_identity() {
         let result = execute_controller_action_with_runner_availability(
             &mut record,
             &action.action_id,
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
             |_| unreachable!("dispatch action has no runner policy"),
         )
@@ -282,7 +282,7 @@ fn accepted_lab_runner_handoff_waits_and_terminal_replay_is_idempotent() {
         let accepted = execute_controller_action_with_runner_availability(
             &mut record,
             &action.action_id,
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &LabRunnerHandoffDispatchHook,
             |_| AgentTaskLoopRunnerAvailability::Available,
         )
