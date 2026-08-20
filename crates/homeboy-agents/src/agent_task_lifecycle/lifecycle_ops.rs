@@ -400,7 +400,7 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
 /// decision for the record: read ambiently, an unrelated run in another home
 /// could veto this parent, or the idempotent re-record of a live handoff could
 /// be misread as a collision.
-pub(crate) fn record_detached_cook_handoff_parent_in_store(
+pub fn record_detached_cook_handoff_parent_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -506,7 +506,7 @@ pub fn record_detached_cook_handoff_child(
 /// this child is recorded as pending or already cancelled, and the durable
 /// identity cancellation later signals on could be attached to a record no
 /// cancellation in this store would ever reach.
-pub(crate) fn record_detached_cook_handoff_child_in_store(
+pub fn record_detached_cook_handoff_child_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     pid: u32,
@@ -550,7 +550,7 @@ pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()
 /// state that makes a lease live indefinitely, so a supervisor recorded against
 /// another home's parent would leave this store's admission to expire while a
 /// daemon was in fact supervising it.
-pub(crate) fn record_detached_cook_supervisor_in_store(
+pub fn record_detached_cook_supervisor_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     job_id: &str,
@@ -702,7 +702,7 @@ pub fn fail_detached_cook_handoff_parent(
 /// from the same store the mutation lands in. Reading them ambiently would let
 /// another home's index or attempt record veto, or fail to veto, a terminal
 /// transition in this one.
-pub(crate) fn fail_detached_cook_handoff_parent_in_store(
+pub fn fail_detached_cook_handoff_parent_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     reason: &str,
