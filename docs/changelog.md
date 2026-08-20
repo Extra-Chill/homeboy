@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.26] - 2026-08-20
+
+### Changed
+- root the detached-Cook handoff protocol
+- root the terminal-notification claim protocol
+
 ## [0.350.25] - 2026-08-20
 
 ### Changed
