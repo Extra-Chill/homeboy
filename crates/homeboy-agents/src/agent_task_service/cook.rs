@@ -722,7 +722,7 @@ fn truncate_diagnostic_text(text: &str) -> String {
 /// side effects without real Git/GitHub mutations (#8357). Promotion is wired
 /// through the claim primitive here (`promote_with_operation_claim`); retry
 /// dispatch and finalization follow as separate slices.
-pub(crate) trait CookSideEffectService {
+pub trait CookSideEffectService {
     /// Promote the successful candidate for `run_id`, or load the already-persisted
     /// promotion when this attempt was interrupted after promoting.
     fn promote(
@@ -752,36 +752,50 @@ pub(crate) trait CookSideEffectService {
     ) -> Result<Value>;
 }
 
+/// The PR-finalization closure a cook side-effect boundary drives.
+///
+/// Boxed rather than carried as a type parameter so [`DefaultCookSideEffects`]
+/// is a concrete type that can live in a struct field — which is what lets one
+/// `CookContext` replace the former `run_cook*` wrapper family. The `'a` is
+/// load-bearing: the production finalizer closes over a `&CookRecipeStore`, so
+/// a `'static` bound would reject every real construction site.
+pub(crate) type CookFinalizeFn<'a> = Box<
+    dyn FnMut(
+            &AgentTaskLifecycleStore,
+            &AgentTaskCookServiceOptions,
+            &str,
+            &AgentTaskPromotionReport,
+        ) -> Result<Value>
+        + 'a,
+>;
+
 /// Production cook side-effect boundary. Each method delegates to the existing
 /// promotion/finalization free functions, so behavior is identical to the prior
 /// direct calls; the trait only relocates the call sites behind one seam.
-pub(crate) struct DefaultCookSideEffects<F> {
-    finalize: F,
+pub(crate) struct DefaultCookSideEffects<'a> {
+    finalize: CookFinalizeFn<'a>,
 }
 
-impl<F> DefaultCookSideEffects<F>
-where
-    F: FnMut(
-        &AgentTaskLifecycleStore,
-        &AgentTaskCookServiceOptions,
-        &str,
-        &AgentTaskPromotionReport,
-    ) -> Result<Value>,
-{
-    pub(crate) fn new(finalize: F) -> Self {
-        Self { finalize }
+impl<'a> DefaultCookSideEffects<'a> {
+    /// Generic in the closure so existing construction sites are unchanged; the
+    /// type parameter is erased at the boundary and never reaches the struct.
+    pub(crate) fn new<F>(finalize: F) -> Self
+    where
+        F: FnMut(
+                &AgentTaskLifecycleStore,
+                &AgentTaskCookServiceOptions,
+                &str,
+                &AgentTaskPromotionReport,
+            ) -> Result<Value>
+            + 'a,
+    {
+        Self {
+            finalize: Box::new(finalize),
+        }
     }
 }
 
-impl<F> CookSideEffectService for DefaultCookSideEffects<F>
-where
-    F: FnMut(
-        &AgentTaskLifecycleStore,
-        &AgentTaskCookServiceOptions,
-        &str,
-        &AgentTaskPromotionReport,
-    ) -> Result<Value>,
-{
+impl CookSideEffectService for DefaultCookSideEffects<'_> {
     fn promote(
         &mut self,
         lifecycle_store: &AgentTaskLifecycleStore,
@@ -825,34 +839,46 @@ where
 /// promotion path (tests that need to intercept promotion persist a promotion
 /// first, exactly as before).
 #[cfg(test)]
-pub(crate) struct TestCookSideEffects<F, R> {
-    finalize: F,
-    recover: R,
+pub(crate) type TestCookFinalizeFn<'a> = Box<
+    dyn FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a,
+>;
+
+#[cfg(test)]
+pub(crate) type TestCookRecoverFn<'a> = Box<
+    dyn FnMut(
+            &AgentTaskCookServiceOptions,
+            &MovingBaseCookRecovery,
+        ) -> Result<AgentTaskPromotionReport>
+        + 'a,
+>;
+
+#[cfg(test)]
+pub(crate) struct TestCookSideEffects<'a> {
+    finalize: TestCookFinalizeFn<'a>,
+    recover: TestCookRecoverFn<'a>,
 }
 
 #[cfg(test)]
-impl<F, R> TestCookSideEffects<F, R>
-where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
-    R: FnMut(
-        &AgentTaskCookServiceOptions,
-        &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport>,
-{
-    pub(crate) fn new(finalize: F, recover: R) -> Self {
-        Self { finalize, recover }
+impl<'a> TestCookSideEffects<'a> {
+    pub(crate) fn new<F, R>(finalize: F, recover: R) -> Self
+    where
+        F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>
+            + 'a,
+        R: FnMut(
+                &AgentTaskCookServiceOptions,
+                &MovingBaseCookRecovery,
+            ) -> Result<AgentTaskPromotionReport>
+            + 'a,
+    {
+        Self {
+            finalize: Box::new(finalize),
+            recover: Box::new(recover),
+        }
     }
 }
 
 #[cfg(test)]
-impl<F, R> CookSideEffectService for TestCookSideEffects<F, R>
-where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
-    R: FnMut(
-        &AgentTaskCookServiceOptions,
-        &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport>,
-{
+impl CookSideEffectService for TestCookSideEffects<'_> {
     fn promote(
         &mut self,
         lifecycle_store: &AgentTaskLifecycleStore,
@@ -2532,7 +2558,10 @@ pub fn run_cook_batch_with_control(
                         // join their own metadata onto.
                         let cell = match claim_disposition(&batch_id, &cook, control) {
                             ClaimDisposition::Run => {
-                                let cell = match run_cook(cook.clone(), executor.clone()) {
+                                let cell = match run_cook(CookContext::new(
+                                    cook.clone(),
+                                    executor.clone(),
+                                )) {
                                     Ok(result) => AgentTaskCookBatchCellReport {
                                         cook_id: cook.cook_id.clone(),
                                         initial_run_id: cook.initial_run_id.clone(),
@@ -2997,12 +3026,14 @@ where
             &format!("homeboy agent-task fanout resume {batch_id}"),
         )?;
     }
-    Ok(
-        run_cook_with_finalizer(options, executor, |options, run_id, promotion| {
-            finalize(options, run_id, promotion)
-        })?
-        .value,
-    )
+    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
+        finalize(options, run_id, promotion)
+    });
+    Ok(run_cook(CookContext {
+        side_effects: Some(Box::new(side_effects)),
+        ..CookContext::new(options, executor)
+    })?
+    .value)
 }
 
 /// The durable checkpoint an owner outside this process reads.
@@ -3654,26 +3685,128 @@ fn reserve_cook_materialization_capacity(
     )
 }
 
-pub fn run_cook(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_store(&store, options, executor)
+/// Everything one Cook run needs. Replaces the 15-variant `run_cook*` family:
+/// each variant was this struct with a different subset of fields defaulted,
+/// spelled out as a name because Rust has no default arguments.
+pub struct CookContext<'a> {
+    pub options: AgentTaskCookServiceOptions,
+    pub executor: SharedAgentTaskExecutor,
+    /// `None` resolves `CookRecipeStore::from_current_data_root()`. This is the
+    /// last ambient fallback in the cook surface and is scheduled for removal
+    /// (see #7505) — it is `Option` here only to keep this change reviewable.
+    pub store: Option<&'a CookRecipeStore>,
+    /// `None` resolves `AgentTaskLifecycleStore::from_current_environment()`.
+    /// A failure to resolve is reported through
+    /// `durable_cook_error_report_with_store`, exactly where the former
+    /// `run_cook_with_boundaries_reported` routed it, so an unresolvable
+    /// environment still returns the durable report for an already-created Cook
+    /// rather than a bare error.
+    pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
+    /// `None` installs the production [`DefaultCookSideEffects`] wired to
+    /// `finalize_or_load_cook_pr_with_stores` against the resolved recipe store.
+    pub side_effects: Option<Box<dyn CookSideEffectService + 'a>>,
+    pub durable_observer: Option<&'a CookProgressObserver<'a>>,
+    /// Admit an authenticated historical terminal recipe as a continuation
+    /// target. Only the terminal-continuation entry point sets this.
+    pub allow_historical_terminal: bool,
 }
 
-/// Run Cook against an explicit durable recipe store. Lifecycle storage remains
-/// ambient; this boundary scopes only Cook recipes and continuations.
-pub fn run_cook_with_store(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let side_effects =
-        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
-            finalize_or_load_cook_pr_with_stores(store, lifecycle_store, options, run_id, promotion)
-        });
-    run_cook_with_boundaries_with_store(store, options, executor, side_effects)
+impl<'a> CookContext<'a> {
+    pub fn new(options: AgentTaskCookServiceOptions, executor: SharedAgentTaskExecutor) -> Self {
+        Self {
+            options,
+            executor,
+            store: None,
+            lifecycle_store: None,
+            side_effects: None,
+            durable_observer: None,
+            allow_historical_terminal: false,
+        }
+    }
+}
+
+/// Run one Cook.
+///
+/// The env-resolving entry point: it resolves whatever roots and side-effect
+/// boundary the caller did not supply, then hands the spine explicit ones. Every
+/// exit funnels through one notification point — including the durable-failure
+/// report built from a controller error — so the failure path is not the one
+/// that stays silent.
+pub fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let CookContext {
+        options,
+        executor,
+        store,
+        lifecycle_store,
+        side_effects,
+        durable_observer,
+        allow_historical_terminal,
+    } = ctx;
+
+    let resolved_store;
+    let store = match store {
+        Some(store) => store,
+        None => {
+            resolved_store = CookRecipeStore::from_current_data_root()?;
+            &resolved_store
+        }
+    };
+
+    // The spine used to resolve this store itself. Resolve it here instead and
+    // keep the failure routed exactly where the spine's own resolution error
+    // used to land, so an unresolvable environment still returns the durable
+    // report for an already-created Cook rather than a bare error.
+    let resolved_lifecycle_store;
+    let lifecycle_store = match lifecycle_store {
+        Some(lifecycle_store) => lifecycle_store,
+        None => match AgentTaskLifecycleStore::from_current_environment() {
+            Ok(lifecycle_store) => {
+                resolved_lifecycle_store = lifecycle_store;
+                &resolved_lifecycle_store
+            }
+            // No lifecycle store exists to inject: resolving one is what just
+            // failed. The report still names the recipe roots the caller owns.
+            Err(error) => {
+                return durable_cook_error_report_with_store(store, None, &options, error)
+            }
+        },
+    };
+
+    let mut side_effects: Box<dyn CookSideEffectService + '_> = match side_effects {
+        Some(side_effects) => side_effects,
+        None => Box::new(DefaultCookSideEffects::new(
+            |lifecycle_store, options, run_id, promotion| {
+                finalize_or_load_cook_pr_with_stores(
+                    store,
+                    lifecycle_store,
+                    options,
+                    run_id,
+                    promotion,
+                )
+            },
+        )),
+    };
+
+    let notification_options = options.clone();
+    let result = run_cook_reported(
+        store,
+        lifecycle_store,
+        options,
+        executor,
+        side_effects.as_mut(),
+        durable_observer,
+        allow_historical_terminal,
+    );
+    if let Ok(result) = &result {
+        if result.value.disposition.is_terminal() {
+            crate::agent_task_notify::cook_terminal(
+                &result.value,
+                cook_component(&notification_options).as_deref(),
+                result.exit_code,
+            );
+        }
+    }
+    result
 }
 
 pub fn run_terminal_cook_continuation(
@@ -3691,93 +3824,12 @@ pub fn run_terminal_cook_continuation(
                 promotion,
             )
         });
-    run_cook_with_boundaries_observed_policy_with_store(
-        &store,
-        options,
-        executor,
-        side_effects,
-        None,
-        true,
-    )
-}
-
-/// Run Cook while reporting the authoritative attempt only after its durable
-/// recipe has been persisted. Callers must treat pre-observer work as
-/// invocation-local because no run recovery identity exists yet.
-pub fn run_cook_with_durable_observer(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    observer: &CookProgressObserver<'_>,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    let side_effects =
-        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
-            finalize_or_load_cook_pr_with_stores(
-                &store,
-                lifecycle_store,
-                options,
-                run_id,
-                promotion,
-            )
-        });
-    run_cook_with_boundaries_observed_with_store(
-        &store,
-        options,
-        executor,
-        side_effects,
-        Some(observer),
-    )
-}
-
-pub(crate) fn run_cook_with_finalizer<F>(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    finalize: F,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
-{
-    let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_finalizer_with_store(&store, options, executor, finalize)
-}
-
-pub(crate) fn run_cook_with_finalizer_with_store<F>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    mut finalize: F,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
-{
-    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
-        finalize(options, run_id, promotion)
-    });
-    run_cook_with_boundaries_with_store(store, options, executor, side_effects)
-}
-
-fn run_cook_with_boundaries<S>(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_boundaries_with_store(&store, options, executor, side_effects)
-}
-
-fn run_cook_with_boundaries_with_store<S>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    run_cook_with_boundaries_observed_with_store(store, options, executor, side_effects, None)
+    run_cook(CookContext {
+        store: Some(&store),
+        side_effects: Some(Box::new(side_effects)),
+        allow_historical_terminal: true,
+        ..CookContext::new(options, executor)
+    })
 }
 
 /// The component a cook is working on, for notification attribution.
@@ -3822,145 +3874,20 @@ pub(crate) fn exhausted_budget_guidance(
     )
 }
 
-fn run_cook_with_boundaries_observed<S>(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_boundaries_observed_with_store(
-        &store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-    )
-}
-
-fn run_cook_with_boundaries_observed_with_store<S>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    run_cook_with_boundaries_observed_policy_with_store(
-        store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        false,
-    )
-}
-
-fn run_cook_with_boundaries_observed_policy<S>(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_boundaries_observed_policy_with_store(
-        &store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    )
-}
-
-fn run_cook_with_boundaries_observed_policy_with_store<S>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    // Every exit from the observed boundary funnels through one notification
-    // point — including the durable-failure report built from a controller
-    // error — so the failure path is not the one that stays silent.
-    let notification_options = options.clone();
-    let result = run_cook_with_boundaries_reported(
-        store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    );
-    if let Ok(result) = &result {
-        if result.value.disposition.is_terminal() {
-            crate::agent_task_notify::cook_terminal(
-                &result.value,
-                cook_component(&notification_options).as_deref(),
-                result.exit_code,
-            );
-        }
-    }
-    result
-}
-
-fn run_cook_with_boundaries_reported<S>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    // The spine used to resolve this store itself. Resolve it here instead and
-    // keep the failure routed exactly where the spine's own resolution error
-    // used to land, so an unresolvable environment still returns the durable
-    // report for an already-created Cook rather than a bare error.
-    let lifecycle_store = match AgentTaskLifecycleStore::from_current_environment() {
-        Ok(lifecycle_store) => lifecycle_store,
-        Err(error) => return durable_cook_error_report_with_store(store, &options, error),
-    };
-    run_cook_with_boundaries_reported_with_stores(
-        store,
-        &lifecycle_store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    )
-}
-
-fn run_cook_with_boundaries_reported_with_stores<S>(
+/// Report the spine's outcome against explicit roots: convert a post-
+/// materialization controller error into the durable Cook result contract, then
+/// publish terminal progress for the attempt that produced it.
+fn run_cook_reported(
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     options: AgentTaskCookServiceOptions,
     executor: SharedAgentTaskExecutor,
-    side_effects: S,
+    side_effects: &mut dyn CookSideEffectService,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let failure_options = options.clone();
-    let result = match run_cook_with_boundaries_observed_inner_with_stores(
+    let result = match run_cook_spine(
         store,
         lifecycle_store,
         options,
@@ -4008,7 +3935,12 @@ where
                     ));
                 }
             }
-            return durable_cook_error_report_with_store(store, &failure_options, error);
+            return durable_cook_error_report_with_store(
+                store,
+                Some(lifecycle_store),
+                &failure_options,
+                error,
+            );
         }
     };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
@@ -4028,7 +3960,12 @@ where
             attempt,
             Some(&result.value.status),
         ) {
-            return durable_cook_error_report_with_store(store, &failure_options, error);
+            return durable_cook_error_report_with_store(
+                store,
+                Some(lifecycle_store),
+                &failure_options,
+                error,
+            );
         }
         if phase == "terminal" {
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
@@ -4037,7 +3974,12 @@ where
                 result.exit_code == 0,
                 result.exit_code,
             ) {
-                return durable_cook_error_report_with_store(store, &failure_options, error);
+                return durable_cook_error_report_with_store(
+                    store,
+                    Some(lifecycle_store),
+                    &failure_options,
+                    error,
+                );
             }
         }
     }
@@ -4052,30 +3994,61 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
-    durable_cook_error_report_with_store(&store, options, error)
+    // The fully ambient entry point: it resolves the recipe root and holds no
+    // lifecycle store, so nothing is injected here and nothing is split.
+    durable_cook_error_report_with_store(&store, None, options, error)
 }
 
+/// The durable failure report, bound to the roots its caller owns.
+///
+/// `lifecycle_store` is `Option` because one caller genuinely has none: `run_cook`
+/// routes here precisely when `AgentTaskLifecycleStore::from_current_environment()`
+/// failed, so there is no store to inject and the ambient reads below will fail
+/// the same way they always did. Every caller that *does* hold a lifecycle store
+/// now passes it.
+///
+/// That distinction is the whole point. This function reads the recipe from an
+/// injected `CookRecipeStore` and used to write the controller failure through
+/// ambient `agent_task_lifecycle` shims, so a Cook whose recipe lives in an
+/// injected home had its failure diagnostic recorded in whatever home the
+/// environment pointed at — and nothing failed while doing it: the report still
+/// returned, the recipe still read back correct, and only the cause went
+/// missing. That is the split `KNOWN_MIXED_STORE_FUNCTIONS` was written for; it
+/// stayed invisible to the scanner because it reached through wrappers instead
+/// of naming a store constructor (#7505).
 fn durable_cook_error_report_with_store(
     store: &CookRecipeStore,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
     options: &AgentTaskCookServiceOptions,
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    // The attempt record is presentation only — a missing one degrades to an
+    // empty attempts list, exactly as the ambient read's `.ok()` already did.
+    let attempt_record = |run_id: &str| match lifecycle_store {
+        Some(lifecycle_store) => agent_task_lifecycle::status_in_store(
+            lifecycle_store,
+            run_id,
+            agent_task_lifecycle::AgentTaskStatusOptions::default(),
+            false,
+        )
+        .ok()
+        .map(|outcome| outcome.record),
+        None => agent_task_lifecycle::status(run_id).ok(),
+    };
     if store.recipe_exists(&options.cook_id) {
         let attempts = store
             .load_recipe(&options.cook_id)
             .ok()
             .and_then(|recipe| recipe.attempts.last().cloned())
             .and_then(|attempt| {
-                agent_task_lifecycle::status(&attempt.run_id)
-                    .ok()
-                    .map(|record| AgentTaskCookAttemptReport {
-                        attempt: attempt.attempt,
-                        run_id: attempt.run_id,
-                        run_state: format!("{:?}", record.state),
-                        aggregate_path: record.aggregate_path,
-                        promotion: None,
-                        feedback: None,
-                    })
+                attempt_record(&attempt.run_id).map(|record| AgentTaskCookAttemptReport {
+                    attempt: attempt.attempt,
+                    run_id: attempt.run_id,
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                })
             })
             .into_iter()
             .collect();
@@ -4103,11 +4076,32 @@ fn durable_cook_error_report_with_store(
             context.phase = "controller".to_string();
             context.reason_code = error.code.as_str().to_string();
             context.diagnostic = Some(bounded_error_diagnostic(&error));
-            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
-                agent_task_lifecycle::record_cook_controller_failure(
-                    &options.initial_run_id,
-                    context.diagnostic.as_ref().expect("controller diagnostic"),
-                )?;
+            // The existence check and the write that follows it must name one
+            // installation: probing the ambient home and then recording into
+            // the injected one (or the reverse) is a check that answers about a
+            // record the write never touches.
+            let diagnostic = context.diagnostic.as_ref().expect("controller diagnostic");
+            match lifecycle_store {
+                Some(lifecycle_store) => {
+                    if agent_task_lifecycle::run_record_exists_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                    )? {
+                        agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            lifecycle_store,
+                            &options.initial_run_id,
+                            diagnostic,
+                        )?;
+                    }
+                }
+                None => {
+                    if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                        agent_task_lifecycle::record_cook_controller_failure(
+                            &options.initial_run_id,
+                            diagnostic,
+                        )?;
+                    }
+                }
             }
         }
         return Ok(report);
@@ -4115,47 +4109,46 @@ fn durable_cook_error_report_with_store(
     Err(error)
 }
 
-fn run_cook_with_boundaries_observed_inner<S>(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
-    // Env-resolving entry point. Both stores are resolved here, once, so the
-    // spine below only ever sees explicit roots.
-    let store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    run_cook_with_boundaries_observed_inner_with_stores(
-        &store,
-        &lifecycle_store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    )
+/// [`agent_task_lifecycle::status`] against an explicitly injected lifecycle
+/// root.
+///
+/// The ambient `status()` is exactly this call with a store resolved from the
+/// process environment, so the two agree on everything except which
+/// installation they read — which is the only difference that matters on a
+/// spine whose caller chose its own roots.
+///
+/// One asymmetry is worth naming rather than hiding: `status_in_store` derives
+/// its recipe store from `lifecycle_store.data_root()`, so a caller that passes
+/// a recipe store rooted somewhere else still gets a recipe view derived from
+/// the lifecycle root. That is not made worse here — the ambient form derived it
+/// from the ambient root, which agreed with neither — and closing it means
+/// giving `status_in_store` both roots, which is its own change.
+fn rooted_status(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    Ok(agent_task_lifecycle::status_in_store(
+        lifecycle_store,
+        run_id,
+        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+        false,
+    )?
+    .record)
 }
 
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
 /// instead of wherever the process environment happens to point (#7505).
-fn run_cook_with_boundaries_observed_inner_with_stores<S>(
+fn run_cook_spine(
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     mut options: AgentTaskCookServiceOptions,
     executor: SharedAgentTaskExecutor,
-    mut side_effects: S,
+    side_effects: &mut dyn CookSideEffectService,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    S: CookSideEffectService,
-{
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
@@ -4481,9 +4474,12 @@ where
                 options.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
-                    agent_task_lifecycle::exact_record(&options.initial_run_id)
-                        .ok()
-                        .as_ref(),
+                    agent_task_lifecycle::exact_record_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                    )
+                    .ok()
+                    .as_ref(),
                     &error,
                 ),
                 error,
@@ -4528,9 +4524,12 @@ where
             options.cook_id.clone(),
             Vec::new(),
             pre_execution_failure_details(
-                agent_task_lifecycle::exact_record(&options.initial_run_id)
-                    .ok()
-                    .as_ref(),
+                agent_task_lifecycle::exact_record_in_store(
+                    lifecycle_store,
+                    &options.initial_run_id,
+                )
+                .ok()
+                .as_ref(),
                 &error,
             ),
             error,
@@ -4886,8 +4885,7 @@ where
                                 // provider execution is active, this heartbeat
                                 // would otherwise sample only its own `ps`
                                 // subprocess while that cleanup completes.
-                                if !agent_task_lifecycle::has_active_provider_execution(
-                                    &heartbeat_run_id,
+                                if !agent_task_lifecycle::has_active_provider_execution_in_store(heartbeat_lifecycle_store, &heartbeat_run_id,
                                 )
                                 .unwrap_or(true)
                                 {
@@ -4897,8 +4895,7 @@ where
                                     continue;
                                 }
                                 next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
-                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid(
-                                    &heartbeat_run_id,
+                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid_in_store(heartbeat_lifecycle_store, &heartbeat_run_id,
                                 )
                                 .ok()
                                 .flatten()
@@ -5053,7 +5050,7 @@ where
                         dispatch_plan,
                     )?;
                 }
-                let record = match agent_task_lifecycle::status(&run_id) {
+                let record = match rooted_status(lifecycle_store, &run_id) {
                     Ok(record)
                         if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>
                     {
@@ -5068,7 +5065,7 @@ where
                             &error,
                             phase,
                         )?;
-                        agent_task_lifecycle::status(&run_id).ok()
+                        rooted_status(lifecycle_store, &run_id).ok()
                     }
                     Ok(record) => Some(record),
                     Err(_) => {
@@ -5083,7 +5080,7 @@ where
                             &error,
                             phase,
                         )?;
-                        agent_task_lifecycle::status(&run_id).ok()
+                        rooted_status(lifecycle_store, &run_id).ok()
                     }
                 };
                 let pre_execution_failure = pre_execution_failure_details(record.as_ref(), &error);
@@ -5146,7 +5143,7 @@ where
         let mut record = if rooted_promotion_continuation {
             lifecycle_store.read_record(&run_id)?
         } else {
-            agent_task_lifecycle::status(&run_id)?
+            rooted_status(lifecycle_store, &run_id)?
         };
         // A local controller can disappear after the provider ledger records a
         // terminal result but before the run projection is terminalized. Repair
@@ -5160,7 +5157,7 @@ where
             record = if rooted_promotion_continuation {
                 lifecycle_store.read_record(&run_id)?
             } else {
-                agent_task_lifecycle::status(&run_id)?
+                rooted_status(lifecycle_store, &run_id)?
             };
         }
         let controller_owned_staging = record

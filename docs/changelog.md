@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.25] - 2026-08-20
+
+### Changed
+- root the Cook spine's remaining ambient reads
+- stop the durable failure report splitting its roots
+- collapse the run_cook variant family into CookContext
+- delete the ambient store wrappers nobody calls
+- erase the executor type parameter
+
+### Fixed
+- compact recovered attempt worktrees
+
 ## [0.350.24] - 2026-08-19
 
 ### Fixed
