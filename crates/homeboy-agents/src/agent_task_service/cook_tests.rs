@@ -1164,14 +1164,13 @@ fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_colla
         resumed_options.initial_run_id = successful.to_string();
         let promotions = Arc::new(AtomicUsize::new(0));
         let selected_artifact = Arc::new(Mutex::new(None));
-        let result = run_cook_with_boundaries(
-            resumed_options,
-            Arc::new(UnusedExecutor),
-            CanonicalSelectionSideEffects {
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(CanonicalSelectionSideEffects {
                 promotions: Arc::clone(&promotions),
                 selected_artifact: Arc::clone(&selected_artifact),
-            },
-        )
+            })),
+            ..CookContext::new(resumed_options, Arc::new(UnusedExecutor))
+        })
         .unwrap();
         assert_eq!(result.value.status, "green_no_finalize");
         assert_eq!(promotions.load(Ordering::SeqCst), 1);
@@ -1209,14 +1208,13 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
             ],
         );
         let promotions = Arc::new(AtomicUsize::new(0));
-        let result = run_cook_with_boundaries(
-            options.clone(),
-            Arc::new(UnusedExecutor),
-            CanonicalSelectionSideEffects {
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(CanonicalSelectionSideEffects {
                 promotions: Arc::clone(&promotions),
                 selected_artifact: Arc::new(Mutex::new(None)),
-            },
-        )
+            })),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
         .unwrap();
         let record = agent_task_lifecycle::status(&options.initial_run_id).unwrap();
         assert_eq!(result.value.status, "selection_required");
@@ -1304,12 +1302,12 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
         .read_record(run_id)
         .expect("read untouched root");
 
-    let result = run_cook_with_boundaries_observed_inner_with_stores(
+    let result = run_cook_spine(
         &recipe_store,
         &supplied_store,
         options,
         Arc::new(UnusedExecutor),
-        SelectionRequiredSideEffects,
+        &mut SelectionRequiredSideEffects,
         None,
         false,
     )
@@ -1767,12 +1765,12 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
     sibling.task_id = "sibling".to_string();
     options.initial_plan.tasks.push(sibling);
 
-    let error = run_cook_with_boundaries_observed_inner_with_stores(
+    let error = run_cook_spine(
         &recipe_store,
         &lifecycle_store,
         options,
         Arc::new(UnusedExecutor),
-        DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+        &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
         None,
         false,
     )
@@ -2340,16 +2338,18 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         })
         .unwrap();
 
-        let first =
-            run_cook_with_finalizer(options.clone(), Arc::new(UnusedExecutor), |_, _, _| {
+        let first = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
                 Err(Error::validation_invalid_argument(
                     "base",
                     "HEAD is behind or diverged from resolved base `main`",
                     None,
                     None,
                 ))
-            })
-            .unwrap();
+            }))),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
+        .unwrap();
         assert_eq!(first.value.status, "candidate_recoverable");
         let claim = crate::agent_task_service::claim_continuation()
             .unwrap()
@@ -2358,10 +2358,8 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         let finalization_count = Arc::new(AtomicUsize::new(0));
         let rebase_count_for_recover = Arc::clone(&rebase_count);
         let finalization_count_for_finalize = Arc::clone(&finalization_count);
-        let second = run_cook_with_boundaries(
-            options.clone(),
-            Arc::new(UnusedExecutor),
-            TestCookSideEffects::new(
+        let second = run_cook(CookContext {
+            side_effects: Some(Box::new(TestCookSideEffects::new(
                 move |_: &_, _: &_, promotion: &AgentTaskPromotionReport| {
                     finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(
@@ -2383,8 +2381,9 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
                         serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
                     Ok(refreshed)
                 },
-            ),
-        )
+            ))),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
         .unwrap();
         claim.complete().unwrap();
         assert_eq!(second.value.status, "review_ready");
@@ -2411,18 +2410,17 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
             .unwrap(),
         )
         .unwrap();
-        let third = run_cook_with_boundaries(
-            options,
-            Arc::new(UnusedExecutor),
-            TestCookSideEffects::new(
+        let third = run_cook(CookContext {
+            side_effects: Some(Box::new(TestCookSideEffects::new(
                 |_: &_, _: &_, _: &_| panic!("failed rebased gates must not finalize"),
                 |_: &AgentTaskCookServiceOptions, recovery: &MovingBaseCookRecovery| {
                     let mut failed = recovery.promotion.clone();
                     failed.status = AgentTaskPromotionStatus::GateFailed;
                     Ok(failed)
                 },
-            ),
-        )
+            ))),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
         .unwrap();
         assert_eq!(third.value.status, "candidate_recoverable");
         assert!(third
@@ -2610,16 +2608,18 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
             record.metadata["provider_executions_consumed"] = serde_json::json!(1);
         })
         .unwrap();
-        let first =
-            run_cook_with_finalizer(options.clone(), Arc::new(UnusedExecutor), |_, _, _| {
+        let first = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
                 Err(Error::validation_invalid_argument(
                     "base",
                     "HEAD is behind or diverged from resolved base `main`",
                     None,
                     None,
                 ))
-            })
-            .unwrap();
+            }))),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
+        .unwrap();
         assert_eq!(first.value.status, "candidate_recoverable");
         assert!(moving_base_recovery_for_run(run_id).unwrap().is_some());
         let claim = crate::agent_task_service::claim_continuation()
@@ -2628,16 +2628,17 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
-        let second = run_cook_with_finalizer(
-            options.clone(),
-            Arc::new(UnusedExecutor),
-            move |_, _, recovered| {
-                finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
-                assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
-                Ok(serde_json::json!({"status": "review_ready"}))
-            },
-        )
+        let second = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(
+                move |_, _, _, recovered| {
+                    finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
+                    assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
+                    Ok(serde_json::json!({"status": "review_ready"}))
+                },
+            ))),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
         .unwrap();
         assert_eq!(second.value.status, "review_ready");
         claim.complete().unwrap();
@@ -3736,8 +3737,8 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
             serde_json::json!({ "kind": "explicit_cwd" });
         std::fs::write(target.join("untracked.txt"), "user drift\n").expect("write drift");
 
-        let result =
-            run_cook(options, Arc::new(UnusedExecutor)).expect("Cook reports admission failure");
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook reports admission failure");
         assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     });
@@ -3835,7 +3836,7 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         assert_eq!(error.details["field"], "to_worktree");
         assert!(error.message.contains("no longer active"));
 
-        let result = run_cook(reconstructed, Arc::new(UnusedExecutor))
+        let result = run_cook(CookContext::new(reconstructed, Arc::new(UnusedExecutor)))
             .expect("durable Cook failure report before provider execution");
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "durable_failure");
@@ -3860,26 +3861,24 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
     set_initial_recipe_creation_barrier_for_test(Some(Arc::clone(&barrier)));
     let (winner_result, loser_result) = std::thread::scope(|scope| {
         let winner = scope.spawn(|| {
-            run_cook_with_boundaries_reported_with_stores(
-                &store,
-                &lifecycle_store,
-                winner,
-                Arc::new(UnusedExecutor),
-                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-                None,
-                false,
-            )
+            run_cook(CookContext {
+                store: Some(&store),
+                lifecycle_store: Some(&lifecycle_store),
+                side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+                    Ok(serde_json::json!({}))
+                }))),
+                ..CookContext::new(winner, Arc::new(UnusedExecutor))
+            })
         });
         let loser = scope.spawn(|| {
-            run_cook_with_boundaries_reported_with_stores(
-                &store,
-                &lifecycle_store,
-                loser,
-                Arc::new(UnusedExecutor),
-                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-                None,
-                false,
-            )
+            run_cook(CookContext {
+                store: Some(&store),
+                lifecycle_store: Some(&lifecycle_store),
+                side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+                    Ok(serde_json::json!({}))
+                }))),
+                ..CookContext::new(loser, Arc::new(UnusedExecutor))
+            })
         });
         (winner.join().unwrap(), loser.join().unwrap())
     });
@@ -4543,15 +4542,16 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
 
         let finalizations = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&finalizations);
-        let result = run_cook_with_finalizer(
-            options,
-            Arc::new(UnusedExecutor),
-            move |_, finalized_run, _| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(finalized_run, run_id);
-                Ok(serde_json::json!({"status": "review_ready"}))
-            },
-        )
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(
+                move |_, _, finalized_run, _| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(finalized_run, run_id);
+                    Ok(serde_json::json!({"status": "review_ready"}))
+                },
+            ))),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
         .expect("continue through finalization");
 
         assert_eq!(result.value.status, "review_ready");
@@ -4573,13 +4573,13 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());
-        let result = run_cook(
+        let result = run_cook(CookContext::new(
             AgentTaskCookServiceOptions {
                 initial_run_id: run_id.to_string(),
                 ..options
             },
             Arc::new(UnusedExecutor),
-        )
+        ))
         .expect("cook returns the persisted dispatch failure");
 
         assert_eq!(result.exit_code, 1);
@@ -4745,7 +4745,7 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         });
         let exact_handle = options.to_worktree.clone();
 
-        let result = run_cook(options.clone(), Arc::new(UnusedExecutor))
+        let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("Cook records lookup failure");
 
         assert_eq!(result.exit_code, 1);
@@ -4829,7 +4829,7 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         resumed_options.initial_run_id = retry.record.run_id.clone();
         resumed_options.initial_plan =
             agent_task_lifecycle::load_plan(&retry.record.run_id).expect("load durable retry plan");
-        let resumed = run_cook(resumed_options, Arc::new(UnusedExecutor))
+        let resumed = run_cook(CookContext::new(resumed_options, Arc::new(UnusedExecutor)))
             .expect("same Cook retry materializes its recovered provider workspace");
         assert_eq!(resumed.value.cook_id, cook_id);
         let resumed_plan =
@@ -5054,7 +5054,7 @@ fn deferred_ensure_only_provider_fails_after_durable_cook_admission() {
             },
         });
 
-        let result = run_cook(options, Arc::new(UnusedExecutor))
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("Cook reports the postcondition failure");
 
         assert_eq!(result.exit_code, 1);
@@ -5138,12 +5138,12 @@ fn deferred_ensure_only_failure_uses_injected_recipe_and_lifecycle_stores() {
             },
         });
 
-        let result = run_cook_with_boundaries_observed_inner_with_stores(
+        let result = run_cook_spine(
             &recipe_store,
             &lifecycle_store,
             options,
             Arc::new(UnusedExecutor),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             false,
         )
@@ -5223,7 +5223,9 @@ fn review_12349_deferred_lookup_cancellation_preserves_cancelled_state() {
             "worktree_provider_id": "fixture",
         });
 
-        let cook = std::thread::spawn(move || run_cook(options, Arc::new(UnusedExecutor)));
+        let cook = std::thread::spawn(move || {
+            run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+        });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !marker.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -5309,8 +5311,11 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
                 .push((event.phase.to_string(), event.detail.map(str::to_string)));
             Ok(())
         };
-        let result = run_cook_with_durable_observer(options, Arc::new(UnusedExecutor), &observer)
-            .expect("Cook records split lookup timeout");
+        let result = run_cook(CookContext {
+            durable_observer: Some(&observer),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("Cook records split lookup timeout");
         assert_eq!(result.value.status, "pre_execution_failure");
         let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -5773,8 +5778,8 @@ fn pending_repo_only_lookup_rejects_provider_workspace_from_another_repository()
             "provenance": "--repo:requested-repository",
         });
 
-        let result =
-            run_cook(options, Arc::new(UnusedExecutor)).expect("Cook records identity failure");
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook records identity failure");
 
         assert_eq!(result.value.status, "pre_execution_failure");
         let record = agent_task_lifecycle::status(run_id).expect("durable identity failure");
@@ -6486,8 +6491,8 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observer_records = observed.clone();
-        let result =
-            run_cook_with_durable_observer(options, Arc::new(UnusedExecutor), &move |event| {
+        let result = run_cook(CookContext {
+            durable_observer: Some(&move |event: &CookProgressEvent<'_>| {
                 let (phase, cook, run) = (event.phase, event.cook_id, event.run_id);
                 let status =
                     agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
@@ -6500,8 +6505,10 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     .expect("observer records lock")
                     .push((phase.to_string(), cook.to_string(), run.to_string()));
                 Ok(())
-            })
-            .expect("restart repairs the Cook alias");
+            }),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("restart repairs the Cook alias");
 
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         assert_eq!(
@@ -6607,8 +6614,8 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observer_records = observed.clone();
-        let result =
-            run_cook_with_durable_observer(options, Arc::new(UnusedExecutor), &move |event| {
+        let result = run_cook(CookContext {
+            durable_observer: Some(&move |event: &CookProgressEvent<'_>| {
                 let (phase, cook, run) = (event.phase, event.cook_id, event.run_id);
                 observer_records
                     .lock()
@@ -6623,8 +6630,10 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
                     run
                 );
                 Ok(())
-            })
-            .expect("interrupted materialization returns a durable report");
+            }),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("interrupted materialization returns a durable report");
 
         // 1. Identity is published before any materialization work.
         assert_eq!(
@@ -6681,7 +6690,8 @@ fn provider_dispatch_observes_a_durable_provider_start_boundary() {
             }),
         );
 
-        let result = run_cook(options, Arc::new(UnusedExecutor)).expect("dispatch Cook");
+        let result =
+            run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).expect("dispatch Cook");
 
         assert_eq!(result.value.status, "in_flight");
         assert_eq!(
@@ -6793,18 +6803,30 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             first_run_id
         );
 
-        let result = run_cook_with_boundaries_observed_inner(
+        // This case drives the spine directly, exactly as the former
+        // `run_cook_with_boundaries_observed_inner` did: both roots resolve from
+        // the ambient environment and no durable-error report or terminal
+        // notification wraps the outcome.
+        let ambient_recipe_store =
+            CookRecipeStore::from_current_data_root().expect("ambient recipe store");
+        let ambient_lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+        let result = run_cook_spine(
+            &ambient_recipe_store,
+            &ambient_lifecycle_store,
             options.clone(),
             Arc::new(UnusedExecutor),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             false,
         )
         .expect("continuation repairs and dispatches recipe-bound retry");
-        let repeated = run_cook_with_boundaries_observed_inner(
+        let repeated = run_cook_spine(
+            &ambient_recipe_store,
+            &ambient_lifecycle_store,
             options,
             Arc::new(UnusedExecutor),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             false,
         )
@@ -7187,7 +7209,8 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
             "branch": "fix/cook-admission-retry",
         });
 
-        run_cook(options, Arc::new(UnusedExecutor)).expect("persist admission failure");
+        run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("persist admission failure");
         let failed_plan = agent_task_lifecycle::load_plan(run_id).expect("failed plan");
         let transient_root = std::path::PathBuf::from(
             failed_plan.tasks[0]
@@ -7280,7 +7303,8 @@ fn retry_reports_missing_candidate_source_as_retryable_recovery() {
             "branch": "fix/cook-missing-worktree",
         });
 
-        run_cook(options, Arc::new(UnusedExecutor)).expect("persist admission failure");
+        run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("persist admission failure");
         std::fs::remove_dir_all(&source).expect("remove managed worktree");
 
         let error = agent_task_lifecycle::retry(run_id, Some("cook-missing-worktree-retry"))
@@ -7309,7 +7333,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
         options.initial_run_id = first_run_id.to_string();
         options.max_attempts = 2;
 
-        let failure = run_cook(options.clone(), Arc::new(UnusedExecutor))
+        let failure = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
         assert_eq!(failure.value.status, "durable_failure");
@@ -7325,7 +7349,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
             Value::Bool(true)
         );
 
-        let resumed = run_cook(options, Arc::new(UnusedExecutor))
+        let resumed = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("repaired runner resumes the immutable cook attempt");
         assert_eq!(resumed.value.status, "in_flight");
         assert_eq!(
@@ -7349,7 +7373,7 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         options.source_worktree_path = Some(temp.path().to_path_buf());
         options.max_attempts = 3;
 
-        let result = run_cook(options, Arc::new(UnusedExecutor))
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook records materialization failure");
 
         assert_eq!(result.value.status, "pre_execution_failure");
@@ -7385,8 +7409,11 @@ fn run_cook_persists_recipe_in_explicit_store_only() {
         options.initial_run_id = "cook-explicit-recipe-store-attempt-1".to_string();
         options.source_worktree_path = Some(source.path().to_path_buf());
 
-        let result = run_cook_with_store(&store, options, Arc::new(UnusedExecutor))
-            .expect("Cook reports the lifecycle materialization failure");
+        let result = run_cook(CookContext {
+            store: Some(&store),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("Cook reports the lifecycle materialization failure");
 
         assert_eq!(result.value.status, "durable_failure");
         assert!(store.recipe_exists(cook_id));
@@ -7493,7 +7520,9 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
             "branch": "fix/cook-slow-baseline",
         });
         let resume_options = options.clone();
-        let controller = std::thread::spawn(move || run_cook(options, Arc::new(UnusedExecutor)));
+        let controller = std::thread::spawn(move || {
+            run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+        });
         let entered_staging = (0..500).any(|_| {
             if entered.exists() {
                 true
@@ -7526,8 +7555,8 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         assert_eq!(result.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
-        let resumed =
-            run_cook(resume_options, Arc::new(UnusedExecutor)).expect("resume accepted handoff");
+        let resumed = run_cook(CookContext::new(resume_options, Arc::new(UnusedExecutor)))
+            .expect("resume accepted handoff");
         assert_eq!(resumed.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     });
@@ -7547,7 +7576,7 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
         options.initial_run_id = "cook-runner-exhaustion-attempt-1".to_string();
         options.max_attempts = 2;
 
-        let failure = run_cook(options, Arc::new(UnusedExecutor))
+        let failure = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
         assert_eq!(failure.value.status, "durable_failure");
@@ -7599,8 +7628,8 @@ fn cook_prepares_transport_before_pinning_runtime_generation() {
         options.provider_command = Some("fixture-provider".to_string());
         options.initial_run_id = "cook-pin-ordering-attempt-1".to_string();
 
-        let result =
-            run_cook(options, Arc::new(UnusedExecutor)).expect("cook accepts detached handoff");
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("cook accepts detached handoff");
 
         assert_eq!(result.value.status, "in_flight");
         assert!(
@@ -7623,13 +7652,13 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
                 }),
             );
         options.provider_command = Some("fixture-provider".to_string());
-        let result = run_cook(
+        let result = run_cook(CookContext::new(
             AgentTaskCookServiceOptions {
                 initial_run_id: run_id.to_string(),
                 ..options
             },
             Arc::new(UnusedExecutor),
-        )
+        ))
         .expect("cook returns the persisted runtime mismatch");
 
         let record = agent_task_lifecycle::status(run_id).expect("runtime mismatch attempt exists");
@@ -7669,7 +7698,7 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
         options.initial_run_id = run_id.to_string();
         options.max_attempts = 2;
 
-        let result = run_cook(options, Arc::new(UnusedExecutor))
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook returns the persisted input failure");
 
         assert_eq!(result.exit_code, 1);
@@ -7791,8 +7820,8 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         options.initial_run_id = "cook-retryable-transport-attempt-1".to_string();
         options.max_attempts = 2;
 
-        let result =
-            run_cook(options, Arc::new(UnusedExecutor)).expect("cook records transport retries");
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("cook records transport retries");
 
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "pre_execution_failure");
@@ -8374,7 +8403,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 metadata: Value::Null,
             }],
         );
-        let result = run_cook(
+        let result = run_cook(CookContext::new(
             AgentTaskCookServiceOptions {
                 cook_id: "cook-detached".to_string(),
                 initial_run_id: run_id.to_string(),
@@ -8403,7 +8432,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 harvest_context: Default::default(),
             },
             Arc::new(UnusedExecutor),
-        )
+        ))
         .expect("accepted detached cook returns");
 
         assert_eq!(result.exit_code, 0);
@@ -8440,15 +8469,15 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
         super::super::persist_initial_recipe(&options).expect("persist orphaned recipe");
         assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("check orphan"));
 
-        let recovered =
-            run_cook(options.clone(), Arc::new(UnusedExecutor)).expect("recover orphan");
+        let recovered = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("recover orphan");
         assert_eq!(recovered.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let record = agent_task_lifecycle::status(run_id).expect("materialized run record");
         assert_eq!(record.runner_job_id(), Some("recording-daemon-job"));
 
-        let replayed =
-            run_cook(options.clone(), Arc::new(UnusedExecutor)).expect("idempotent replay");
+        let replayed = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("idempotent replay");
         assert_eq!(replayed.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let replayed_record = agent_task_lifecycle::status(run_id).unwrap();
@@ -8459,7 +8488,7 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
 
         let mut changed = options;
         changed.title = "changed immutable finalization title".to_string();
-        let replayed = run_cook(changed, Arc::new(UnusedExecutor))
+        let replayed = run_cook(CookContext::new(changed, Arc::new(UnusedExecutor)))
             .expect("durable recipe remains authoritative");
         assert_eq!(replayed.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
@@ -9528,18 +9557,19 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             claim,
             |_| Ok(Some(dispatcher.clone())),
             |options| {
-                run_cook_with_finalizer(
-                    options,
-                    Arc::new(UnusedExecutor),
-                    |options, run_id, promotion| {
-                        finalize_cook_pr_with_backend(
-                            options,
-                            run_id,
-                            promotion,
-                            &mut resumed_backend,
-                        )
-                    },
-                )
+                run_cook(CookContext {
+                    side_effects: Some(Box::new(DefaultCookSideEffects::new(
+                        |_, options, run_id, promotion| {
+                            finalize_cook_pr_with_backend(
+                                options,
+                                run_id,
+                                promotion,
+                                &mut resumed_backend,
+                            )
+                        },
+                    ))),
+                    ..CookContext::new(options, Arc::new(UnusedExecutor))
+                })
                 .map(|result| result.exit_code)
             },
         )
@@ -11381,13 +11411,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "candidate drift falls through to normal preflight"
         );
-        let result = run_cook_with_boundaries_observed_policy(
-            historical.clone(),
-            executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-            None,
-            true,
-        )
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+                Ok(serde_json::json!({}))
+            }))),
+            allow_historical_terminal: true,
+            ..CookContext::new(historical.clone(), executor.clone())
+        })
         .expect("candidate drift returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
@@ -11411,13 +11441,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "cancelled review-form attempts never authorize the bypass"
         );
-        let result = run_cook_with_boundaries_observed_policy(
-            historical.clone(),
-            executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-            None,
-            true,
-        )
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+                Ok(serde_json::json!({}))
+            }))),
+            allow_historical_terminal: true,
+            ..CookContext::new(historical.clone(), executor.clone())
+        })
         .expect("cancelled attempt returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
@@ -11447,13 +11477,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "missing legacy candidate evidence is an authorization denial"
         );
-        let result = run_cook_with_boundaries_observed_policy(
-            historical.clone(),
-            executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-            None,
-            true,
-        )
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+                Ok(serde_json::json!({}))
+            }))),
+            allow_historical_terminal: true,
+            ..CookContext::new(historical.clone(), executor.clone())
+        })
         .expect("malformed evidence returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
@@ -11634,25 +11664,26 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
             }
             Ok(())
         };
-        let result = run_cook_with_boundaries_observed(
-            options,
-            Arc::new(UnusedExecutor),
-            DefaultCookSideEffects::new(move |_, _, received_run, promotion| {
-                finalization_count.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(received_run, expected_run_id);
-                assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
-                assert_eq!(
-                    promotion.deterministic_gates[0]
-                        .baseline_comparison
-                        .as_ref()
-                        .unwrap()
-                        .result,
-                    crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
-                );
-                Ok(serde_json::json!({"status": "review_ready"}))
-            }),
-            Some(&observer),
-        )
+        let result = run_cook(CookContext {
+            side_effects: Some(Box::new(DefaultCookSideEffects::new(
+                move |_, _, received_run, promotion| {
+                    finalization_count.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(received_run, expected_run_id);
+                    assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
+                    assert_eq!(
+                        promotion.deterministic_gates[0]
+                            .baseline_comparison
+                            .as_ref()
+                            .unwrap()
+                            .result,
+                        crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                    );
+                    Ok(serde_json::json!({"status": "review_ready"}))
+                },
+            ))),
+            durable_observer: Some(&observer),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
         .unwrap();
         assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
         assert!(result

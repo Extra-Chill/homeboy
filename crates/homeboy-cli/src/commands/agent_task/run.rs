@@ -1104,7 +1104,10 @@ where
             let cook = if historical_terminal {
                 agent_task_service::run_terminal_cook_continuation(options, executor.clone())?
             } else {
-                agent_task_service::run_cook(options, executor.clone())?
+                agent_task_service::run_cook(agent_task_service::CookContext::new(
+                    options,
+                    executor.clone(),
+                ))?
             };
             let exit_code = cook.exit_code;
             result = Some(cook.value);
@@ -1160,7 +1163,7 @@ where
     let result = if terminal_review_form_continuation {
         agent_task_service::run_terminal_cook_continuation(options, executor)?
     } else {
-        agent_task_service::run_cook(options, executor)?
+        agent_task_service::run_cook(agent_task_service::CookContext::new(options, executor))?
     };
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
@@ -1235,7 +1238,9 @@ where
                 options.initial_run_id = attempt.run_id.clone();
                 options.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;
-                let result = agent_task_service::run_cook(options, executor)?;
+                let result = agent_task_service::run_cook(agent_task_service::CookContext::new(
+                    options, executor,
+                ))?;
                 let value = cook_report_with_continuation(
                     serde_json::to_value(result.value).unwrap_or(Value::Null),
                 );
@@ -2740,8 +2745,10 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             })
             .unwrap_or(Ok(()))
     };
-    let result = agent_task_service::run_cook_with_durable_observer(
-        agent_task_service::AgentTaskCookServiceOptions {
+    let result = agent_task_service::run_cook(agent_task_service::CookContext {
+        durable_observer: Some(&durable_observer),
+        ..agent_task_service::CookContext::new(
+            agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
             initial_run_id: run_id,
             initial_plan,
@@ -2780,10 +2787,10 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(
                 )?,
-        },
-        executor,
-        &durable_observer,
-    )?;
+            },
+            executor,
+        )
+    })?;
     Ok((
         super::status::compact_cook_report(
             cook_report_with_continuation(
