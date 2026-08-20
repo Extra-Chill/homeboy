@@ -34,7 +34,7 @@ mod cancellation_tests {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(100));
         let cancel_calls = Arc::clone(&executor.cancel_calls);
         let running = Arc::clone(&executor.running);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 1;
         let token = AgentTaskCancellationToken::default();

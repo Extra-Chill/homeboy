@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -34,7 +35,7 @@ use homeboy::agents::agent_tasks::gate::{
 };
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
-use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+use homeboy::agents::agent_tasks::scheduler::{AgentTaskPlan, SharedAgentTaskExecutor};
 use homeboy::agents::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
@@ -317,7 +318,7 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     let result = agent_task_service::resume_cook_batch(
         &args.batch_id,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
@@ -937,7 +938,7 @@ fn resume_fanout_child(
 ) -> Result<()> {
     agent_task_service::resume_cook(
         &child.run_id,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
         rerun_completed_gates,
     )?;
@@ -1371,7 +1372,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
                     cooks,
                     max_concurrency: concurrency.limit,
                 },
-                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
                 agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
             )
         });
@@ -1392,28 +1393,22 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
     run_batch_cook_fanout_plan_with_executor(
         plan,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-fn run_batch_cook_fanout_plan_with_executor<E>(
+fn run_batch_cook_fanout_plan_with_executor(
     plan: BatchCookFanoutPlan,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     run_batch_cook_fanout_plan_with_executor_claim(plan, executor, None)
 }
 
-fn run_batch_cook_fanout_plan_with_executor_claim<E>(
+fn run_batch_cook_fanout_plan_with_executor_claim(
     plan: BatchCookFanoutPlan,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     claim_id: Option<String>,
-) -> CmdResult<Value>
-where
-    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
-{
+) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
     let claim_id = match claim_id {
@@ -1893,7 +1888,7 @@ fn cook_batch_inner(
             )?,
             None => run_batch_cook_fanout_plan_with_executor_claim(
                 plan.clone(),
-                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
                 claim_id.clone(),
             )?,
         };

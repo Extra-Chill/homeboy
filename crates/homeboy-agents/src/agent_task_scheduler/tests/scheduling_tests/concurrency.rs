@@ -23,7 +23,8 @@ pub(super) mod concurrency_tests {
     fn provider_panic_returns_a_terminal_failure_without_hanging_the_scheduler() {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let aggregate = AgentTaskScheduler::new(PanickingExecutor).run(plan_with_tasks(1));
+            let aggregate =
+                AgentTaskScheduler::new(Arc::new(PanickingExecutor)).run(plan_with_tasks(1));
             let _ = sender.send(aggregate);
         });
 
@@ -75,7 +76,7 @@ pub(super) mod concurrency_tests {
         let plan = plan_with_tasks(1);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
 
-        let aggregate = AgentTaskScheduler::new(PolicyDeniedExecutor)
+        let aggregate = AgentTaskScheduler::new(Arc::new(PolicyDeniedExecutor))
             .with_run_id(run_id)
             .run(plan);
 
@@ -130,7 +131,7 @@ pub(super) mod concurrency_tests {
     fn schedules_tasks_with_bounded_concurrency_and_success_aggregate() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(4);
         plan.options.max_concurrency = 2;
 
@@ -176,10 +177,10 @@ pub(super) mod concurrency_tests {
     #[test]
     fn first_green_returns_after_concurrent_winner_and_supervises_sibling() {
         let cancelled = Arc::new(AtomicBool::new(false));
-        let scheduler = AgentTaskScheduler::new(FirstGreenExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(FirstGreenExecutor {
             entered: Arc::new(std::sync::Barrier::new(2)),
             cancelled: Arc::clone(&cancelled),
-        });
+        }));
         let mut plan = plan_with_tasks(2);
         plan.group_key = Some("candidate-group".to_string());
         for task in &mut plan.tasks {
@@ -207,7 +208,7 @@ pub(super) mod concurrency_tests {
     #[test]
     fn wait_all_remains_the_default_candidate_completion_policy() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(20));
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.group_key = Some("candidate-group".to_string());
         for task in &mut plan.tasks {
@@ -232,7 +233,7 @@ pub(super) mod concurrency_tests {
     fn candidate_resource_budget_can_intentionally_serialize_execution() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.group_key = Some("candidate-group".to_string());
         for task in &mut plan.tasks {
@@ -248,10 +249,10 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn blocks_tasks_over_queue_depth_and_reports_backpressure() {
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
-        ));
+        )));
         let mut plan = plan_with_tasks(3);
         plan.options.max_queue_depth = Some(2);
 
@@ -280,7 +281,7 @@ pub(super) mod concurrency_tests {
     fn applies_per_executor_concurrency_below_global_limit() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.options
@@ -304,7 +305,7 @@ pub(super) mod concurrency_tests {
     fn applies_per_model_concurrency_below_global_limit() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(3);
         for task in &mut plan.tasks {
             task.executor.model = Some("model-a".to_string());
@@ -334,7 +335,7 @@ pub(super) mod concurrency_tests {
         init_git_workspace(&workspace);
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         for task in &mut plan.tasks {
@@ -373,7 +374,7 @@ pub(super) mod concurrency_tests {
     fn serializes_tasks_with_the_same_declared_exclusive_resource() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         for task in &mut plan.tasks {
@@ -421,7 +422,7 @@ pub(super) mod concurrency_tests {
     fn unrelated_declared_resources_remain_concurrent() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         plan.tasks[0].limits.exclusive_resource_keys = vec!["cache:one".to_string()];
@@ -465,7 +466,7 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn execution_timeout_excludes_declared_resource_wait() {
-        let scheduler = AgentTaskScheduler::new(ResourceTimeoutExecutor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(ResourceTimeoutExecutor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         for task in &mut plan.tasks {
@@ -509,7 +510,7 @@ pub(super) mod concurrency_tests {
         fs::create_dir(&child).expect("child");
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(executor);
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
@@ -640,13 +641,13 @@ pub(super) mod concurrency_tests {
         let attempt_roots = Arc::new(Mutex::new(Vec::new()));
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
         let scratch_active_while_running = Arc::new(AtomicBool::new(false));
-        let scheduler = AgentTaskScheduler::new(LateMutatingExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(LateMutatingExecutor {
             events: Arc::clone(&events),
             finished: Arc::clone(&finished),
             attempt_roots: Arc::clone(&attempt_roots),
             scratch_roots: Arc::clone(&scratch_roots),
             scratch_active_while_running: Arc::clone(&scratch_active_while_running),
-        });
+        }));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
@@ -757,7 +758,7 @@ pub(super) mod concurrency_tests {
         fs::write(workspace.join("user-edit.txt"), "keep me\n").expect("user edit");
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(0));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
 
@@ -876,7 +877,7 @@ pub(super) mod concurrency_tests {
         };
         let attempts = Arc::clone(&executor.attempts);
         let workspaces = Arc::clone(&executor.workspaces);
-        let scheduler = AgentTaskScheduler::new(executor).with_run_id("retry-isolation");
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor)).with_run_id("retry-isolation");
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(source.display().to_string());
         plan.tasks[0].executor.config = json!({
@@ -948,10 +949,10 @@ pub(super) mod concurrency_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
 

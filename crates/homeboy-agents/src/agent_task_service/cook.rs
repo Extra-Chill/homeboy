@@ -17,7 +17,7 @@ use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_scheduler::{
-    AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
+    AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
 use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
 use homeboy_core::command_invocation::CommandInvocation;
@@ -2456,13 +2456,10 @@ impl AgentTaskCookBatchControl {
 ///
 /// This is the unowned coordinator: it runs to completion or dies with its
 /// caller. A caller with a durable owner uses [`run_cook_batch_with_control`].
-pub fn run_cook_batch<E>(
+pub fn run_cook_batch(
     options: AgentTaskCookBatchOptions,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone + Send,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>> {
     run_cook_batch_with_control(options, executor, AgentTaskCookBatchControl::default())
 }
 
@@ -2474,14 +2471,11 @@ where
 /// ceiling resolved by `resolve_batch_concurrency`, and it does not introduce a
 /// second deadline — the batch `CookDeadline` is still captured once here and
 /// re-bound onto every worker.
-pub fn run_cook_batch_with_control<E>(
+pub fn run_cook_batch_with_control(
     options: AgentTaskCookBatchOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     control: AgentTaskCookBatchControl,
-) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone + Send,
-{
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>> {
     let total = options.cooks.len();
     if total == 0 {
         return Err(Error::validation_invalid_argument(
@@ -2700,13 +2694,12 @@ fn observed_child_cell(
 /// in flight on a runner daemon is reported as-is rather than forced. The
 /// per-child finalization state is reconciled back into the durable batch record
 /// so repeated resume calls converge instead of re-finalizing (#9525).
-pub fn resume_cook_batch<E, D>(
+pub fn resume_cook_batch<D>(
     batch_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: D,
 ) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 {
     resume_cook_batch_with_finalizer(
@@ -2720,14 +2713,13 @@ where
 /// Resume one durable Cook through its original provider, promotion, gates, and
 /// finalization contract. Fanout supervisors use this child-local entrypoint so
 /// a blocked sibling cannot prevent a ready candidate from advancing.
-pub fn resume_cook<E, D>(
+pub fn resume_cook<D>(
     cook_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: D,
     rerun_completed_gates: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 {
     let mut finalize = finalize_or_load_cook_pr;
@@ -2745,14 +2737,13 @@ where
     })
 }
 
-fn resume_cook_batch_with_finalizer<E, D, F>(
+fn resume_cook_batch_with_finalizer<D, F>(
     batch_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: D,
     mut finalize: F,
 ) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
@@ -2889,15 +2880,14 @@ fn cook_batch_result(
 /// Reconstruct one batch child's cook from its durable recipe and re-run it.
 /// A missing recipe means the child never reached cook start; surface an
 /// actionable resumability error instead of fabricating a cook.
-fn resume_batch_child<E, D, F>(
+fn resume_batch_child<D, F>(
     batch_id: &str,
     cook_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: &D,
     finalize: &mut F,
 ) -> Result<AgentTaskCookReport>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
@@ -2911,16 +2901,15 @@ where
     )
 }
 
-fn resume_batch_child_with_gate_rerun<E, D, F>(
+fn resume_batch_child_with_gate_rerun<D, F>(
     batch_id: &str,
     cook_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: &D,
     finalize: &mut F,
     rerun_completed_gates: bool,
 ) -> Result<AgentTaskCookReport>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
@@ -3212,10 +3201,10 @@ pub(super) fn validate_cook_follow_up_stores(
     clippy::too_many_arguments,
     reason = "Cook follow-up retains explicit durable recipe and dispatch identity fields"
 )]
-pub(crate) fn dispatch_cook_follow_up<E>(
+pub(crate) fn dispatch_cook_follow_up(
     stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     options: &AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     cook_id: &str,
     attempt: u32,
     source_run_id: &str,
@@ -3228,10 +3217,7 @@ pub(crate) fn dispatch_cook_follow_up<E>(
     budget_limit: &AgentTaskExecutionBudget,
     budget_used: ExecutionBudgetUsage,
     remediation_category_usage: &mut ExecutionBudgetUsage,
-) -> Result<CookFollowUpDispatch>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<CookFollowUpDispatch> {
     let (recipe_store, lifecycle_store) = stores;
     validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
@@ -3668,27 +3654,21 @@ fn reserve_cook_materialization_capacity(
     )
 }
 
-pub fn run_cook<E>(
+pub fn run_cook(
     options: AgentTaskCookServiceOptions,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
     run_cook_with_store(&store, options, executor)
 }
 
 /// Run Cook against an explicit durable recipe store. Lifecycle storage remains
 /// ambient; this boundary scopes only Cook recipes and continuations.
-pub fn run_cook_with_store<E>(
+pub fn run_cook_with_store(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let side_effects =
         DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
             finalize_or_load_cook_pr_with_stores(store, lifecycle_store, options, run_id, promotion)
@@ -3696,13 +3676,10 @@ where
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
-pub fn run_terminal_cook_continuation<E>(
+pub fn run_terminal_cook_continuation(
     options: AgentTaskCookServiceOptions,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
     let side_effects =
         DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
@@ -3727,14 +3704,11 @@ where
 /// Run Cook while reporting the authoritative attempt only after its durable
 /// recipe has been persisted. Callers must treat pre-observer work as
 /// invocation-local because no run recovery identity exists yet.
-pub fn run_cook_with_durable_observer<E>(
+pub fn run_cook_with_durable_observer(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     observer: &CookProgressObserver<'_>,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
     let side_effects =
         DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
@@ -3755,27 +3729,25 @@ where
     )
 }
 
-pub(crate) fn run_cook_with_finalizer<E, F>(
+pub(crate) fn run_cook_with_finalizer<F>(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     finalize: F,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
     let store = CookRecipeStore::from_current_data_root()?;
     run_cook_with_finalizer_with_store(&store, options, executor, finalize)
 }
 
-pub(crate) fn run_cook_with_finalizer_with_store<E, F>(
+pub(crate) fn run_cook_with_finalizer_with_store<F>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     mut finalize: F,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
     let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
@@ -3784,27 +3756,25 @@ where
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
-fn run_cook_with_boundaries<E, S>(
+fn run_cook_with_boundaries<S>(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     let store = CookRecipeStore::from_current_data_root()?;
     run_cook_with_boundaries_with_store(&store, options, executor, side_effects)
 }
 
-fn run_cook_with_boundaries_with_store<E, S>(
+fn run_cook_with_boundaries_with_store<S>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     run_cook_with_boundaries_observed_with_store(store, options, executor, side_effects, None)
@@ -3852,14 +3822,13 @@ pub(crate) fn exhausted_budget_guidance(
     )
 }
 
-fn run_cook_with_boundaries_observed<E, S>(
+fn run_cook_with_boundaries_observed<S>(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     let store = CookRecipeStore::from_current_data_root()?;
@@ -3872,15 +3841,14 @@ where
     )
 }
 
-fn run_cook_with_boundaries_observed_with_store<E, S>(
+fn run_cook_with_boundaries_observed_with_store<S>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     run_cook_with_boundaries_observed_policy_with_store(
@@ -3893,15 +3861,14 @@ where
     )
 }
 
-fn run_cook_with_boundaries_observed_policy<E, S>(
+fn run_cook_with_boundaries_observed_policy<S>(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     let store = CookRecipeStore::from_current_data_root()?;
@@ -3915,16 +3882,15 @@ where
     )
 }
 
-fn run_cook_with_boundaries_observed_policy_with_store<E, S>(
+fn run_cook_with_boundaries_observed_policy_with_store<S>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     // Every exit from the observed boundary funnels through one notification
@@ -3951,16 +3917,15 @@ where
     result
 }
 
-fn run_cook_with_boundaries_reported<E, S>(
+fn run_cook_with_boundaries_reported<S>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     // The spine used to resolve this store itself. Resolve it here instead and
@@ -3982,17 +3947,16 @@ where
     )
 }
 
-fn run_cook_with_boundaries_reported_with_stores<E, S>(
+fn run_cook_with_boundaries_reported_with_stores<S>(
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     let failure_options = options.clone();
@@ -4151,15 +4115,14 @@ fn durable_cook_error_report_with_store(
     Err(error)
 }
 
-fn run_cook_with_boundaries_observed_inner<E, S>(
+fn run_cook_with_boundaries_observed_inner<S>(
     options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     // Env-resolving entry point. Both stores are resolved here, once, so the
@@ -4181,17 +4144,16 @@ where
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
 /// instead of wherever the process environment happens to point (#7505).
-fn run_cook_with_boundaries_observed_inner_with_stores<E, S>(
+fn run_cook_with_boundaries_observed_inner_with_stores<S>(
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     mut options: AgentTaskCookServiceOptions,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     mut side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
     // The local detached launcher persists this fence before spawn. Recheck it

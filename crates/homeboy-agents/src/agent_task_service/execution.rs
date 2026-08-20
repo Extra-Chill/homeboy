@@ -18,7 +18,7 @@ use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskPlan, AgentTaskScheduler, SharedAgentTaskExecutor,
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -69,27 +69,21 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
     Ok(plan)
 }
 
-pub fn run_loaded_plan<E>(
+pub fn run_loaded_plan(
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline(plan, record_run_id, executor, None, None)
 }
 
-pub(crate) fn run_loaded_plan_with_derived_cook_baseline<E>(
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline(
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline_in_optional_store(
         None,
         plan,
@@ -100,17 +94,14 @@ where
     )
 }
 
-pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store<E>(
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline_in_optional_store(
         Some(lifecycle_store),
         plan,
@@ -121,17 +112,14 @@ where
     )
 }
 
-fn run_loaded_plan_with_derived_cook_baseline_in_optional_store<E>(
+fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     mut plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(run_id) = record_run_id {
         // Prepare before persistence so the lifecycle record and scheduler use
         // the same materialized workspace contract. In particular, Cook's
@@ -278,24 +266,18 @@ pub fn submit_plan_spec(spec: &str, run_id: Option<&str>) -> Result<AgentTaskRun
     agent_task_lifecycle::submit_plan(&plan, run_id)
 }
 
-pub fn run_submitted<E>(
+pub fn run_submitted(
     run_id: String,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_submitted_with_timeout(run_id, None, executor)
 }
 
-pub fn run_submitted_with_timeout<E>(
+pub fn run_submitted_with_timeout(
     run_id: String,
     timeout_ms: Option<u64>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -359,25 +341,19 @@ pub struct AgentTaskQueueAdmission {
     pub limit_reached: bool,
 }
 
-pub fn run_next<E>(executor: E) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+pub fn run_next(executor: SharedAgentTaskExecutor) -> Result<AgentTaskRunNextResult> {
     run_next_with_cook_dispatcher(executor, |_| Ok(None), None)
 }
 
-pub fn run_next_with_cook_dispatcher<E>(
-    executor: E,
+pub fn run_next_with_cook_dispatcher(
+    executor: SharedAgentTaskExecutor,
     dispatcher: impl Fn(
         &Value,
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     scoped_run_ids: Option<&HashSet<String>>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     run_next_with_cook_dispatcher_and_queue_preflight(
         executor,
         dispatcher,
@@ -389,8 +365,8 @@ where
     )
 }
 
-pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
-    executor: E,
+pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
+    executor: SharedAgentTaskExecutor,
     dispatcher: impl Fn(
         &Value,
     ) -> Result<
@@ -398,10 +374,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
     >,
     scoped_run_ids: Option<&HashSet<String>>,
     queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     let mut skipped = Vec::new();
     let mut inspected = 0;
     if let Some(scoped_run_ids) = scoped_run_ids {
@@ -520,19 +493,16 @@ fn validate_queued_cook_identity(record: &AgentTaskRunRecord) -> Result<()> {
     super::validate_recipe_attempt_record(&recipe, &record.run_id, record)
 }
 
-fn consume_claimed_continuation<E>(
+fn consume_claimed_continuation(
     claim: super::ClaimedCookContinuation,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatcher: &impl Fn(
         &Value,
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     mut skipped: Vec<AgentTaskRunNextSkip>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     let store = super::CookRecipeStore::from_current_data_root()?;
     let cook_id = claim.continuation().cook_id.clone();
     let run_id = claim.continuation().run_id.clone();
@@ -646,10 +616,10 @@ fn continuation_skip(
     }
 }
 
-pub fn resume<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+pub fn resume(
+    run_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -1198,10 +1168,10 @@ pub fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> Result<()> {
     Ok(())
 }
 
-fn run_claimed<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+fn run_claimed(
+    run_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
         agent_task_lifecycle::record_pre_execution_failure(
@@ -1228,15 +1198,12 @@ where
     run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
-fn run_prepared_claimed<E>(
+fn run_prepared_claimed(
     run_id: String,
     plan: AgentTaskPlan,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     let aggregate = run_plan_with_scheduler(
         None,
         plan.clone(),
@@ -1322,17 +1289,14 @@ fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()
     )
 }
 
-fn run_plan_with_scheduler<E>(
+fn run_plan_with_scheduler(
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     plan: AgentTaskPlan,
     run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskAggregate>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskAggregate> {
     let scheduler =
         AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
     let scheduler = match lifecycle_store {
@@ -1510,6 +1474,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Arc;
 
     use super::*;
     use crate::agent_task::{
@@ -1518,8 +1483,8 @@ mod tests {
         AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
-        AgentTaskExecutionContext, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
-        AgentTaskPlan, HarvestExecutionContext,
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskManagedService,
+        AgentTaskManagedServiceLifecycle, AgentTaskPlan, HarvestExecutionContext,
     };
 
     #[derive(Clone)]
@@ -1686,7 +1651,7 @@ mod tests {
                 store,
                 one_task_plan(plan_id, workspace),
                 Some(run_id),
-                SuccessfulExecutor,
+                Arc::new(SuccessfulExecutor),
                 None,
                 Some(HarvestExecutionContext::default()),
             )

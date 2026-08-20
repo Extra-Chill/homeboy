@@ -10,7 +10,7 @@ mod adaptive_concurrency_tests {
     fn adaptive_concurrency_scales_up_when_runner_slots_are_available() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(4);
         plan.options.max_concurrency = 1;
         plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
@@ -44,7 +44,7 @@ mod adaptive_concurrency_tests {
     fn adaptive_concurrency_scales_down_under_runner_pressure() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 4;
         plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
@@ -82,7 +82,7 @@ mod adaptive_concurrency_tests {
             cancel_calls: Arc::new(Mutex::new(Vec::new())),
         };
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
@@ -117,10 +117,10 @@ mod adaptive_concurrency_tests {
 
     #[test]
     fn adaptive_concurrency_status_records_held_decision() {
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.options.max_concurrency = 2;
         plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy::default());

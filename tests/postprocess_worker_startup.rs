@@ -110,7 +110,8 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
         let root = homeboy::core::artifacts::root()
             .expect("artifact root")
             .join("agent-task/postprocess/race-run/compose");
-        let scheduler = Arc::new(AgentTaskScheduler::new(NoopExecutor).with_run_id("race-run"));
+        let scheduler =
+            Arc::new(AgentTaskScheduler::new(Arc::new(NoopExecutor)).with_run_id("race-run"));
         let worker = thread::spawn({
             let scheduler = Arc::clone(&scheduler);
             move || scheduler.run(plan)
@@ -188,7 +189,7 @@ fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
             .expect("artifact root")
             .join("agent-task/postprocess/restart-run/compose");
         let first = thread::spawn(|| {
-            AgentTaskScheduler::new(NoopExecutor)
+            AgentTaskScheduler::new(Arc::new(NoopExecutor))
                 .with_run_id("restart-run")
                 .run(postprocess_plan())
         });
@@ -203,7 +204,7 @@ fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
         );
 
         let restarted = thread::spawn(|| {
-            AgentTaskScheduler::new(NoopExecutor)
+            AgentTaskScheduler::new(Arc::new(NoopExecutor))
                 .with_run_id("restart-run")
                 .run(postprocess_plan())
         });

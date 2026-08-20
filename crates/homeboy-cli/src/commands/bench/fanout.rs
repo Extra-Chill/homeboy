@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
@@ -91,7 +92,7 @@ pub(super) fn run_matrix_fanout(
         "report": run_args.report,
     });
 
-    let scheduler = AgentTaskScheduler::new_controller(LocalBenchMatrixExecutor);
+    let scheduler = AgentTaskScheduler::new_controller(Arc::new(LocalBenchMatrixExecutor));
     let scheduler_aggregate = scheduler.run(schedule);
     let matrix_aggregate =
         AgentTaskMatrixAggregate::from_outcomes(&matrix_plan, &scheduler_aggregate.outcomes);

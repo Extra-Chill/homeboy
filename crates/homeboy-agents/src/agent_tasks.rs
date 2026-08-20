@@ -120,7 +120,9 @@ pub use super::agent_task_schedule::{
 // schedule-side variant, so name it explicitly here.
 pub use super::agent_task_schedule::AgentTaskProgressEvent;
 
-pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+pub use super::agent_task_scheduler::{
+    AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,
+};
 
 pub use super::agent_tool_control_plane::{
     dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
@@ -449,7 +451,9 @@ pub mod scheduler {
         AgentTaskResourceBudgetStatus, AgentTaskResourcePressure, AgentTaskRetryPolicy,
         AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
     };
-    pub use super::super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+    pub use super::super::agent_task_scheduler::{
+        AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,
+    };
 }
 
 /// Secret-env mapping and resolution helpers.

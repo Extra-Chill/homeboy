@@ -28,6 +28,7 @@ use crate::agent_task_promotion::{
     AgentTaskPromotionReport,
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
+use crate::agent_task_scheduler::SharedAgentTaskExecutor;
 use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
@@ -153,24 +154,21 @@ pub fn adopt_cook_candidate_with_options_and_dispatcher(
         candidate_ref,
         adoption,
         reconstruct_dispatcher,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
 /// Adopt a candidate and retain the normal Cook execution boundary for any
 /// remediation requested by its deterministic feedback.
-pub fn adopt_cook_candidate_with_options_dispatcher_and_executor<E>(
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor(
     cook_or_run_id: &str,
     candidate_ref: &str,
     adoption: AgentTaskCandidateAdoptionOptions,
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
         cook_or_run_id,
         None,
@@ -182,7 +180,7 @@ where
 }
 
 /// Adopt a candidate against an explicit numbered Cook attempt.
-pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt<E>(
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
     cook_or_run_id: &str,
     attempt: Option<u32>,
     candidate_ref: &str,
@@ -190,11 +188,8 @@ pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt<E>(
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
         cook_or_run_id,
         attempt,
@@ -207,7 +202,6 @@ where
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     cook_or_run_id: &str,
@@ -216,7 +210,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
@@ -231,7 +225,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     cook_or_run_id: &str,
@@ -241,7 +234,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
@@ -261,7 +254,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_stores<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     recipe_store: &CookRecipeStore,
@@ -273,7 +265,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     super::cook::validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
