@@ -1327,15 +1327,36 @@ jobs:
           HOST_RESULT: ${{ needs.host.result }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
         run: |
+          # Observe the release BEFORE judging the host job result (#12701).
+          #
+          # This guard used to `exit 1` on a non-success host result without
+          # ever calling the API, asserting "The tag exists with no GitHub
+          # Release" as though it had looked. For v0.350.22 through v0.350.25
+          # that was false: each release was published complete with all 14
+          # assets and `host` had failed on a post-publish assertion. A guard
+          # that reports an unobserved state as an observation sends every
+          # investigation to the wrong place, which is what it did.
+          #
+          # `releases/tags/{tag}` resolves published releases only; a draft
+          # 404s there. Distinguish the two so "never published" cannot be
+          # reported as a malformed API response.
+          published=true
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json 2>/dev/null; then
+            published=false
+          fi
+
+          # A failed `host` stays red either way -- the publish chain is broken
+          # and #8567 requires that be loud. Only the diagnosis changes.
           if [ "${HOST_RESULT}" != "success" ]; then
-            echo "::error::Release ${RELEASE_TAG} was prepared and tagged but the Create GitHub Release job did not succeed (result: ${HOST_RESULT}). The tag exists with no GitHub Release. Investigate the plan/build/host publish chain; recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
+            if [ "${published}" = "true" ]; then
+              echo "::error::Release ${RELEASE_TAG} IS published with $(jq -r '[.assets[].name] | length' release.json) assets, but the Create GitHub Release job did not succeed (result: ${HOST_RESULT}). The break is after the release object was created, so inspect that job's failing step directly -- the release itself may be intact. Recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
+            else
+              echo "::error::Release ${RELEASE_TAG} was prepared and tagged but the Create GitHub Release job did not succeed (result: ${HOST_RESULT}), and no published GitHub Release exists for the tag. Investigate the plan/build/host publish chain; recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
+            fi
             exit 1
           fi
 
-          # `releases/tags/{tag}` resolves published releases only; a draft 404s
-          # there. Distinguish the two so "never published" cannot be reported as
-          # a malformed API response.
-          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json 2>/dev/null; then
+          if [ "${published}" != "true" ]; then
             echo "::error::Release ${RELEASE_TAG} is not published. The tag exists but the GitHub Release is still a draft or absent, so consumers pinning this version get nothing. Recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
             exit 1
           fi
