@@ -1833,12 +1833,11 @@ pub fn claim_cook_terminal_notification_in_store(
     )
 }
 
-/// Persist a confirmed terminal delivery, which is the point at which its
-/// exactly-once eligibility is consumed.
-pub fn confirm_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    confirm_cook_terminal_notification_in_store(&lifecycle_store, cook_id, delivered_by)
-}
+// The ambient `confirm_cook_terminal_notification()` shim that used to sit
+// above this is gone. Its only callers were the three terminal-notification
+// entry points in `agent_task_notify`, which now resolve one lifecycle store
+// for the whole claim/confirm/release protocol and pass it to each rooted
+// sibling, rather than resolving a fresh root per step (#7505).
 
 /// Persist a confirmed terminal delivery beside the injected store's own Cook
 /// index. Like the claim it commits, this is a bare filesystem write with no
@@ -1868,12 +1867,28 @@ pub fn release_cook_terminal_notification_claim(cook_id: &str) -> Result<()> {
     store::release_cook_notification_claim(cook_id)
 }
 
-/// Store the latest compact notification delivery outcome for Cook/status
-/// readers. The caller supplies an already redacted, bounded projection.
-pub fn record_cook_terminal_notification_outcome(cook_id: &str, outcome: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_terminal_notification_outcome_in_store(&lifecycle_store, cook_id, outcome)
+/// Release a provisional terminal-notification claim inside an explicitly
+/// rooted store.
+///
+/// This is the third step of the same exactly-once protocol as
+/// [`claim_cook_terminal_notification_in_store`] and
+/// [`confirm_cook_terminal_notification_in_store`], and it is the step that
+/// previously had no rooted form at all: the ambient shim above reaches
+/// `store::`, which resolves a root of its own. A claim taken in an injected
+/// store and released against the ambient one leaves the real claim standing
+/// until its lease expires, which is the duplicate-notification outcome the
+/// claim exists to prevent.
+pub fn release_cook_terminal_notification_claim_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<()> {
+    lifecycle_store.release_cook_notification_claim(cook_id)
 }
+
+// The ambient `record_cook_terminal_notification_outcome()` shim that used to
+// sit above this is gone, for the same reason as the confirm shim: its only
+// callers were the `agent_task_notify` entry points, which now record the
+// outcome in the store they claimed against (#7505).
 
 /// Store the latest compact notification delivery outcome beside the injected
 /// store's own Cook index. The marker is a file next to `index.json`, not an
