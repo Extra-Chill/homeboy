@@ -2415,13 +2415,14 @@ pub fn record_provider_execution_process_in_store(
     })
 }
 
-/// Return the unambiguous running provider PID for activity sampling.
-pub fn running_owner_pid(run_id: &str) -> Result<Option<u32>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    running_owner_pid_in_store(&lifecycle_store, run_id)
-}
+// The ambient `running_owner_pid()` shim that used to sit above this is gone.
+// Its last caller was the Cook heartbeat, which samples activity on a thread
+// that already held a borrow of the injected lifecycle store for its
+// supervision writes — so it now reads the owner PID from the same installation
+// it records the sample into (#7505).
 
-/// [`running_owner_pid`] against explicitly injected durable lifecycle roots.
+/// Return the unambiguous running provider PID for activity sampling, from an
+/// explicitly injected durable lifecycle root.
 pub fn running_owner_pid_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

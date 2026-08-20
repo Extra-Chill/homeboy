@@ -4109,6 +4109,33 @@ fn durable_cook_error_report_with_store(
     Err(error)
 }
 
+/// [`agent_task_lifecycle::status`] against an explicitly injected lifecycle
+/// root.
+///
+/// The ambient `status()` is exactly this call with a store resolved from the
+/// process environment, so the two agree on everything except which
+/// installation they read — which is the only difference that matters on a
+/// spine whose caller chose its own roots.
+///
+/// One asymmetry is worth naming rather than hiding: `status_in_store` derives
+/// its recipe store from `lifecycle_store.data_root()`, so a caller that passes
+/// a recipe store rooted somewhere else still gets a recipe view derived from
+/// the lifecycle root. That is not made worse here — the ambient form derived it
+/// from the ambient root, which agreed with neither — and closing it means
+/// giving `status_in_store` both roots, which is its own change.
+fn rooted_status(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    Ok(agent_task_lifecycle::status_in_store(
+        lifecycle_store,
+        run_id,
+        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+        false,
+    )?
+    .record)
+}
+
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
@@ -4447,9 +4474,12 @@ fn run_cook_spine(
                 options.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
-                    agent_task_lifecycle::exact_record(&options.initial_run_id)
-                        .ok()
-                        .as_ref(),
+                    agent_task_lifecycle::exact_record_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                    )
+                    .ok()
+                    .as_ref(),
                     &error,
                 ),
                 error,
@@ -4494,9 +4524,12 @@ fn run_cook_spine(
             options.cook_id.clone(),
             Vec::new(),
             pre_execution_failure_details(
-                agent_task_lifecycle::exact_record(&options.initial_run_id)
-                    .ok()
-                    .as_ref(),
+                agent_task_lifecycle::exact_record_in_store(
+                    lifecycle_store,
+                    &options.initial_run_id,
+                )
+                .ok()
+                .as_ref(),
                 &error,
             ),
             error,
@@ -4852,8 +4885,7 @@ fn run_cook_spine(
                                 // provider execution is active, this heartbeat
                                 // would otherwise sample only its own `ps`
                                 // subprocess while that cleanup completes.
-                                if !agent_task_lifecycle::has_active_provider_execution(
-                                    &heartbeat_run_id,
+                                if !agent_task_lifecycle::has_active_provider_execution_in_store(heartbeat_lifecycle_store, &heartbeat_run_id,
                                 )
                                 .unwrap_or(true)
                                 {
@@ -4863,8 +4895,7 @@ fn run_cook_spine(
                                     continue;
                                 }
                                 next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
-                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid(
-                                    &heartbeat_run_id,
+                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid_in_store(heartbeat_lifecycle_store, &heartbeat_run_id,
                                 )
                                 .ok()
                                 .flatten()
@@ -5019,7 +5050,7 @@ fn run_cook_spine(
                         dispatch_plan,
                     )?;
                 }
-                let record = match agent_task_lifecycle::status(&run_id) {
+                let record = match rooted_status(lifecycle_store, &run_id) {
                     Ok(record)
                         if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>
                     {
@@ -5034,7 +5065,7 @@ fn run_cook_spine(
                             &error,
                             phase,
                         )?;
-                        agent_task_lifecycle::status(&run_id).ok()
+                        rooted_status(lifecycle_store, &run_id).ok()
                     }
                     Ok(record) => Some(record),
                     Err(_) => {
@@ -5049,7 +5080,7 @@ fn run_cook_spine(
                             &error,
                             phase,
                         )?;
-                        agent_task_lifecycle::status(&run_id).ok()
+                        rooted_status(lifecycle_store, &run_id).ok()
                     }
                 };
                 let pre_execution_failure = pre_execution_failure_details(record.as_ref(), &error);
@@ -5112,7 +5143,7 @@ fn run_cook_spine(
         let mut record = if rooted_promotion_continuation {
             lifecycle_store.read_record(&run_id)?
         } else {
-            agent_task_lifecycle::status(&run_id)?
+            rooted_status(lifecycle_store, &run_id)?
         };
         // A local controller can disappear after the provider ledger records a
         // terminal result but before the run projection is terminalized. Repair
@@ -5126,7 +5157,7 @@ fn run_cook_spine(
             record = if rooted_promotion_continuation {
                 lifecycle_store.read_record(&run_id)?
             } else {
-                agent_task_lifecycle::status(&run_id)?
+                rooted_status(lifecycle_store, &run_id)?
             };
         }
         let controller_owned_staging = record
