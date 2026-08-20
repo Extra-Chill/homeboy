@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.3] - 2026-08-20
+
+### Fixed
+- skip empty matrices for sharded test workflows
+
 ## [2.14.2] - 2026-08-17
 
 ### Fixed
