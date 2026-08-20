@@ -537,8 +537,11 @@ fn consume_claimed_continuation(
         claim,
         |recipe| dispatcher(recipe),
         |options| {
-            super::run_cook_with_store(&store, options, executor.clone())
-                .map(|result| result.exit_code)
+            super::run_cook(super::cook::CookContext {
+                store: Some(&store),
+                ..super::cook::CookContext::new(options, executor.clone())
+            })
+            .map(|result| result.exit_code)
         },
     )?;
     let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
