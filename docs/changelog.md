@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.24] - 2026-08-19
+
+### Fixed
+- serialize nextest shard replay until the shared stores take roots
+
 ## [0.350.23] - 2026-08-19
 
 ### Changed
