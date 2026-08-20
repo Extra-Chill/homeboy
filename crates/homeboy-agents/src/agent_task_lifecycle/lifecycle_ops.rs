@@ -5333,7 +5333,7 @@ pub(crate) fn record_cook_attempt_locked(
     record_cook_attempt_locked_in_store(&lifecycle_store, cook_id, attempt, run_id)
 }
 
-fn record_cook_attempt_locked_in_store(
+pub(crate) fn record_cook_attempt_locked_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt: u32,
