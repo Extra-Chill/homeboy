@@ -8,7 +8,12 @@ the permission rule that caused the #327/#328 startup failure.
 """
 
 from pathlib import Path
+import json
+import os
+import re
+import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -37,6 +42,7 @@ NORMAL_JOBS = {
     "reconcile",
     "policy",
 }
+NON_TEST_MATRIX_JOBS = {"candidate", "baseline", "reconcile"}
 PERMISSION_LEVELS = {"none": 0, "read": 1, "write": 2}
 
 
@@ -133,7 +139,83 @@ for job_name in NORMAL_JOBS:
     if "inputs.contract-probe" not in condition:
         fail(f"normal job {job_name!r} can run during the bounded contract probe")
 
+plan_script = callee["jobs"]["plan"]["steps"][-1]["run"]
+plan_outputs = callee["jobs"]["plan"].get("outputs", {})
+if plan_outputs.get("non-test-commands-enabled") != "${{ steps.plan.outputs.non-test-commands-enabled }}":
+    fail("plan does not expose its non-test command decision")
+
+for job_name in NON_TEST_MATRIX_JOBS:
+    job = callee["jobs"][job_name]
+    strategy_matrix = job.get("strategy", {}).get("matrix", "")
+    if "fromJson(needs.plan.outputs.matrix)" not in strategy_matrix:
+        fail(f"{job_name} no longer consumes the generic planned matrix")
+    condition = job.get("if", "")
+    if "needs.plan.outputs.non-test-commands-enabled == 'true'" not in condition:
+        fail(f"{job_name} is not guarded by the planner's non-test command decision")
+
+for job_name, job in callee["jobs"].items():
+    if re.search(r"\bmatrix\.", str(job.get("if", ""))):
+        fail(f"job-level if for {job_name!r} references matrix before strategy expansion")
+
+
+def run_plan(commands, test_shards):
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        output_path = Path(temporary_directory) / "github-output"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "COMMANDS": commands,
+                "BASELINE_COMMANDS": "auto",
+                "TEST_SHARDS": test_shards,
+                "GITHUB_OUTPUT": str(output_path),
+            }
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", plan_script],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            fail(f"planner execution failed: {result.stderr.strip()}")
+        return dict(line.split("=", 1) for line in output_path.read_text().splitlines())
+
+
+test_only_plan = run_plan("review test", "2")
+if test_only_plan.get("test-shards-enabled") != "true":
+    fail("test-only sharded planning does not enable the shard path")
+if test_only_plan.get("non-test-commands-enabled") != "false":
+    fail("test-only sharded planning does not disable non-test matrix jobs")
+if json.loads(test_only_plan["matrix"]) != {"include": []}:
+    fail("test-only sharded planning retains synthetic non-test matrix rows")
+
+mixed_plan = run_plan("review lint,review test", "2")
+if mixed_plan.get("test-shards-enabled") != "true":
+    fail("mixed quality and Test planning does not enable the shard path")
+if mixed_plan.get("non-test-commands-enabled") != "true":
+    fail("mixed quality and Test planning disables non-test matrix jobs")
+mixed_rows = json.loads(mixed_plan["matrix"])["include"]
+if [row["section_key"] for row in mixed_rows] != ["lint"]:
+    fail("mixed quality and Test planning does not preserve its quality matrix")
+
+enforcement = callee["jobs"]["reconcile-test-shards"]
+enforcement_steps = {step.get("name"): step for step in enforcement["steps"] if "name" in step}
+aggregation_failure = enforcement_steps.get("Report candidate Test aggregation failure", {})
+if "needs.candidate-test-result.result != 'success'" not in aggregation_failure.get("if", ""):
+    fail("failed sharded Test aggregation is not routed to a red verdict")
+if "exit 1" not in aggregation_failure.get("run", ""):
+    fail("failed sharded Test aggregation does not fail the Test job")
+aggregate_enforcement = enforcement_steps.get("Enforce sharded Test result", {})
+if aggregate_enforcement.get("if") != "needs.candidate-test-result.result == 'success'":
+    fail("successful sharded Test aggregation is not routed to final enforcement")
+if "candidate-test-results/homeboy-ci-results/results.json" not in aggregate_enforcement.get("run", ""):
+    fail("sharded Test enforcement does not consume the aggregate result")
+if "baseline-command" in str(aggregate_enforcement):
+    fail("sharded Test enforcement still has a baseline-command bypass")
+
 print("PASS: minimal documented caller satisfies reusable workflow permissions and inputs")
 print("PASS: reusable workflow exposes Plan, candidate preparation, candidate, and verdict jobs")
 print("PASS: unavailable permission fixture is rejected before job scheduling")
 print("PASS: GitHub consumer probe invokes the promotion candidate in bounded mode")
+print("PASS: planner guards empty sharded-Test matrices without job-level matrix references")

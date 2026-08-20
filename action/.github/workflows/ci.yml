@@ -290,6 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      non-test-commands-enabled: ${{ steps.plan.outputs.non-test-commands-enabled }}
       test-shards-enabled: ${{ steps.plan.outputs.test-shards-enabled }}
       test-command: ${{ steps.plan.outputs.test-command }}
       action-sha: ${{ steps.action-sha.outputs.sha }}
@@ -431,8 +432,11 @@ jobs:
               matrix="$(printf '%s' "${matrix}" | jq -c '{include:[.include[] | select(.section_key != "test")]}')"
             fi
           fi
+
+          non_test_commands_enabled="$(printf '%s' "${matrix}" | jq -r '.include | length > 0')"
           {
             echo "matrix=${matrix}"
+            echo "non-test-commands-enabled=${non_test_commands_enabled}"
             echo "test-shards-enabled=${test_shards_enabled}"
             echo "test-command=${test_command}"
           } >> "${GITHUB_OUTPUT}"
@@ -440,7 +444,7 @@ jobs:
   candidate:
     name: Candidate ${{ matrix.title }}
     needs: [binary, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -569,7 +573,7 @@ jobs:
   baseline:
     name: Baseline ${{ matrix.title }}
     needs: [binary, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1050,7 +1054,7 @@ jobs:
     # This is the sole verdict and retains the established required-check name.
     name: ${{ matrix.title }}
     needs: [candidate, baseline, plan]
-    if: ${{ !inputs.contract-probe && always() }}
+    if: ${{ !inputs.contract-probe && always() && needs.plan.outputs.non-test-commands-enabled == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
