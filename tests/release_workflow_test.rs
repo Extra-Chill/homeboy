@@ -1121,7 +1121,7 @@ fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
     assert!(recovery.contains("--arg schema homeboy.package-recovery"));
     assert!(recovery.contains("--arg tag \"${RELEASE_TAG}\""));
     assert!(recovery.contains("--arg commit \"${COMMIT}\""));
-    assert!(recovery.contains("artifacts: [$expected_assets[] | {path: .}]"));
+    assert!(recovery.contains("--argjson artifacts \"${artifacts_json}\""));
     assert!(
         !recovery.contains("path: (\"artifacts/\" + .)"),
         "manifest paths are relative to --from-artifacts artifacts"
@@ -1540,6 +1540,137 @@ fn verify_published_diagnoses_a_failed_host_from_the_observed_release() {
         output.contains("no published GitHub Release exists"),
         "an absent release must still be named as absent: {output}"
     );
+}
+
+/// The recovery manifest must declare a real digest for every expected asset.
+///
+/// It emitted `{path: .}` and nothing else, so every artifact carried a null
+/// `sha256` — while `validate_recovery_artifact`
+/// (`homeboy-release/src/release/executor/artifacts.rs`) requires a 64-hex
+/// digest for each one and rejects the first it reads. The manifest and its
+/// only reader had disagreed since the manifest was introduced. Nothing
+/// reached the reader until the asset-completeness gate ahead of it was fixed,
+/// at which point v0.350.27 failed with "Recovered release asset
+/// 'dist-manifest.json' is missing a valid sha256" — that asset is merely
+/// first in the sorted expected set, not special.
+///
+/// Executed rather than string-matched. The previous assertion pinned the jq
+/// expression exactly and still could not see that the document it produced
+/// was rejected by the code that consumes it, which is the whole reason this
+/// file has a script harness.
+#[test]
+fn recovery_manifest_declares_a_verified_digest_for_every_expected_asset() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = job_section(release_workflow(), "host");
+    let script = step_run_script(host, "name: Create authoritative recovery manifest");
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-recovery-manifest-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("temp bin");
+    std::fs::create_dir_all(dir.join("artifacts")).expect("artifacts dir");
+
+    // The bootstrap assets cargo-dist never checksums are deliberately included.
+    let assets = [
+        "dist-manifest.json",
+        "homeboy-installer.sh",
+        "homeboy.rb",
+        "sha256.sum",
+        "source.tar.gz",
+    ];
+    for asset in assets {
+        std::fs::write(
+            dir.join("artifacts").join(asset),
+            format!("bytes of {asset}\n"),
+        )
+        .expect("write asset");
+    }
+
+    let commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    std::fs::write(
+        bin.join("git"),
+        format!("#!/usr/bin/env bash\nprintf '%s\\n' {commit}\n"),
+    )
+    .expect("write mock git");
+    let mut perms = std::fs::metadata(bin.join("git"))
+        .expect("mock git metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(bin.join("git"), perms).expect("mark mock git executable");
+
+    let script_path = dir.join("manifest.sh");
+    std::fs::write(&script_path, &script).expect("write script");
+
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .current_dir(&dir)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("RELEASE_TAG", "v0.350.28")
+        .env("RELEASE_VERSION", "0.350.28")
+        .env(
+            "EXPECTED_ASSETS",
+            serde_json::to_string(&assets).expect("asset JSON"),
+        )
+        .output()
+        .expect("recovery manifest step should run");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("artifacts").join("manifest.json")).expect("read manifest"),
+    )
+    .expect("manifest is JSON");
+
+    let artifacts = manifest["artifacts"]
+        .as_array()
+        .expect("manifest declares artifacts");
+    assert_eq!(
+        artifacts.len(),
+        assets.len(),
+        "every expected asset must appear: {manifest}"
+    );
+
+    for (artifact, asset) in artifacts.iter().zip(assets) {
+        assert_eq!(artifact["path"], serde_json::json!(asset));
+        let declared = artifact["sha256"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{asset} must declare a sha256: {manifest}"));
+        // Exactly the predicate `validate_recovery_artifact` applies.
+        assert!(
+            declared.len() == 64 && declared.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{asset} sha256 {declared:?} must satisfy the recovery validator"
+        );
+        // And it must be the digest of the bytes actually on disk, not a
+        // placeholder that merely satisfies the shape.
+        let expected = std::process::Command::new("sha256sum")
+            .arg(dir.join("artifacts").join(asset))
+            .output()
+            .expect("sha256sum");
+        let expected = String::from_utf8_lossy(&expected.stdout)
+            .split_whitespace()
+            .next()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(declared, expected, "{asset} digest must match its bytes");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Extract the shell body of a `run: |` step so its BEHAVIOUR can be exercised
