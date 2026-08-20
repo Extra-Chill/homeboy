@@ -769,7 +769,7 @@ impl AgentTaskScheduleSupport {
                             );
                             super::finalize_candidate_artifacts(&mut recovered, &task);
                         }
-                        super::engine::release_scratch(
+                        let _ = super::engine::release_scratch(
                             &task.scratch,
                             "scheduler_timeout_completion",
                             &recovered,
