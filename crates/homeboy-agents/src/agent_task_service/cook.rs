@@ -3764,7 +3764,11 @@ pub fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentTaskCook
                 resolved_lifecycle_store = lifecycle_store;
                 &resolved_lifecycle_store
             }
-            Err(error) => return durable_cook_error_report_with_store(store, &options, error),
+            // No lifecycle store exists to inject: resolving one is what just
+            // failed. The report still names the recipe roots the caller owns.
+            Err(error) => {
+                return durable_cook_error_report_with_store(store, None, &options, error)
+            }
         },
     };
 
@@ -3931,7 +3935,12 @@ fn run_cook_reported(
                     ));
                 }
             }
-            return durable_cook_error_report_with_store(store, &failure_options, error);
+            return durable_cook_error_report_with_store(
+                store,
+                Some(lifecycle_store),
+                &failure_options,
+                error,
+            );
         }
     };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
@@ -3951,7 +3960,12 @@ fn run_cook_reported(
             attempt,
             Some(&result.value.status),
         ) {
-            return durable_cook_error_report_with_store(store, &failure_options, error);
+            return durable_cook_error_report_with_store(
+                store,
+                Some(lifecycle_store),
+                &failure_options,
+                error,
+            );
         }
         if phase == "terminal" {
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
@@ -3960,7 +3974,12 @@ fn run_cook_reported(
                 result.exit_code == 0,
                 result.exit_code,
             ) {
-                return durable_cook_error_report_with_store(store, &failure_options, error);
+                return durable_cook_error_report_with_store(
+                    store,
+                    Some(lifecycle_store),
+                    &failure_options,
+                    error,
+                );
             }
         }
     }
@@ -3975,30 +3994,61 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
-    durable_cook_error_report_with_store(&store, options, error)
+    // The fully ambient entry point: it resolves the recipe root and holds no
+    // lifecycle store, so nothing is injected here and nothing is split.
+    durable_cook_error_report_with_store(&store, None, options, error)
 }
 
+/// The durable failure report, bound to the roots its caller owns.
+///
+/// `lifecycle_store` is `Option` because one caller genuinely has none: `run_cook`
+/// routes here precisely when `AgentTaskLifecycleStore::from_current_environment()`
+/// failed, so there is no store to inject and the ambient reads below will fail
+/// the same way they always did. Every caller that *does* hold a lifecycle store
+/// now passes it.
+///
+/// That distinction is the whole point. This function reads the recipe from an
+/// injected `CookRecipeStore` and used to write the controller failure through
+/// ambient `agent_task_lifecycle` shims, so a Cook whose recipe lives in an
+/// injected home had its failure diagnostic recorded in whatever home the
+/// environment pointed at — and nothing failed while doing it: the report still
+/// returned, the recipe still read back correct, and only the cause went
+/// missing. That is the split `KNOWN_MIXED_STORE_FUNCTIONS` was written for; it
+/// stayed invisible to the scanner because it reached through wrappers instead
+/// of naming a store constructor (#7505).
 fn durable_cook_error_report_with_store(
     store: &CookRecipeStore,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
     options: &AgentTaskCookServiceOptions,
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    // The attempt record is presentation only — a missing one degrades to an
+    // empty attempts list, exactly as the ambient read's `.ok()` already did.
+    let attempt_record = |run_id: &str| match lifecycle_store {
+        Some(lifecycle_store) => agent_task_lifecycle::status_in_store(
+            lifecycle_store,
+            run_id,
+            agent_task_lifecycle::AgentTaskStatusOptions::default(),
+            false,
+        )
+        .ok()
+        .map(|outcome| outcome.record),
+        None => agent_task_lifecycle::status(run_id).ok(),
+    };
     if store.recipe_exists(&options.cook_id) {
         let attempts = store
             .load_recipe(&options.cook_id)
             .ok()
             .and_then(|recipe| recipe.attempts.last().cloned())
             .and_then(|attempt| {
-                agent_task_lifecycle::status(&attempt.run_id)
-                    .ok()
-                    .map(|record| AgentTaskCookAttemptReport {
-                        attempt: attempt.attempt,
-                        run_id: attempt.run_id,
-                        run_state: format!("{:?}", record.state),
-                        aggregate_path: record.aggregate_path,
-                        promotion: None,
-                        feedback: None,
-                    })
+                attempt_record(&attempt.run_id).map(|record| AgentTaskCookAttemptReport {
+                    attempt: attempt.attempt,
+                    run_id: attempt.run_id,
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                })
             })
             .into_iter()
             .collect();
@@ -4026,11 +4076,32 @@ fn durable_cook_error_report_with_store(
             context.phase = "controller".to_string();
             context.reason_code = error.code.as_str().to_string();
             context.diagnostic = Some(bounded_error_diagnostic(&error));
-            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
-                agent_task_lifecycle::record_cook_controller_failure(
-                    &options.initial_run_id,
-                    context.diagnostic.as_ref().expect("controller diagnostic"),
-                )?;
+            // The existence check and the write that follows it must name one
+            // installation: probing the ambient home and then recording into
+            // the injected one (or the reverse) is a check that answers about a
+            // record the write never touches.
+            let diagnostic = context.diagnostic.as_ref().expect("controller diagnostic");
+            match lifecycle_store {
+                Some(lifecycle_store) => {
+                    if agent_task_lifecycle::run_record_exists_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                    )? {
+                        agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            lifecycle_store,
+                            &options.initial_run_id,
+                            diagnostic,
+                        )?;
+                    }
+                }
+                None => {
+                    if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                        agent_task_lifecycle::record_cook_controller_failure(
+                            &options.initial_run_id,
+                            diagnostic,
+                        )?;
+                    }
+                }
             }
         }
         return Ok(report);
