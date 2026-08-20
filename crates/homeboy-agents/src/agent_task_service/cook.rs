@@ -556,7 +556,7 @@ fn finalize_with_operation_claim_in_store(
 
 /// Promote a cook attempt under a durable exactly-once operation claim.
 ///
-/// `promote_or_load_attempt` already loads an already-persisted promotion, but
+/// `promote_or_load_attempt_in_store` already loads an already-persisted promotion, but
 /// the fresh-promote path performs its external effect (`promote_attempt`) and
 /// only then records the result. A controller crash in that window re-runs the
 /// effect on restart. The claim closes it: reserve `promote:<run_id>` before the
@@ -583,7 +583,7 @@ fn promote_with_operation_claim_in_store(
             promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
         }
         // Another pass holds a still-fresh lease. The persisted-promotion read in
-        // `promote_or_load_attempt` still resolves an already-produced promotion;
+        // `promote_or_load_attempt_in_store` still resolves an already-produced promotion;
         // if none exists yet, promotion proceeds (content-addressed and idempotent
         // on disk). Do not mark the claim completed from here — its owner does.
         agent_task_lifecycle::ClaimOutcome::LeaseHeld => {

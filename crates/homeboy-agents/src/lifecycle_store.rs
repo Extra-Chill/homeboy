@@ -1518,7 +1518,7 @@ fn validate_cook_index_attempt_in_store(
 /// observation database instead of `paths::observation_db()`.
 ///
 /// The ambient `read_records()` free shim that used to sit above this is gone.
-/// Its last caller was `reconcile_active_lab_runner_handoffs`, a queue scan that
+/// Its last caller was `reconcile_active_lab_runner_handoffs_in_store`, a queue scan that
 /// mutates every row it selects — expiring, terminalizing, and reconciling them
 /// — so it now scans the store it was handed rather than deciding from one
 /// installation's queue and committing into another (#7505).
