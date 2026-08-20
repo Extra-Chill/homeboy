@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.28] - 2026-08-20
+
+### Fixed
+- three root causes behind red main
+
 ## [0.350.27] - 2026-08-20
 
 ### Changed
