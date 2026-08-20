@@ -2678,8 +2678,19 @@ fn cancel_run_signals_live_running_record() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
+    let identity = homeboy_core::build_identity::current().display;
+    let artifact = context.root().join("fake-controller");
+    let digest = fake_controller_artifact(&artifact, &identity, "live cancellation fixture");
     lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| Ok(json!({})))
+        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| {
+            Ok(json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": artifact,
+                    "sha256": digest,
+                }
+            }))
+        })
         .expect("submitted");
     mark_running_in_store(&lifecycle_store, "run-cancel-live").expect("marked running");
 
