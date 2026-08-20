@@ -2681,6 +2681,17 @@ fn cancel_run_signals_live_running_record() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| Ok(json!({})))
         .expect("submitted");
+    let mut record = lifecycle_store
+        .read_record("run-cancel-live")
+        .expect("submitted record");
+    record
+        .metadata
+        .as_object_mut()
+        .expect("record metadata")
+        .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+    lifecycle_store
+        .write_record(&record)
+        .expect("remove synthetic runtime admission");
     mark_running_in_store(&lifecycle_store, "run-cancel-live").expect("marked running");
 
     // The test binary cannot be a cancellation target: process cleanup
