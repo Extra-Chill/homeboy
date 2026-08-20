@@ -404,7 +404,11 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        let dry_run_preflight = run_dry_run_preflights(&input.component_id, &options)?;
+        let dry_run_preflight = run_dry_run_preflights(
+            &homeboy_core::paths::PathRoots::from_environment()?,
+            &input.component_id,
+            &options,
+        )?;
         if let Some(run) = dry_run_preflight {
             let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
             let release_summary = release_summary_from_run(&run);
@@ -627,7 +631,13 @@ fn prepared_tag_publish_recovery_decision(
     }
 }
 
+/// Run the dry-run preflight plan against roots resolved by the caller.
+///
+/// Dry run is its own entry into plan execution — it never reaches
+/// `orchestrator::run_with_plan` — so it receives roots from the workflow
+/// boundary rather than letting individual steps rediscover a home (#7505).
 fn run_dry_run_preflights(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<Option<ReleaseRun>> {
@@ -636,6 +646,7 @@ fn run_dry_run_preflights(
     let preflight_plan = super::execution_plan::build_dry_run_preflight_plan(component_id, options);
     let mut results = Vec::new();
     let stopped = super::execution_plan::execute_plan_steps(
+        roots,
         &preflight_plan.plan.steps,
         component_id,
         options,

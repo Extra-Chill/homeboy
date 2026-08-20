@@ -29,6 +29,11 @@ pub(crate) fn run_with_plan(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<(ReleasePlan, ReleaseRun, Option<ReleaseWorkspaceOutput>)> {
+    // One resolution for the entire release. Both plan phases below — the
+    // executable preflight pass and the rebuilt mutation pass — receive it,
+    // so a release cannot package into one home and then clean up, checkpoint,
+    // or record its deploy recovery against another (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let component = super::context::load_component(component_id, options)?;
     let mut workspace = super::workspace::ReleaseWorkspace::select(&component)?;
     let mut workspace_options = options.clone();
@@ -38,6 +43,7 @@ pub(crate) fn run_with_plan(
 
     let staging_source_sha = workspace.source_sha();
     match run_with_plan_inner(
+        &roots,
         component_id,
         &workspace_options,
         checkout_guard.as_ref(),
@@ -94,6 +100,7 @@ pub(crate) fn run_with_plan(
 }
 
 fn run_with_plan_inner(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
@@ -106,6 +113,7 @@ fn run_with_plan_inner(
     let mut timer = PhaseTimer::new();
     let initial_stop = timer.time("package_preflight", || {
         super::execution_plan::execute_plan_steps_at_source(
+            roots,
             &initial_plan.plan.steps,
             component_id,
             options,
@@ -142,6 +150,7 @@ fn run_with_plan_inner(
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
+            roots,
             &release_plan.plan.steps,
             component_id,
             options,
