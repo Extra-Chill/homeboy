@@ -2961,12 +2961,14 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
     let mut has_live_owner = false;
     let mut has_unverifiable_owner = false;
     let mut has_succeeded = false;
+    let mut has_failed = false;
     let mut recovery_identity = Vec::new();
     for execution in executions.iter_mut() {
         match execution["state"].as_str() {
-            Some("running") | Some("succeeded") => {
+            Some("running") | Some("succeeded") | Some("failed") => {
                 has_reconcilable_execution = true;
                 has_succeeded |= execution["state"] == json!("succeeded");
+                has_failed |= execution["state"] == json!("failed");
                 recovery_identity.push(execution["owner_identity"].clone());
                 let identity_state = execution
                     .get("owner_pid")
@@ -3005,9 +3007,13 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
         }
     }
     // Older records predate per-provider ownership, and non-Linux hosts can be
-    // unable to verify a persisted identity. Neither is proof that the owner
-    // died, so retain the joinable run instead of terminalizing it on a read.
-    if has_live_owner || has_unverifiable_owner {
+    // unable to verify a persisted identity. Neither alone is proof that the
+    // owner died, so retain a joinable run unless its provider already recorded
+    // a terminal failure.
+    // A terminal provider failure is already conclusive evidence that this
+    // execution cannot make progress. It must not retain `Running` solely
+    // because the foreground wrapper was interrupted before aggregate harvest.
+    if has_live_owner || (has_unverifiable_owner && !has_failed) {
         return true;
     }
     if !has_reconcilable_execution {
@@ -3035,6 +3041,22 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
                 task.state = AgentTaskState::CandidateRecoverable;
             }
         }
+    } else if has_failed {
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Failed);
+        for task in &mut record.tasks {
+            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                task.state = AgentTaskState::Failed;
+            }
+        }
+        record.ensure_metadata_object().insert(
+            "local_provider_ownership".to_string(),
+            json!({
+                "state": "provider_failed",
+                "recovery_identity": recovery_identity,
+                "reconciled_at": now,
+            }),
+        );
     } else {
         let executions = record
             .ensure_metadata_object()
