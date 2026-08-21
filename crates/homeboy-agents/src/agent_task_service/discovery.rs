@@ -290,6 +290,10 @@ fn discovery_report(
             None,
         ));
     }
+    // Fixture-backed runner rows were once written by an in-process concurrent
+    // Cook test. Treat only the durable fixture provenance as non-production;
+    // an unknown runner with any real/unknown executor stays visible and blocks.
+    records.retain(|record| !is_fixture_runner_record(record));
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
         records.retain(|record| {
@@ -471,10 +475,15 @@ pub(crate) fn controller_upgrade_admission_for_records(
     record_health: AgentTaskRecordHealthSummary,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ControllerUpgradeAdmission {
-    let summary = liveness_summary_for_records(records, now);
+    let records = records
+        .iter()
+        .filter(|record| !is_fixture_runner_record(record))
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary = liveness_summary_for_records(&records, now);
     let mut parent_by_attempt = BTreeMap::new();
     let mut invalid_handoff_parents = BTreeSet::new();
-    for record in records {
+    for record in &records {
         if let Some(attempt) = record
             .metadata
             .pointer("/detached_cook_handoff/attempt_run_id")
@@ -708,6 +717,13 @@ fn run_source(record: &AgentTaskRunRecord) -> String {
         return "remote".to_string();
     }
     "local".to_string()
+}
+
+fn is_fixture_runner_record(record: &AgentTaskRunRecord) -> bool {
+    agent_task_lifecycle::load_controller_plan(&record.run_id)
+        .ok()
+        .and_then(|plan| agent_task_lifecycle::fixture_runner_provenance(record, &plan))
+        .is_some()
 }
 
 /// Age in whole minutes between `timestamp` (RFC3339) and `now`, clamped to

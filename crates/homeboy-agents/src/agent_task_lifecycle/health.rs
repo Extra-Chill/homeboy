@@ -3,6 +3,33 @@ use homeboy_core::observation::RunRecord;
 
 pub(crate) const HEALTH_SAMPLE_LIMIT: usize = 20;
 const QUARANTINE_KEY: &str = "agent_task_lifecycle_quarantine";
+const FIXTURE_RUNNER_QUARANTINE_REASON: &str = "fixture_runner_provenance";
+
+/// Fixture executor records cannot represent production runner ownership. The
+/// conjunction keeps an unknown real runner fail-closed: it requires an accepted
+/// runner handoff, a complete runner-job identity, and a plan made entirely of
+/// the in-tree test executor.
+pub(crate) fn fixture_runner_provenance(
+    record: &AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+) -> Option<Value> {
+    let runner_id = record.runner_id()?;
+    let runner_job_id = record.runner_job_id()?;
+    (record.has_accepted_lab_handoff()
+        && !plan.tasks.is_empty()
+        && plan
+            .tasks
+            .iter()
+            .all(|task| task.executor.backend == "fixture"))
+    .then(|| {
+        json!({
+            "schema": "homeboy/agent-task-fixture-runner-provenance/v1",
+            "runner_id": runner_id,
+            "runner_job_id": runner_job_id,
+            "executor_backends": ["fixture"],
+        })
+    })
+}
 
 pub(crate) fn diagnose_run(
     run: &RunRecord,
@@ -28,7 +55,15 @@ pub(crate) fn diagnose_run(
             remediation: remediation.to_string(),
         }
     })?;
-    let reason = if record.lab_handoff_validation_error().is_some() {
+    let reason = if quarantined
+        && run
+            .metadata_json
+            .pointer("/agent_task_lifecycle_quarantine/reason_code")
+            .and_then(Value::as_str)
+            == Some(FIXTURE_RUNNER_QUARANTINE_REASON)
+    {
+        Some(AgentTaskRecordHealthReason::FixtureRunnerProvenance)
+    } else if record.lab_handoff_validation_error().is_some() {
         Some(AgentTaskRecordHealthReason::MalformedMetadata)
     } else if record.schema != schemas::RUN
         || record.lifecycle.schema != RUN_LIFECYCLE_RECORD_SCHEMA
@@ -59,6 +94,7 @@ pub(crate) fn record_health_item(
         | AgentTaskRecordHealthReason::MalformedMetadata => health.malformed += 1,
         AgentTaskRecordHealthReason::LegacySchema => health.legacy += 1,
         AgentTaskRecordHealthReason::ConflictingProjections => health.conflicting += 1,
+        AgentTaskRecordHealthReason::FixtureRunnerProvenance => health.fixture += 1,
     }
     if item.quarantined {
         health.quarantined += 1;
@@ -125,8 +161,26 @@ pub fn reconcile_record_health_in_store(
         records: Vec::new(),
     };
     for run in lifecycle_store.observation_runs()? {
-        let Err(item) = diagnose_run(&run) else {
-            continue;
+        let item = match diagnose_run(&run) {
+            Err(item) => item,
+            Ok(record) => {
+                let fixture_provenance = lifecycle_store
+                    .read_controller_plan(&run.id)
+                    .ok()
+                    .and_then(|plan| fixture_runner_provenance(&record, &plan));
+                let Some(provenance) = fixture_provenance else {
+                    continue;
+                };
+                AgentTaskRecordHealthItem {
+                    run_id: run.id.clone(),
+                    reason: AgentTaskRecordHealthReason::FixtureRunnerProvenance,
+                    quarantined: false,
+                    remediation: format!(
+                        "fixture runner provenance must remain quarantined: {}",
+                        provenance
+                    ),
+                }
+            }
         };
         // Quarantine is durable operator evidence, not a retry queue. Repeating
         // apply must be a no-op until an operator supplies new source evidence.

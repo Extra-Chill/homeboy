@@ -37,6 +37,7 @@ pub enum AgentTaskRecordHealthReason {
     MalformedMetadata,
     LegacySchema,
     ConflictingProjections,
+    FixtureRunnerProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct AgentTaskRecordHealthSummary {
     pub malformed: usize,
     pub legacy: usize,
     pub conflicting: usize,
+    pub fixture: usize,
     pub quarantined: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<AgentTaskRecordHealthItem>,
