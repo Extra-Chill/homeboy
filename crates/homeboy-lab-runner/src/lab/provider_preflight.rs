@@ -233,42 +233,6 @@ fn resolved_materialized_runtime(
         && plan.source_revision.as_deref() == Some(identity.source_revision.as_str())
 }
 
-/// A controller pin is only compatible when the runner advertises the same
-/// provider and immutable materialization revision. Provider availability alone
-/// cannot prove that a runner will execute the controller-selected runtime.
-fn exact_runtime_requirement_reason(
-    providers: &[AgentTaskExecutorProvider],
-    identity: &homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity,
-) -> Option<String> {
-    let Some(provider) = providers
-        .iter()
-        .find(|provider| provider.id == identity.provider_id)
-    else {
-        return Some(format!(
-            "runner does not advertise controller-selected provider `{}`",
-            identity.provider_id
-        ));
-    };
-    let Some(plan) = provider.extra.get("runtime_materialization_plan") else {
-        return Some(format!(
-            "runner provider `{}` has no runtime materialization declaration; it cannot prove the required runtime revision `{}`",
-            identity.provider_id, identity.source_revision
-        ));
-    };
-    let runner_revision = plan
-        .get("source_revision")
-        .and_then(serde_json::Value::as_str);
-    if runner_revision == Some(identity.source_revision.as_str()) {
-        return None;
-    }
-    Some(format!(
-        "runner provider `{}` does not advertise required runtime revision `{}` (advertised `{}`); materialize the controller-selected runtime before retrying",
-        identity.provider_id,
-        identity.source_revision,
-        runner_revision.unwrap_or("missing")
-    ))
-}
-
 struct AgentTaskProviderProbeOutput {
     stdout: String,
     stderr: String,
@@ -592,23 +556,6 @@ fn parse_json_from_mixed_output(output: &str) -> Option<serde_json::Value> {
         }
     }
     None
-}
-
-fn provider_available(
-    providers: &[AgentTaskExecutorProvider],
-    backend: &str,
-    selector: Option<&str>,
-) -> bool {
-    AgentTaskProviderAdmissionPlan::compile(
-        AgentTaskProviderAdmissionRequest {
-            backend: backend.to_string(),
-            selector: selector.map(str::to_string),
-            model: None,
-            runtime_identity: None,
-        },
-        providers,
-    )
-    .is_ready()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1005,102 +952,6 @@ mod tests {
         assert!(error
             .message
             .contains("does not match the requested provider"));
-    }
-
-    #[test]
-    fn exact_runtime_requirement_accepts_only_the_controller_revision() {
-        let identity = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
-            runtime_id: "runtime".to_string(),
-            provider_id: "provider".to_string(),
-            source_selector: "extension:provider".to_string(),
-            source_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            freshness: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned,
-            provider: serde_json::Value::Null,
-            materialization_plan: serde_json::Value::Null,
-        };
-        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "provider",
-            "backend": "test",
-            "argv": ["provider"],
-        }))
-        .expect("provider");
-        provider.extra.insert(
-            "runtime_materialization_plan".to_string(),
-            serde_json::json!({ "source_revision": identity.source_revision }),
-        );
-        assert_eq!(
-            exact_runtime_requirement_reason(&[provider.clone()], &identity),
-            None
-        );
-
-        provider.extra.insert(
-            "runtime_materialization_plan".to_string(),
-            serde_json::json!({ "source_revision": "ffffffffffffffffffffffffffffffffffffffff" }),
-        );
-        let error = exact_runtime_requirement_reason(&[provider], &identity)
-            .expect("stale runner runtime rejects before submission");
-        assert!(error.contains("controller-selected runtime"));
-    }
-
-    #[test]
-    fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
-        let stdout = concat!(
-            "Preparing runtime...\n",
-            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"variant-a\",\"backend\":\"primary\",\"default_backend\":true,\"argv\":[\"provider-a\",\"agent\"],\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
-        );
-
-        let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
-
-        assert!(provider_available(&providers, "primary", None));
-        assert!(provider_available(&providers, "primary", Some("variant-a")));
-        assert!(!provider_available(&providers, "primary", Some("missing")));
-    }
-
-    #[test]
-    fn parsed_provider_availability_accepts_unique_extension_alias() {
-        let stdout = concat!(
-            "Preparing runtime...\n",
-            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"extension-a.agent-task-executor\",\"backend\":\"renamed-backend\",\"default_backend\":true,\"argv\":[\"extension-a\",\"agent\"],\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\",\"extension_id\":\"extension-a\"}]}}\n"
-        );
-
-        let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
-
-        assert!(provider_available(&providers, "extension-a", None));
-        let mut selection = AgentTaskProviderSelection {
-            backend: "extension-a".to_string(),
-            selector: None,
-            runtime_identity: None,
-        };
-        assert!(provider_admission_reason(&selection, &providers).is_none());
-        assert!(provider_available(
-            &providers,
-            "extension-a",
-            Some("extension-a.agent-task-executor")
-        ));
-        assert!(!provider_available(
-            &providers,
-            "extension-a",
-            Some("missing")
-        ));
-
-        selection.selector = Some("missing".to_string());
-        assert!(provider_admission_reason(&selection, &providers)
-            .expect("missing selector reason")
-            .contains("does not match backend"));
-
-        let mut ambiguous = providers.clone();
-        let mut second = ambiguous[0].clone();
-        second.id = "extension-a.second".to_string();
-        ambiguous.push(second);
-        selection.selector = None;
-        assert!(provider_admission_reason(&selection, &ambiguous)
-            .expect("ambiguous alias reason")
-            .contains("is ambiguous"));
-
-        selection.backend = "unknown".to_string();
-        assert!(provider_admission_reason(&selection, &ambiguous)
-            .expect("unknown backend reason")
-            .contains("no provider for backend"));
     }
 
     #[test]

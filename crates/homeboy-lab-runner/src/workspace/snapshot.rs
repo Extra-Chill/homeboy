@@ -115,8 +115,6 @@ pub use homeboy_source_snapshot_contract::workspace_content_identity::{
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
-pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
-
 // The SSH path passes this script through `sh -c` after shell-quoting it. A
 // single quote can expand from one byte to five bytes at that layer. 16 KiB
 // therefore remains below Linux's 128 KiB single-argument limit even in that

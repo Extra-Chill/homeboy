@@ -2696,15 +2696,6 @@ where
     ))
 }
 
-fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> Result<()> {
-    homeboy_core::config::with_config_lock(|| {
-        let patch = serde_json::json!({ "homeboy_path": homeboy_path });
-        match merge(Some(runner_id), &patch.to_string(), &[])? {
-            MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(()),
-        }
-    })
-}
-
 /// Restore only if this promotion still owns the selected value. A later
 /// serialized transaction may have selected another binary after this one
 /// failed; compensation must never overwrite that newer owner.
@@ -2749,37 +2740,6 @@ fn defer_reconnect_after_promotion_race(
         selected_binary_path: selected_homeboy_path.to_string(),
         followup_commands: active_job_followups(runner_id, &active_job_ids),
         ownership_contention,
-    })
-}
-
-fn rollback_refreshed_daemon_with<Stop, Restore, Reconnect>(
-    previous_homeboy_path: Option<&str>,
-    stop: Stop,
-    restore: Restore,
-    reconnect: Reconnect,
-) -> Result<()>
-where
-    Stop: FnOnce() -> Result<()>,
-    Restore: FnOnce(Option<&str>) -> Result<()>,
-    Reconnect: FnOnce(Option<&str>) -> Result<()>,
-{
-    stop()?;
-    restore(previous_homeboy_path)?;
-    reconnect(previous_homeboy_path)
-}
-
-fn rollback_refresh_connect_error_with<T, Restore, Reconnect>(
-    primary_error: Error,
-    restore: Restore,
-    reconnect: Reconnect,
-) -> Result<T>
-where
-    Restore: FnOnce() -> Result<()>,
-    Reconnect: FnOnce() -> Result<()>,
-{
-    rollback_refresh_error_with(primary_error, || {
-        restore()?;
-        reconnect()
     })
 }
 

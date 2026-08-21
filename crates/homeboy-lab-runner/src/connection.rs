@@ -43,7 +43,6 @@ const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15
 const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
 // controller-local tunnel that disappeared during a link flap.
-const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
 const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -559,32 +558,6 @@ fn rollback_rotated_candidate(
     }
     terminate_tunnel_if_owned(candidate);
     let _ = super::generation_store::rollback_activation(runner_id, current, generation);
-}
-
-fn cleanup_direct_generation_with<Fallback, Tunnel>(
-    session: &RunnerSession,
-    graceful_stop: Result<()>,
-    mut force_stop_remote: Fallback,
-    mut terminate_tunnel: Tunnel,
-) -> Result<()>
-where
-    Fallback: FnMut(u32) -> Result<()>,
-    Tunnel: FnMut(&RunnerSession),
-{
-    let cleanup_result = match graceful_stop {
-        Ok(()) => Ok(()),
-        Err(graceful_error) => match session.remote_daemon_pid {
-            Some(pid) => force_stop_remote(pid).map_err(|fallback_error| {
-                Error::internal_unexpected(format!(
-                    "generation graceful cleanup failed ({}) and exact PID fallback failed ({})",
-                    graceful_error.message, fallback_error.message
-                ))
-            }),
-            None => Err(graceful_error),
-        },
-    };
-    terminate_tunnel(session);
-    cleanup_result
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -2703,97 +2676,6 @@ where
 
     reconnect(runner_id)?;
     status_fn(runner_id)
-}
-
-fn reconcile_terminal_phantom_activity(
-    runner_id: &str,
-    session: Option<&RunnerSession>,
-    active_jobs: Vec<ActiveRunnerJobSummary>,
-    stale_jobs: Vec<ActiveRunnerJobSummary>,
-    direct_daemon_active_jobs: Option<usize>,
-) -> (
-    Vec<ActiveRunnerJobSummary>,
-    Vec<ActiveRunnerJobSummary>,
-    Option<usize>,
-    Option<RunnerActiveJobRecoveryEvidence>,
-) {
-    let Some(authoritative_count) = direct_daemon_active_jobs else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    if authoritative_count == active_jobs.len() {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Some(local_url) = session.and_then(|session| session.local_url.as_deref()) else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Ok(client) = Client::builder().timeout(Duration::from_secs(10)).build() else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Ok(response) = client
-        .post(format!(
-            "{}/jobs/reconcile-terminal",
-            local_url.trim_end_matches('/')
-        ))
-        .send()
-    else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    if !response.status().is_success() {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Ok(body) = response.json::<Value>() else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let reconciled = body
-        .pointer("/body/reconciled_count")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let reconciled_job_ids = body
-        .pointer("/body/reconciled_job_ids")
-        .and_then(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .take(100)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if reconciled == 0
-        || reconciled_job_ids.is_empty()
-        || usize::try_from(reconciled).ok() != Some(reconciled_job_ids.len())
-    {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Ok((refreshed_active_jobs, refreshed_stale_jobs)) =
-        runner_jobs(runner_id, session.expect("local URL requires session"))
-    else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Some(refreshed_count) = daemon_http_freshness(
-        runner_id,
-        local_url,
-        &session.expect("local URL requires session").homeboy_version,
-        session
-            .expect("local URL requires session")
-            .homeboy_build_identity
-            .as_deref()
-            .unwrap_or(""),
-    )
-    .ok()
-    .map(|freshness| freshness.active_jobs) else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    (
-        refreshed_active_jobs,
-        refreshed_stale_jobs,
-        Some(refreshed_count),
-        Some(RunnerActiveJobRecoveryEvidence {
-            reconciled_job_ids,
-            prior_active_job_count: authoritative_count,
-            active_job_count: refreshed_count,
-        }),
-    )
 }
 
 fn should_infer_child_run_orphans(

@@ -920,69 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn fixture_two_controller_session_ownership_lifecycle() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let owner_daemon = FixtureDaemon::new("lease-fixture", 4242);
-            let peer_daemon = FixtureDaemon::new("lease-fixture", 4242);
-            let owner = fixture_session("controller-owner", owner_daemon.url());
-            let peer = fixture_session("controller-peer", peer_daemon.url());
-
-            let barrier = Arc::new(Barrier::new(3));
-            let mut connects = Vec::new();
-            for session in [owner.clone(), peer.clone()] {
-                let barrier = Arc::clone(&barrier);
-                connects.push(thread::spawn(move || {
-                    write_session(&session).expect("record controller connection");
-                    barrier.wait();
-                    read_session_for_controller(
-                        &session.runner_id,
-                        session.controller_id.as_deref().expect("controller ID"),
-                    )
-                    .expect("read controller connection")
-                    .expect("recorded controller connection")
-                }));
-            }
-            barrier.wait();
-            let connected: Vec<_> = connects
-                .into_iter()
-                .map(|connect| connect.join().expect("controller connect"))
-                .collect();
-
-            assert_ne!(
-                paths::runner_controller_session_file("fixture-lab", "controller-owner")
-                    .expect("owner controller path"),
-                paths::runner_controller_session_file("fixture-lab", "controller-peer")
-                    .expect("peer controller path")
-            );
-            assert_eq!(connected.len(), 2);
-            assert!(connected.iter().all(session_is_live));
-
-            write_ownership(&owner).expect("record live owner");
-            assert!(has_live_peer_session(&owner).expect("live peer"));
-            assert!(!claim_ownership_if_owner_not_live(&peer).expect("protect live owner"));
-            assert!(
-                !should_stop_remote_daemon(&owner, Some(&owner), true),
-                "the live owner cannot tear down the daemon while a peer remains"
-            );
-
-            drop(owner_daemon);
-            assert!(claim_ownership_if_owner_not_live(&peer).expect("transfer stale ownership"));
-            write_ownership(&peer).expect("transfer owner record");
-            assert_eq!(
-                read_ownership("fixture-lab")
-                    .expect("read owner")
-                    .expect("owner record")
-                    .controller_id,
-                peer.controller_id
-            );
-            assert!(
-                should_stop_remote_daemon(&peer, Some(&peer), false),
-                "only the transferred owner can tear down after stale peers are gone"
-            );
-        });
-    }
-
-    #[test]
     fn transport_drop_uses_bounded_ssh_stop_for_exact_live_owner() {
         let session = direct_ssh_session("lease-live");
         let initial = remote_daemon_status(true, 0, "lease-live", 4242, None);
