@@ -655,6 +655,14 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
         }
         CommandOutputFileMode::TraceJsonSummaryArtifact
         | CommandOutputFileMode::GenericEnvelope => {
+            // Raw stdout/stderr are terminal streams. Their bounded evidence is
+            // supplied explicitly by the raw command, not duplicated in the
+            // structured envelope's presentation fields.
+            let presentation = run
+                .raw_stdout
+                .is_none()
+                .then(|| presentation_envelope(run.presentation.clone()))
+                .flatten();
             output::write_json_to_file_for_identity(
                 run.output_file_result(mode),
                 path,
@@ -663,7 +671,7 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
                     command: run.command.clone(),
                     operation: run.operation.clone(),
                 },
-                presentation_envelope(run.presentation.clone()),
+                presentation,
             );
         }
     }
@@ -752,6 +760,42 @@ mod tests {
             run.output_file_result.unwrap().unwrap()["stdout_tail"],
             "tail"
         );
+    }
+
+    #[test]
+    fn raw_output_file_omits_unbounded_presentation_streams() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ssh-output.json");
+        let large_stderr = "e".repeat(2 * 1024 * 1024);
+        let run = CommandRun::from_raw_stdout_streaming(
+            "ssh",
+            Ok("full raw stdout".to_string()),
+            0,
+            Some(Ok(json!({
+                "stdout_tail": "bounded stdout",
+                "stderr_tail": "bounded stderr",
+                "stderr_truncated": true,
+            }))),
+        )
+        .with_presentation(CommandPresentation {
+            stdout: None,
+            stderr: Some(large_stderr),
+        });
+
+        write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+
+        let bytes = std::fs::read(&path).expect("artifact written");
+        let json: Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert!(
+            bytes.len() < 16 * 1024,
+            "raw presentation leaked into artifact"
+        );
+        assert_eq!(json["data"]["stderr_tail"], "bounded stderr");
+        assert!(json.get("presentation").is_none());
     }
 
     #[test]
