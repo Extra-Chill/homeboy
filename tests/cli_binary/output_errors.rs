@@ -107,7 +107,7 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
 #[test]
 fn compact_runner_status_includes_summary_and_full_continuation() {
     let dir = tempfile::tempdir().expect("tempdir");
-    register_local_runner(dir.path());
+    register_lab_runner(dir.path());
 
     let output = homeboy_command()
         .args(["runner", "status", "lab-local"])
@@ -140,7 +140,7 @@ fn compact_runner_status_includes_summary_and_full_continuation() {
 #[test]
 fn full_runner_status_includes_lab_diagnostics() {
     let dir = tempfile::tempdir().expect("tempdir");
-    register_local_runner(dir.path());
+    register_lab_runner(dir.path());
 
     let output = homeboy_command()
         .args(["runner", "status", "lab-local", "--full"])
@@ -258,5 +258,49 @@ fn register_local_runner(home: &std::path::Path) {
         "expected local runner registration to succeed; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn register_lab_runner(home: &std::path::Path) {
+    let server = homeboy_command()
+        .args([
+            "server",
+            "create",
+            "lab-local",
+            "--host",
+            "localhost",
+            "--user",
+            "test",
+        ])
+        .env("HOME", home)
+        .output()
+        .expect("register Lab server");
+    assert!(
+        server.status.success(),
+        "expected Lab server registration to succeed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&server.stdout),
+        String::from_utf8_lossy(&server.stderr)
+    );
+
+    let runner = homeboy_command()
+        .args([
+            "runner",
+            "add",
+            "lab-local",
+            "--kind",
+            "ssh",
+            "--server",
+            "lab-local",
+            "--workspace-root",
+        ])
+        .arg(home)
+        .env("HOME", home)
+        .output()
+        .expect("register Lab runner");
+    assert!(
+        runner.status.success(),
+        "expected Lab runner registration to succeed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&runner.stdout),
+        String::from_utf8_lossy(&runner.stderr)
     );
 }

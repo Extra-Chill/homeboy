@@ -46,17 +46,27 @@ pub fn run_summaries_with_artifact_indexes(
         .map(|run| run.id.clone())
         .collect::<Vec<_>>();
     let mut artifacts_by_run = store.list_artifacts_for_runs(&rig_run_ids)?;
+    // Resolved once for the whole listing, from the store being listed. The
+    // ambient form resolved per row and guarded first to keep that affordable;
+    // asking the store once removes the per-row cost and the disagreement
+    // between the listing's home and the store's (#7505).
+    let artifact_root = store.artifact_root()?;
     Ok(run_records
         .into_iter()
         .map(|run| {
             let artifacts = artifacts_by_run.remove(&run.id).unwrap_or_default();
-            run_summary_with_artifact_index(run, &artifacts)
+            run_summary_with_artifact_index(&artifact_root, run, &artifacts)
         })
         .collect())
 }
 
-fn run_summary_with_artifact_index(run: RunRecord, artifacts: &[ArtifactRecord]) -> RunSummary {
-    let artifact_index = homeboy::rig::artifact_index_for_run_with_artifacts(&run, artifacts);
+fn run_summary_with_artifact_index(
+    artifact_root: &std::path::Path,
+    run: RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> RunSummary {
+    let artifact_index =
+        homeboy::rig::artifact_index_for_run_with_artifacts(artifact_root, &run, artifacts);
     RunSummary {
         artifact_index,
         ..super::run_summary(run)

@@ -363,8 +363,17 @@ mod tests {
 
     #[test]
     fn durable_record_round_trips_target_state_and_partial_timing_evidence() {
-        with_isolated_home(|_| {
-            let roots = homeboy_core::paths::PathRoots::from_environment().expect("path roots");
+        // Deliberately no `with_isolated_home`. Every durable call below already
+        // takes a data root, so this test can name its own instead of mutating
+        // `HOME` and reading it straight back out through `from_environment`.
+        //
+        // That is what #7505 is for. A test that owns its roots needs neither
+        // the environment nor the process-global mutex `HomeGuard` takes to
+        // protect it, so it can run beside any other test instead of queueing
+        // behind all of them.
+        {
+            let data_root = tempfile::tempdir().expect("data root");
+            let data_root = data_root.path();
             let mut run = DeployLifecycleRun::new("run".to_string(), identity());
             let mut timer = homeboy_core::phase_timing::PhaseTimer::new();
             timer.record_failed("transfer", std::time::Duration::from_millis(1));
@@ -374,9 +383,9 @@ mod tests {
                 Some("connection lost".to_string()),
                 Some(timer.into_report()),
             );
-            save_in_roots(roots.data(), &run).expect("persist run before retryable remote work");
+            save_in_roots(data_root, &run).expect("persist run before retryable remote work");
 
-            let restored = load_in_roots(roots.data(), "run").expect("read durable run");
+            let restored = load_in_roots(data_root, "run").expect("read durable run");
             assert_eq!(restored.schema_version, SCHEMA_VERSION);
             assert_eq!(restored.targets[1].status, DeployTargetStatus::Failed);
             assert_eq!(
@@ -391,7 +400,7 @@ mod tests {
                     .map(|span| span.status),
                 Some(homeboy_core::phase_timing::PhaseStatus::Failed)
             );
-        });
+        }
     }
 
     #[test]
