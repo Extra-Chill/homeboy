@@ -523,12 +523,15 @@ pub(crate) fn controller_upgrade_admission_for_records(
                 } else {
                     record
                         .runner_id()
+                        .filter(|runner| agent_task_lifecycle::runner_exists(runner))
                         .map(|runner| format!("homeboy runner reconcile {runner}"))
                         .unwrap_or_else(|| {
                             if liveness == AgentTaskLiveness::Active {
                                 format!("homeboy agent-task cancel {group_run_id}")
                             } else {
-                                format!("homeboy agent-task reconcile {group_run_id} --apply")
+                                format!(
+                                    "homeboy --placement local agent-task reconcile {group_run_id} --apply"
+                                )
                             }
                         })
                 };

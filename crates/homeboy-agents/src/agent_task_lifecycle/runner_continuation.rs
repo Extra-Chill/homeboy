@@ -205,6 +205,13 @@ homeboy_engine_primitives::provider_registry! {
     with: pub(crate) fn with_runner_continuation,
 }
 
+/// Whether the current runner provider has a configured authority for this id.
+/// A missing configuration proves the durable runner projection is orphaned;
+/// connection state alone does not.
+pub fn runner_exists(runner_id: &str) -> bool {
+    with_runner_continuation(|provider| provider.runner_exists(runner_id))
+}
+
 /// Clear any registered runner-continuation provider so a fresh test starts from
 /// the no-op default. The provider slot is a process-global; without this reset a
 /// provider registered by one test would leak into every later test in the same

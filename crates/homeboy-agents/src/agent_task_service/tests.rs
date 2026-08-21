@@ -1787,6 +1787,9 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
     with_isolated_home(|_| {
         let cook_id = "cook-upgrade-alias";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            AbsentSubmissionProvider,
+        ));
         agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
@@ -1822,6 +1825,46 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         );
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(admission.blockers[0].action, "homeboy runner reconcile lab");
+    });
+}
+
+#[test]
+fn upgrade_admission_recovers_an_orphaned_removed_runner_record_locally() {
+    with_isolated_home(|_| {
+        let cook_id = "concurrent-first-cook-run";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(cook_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+            record.metadata["runner_job_id"] = serde_json::json!("removed-runner-job");
+        })
+        .expect("orphaned runner projection stored");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        let blocker = &admission.blockers[0];
+        assert_eq!(blocker.run_id, cook_id);
+        assert_eq!(blocker.owner, "durable_agent_tasks");
+        assert_eq!(
+            blocker.recovery_command,
+            "homeboy --placement local agent-task reconcile concurrent-first-cook-run --apply"
+        );
+
+        let applied = reconcile_run(cook_id, false).expect("orphaned record reconciles locally");
+        assert_eq!(applied.reconciled, 1);
+        assert_eq!(applied.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status(cook_id).expect("reconciled record").state,
+            AgentTaskRunState::Cancelled
+        );
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        assert!(
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now())
+                .allows_controller_replacement()
+        );
     });
 }
 
@@ -2398,7 +2441,10 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
             .find(|blocker| blocker.run_id == "unverified-runner")
             .expect("unverified runner blocks");
         assert_eq!(runner.reason, "runner_job_unverified_after_daemon_restart");
-        assert_eq!(runner.recovery_command, "homeboy runner reconcile lab");
+        assert_eq!(
+            runner.recovery_command,
+            "homeboy --placement local agent-task reconcile unverified-runner --apply"
+        );
         assert!(!admission
             .blockers
             .iter()
