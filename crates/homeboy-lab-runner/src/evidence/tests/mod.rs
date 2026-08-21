@@ -886,21 +886,22 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
     let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let lifecycle_store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let command = vec![
         "homeboy".to_string(),
         "agent-task".to_string(),
         "cook".to_string(),
     ];
-    homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
-        homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+    lifecycle_store
+        .record_lab_offload_planned(homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
             run_id: "agent-task-lab-mirror",
             runner_id: "lab",
             remote_workspace: "/srv/homeboy/project",
             remote_command: &command,
             durable_plan: None,
-        },
-    )
-    .expect("planned controller proxy");
+        })
+        .expect("planned controller proxy");
     let job_id = Uuid::new_v4();
     let job = Job {
         id: job_id,
@@ -954,7 +955,8 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
         None,
     )
     .expect("mirror terminal Lab job");
-    let lifecycle = homeboy_agents::agent_task_lifecycle::status("agent-task-lab-mirror")
+    let lifecycle = lifecycle_store
+        .read_record("agent-task-lab-mirror")
         .expect("typed lifecycle remains readable");
 
     assert_eq!(run.kind, "agent-task");

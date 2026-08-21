@@ -3857,9 +3857,9 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
 }
 
 fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = CookRecipeStore::new(context.path_roots());
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+    let store = CookRecipeStore::new(roots.clone());
+    let lifecycle_store = AgentTaskLifecycleStore::new(roots);
     let cook_id = format!("concurrent-first-cook-{}", uuid::Uuid::new_v4());
     let mut winner = batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     winner.initial_plan.plan_id = "creator-plan".to_string();
@@ -3894,19 +3894,25 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     set_initial_recipe_creation_barrier_for_test(None);
 
     let outcomes = [winner_result.unwrap(), loser_result.unwrap()];
+    let statuses = outcomes
+        .iter()
+        .map(|outcome| outcome.value.status.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
         outcomes
             .iter()
             .filter(|outcome| outcome.value.status == "in_flight")
             .count(),
-        1
+        1,
+        "unexpected concurrent Cook statuses: {statuses:?}"
     );
     assert_eq!(
         outcomes
             .iter()
             .filter(|outcome| outcome.value.status == "durable_failure")
             .count(),
-        1
+        1,
+        "unexpected concurrent Cook statuses: {statuses:?}"
     );
     let recipe = store.load_recipe(&cook_id).expect("creator recipe");
     let creator_options = super::super::reconstruct_options_with_dispatcher(
@@ -3916,7 +3922,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     .expect("creator options");
     let record_before = lifecycle_store
         .read_record(&creator_options.initial_run_id)
-        .expect("queued creator record");
+        .expect("running creator record");
     let plan_before = lifecycle_store
         .read_controller_plan(&creator_options.initial_run_id)
         .expect("creator controller plan");
@@ -3926,11 +3932,11 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     )
     .ok();
 
-    assert_eq!(record_before.state, AgentTaskRunState::Queued);
+    assert_eq!(record_before.state, AgentTaskRunState::Running);
     assert_eq!(
         lifecycle_store
             .read_record(&creator_options.initial_run_id)
-            .expect("creator record remains queued")
+            .expect("creator record remains running")
             .state,
         record_before.state
     );
