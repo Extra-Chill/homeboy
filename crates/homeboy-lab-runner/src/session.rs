@@ -927,14 +927,22 @@ impl RunnerStatusReport {
         // Reconciliation settles terminal jobs through the connected daemon.
         // A disconnected report must first select its reconnect, refresh, or
         // ownership-recovery action rather than advertising that unavailable path.
-        let next_action = self
-            .admission_action()
-            .or_else(|| {
+        // Terminal ownership uncertainty dominates every retained-generation
+        // projection. Reconciliation mutates the ledger and cannot become an
+        // implicit fallback when the daemon owner itself is not established.
+        let next_action = (!self
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(DaemonFreshnessReport::has_terminal_recovery_ownership_blocker))
+        .then(|| {
+            self.admission_action().or_else(|| {
                 unresolved_generation
                     .as_ref()
                     .map(|_| reconcile_action(&self.runner_id))
             })
-            .map(|action| action.render_command());
+        })
+        .flatten()
+        .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
             runner_id: self.runner_id.clone(),
@@ -965,6 +973,9 @@ impl RunnerStatusReport {
     /// the source prevents either surface from dropping the runner id.
     pub fn admission_action(&self) -> Option<ExecutableAction> {
         if let Some(freshness) = self.daemon_freshness.as_ref() {
+            if freshness.has_terminal_recovery_ownership_blocker() {
+                return None;
+            }
             if let Some(action) = freshness
                 .repair_plan
                 .first()
@@ -973,9 +984,10 @@ impl RunnerStatusReport {
                 return Some(action);
             }
             if !freshness.fresh {
-                // Missing lease evidence without an authorized repair must be
-                // reprobed, not replaced with a generic reconnect.
-                return Some(crate::daemon_repair::diagnose_action(&self.runner_id));
+                // Missing typed ownership proof means no mutation is authorized.
+                // Keep admission closed and expose the freshness evidence as the
+                // terminal blocker rather than prescribing a read-only loop.
+                return None;
             }
         }
         if let Some(warning) = &self.stale_daemon {
@@ -1441,7 +1453,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_lease_missing_without_repair_plan_requires_diagnosis() {
+    fn admission_summary_lease_missing_with_unavailable_reconciliation_plan_is_terminal() {
         let mut report = base_report();
         report.connected = false;
         report.state = RunnerSessionState::Disconnected;
@@ -1461,7 +1473,10 @@ mod status_serialization_tests {
             runtime_paths: None,
             active_jobs: 0,
             termination_evidence: None,
-            repair_plan: Vec::new(),
+            repair_plan: vec![homeboy_core::daemon::DaemonRepairStep::text(
+                "runner_reconcile_leaseless_orphans",
+                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            )],
         });
 
         let summary = report.admission_summary(0);
@@ -1469,10 +1484,7 @@ mod status_serialization_tests {
         assert!(!summary.daemon_fresh);
         assert!(!summary.accepting_jobs);
         assert!(!summary.safe_to_rotate);
-        assert_eq!(
-            summary.next_action.as_deref(),
-            Some("homeboy runner doctor homeboy-lab --scope lab-offload")
-        );
+        assert_eq!(summary.next_action, None);
     }
 
     #[test]
@@ -1622,6 +1634,50 @@ mod status_serialization_tests {
             summary.next_action.as_deref(),
             Some("homeboy runner reconcile homeboy-lab")
         );
+    }
+
+    #[test]
+    fn terminal_ownership_blocks_retained_generation_reconciliation_fallback() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Unavailable;
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
+            ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-old".to_string(),
+            admission_owner: false,
+            drain_state: crate::RollingDrainState::Draining,
+            active_job_count: 2,
+            observed_active_job_count: None,
+            active_job_count_authoritative: false,
+            job_owner_count: 2,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-old".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+
+        let summary = report.admission_summary_with_generations(&generations, &[], 1);
+
+        assert_eq!(summary.unresolved_retained_projection_count, 2);
+        assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
+        assert_eq!(summary.next_action, None);
     }
 
     #[test]
