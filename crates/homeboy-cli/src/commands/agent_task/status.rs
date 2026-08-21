@@ -68,16 +68,25 @@ pub(super) fn resolve_cook_reader_target(
     run_or_cook_id: &str,
     exact: bool,
 ) -> homeboy::core::Result<CookReaderTarget> {
+    // One store for the whole target resolution. Both branches ask the same
+    // question about the same Cook — does its index exist, and what does it
+    // say — and separately resolved homes can disagree about the answer
+    // (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     if exact {
-        let cook_alias = agent_task_lifecycle::cook_index_exists(run_or_cook_id)?
-            .then(|| agent_task_lifecycle::cook_index(run_or_cook_id))
-            .transpose()?
-            .map(|index| {
-                json!({
-                    "cook_id": index.cook_id,
-                    "latest_attempt_run_id": index.latest_run_id,
+        let cook_alias =
+            agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, run_or_cook_id)?
+                .then(|| {
+                    agent_task_lifecycle::cook_index_in_store(&lifecycle_store, run_or_cook_id)
                 })
-            });
+                .transpose()?
+                .map(|index| {
+                    json!({
+                        "cook_id": index.cook_id,
+                        "latest_attempt_run_id": index.latest_run_id,
+                    })
+                });
         return Ok(CookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
@@ -86,9 +95,12 @@ pub(super) fn resolve_cook_reader_target(
             resolution: "exact_record",
         });
     }
-    if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
+    if !agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, run_or_cook_id)? {
         if let Some(materializing) =
-            agent_task_lifecycle::resolve_detached_cook_materializing_attempt(run_or_cook_id)?
+            agent_task_lifecycle::resolve_detached_cook_materializing_attempt_in_store(
+                &lifecycle_store,
+                run_or_cook_id,
+            )?
         {
             return Ok(CookReaderTarget {
                 run_id: materializing.run_id.clone(),

@@ -5544,15 +5544,8 @@ pub struct DetachedCookMaterializingAttempt {
     pub run_id: String,
 }
 
-/// Resolve a detached Cook parent's known materializing child before Cook-index
-/// publication. A published index supersedes the reservation, and an absent
-/// child remains a parent read while submission is still in progress.
-pub fn resolve_detached_cook_materializing_attempt(
-    cook_id: &str,
-) -> Result<Option<DetachedCookMaterializingAttempt>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    resolve_detached_cook_materializing_attempt_in_store(&lifecycle_store, cook_id)
-}
+// The ambient `resolve_detached_cook_materializing_attempt()` shim that used to sit
+// here is gone; the status reader was its only caller and now resolves the attempt in the store it checked the index against (#7505).
 
 /// [`resolve_detached_cook_materializing_attempt`] against explicitly injected
 /// durable lifecycle roots.
@@ -6187,25 +6180,8 @@ pub fn record_acceptance_verdict_in_store(
     )
 }
 
-/// Record a verdict with bounded reviewer feedback for the single durable Cook
-/// remediation that follows a rejection.
-pub fn record_acceptance_verdict_with_feedback(
-    run_id: &str,
-    verdict: AgentTaskAcceptanceVerdict,
-    evidence_refs: Vec<String>,
-    token: String,
-    feedback: Option<String>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_acceptance_verdict_with_feedback_in_store(
-        &lifecycle_store,
-        run_id,
-        verdict,
-        evidence_refs,
-        token,
-        feedback,
-    )
-}
+// The ambient `record_acceptance_verdict_with_feedback()` shim that used to sit
+// here is gone; the acceptance CLI command was its only caller (#7505).
 
 /// Record an authority verdict inside an explicitly rooted store.
 ///
@@ -6429,16 +6405,8 @@ pub(crate) fn record_cook_finalization_in_store(
     }
 }
 
-/// Persist the exact compare-and-swap push receipt before PR reconciliation.
-/// A restarted fanout supervisor can therefore distinguish an observed remote
-/// update from an unrecorded mutation window.
-pub fn record_cook_force_with_lease_receipt(
-    run_id: &str,
-    receipt: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_force_with_lease_receipt_in_store(&lifecycle_store, run_id, receipt)
-}
+// The ambient `record_cook_force_with_lease_receipt()` shim that used to sit
+// here is gone; the fanout force-with-lease path was its only caller and now writes both receipts into one store (#7505).
 
 pub fn record_cook_force_with_lease_receipt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
