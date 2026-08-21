@@ -1337,16 +1337,9 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
     default_store()?.enqueue_terminal_continuation(cook_id, run_id)
 }
 
-/// Explicit operator recovery may rearm a continuation that previously failed
-/// before Cook execution. Automatic scheduling keeps failed entries terminal.
-pub fn rearm_failed_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
-    rearm_failed_terminal_continuation_in_store(
-        &default_store()?,
-        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        cook_id,
-        run_id,
-    )
-}
+// The ambient `rearm_failed_terminal_continuation()` shim that used to sit
+// here is gone. It had no callers and was reachable only through the
+// `agent_tasks::lifecycle` facade, which nothing outside the crate used (#7505).
 
 /// [`rearm_failed_terminal_continuation`] against explicitly injected durable
 /// roots.
