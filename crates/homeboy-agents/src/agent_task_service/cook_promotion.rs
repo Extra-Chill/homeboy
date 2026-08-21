@@ -2608,6 +2608,20 @@ fn validate_manual_preflight_report(
             None,
         ));
     }
+    if report
+        .publication_proof
+        .git_identity
+        .as_ref()
+        .and_then(|identity| identity.commit_sha.as_deref())
+        .is_none_or(str::is_empty)
+    {
+        return Err(Error::validation_invalid_argument(
+            "publication_proof.git_identity.commit_sha",
+            "recoverable manual preflight requires a committed candidate; commit the candidate first and rerun preflight, or run the same manual-finalization command without --preflight to have Homeboy commit and publish it directly",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     validate_publication_intent(&report.publication_intent).map_err(|_| {
         Error::validation_invalid_argument(
             "cook_finalization",
