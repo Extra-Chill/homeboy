@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.30] - 2026-08-21
+
+### Changed
+- delete five dead ambient path wrappers
+- Root the agent-task status read
+- delete the retry wrappers the rooted boundary orphaned
+- make prune failures say why the scan withheld a workspace
+- delete the dead private-batch-plan dir wrapper
+- root the deferred-workload worker path
+
+### Fixed
+- stop one fat process withholding every prunable workspace
+- two deterministic red-main failures with environment-shaped causes
+
 ## [0.350.29] - 2026-08-21
 
 ### Changed
