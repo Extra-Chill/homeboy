@@ -4028,19 +4028,7 @@ fn parse_ssh_prune_delete_output(
     }
 }
 
-pub(crate) fn ssh_prune_delete_command(root: &str, remote_path: &str) -> String {
-    ssh_prune_delete_command_with_terminal_owner(root, remote_path, None)
-}
-
-pub(crate) fn ssh_prune_delete_command_with_terminal_owner(
-    root: &str,
-    remote_path: &str,
-    terminal_owner_run_id: Option<&str>,
-) -> String {
-    ssh_prune_delete_command_with_terminal_authority(root, remote_path, terminal_owner_run_id, None)
-}
-
-fn ssh_prune_delete_command_with_terminal_authority(
+pub(crate) fn ssh_prune_delete_command_with_terminal_authority(
     root: &str,
     remote_path: &str,
     terminal_owner_run_id: Option<&str>,

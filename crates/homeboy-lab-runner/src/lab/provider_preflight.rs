@@ -269,23 +269,6 @@ fn exact_runtime_requirement_reason(
     ))
 }
 
-/// Resolve the requested backend/selector against the runner-reported provider
-/// list and, when it is not selectable, return a precise reason that names the
-/// exact mapping mismatch in terms of the listed providers. Returns `None` when
-/// the provider resolves cleanly.
-///
-/// This is what keeps the cook preflight aligned with `agent-task providers
-/// --runner`: the same provider documents discovery shows are run through the
-/// shared `resolve_provider_for_backend` contract, so a provider that discovery
-/// lists is either accepted here or rejected with a specific selector/backend
-/// explanation — never a bare "availability is false".
-fn runner_provider_unavailable_reason(
-    providers: &[AgentTaskExecutorProvider],
-    selection: &AgentTaskProviderSelection,
-) -> Option<String> {
-    provider_admission_reason(selection, providers)
-}
-
 struct AgentTaskProviderProbeOutput {
     stdout: String,
     stderr: String,
@@ -1088,7 +1071,7 @@ mod tests {
             selector: None,
             runtime_identity: None,
         };
-        assert!(runner_provider_unavailable_reason(&providers, &selection).is_none());
+        assert!(provider_admission_reason(&selection, &providers).is_none());
         assert!(provider_available(
             &providers,
             "extension-a",
@@ -1101,7 +1084,7 @@ mod tests {
         ));
 
         selection.selector = Some("missing".to_string());
-        assert!(runner_provider_unavailable_reason(&providers, &selection)
+        assert!(provider_admission_reason(&selection, &providers)
             .expect("missing selector reason")
             .contains("does not match backend"));
 
@@ -1110,12 +1093,12 @@ mod tests {
         second.id = "extension-a.second".to_string();
         ambiguous.push(second);
         selection.selector = None;
-        assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
+        assert!(provider_admission_reason(&selection, &ambiguous)
             .expect("ambiguous alias reason")
             .contains("is ambiguous"));
 
         selection.backend = "unknown".to_string();
-        assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
+        assert!(provider_admission_reason(&selection, &ambiguous)
             .expect("unknown backend reason")
             .contains("no provider for backend"));
     }

@@ -1,6 +1,5 @@
 use super::super::lab_selection::{
-    authoritative_status_for_preflight, authoritative_status_for_preflight_with_transport,
-    preflight_lab_runner_availability_from_status,
+    authoritative_status_for_preflight_with_transport,
     preflight_lab_runner_availability_from_status_with_transport,
     prepare_lab_runner_for_offload_with, reconnect_after_compatible_lease_with,
     LabRunnerPreparation, LabRunnerSelection,
@@ -394,11 +393,12 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
     report.tunnel_pid = Some(tunnel_pid);
     report.remote_daemon_pid = session.remote_daemon_pid;
     connected.session = Some(session.clone());
-    let (_, admitted) = preflight_lab_runner_availability_from_status(
+    let (_, admitted) = preflight_lab_runner_availability_from_status_with_transport(
         &selection,
         |_| Ok(connected.clone()),
         Some(1),
         Some(&report),
+        false,
     )
     .expect("live owned tunnel admits after connect returns");
     assert!(homeboy_core::process::pid_is_running(tunnel_pid));
@@ -454,7 +454,7 @@ fn stale_disconnected_projection_rejects_reused_tunnel_identity_before_health() 
     connect.tunnel_pid = Some(std::process::id());
     connect.remote_daemon_pid = Some(1467759);
 
-    let error = authoritative_status_for_preflight(status, Some(&connect))
+    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
         .expect_err("reused tunnel identity is rejected before endpoint probing");
 
     assert!(error.message.contains("tunnel is no longer owned"));
@@ -516,11 +516,12 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
         mode: RunnerTunnelMode::DirectSsh,
     };
 
-    let error = preflight_lab_runner_availability_from_status(
+    let error = preflight_lab_runner_availability_from_status_with_transport(
         &selection,
         |_| Ok(status.clone()),
         Some(1),
         Some(&connect),
+        false,
     )
     .expect_err("mismatched health is rejected");
 
@@ -595,11 +596,12 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
             source: LabRunnerSelectionSource::Explicit,
             mode: RunnerTunnelMode::DirectSsh,
         };
-        let error = preflight_lab_runner_availability_from_status(
+        let error = preflight_lab_runner_availability_from_status_with_transport(
             &selection,
             |_| Ok(status.clone()),
             Some(1),
             Some(&connect),
+            false,
         )
         .expect_err("omitted coordinate is rejected");
         daemon.join().expect("daemon");
@@ -614,7 +616,8 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
 fn true_disconnected_projection_is_not_authorized_without_matching_connect_evidence() {
     let status = unreachable_health_status("lab", false);
 
-    let admitted = authoritative_status_for_preflight(status, None).expect("ordinary status");
+    let admitted = authoritative_status_for_preflight_with_transport(status, None, false)
+        .expect("ordinary status");
 
     assert!(!admitted.connected);
 }
@@ -624,7 +627,7 @@ fn stale_disconnected_projection_rejects_mismatched_connect_evidence() {
     let status = unreachable_health_status("lab", false);
     let connect = connected_direct_connect_report("lab");
 
-    let error = authoritative_status_for_preflight(status, Some(&connect))
+    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
         .expect_err("different endpoint evidence is not admitted");
 
     assert!(error.message.contains("did not converge"));
