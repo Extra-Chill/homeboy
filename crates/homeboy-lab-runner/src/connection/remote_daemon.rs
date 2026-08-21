@@ -2023,7 +2023,15 @@ pub(super) fn bounded_candidate_exemplars(candidates: &[Value]) -> String {
     let mut seen = BTreeSet::new();
     let mut exemplars = Vec::new();
     let mut bytes = 0;
-    for candidate in candidates {
+    // An ambiguous owner blocks safe recovery; show it before unrelated
+    // candidates even when a remote daemon reports it last.
+    let prioritized = candidates.iter().filter(|candidate| {
+        candidate.get("ownership").and_then(Value::as_str) == Some("ambiguous")
+    });
+    let remaining = candidates.iter().filter(|candidate| {
+        candidate.get("ownership").and_then(Value::as_str) != Some("ambiguous")
+    });
+    for candidate in prioritized.chain(remaining) {
         let rendered =
             serde_json::to_string(candidate).unwrap_or_else(|_| "<unserializable>".to_string());
         if !seen.insert(rendered.clone()) {
