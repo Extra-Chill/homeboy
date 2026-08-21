@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.16] - 2026-08-21
+
+### Fixed
+- compose repository ESLint configs
+
 ## [3.35.15] - 2026-08-19
 
 ### Fixed
