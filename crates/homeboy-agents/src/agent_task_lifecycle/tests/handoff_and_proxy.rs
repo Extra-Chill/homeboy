@@ -819,8 +819,12 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
         snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
         snapshot.events.clear();
 
-        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
-            .expect("accepted runner snapshot binds the pending handoff");
+        reconcile_transport_proxy_snapshot_in_store(
+            &AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store"),
+            &mut record,
+            &snapshot,
+        )
+        .expect("accepted runner snapshot binds the pending handoff");
 
         assert_eq!(record.state, AgentTaskRunState::Running);
         assert_eq!(

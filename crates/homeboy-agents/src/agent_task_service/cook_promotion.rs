@@ -1266,17 +1266,8 @@ pub(crate) fn moving_base_recovery_report(
     report
 }
 
-/// Continue only the controller-owned half of a green Cook: authenticate the
-/// original promoted candidate, pin a fresh destination base, rebase it, then
-/// rebuild promotion/gate proof without returning to a provider.
-pub(crate) fn recover_moving_base_cook_candidate(
-    options: &AgentTaskCookServiceOptions,
-    recovery: &MovingBaseCookRecovery,
-) -> Result<AgentTaskPromotionReport> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    recover_moving_base_cook_candidate_in_store(&lifecycle_store, options, recovery)
-}
+// The ambient `recover_moving_base_cook_candidate()` shim that used to sit here is
+// gone; one moving-base recovery test was its only caller and now resolves its own store (#7505).
 
 pub(crate) fn recover_moving_base_cook_candidate_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
