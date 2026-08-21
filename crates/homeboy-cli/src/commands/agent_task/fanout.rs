@@ -857,12 +857,24 @@ fn force_with_lease_then_reconcile(
                 None,
             )
         })?;
+    // One store for both receipt writes and the status read below: the two
+    // receipts describe one force-with-lease and must land in one home.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let receipt = force_with_lease_push(path, head)?;
-    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt.clone())?;
+    agent_task_lifecycle::record_cook_force_with_lease_receipt_in_store(
+        &lifecycle_store,
+        &child.run_id,
+        receipt.clone(),
+    )?;
     agent_task_service::recover_cook_pr(&child.run_id, Vec::new(), false)?;
     let mut receipt = receipt;
     receipt["pr_refresh_completed"] = Value::Bool(true);
-    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt)?;
+    agent_task_lifecycle::record_cook_force_with_lease_receipt_in_store(
+        &lifecycle_store,
+        &child.run_id,
+        receipt,
+    )?;
     Ok(())
 }
 
@@ -6120,6 +6132,30 @@ fi
                 .expect("register managed worktree fixture");
             }
             test();
+        });
+    }
+
+    #[test]
+    fn cook_batch_reuses_multiple_existing_issue_worktrees_before_lab_reconciliation() {
+        with_materialized_cook_batch_worktrees(|| {
+            let (value, exit_code) = cook_batch(cook_batch_args()).expect("plan existing wave");
+
+            assert_eq!(exit_code, 0, "{value}");
+            assert_eq!(value["summary"]["issues"], 2);
+            let rows = value["worktrees"]["rows"]
+                .as_array()
+                .expect("worktree rows");
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter().all(|row| row["status"] == "created"),
+                "{rows:?}"
+            );
+            assert!(rows.iter().all(|row| row["path"].is_string()), "{rows:?}");
+            assert!(value["plan"]["cooks"]
+                .as_array()
+                .expect("planned cooks")
+                .iter()
+                .all(|cook| cook["workspace"].is_string()));
         });
     }
 

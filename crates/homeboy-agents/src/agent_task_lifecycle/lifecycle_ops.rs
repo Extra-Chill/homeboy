@@ -809,10 +809,8 @@ pub fn has_expired_detached_cook_admission(
     has_pending_detached_cook_handoff(record) && !detached_cook_admission_is_live(record, now)
 }
 
-pub fn expire_detached_cook_admission(cook_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    expire_detached_cook_admission_in_store(&lifecycle_store, cook_id)
-}
+// The ambient `expire_detached_cook_admission()` shim that used to sit here is
+// gone; the reconciler was its only caller and now expires inside the store it classified the run from (#7505).
 
 /// Expire a detached Cook's admission lease inside an explicitly rooted store.
 ///
@@ -1040,15 +1038,8 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
-/// Restore an explicit plan placement decision onto a legacy run record.
-///
-/// Placement is opt-in policy evidence. A controller-local plan without a
-/// decision must remain unclassified rather than acquiring a synthetic local
-/// contract that could contradict later runner evidence.
-pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    normalize_local_execution_placement_in_store(&lifecycle_store, run_id)
-}
+// The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
+// its two normalization tests now normalize inside a store they resolve (#7505).
 
 /// Restore an explicit plan placement decision onto a legacy record inside an
 /// explicitly rooted store.
@@ -1308,12 +1299,16 @@ mod execution_placement_tests {
     #[test]
     fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            // One store for the whole test: both normalizations and the record
+            // they read must name one installation.
+            let store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
             let plan = super::super::tests::test_plan();
             let record =
                 submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
                     .expect("submit plan");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("submission stamp remains authoritative");
             let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
                 serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
@@ -1343,7 +1338,7 @@ mod execution_placement_tests {
                 .remove("execution_placement_decision");
             store::write_record(&legacy_record).expect("remove legacy record projection");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("explicit plan decision is restored");
             assert_eq!(
                 normalized.metadata["execution_placement_decision"]["decision_id"],
@@ -2773,6 +2768,17 @@ pub(crate) fn record_provider_execution_terminal_in_store(
     attempt: u32,
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
+    if !matches!(
+        state,
+        "succeeded" | "cancelled" | "timed_out" | "candidate_recoverable" | "failed"
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "state",
+            "provider execution terminal state is invalid",
+            Some(state.to_string()),
+            None,
+        ));
+    }
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
@@ -2812,21 +2818,13 @@ pub(crate) fn record_provider_execution_terminal_in_store(
             "provider execution reached a terminal result without its durable attempt record",
         ));
     }
-    record.ok_or_else(|| {
-        Error::internal_unexpected("provider execution terminal record was unchanged")
-    })
+    // The mutation is intentionally a no-op when cancellation or another
+    // terminal writer won the race. That existing record is the durable outcome.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
 }
 
-/// Whether this run still has a provider execution that can produce work.
-///
-/// Controller-owned artifact harvesting may continue after a provider result is
-/// terminal. Foreground liveness sampling is only meaningful while a provider
-/// boundary remains active, so callers use this durable predicate to stop
-/// sampling during that bounded cleanup phase.
-pub fn has_active_provider_execution(run_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    has_active_provider_execution_in_store(&lifecycle_store, run_id)
-}
+// The ambient `has_active_provider_execution()` shim that used to sit here is gone;
+// its one scheduler test now asks the store it resolves (#7505).
 
 /// [`has_active_provider_execution`] against explicitly injected durable
 /// lifecycle roots.
@@ -2961,12 +2959,14 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
     let mut has_live_owner = false;
     let mut has_unverifiable_owner = false;
     let mut has_succeeded = false;
+    let mut has_failed = false;
     let mut recovery_identity = Vec::new();
     for execution in executions.iter_mut() {
         match execution["state"].as_str() {
-            Some("running") | Some("succeeded") => {
+            Some("running") | Some("succeeded") | Some("failed") => {
                 has_reconcilable_execution = true;
                 has_succeeded |= execution["state"] == json!("succeeded");
+                has_failed |= execution["state"] == json!("failed");
                 recovery_identity.push(execution["owner_identity"].clone());
                 let identity_state = execution
                     .get("owner_pid")
@@ -3005,9 +3005,13 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
         }
     }
     // Older records predate per-provider ownership, and non-Linux hosts can be
-    // unable to verify a persisted identity. Neither is proof that the owner
-    // died, so retain the joinable run instead of terminalizing it on a read.
-    if has_live_owner || has_unverifiable_owner {
+    // unable to verify a persisted identity. Neither alone is proof that the
+    // owner died, so retain a joinable run unless its provider already recorded
+    // a terminal failure.
+    // A terminal provider failure is already conclusive evidence that this
+    // execution cannot make progress. It must not retain `Running` solely
+    // because the foreground wrapper was interrupted before aggregate harvest.
+    if has_live_owner || (has_unverifiable_owner && !has_failed) {
         return true;
     }
     if !has_reconcilable_execution {
@@ -3035,6 +3039,22 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
                 task.state = AgentTaskState::CandidateRecoverable;
             }
         }
+    } else if has_failed {
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Failed);
+        for task in &mut record.tasks {
+            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                task.state = AgentTaskState::Failed;
+            }
+        }
+        record.ensure_metadata_object().insert(
+            "local_provider_ownership".to_string(),
+            json!({
+                "state": "provider_failed",
+                "recovery_identity": recovery_identity,
+                "reconciled_at": now,
+            }),
+        );
     } else {
         let executions = record
             .ensure_metadata_object()
@@ -3786,19 +3806,8 @@ pub fn status_with_options(
     status_in_store(&lifecycle_store, run_id, options, false)
 }
 
-/// Reconcile one literal durable record without following a Cook alias. Scoped
-/// repair uses this when a logical Cook id has both a handoff parent and an
-/// attempt, because each record is independently authoritative evidence.
-pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    Ok(status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        true,
-    )?
-    .record)
-}
+// The ambient `exact_status()` shim that used to sit here is
+// gone; the reconciler was its only caller and now reads exactly through the store it resolved once (#7505).
 
 /// The shared, store-rooted body of [`status`], [`status_with_options`], and
 /// [`exact_status`].
@@ -5302,15 +5311,8 @@ pub(crate) fn record_cook_attempt_in_store(
     Ok(index)
 }
 
-/// Register a Cook attempt while the caller owns the config lock.
-pub(crate) fn record_cook_attempt_locked(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-) -> Result<CookAttemptRegistration> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_attempt_locked_in_store(&lifecycle_store, cook_id, attempt, run_id)
-}
+// The ambient `record_cook_attempt_locked()` shim that used to sit here is gone;
+// its one strict-lock test now registers inside the store it resolves (#7505).
 
 pub(crate) fn record_cook_attempt_locked_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5413,17 +5415,8 @@ impl CookAttemptRegistration {
     }
 }
 
-/// Record the controller-owned boundary that a resumed Cook must advance.
-/// Provider terminal evidence and promotion reports remain separate so a later
-/// failed attempt cannot replace the source candidate's recovery checkpoint.
-pub fn record_cook_recovery_checkpoint(
-    run_id: &str,
-    phase: &str,
-    next_command: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_recovery_checkpoint_in_store(&lifecycle_store, run_id, phase, next_command)
-}
+// The ambient `record_cook_recovery_checkpoint()` shim that used to sit here is gone;
+// the fanout resume path was its only caller and now checkpoints inside the store it resolves (#7505).
 
 pub fn record_cook_recovery_checkpoint_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5571,15 +5564,8 @@ pub struct DetachedCookMaterializingAttempt {
     pub run_id: String,
 }
 
-/// Resolve a detached Cook parent's known materializing child before Cook-index
-/// publication. A published index supersedes the reservation, and an absent
-/// child remains a parent read while submission is still in progress.
-pub fn resolve_detached_cook_materializing_attempt(
-    cook_id: &str,
-) -> Result<Option<DetachedCookMaterializingAttempt>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    resolve_detached_cook_materializing_attempt_in_store(&lifecycle_store, cook_id)
-}
+// The ambient `resolve_detached_cook_materializing_attempt()` shim that used to sit
+// here is gone; the status reader was its only caller and now resolves the attempt in the store it checked the index against (#7505).
 
 /// [`resolve_detached_cook_materializing_attempt`] against explicitly injected
 /// durable lifecycle roots.
@@ -5954,13 +5940,9 @@ pub fn exact_record_in_store(
     lifecycle_store.read_record(&sanitize_run_id(run_id))
 }
 
-/// Return the exact durable records a reconciliation request owns. A Cook id
-/// with a materialized detached-handoff parent names both that parent and its
-/// current attempt; an exact attempt remains scoped to itself.
-pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)
-}
+// The ambient `reconcile_scope_run_ids()` shim that used to sit here is gone;
+// the reconciler moved to the rooted form in a prior slice and the one
+// remaining test caller now resolves its own store (#7505).
 
 /// [`reconcile_scope_run_ids`] against explicitly injected durable lifecycle
 /// roots.
@@ -6214,25 +6196,8 @@ pub fn record_acceptance_verdict_in_store(
     )
 }
 
-/// Record a verdict with bounded reviewer feedback for the single durable Cook
-/// remediation that follows a rejection.
-pub fn record_acceptance_verdict_with_feedback(
-    run_id: &str,
-    verdict: AgentTaskAcceptanceVerdict,
-    evidence_refs: Vec<String>,
-    token: String,
-    feedback: Option<String>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_acceptance_verdict_with_feedback_in_store(
-        &lifecycle_store,
-        run_id,
-        verdict,
-        evidence_refs,
-        token,
-        feedback,
-    )
-}
+// The ambient `record_acceptance_verdict_with_feedback()` shim that used to sit
+// here is gone; the acceptance CLI command was its only caller (#7505).
 
 /// Record an authority verdict inside an explicitly rooted store.
 ///
@@ -6456,16 +6421,8 @@ pub(crate) fn record_cook_finalization_in_store(
     }
 }
 
-/// Persist the exact compare-and-swap push receipt before PR reconciliation.
-/// A restarted fanout supervisor can therefore distinguish an observed remote
-/// update from an unrecorded mutation window.
-pub fn record_cook_force_with_lease_receipt(
-    run_id: &str,
-    receipt: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_force_with_lease_receipt_in_store(&lifecycle_store, run_id, receipt)
-}
+// The ambient `record_cook_force_with_lease_receipt()` shim that used to sit
+// here is gone; the fanout force-with-lease path was its only caller and now writes both receipts into one store (#7505).
 
 pub fn record_cook_force_with_lease_receipt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

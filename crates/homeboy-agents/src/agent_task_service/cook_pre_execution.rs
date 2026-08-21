@@ -354,10 +354,9 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     Ok(())
 }
 
-pub(crate) fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reconcile_reserved_cancellation_in_store(&lifecycle_store, cook_id)
-}
+// The ambient `reconcile_reserved_cancellation()` shim that used to sit here
+// is gone. Its apparent call site invokes the closure parameter of the same
+// name; the free function itself had no callers (#7505).
 
 pub(crate) fn reconcile_reserved_cancellation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

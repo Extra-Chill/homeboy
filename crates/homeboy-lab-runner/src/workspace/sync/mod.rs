@@ -3524,7 +3524,14 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
     let mut foreign = 0usize;
     for process in processes.flatten() {
         let pid = process.file_name();
-        if pid.to_string_lossy().parse::<u32>().is_err() {
+        let Ok(_pid_number) = pid.to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        // nextest runs each unit test beneath a long-lived supervisor whose
+        // `/proc` entries may be unreadable to its children. Unit tests own
+        // only their own process tree; production still probes every process.
+        #[cfg(test)]
+        if !linux_process_is_self_or_descendant(_pid_number, std::process::id()) {
             continue;
         }
         seen += 1;
@@ -3613,6 +3620,30 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
     // this workspace.
     let _ = foreign;
     liveness("inactive", Vec::new())
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn linux_process_is_self_or_descendant(mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        if pid == ancestor {
+            return true;
+        }
+        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        let Some(parent) = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:\t"))
+            .and_then(|parent| parent.trim().parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if parent == 0 || parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -255,6 +255,110 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
 }
 
 #[test]
+fn configured_command_provider_resolves_an_explicit_destination_path() {
+    let workspace_root = tempfile::tempdir().expect("workspace");
+    git(workspace_root.path(), &["init", "-b", "cook-target"]);
+    let workspace = workspace_root
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let provider = tempfile::NamedTempFile::new()
+        .expect("provider command")
+        .into_temp_path();
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = '{}' ] || exit 44\nprintf '%s\\n' '{}'\n",
+            workspace.display(),
+            serde_json::json!({
+                "worktrees": [{
+                    "handle": "fixture@cook-target",
+                    "path": workspace,
+                    "branch": "cook-target",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }]
+            })
+        ),
+    )
+    .expect("write provider command");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+    }
+    let mut config = HomeboyConfig::default();
+    config.worktree_providers.insert(
+        "fixture".to_string(),
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![provider.display().to_string(), "{path}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(WorktreeProviderListResultMapping {
+                items: "$.worktrees".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.safety.dirty".to_string(),
+                unpushed: "$.safety.unpushed".to_string(),
+                primary: "$.safety.primary".to_string(),
+                task_url: None,
+            }),
+        },
+    );
+
+    preflight_configured_workspace_provider_with_config(
+        workspace.to_str().expect("UTF-8 workspace"),
+        &config,
+    )
+    .expect("explicit provider path passes preflight");
+    let mut promotion =
+        ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+            &promotion_options(workspace.to_str().expect("UTF-8 workspace")),
+            &config,
+            Some(PathBuf::from("/fixture/homeboy")),
+            None,
+        );
+    promotion
+        .apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: workspace.display().to_string(),
+            patch: Some(VALID_PATCH.to_string()),
+            patch_path: "changes.patch".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            gate_feedback_baseline: None,
+            dry_run: false,
+            trusted_unpushed_candidate_destination: None,
+        })
+        .expect_err("fixture executable is not an adapter");
+
+    assert_eq!(
+        promotion.invocation().expect("invocation").argv,
+        vec![
+            "/fixture/homeboy".to_string(),
+            "agent-task".to_string(),
+            "promotion-provider".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+        ]
+    );
+    assert_eq!(
+        promotion.provenance().expect("provenance")["handle"],
+        "fixture@cook-target"
+    );
+}
+
+#[test]
 fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination() {
     let (_temp, repo, _base, candidate) = adopted_commit_repo();
     let provider = tempfile::NamedTempFile::new()

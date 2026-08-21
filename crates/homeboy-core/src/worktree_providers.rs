@@ -372,6 +372,33 @@ pub fn resolve_worktree_provider_path_from_config(
     path: &std::path::Path,
     config: &HomeboyConfig,
 ) -> Result<Option<WorktreeProviderResolution>> {
+    resolve_worktree_provider_path_with_policy_from_config(path, config, false, None, None)
+}
+
+/// Resolve an exact provider-owned checkout path for mutation while applying
+/// the same destination safety policy as handle-based promotion.
+pub fn resolve_apply_enabled_worktree_provider_path_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
+) -> Result<Option<WorktreeProviderResolution>> {
+    resolve_worktree_provider_path_with_policy_from_config(
+        path,
+        config,
+        true,
+        gate_feedback_baseline,
+        trusted_unpushed_destination,
+    )
+}
+
+fn resolve_worktree_provider_path_with_policy_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+    require_apply_enabled: bool,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
+) -> Result<Option<WorktreeProviderResolution>> {
     let requested = match std::fs::canonicalize(path) {
         Ok(path) => path,
         Err(_) => return Ok(None),
@@ -384,7 +411,7 @@ pub fn resolve_worktree_provider_path_from_config(
     provider_ids.sort();
     for provider_id in provider_ids {
         let provider = &config.worktree_providers[&provider_id];
-        if !provider.enabled {
+        if !provider.enabled || (require_apply_enabled && !provider.apply_enabled) {
             continue;
         }
         let worktree = if let Some(command) = provider.commands.resolve_path.as_ref() {
@@ -409,7 +436,12 @@ pub fn resolve_worktree_provider_path_from_config(
         let Some(worktree) = worktree else {
             continue;
         };
-        validate_provider_handle(&provider_id, &worktree, None, None)?;
+        validate_provider_handle(
+            &provider_id,
+            &worktree,
+            gate_feedback_baseline,
+            trusted_unpushed_destination,
+        )?;
         return Ok(Some(WorktreeProviderResolution {
             provider_id,
             worktree,
@@ -437,6 +469,69 @@ pub fn resolve_apply_enabled_worktree_provider_from_config(
         gate_feedback_baseline,
         None,
     )
+}
+
+/// Whether a provider path names a remote location rather than a filesystem
+/// checkout. This is deliberately syntactic so callers never probe a remote
+/// location through the local filesystem before its provider materializes it.
+pub fn worktree_provider_path_requires_materialization(path: &str) -> bool {
+    path.split_once("://")
+        .is_some_and(|(scheme, _)| !scheme.is_empty() && scheme != "file")
+}
+
+/// Materialize an already-registered provider workspace through that provider's
+/// configured mutation capability. The postcondition must be a filesystem path;
+/// returning another remote location leaves an actionable, bounded failure
+/// rather than letting a later filesystem operation block indefinitely.
+pub fn materialize_apply_enabled_worktree_provider_identity_from_config(
+    identity: &WorktreeProviderExactIdentity,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderExactIdentity> {
+    if !worktree_provider_path_requires_materialization(&identity.path) {
+        return Ok(identity.clone());
+    }
+    let handle = &identity.handle;
+    let provider_id = &identity.provider_id;
+    let provider = config
+        .worktree_providers
+        .get(provider_id)
+        .expect("resolved provider is configured");
+    let command = provider.commands.ensure.as_ref().ok_or_else(|| {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            format!("registered remote worktree `{handle}` requires materialization, but provider `{provider_id}` does not configure commands.ensure"),
+            Some(handle.to_string()),
+            Some(vec![format!("Configure worktree_providers.{provider_id}.commands.ensure with the provider-native command that materializes `{handle}`.")]),
+        );
+        error.details["worktree_provider_materialization"] = Value::String("unavailable".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error
+    })?;
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{handle}", handle))
+        .collect::<Vec<_>>();
+    let remediation = render_provider_command(&command);
+    run_provider_ensure_command(provider_id, provider, &command)?;
+    let identity = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+        handle,
+        provider_id,
+        config,
+    )?;
+    if worktree_provider_path_requires_materialization(&identity.path) {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            format!("provider `{provider_id}` reported registered remote worktree `{handle}` after its materialization command completed"),
+            Some(handle.to_string()),
+            Some(vec![format!("Run the provider-native materialization command: {remediation}")]),
+        );
+        error.details["worktree_provider_materialization"] =
+            Value::String("incomplete".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error.details["worktree_provider_remediation"] = Value::String(remediation);
+        return Err(error);
+    }
+    Ok(identity)
 }
 
 /// Resolve a workspace through one previously selected apply-enabled provider.
@@ -2466,8 +2561,9 @@ fn validate_provider_handle(
     gate_feedback_baseline: Option<&serde_json::Value>,
     trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
 ) -> Result<()> {
+    let remote = worktree_provider_path_requires_materialization(&worktree.path);
     let path = std::path::PathBuf::from(&worktree.path);
-    if !path.is_dir() {
+    if !remote && !path.is_dir() {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
@@ -2554,6 +2650,9 @@ fn validate_provider_handle(
             });
         }
         return Err(error);
+    }
+    if remote {
+        return Ok(());
     }
     if crate::git::current_branch(&path).as_deref() != Some(worktree.branch.as_str()) {
         return Err(Error::validation_invalid_argument(

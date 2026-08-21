@@ -3400,6 +3400,82 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
     });
 }
 
+/// A foreground controller can be interrupted after the provider's terminal
+/// result was persisted but before aggregate harvesting starts. The failed
+/// provider result is sufficient to converge without an aggregate, handle, or
+/// surviving owner process.
+#[test]
+fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("provider-failed-no-owner")).expect("submitted");
+        mark_running("provider-failed-no-owner").expect("running");
+        reserve_provider_execution("provider-failed-no-owner", &plan.tasks[0], 1)
+            .expect("reserved");
+        record_provider_execution_terminal("provider-failed-no-owner", "task-a", 1, "failed")
+            .expect("provider failure recorded");
+        rewrite_record_for_test("provider-failed-no-owner", |record| {
+            let execution = record.metadata["provider_executions"][0]
+                .as_object_mut()
+                .expect("provider execution object");
+            execution.remove("owner_pid");
+            execution.remove("owner_linux_starttime_ticks");
+            execution.remove("owner_identity");
+        })
+        .expect("interrupted foreground owner fixture");
+
+        let terminal = status("provider-failed-no-owner").expect("reconciled status");
+        let replay = status("provider-failed-no-owner").expect("idempotent status");
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(replay.state, AgentTaskRunState::Failed);
+        assert!(replay.provider_handles.is_empty());
+        assert!(replay.aggregate_path.is_none());
+        assert_eq!(replay.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(
+            replay.metadata["local_provider_ownership"]["state"],
+            json!("provider_failed")
+        );
+    });
+}
+
+/// The provider result survives a caller interruption even when the original
+/// foreground owner had a verifiable process identity.
+#[cfg(unix)]
+#[test]
+fn interrupted_foreground_owner_converges_terminal_provider_failure() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("provider-failed-owner-dead")).expect("submitted");
+        mark_running("provider-failed-owner-dead").expect("running");
+        reserve_provider_execution("provider-failed-owner-dead", &plan.tasks[0], 1)
+            .expect("reserved");
+        record_provider_execution_terminal("provider-failed-owner-dead", "task-a", 1, "failed")
+            .expect("provider failure recorded");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start foreground owner");
+        rewrite_record_for_test("provider-failed-owner-dead", |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
+        })
+        .expect("foreground owner fixture");
+        owner.kill().expect("interrupt foreground owner");
+        owner.wait().expect("reap foreground owner");
+
+        let terminal = status("provider-failed-owner-dead").expect("reconciled status");
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            terminal.metadata["provider_executions"][0]["owner_state"],
+            json!("dead")
+        );
+        assert_eq!(
+            terminal.metadata["local_provider_ownership"]["state"],
+            json!("provider_failed")
+        );
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The durable provider success the cancellation must defer to is
 /// recorded in the same store both cancellation attempts read, so the deferral
@@ -3424,6 +3500,79 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
             replay.metadata["provider_executions"][0]["state"],
             json!("succeeded")
         );
+        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+    });
+}
+
+#[test]
+fn provider_terminalization_observes_cancellation_that_won_the_race() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("provider-terminal-cancel-race")).expect("submitted");
+        mark_running("provider-terminal-cancel-race").expect("running");
+        reserve_provider_execution("provider-terminal-cancel-race", &plan.tasks[0], 1)
+            .expect("reserved");
+        cancel_run("provider-terminal-cancel-race", Some("stale owner"))
+            .expect("cancellation recorded");
+
+        let terminal = record_provider_execution_terminal(
+            "provider-terminal-cancel-race",
+            "task-a",
+            1,
+            "timed_out",
+        )
+        .expect("provider timeout observes the durable cancellation");
+
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            terminal.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert_eq!(terminal.metadata["provider_executions_consumed"], json!(1));
+    });
+}
+
+#[test]
+fn provider_terminalization_rejects_an_invalid_terminal_state() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("invalid-provider-terminal-state")).expect("submitted");
+        reserve_provider_execution("invalid-provider-terminal-state", &plan.tasks[0], 1)
+            .expect("reserved");
+
+        let error = record_provider_execution_terminal(
+            "invalid-provider-terminal-state",
+            "task-a",
+            1,
+            "running",
+        )
+        .expect_err("running is not a terminal provider state");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            status("invalid-provider-terminal-state")
+                .expect("durable record")
+                .metadata["provider_executions"][0]["state"],
+            json!("running")
+        );
+    });
+}
+
+#[test]
+fn provider_terminalization_rejects_a_missing_execution_attempt() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("missing-provider-terminal-attempt")).expect("submitted");
+
+        let error = record_provider_execution_terminal(
+            "missing-provider-terminal-attempt",
+            "task-a",
+            1,
+            "timed_out",
+        )
+        .expect_err("a terminal result needs a reserved execution attempt");
+
+        assert_eq!(error.code, ErrorCode::InternalUnexpected);
     });
 }
 
