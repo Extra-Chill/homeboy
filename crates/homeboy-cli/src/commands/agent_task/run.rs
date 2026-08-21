@@ -222,6 +222,26 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     let (args, provision) = resolve_cook_preview_destination(args)?;
+    if provision["action"] == "materialization_required" {
+        let replay = cook_preview_replay_argv(&args);
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-cook-preview/v1",
+                "mutates": false,
+                "resolved": {
+                    "repository": args.dispatch.repo,
+                    "worktree": args.to_worktree,
+                    "base": args.base,
+                    "head": args.head,
+                    "placement": preview_placement_policy(),
+                    "materialization": provision,
+                },
+                "replay_argv": replay.argv,
+                "replay_requires": replay.requires,
+            }),
+            0,
+        ));
+    }
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
             .as_deref()
@@ -904,7 +924,7 @@ mod preview_tests {
 
     #[cfg(unix)]
     #[test]
-    fn preview_never_executes_a_configured_worktree_provider() {
+    fn preview_reports_registered_remote_provider_workspace_without_materializing_it() {
         use std::os::unix::fs::PermissionsExt;
 
         crate::test_support::with_isolated_home(|_| {
@@ -913,7 +933,10 @@ mod preview_tests {
             let provider = temp.path().join("provider.sh");
             std::fs::write(
                 &provider,
-                format!("#!/bin/sh\ntouch {}\n", marker.display()),
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\nensure) touch '{}' ;;\nsentinel@missing) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nsentinel@malformed) printf '{{' ;;\n*) printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"sentinel@remote\",\"path\":\"remote://fixture/sentinel\",\"branch\":\"remote\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nesac\n",
+                    marker.display()
+                ),
             )
             .expect("write provider");
             let mut permissions = std::fs::metadata(&provider)
@@ -933,15 +956,57 @@ mod preview_tests {
                     mutation_timeout_ms: 30_000,
                     lookup_output_limit_bytes: 64 * 1024,
                     commands: homeboy::core::defaults::WorktreeProviderCommands {
-                        list: Some(vec![provider.display().to_string()]),
+                        resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                        ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
                         ..Default::default()
                     },
-                    list_result_mapping: None,
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                            task_url: None,
+                        },
+                    ),
                 },
             );
             homeboy::core::defaults::save_config(&config).expect("save provider config");
 
-            let error = preview_cook(
+            let (preview, exit_code) = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "implement the issue",
+                    "--to-worktree",
+                    "sentinel@remote",
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect("registered remote workspace returns a preview requirement");
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                preview["resolved"]["materialization"]["action"],
+                "materialization_required"
+            );
+            assert_eq!(
+                preview["resolved"]["materialization"]["provider_id"],
+                "sentinel"
+            );
+            assert!(
+                !marker.exists(),
+                "preview must not execute provider materialization"
+            );
+            let missing = preview_cook(
                 cook(&[
                     "homeboy",
                     "agent-task",
@@ -957,17 +1022,33 @@ mod preview_tests {
                 ]),
                 None,
             )
-            .expect_err("provider-backed destination must block preview");
+            .expect_err("missing handle is not a materialization requirement");
+            assert_eq!(missing.details["worktree_provider_lookup"], "not_found");
+            let malformed = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "implement the issue",
+                    "--to-worktree",
+                    "sentinel@malformed",
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect_err("malformed provider result must fail closed");
             assert_eq!(
-                error.code,
-                homeboy::core::ErrorCode::ValidationInvalidArgument
+                malformed.details["worktree_provider_call_classification"],
+                "malformed"
             );
             assert!(
-                error.message.contains("preview unresolved destination"),
-                "{}",
-                error.message
+                !marker.exists(),
+                "preview must not materialize missing or malformed destinations"
             );
-            assert!(!marker.exists(), "preview executed the configured provider");
         });
     }
 
@@ -1932,9 +2013,9 @@ pub(crate) fn resolve_cook_destination(
     Ok(args)
 }
 
-/// Preview never asks a worktree provider whether a handle exists: even a
-/// provider's nominal "list" command is arbitrary configured code. It only
-/// validates an already-local authority and otherwise returns a typed blocker.
+/// Preview performs only bounded provider identity resolution. It never invokes
+/// a provider mutation or task execution, and reports remote destinations as a
+/// typed materialization requirement before filesystem-dependent planning.
 fn resolve_cook_preview_destination(
     mut args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<(AgentTaskCookArgs, Value)> {
@@ -1997,10 +2078,28 @@ fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        return Err(preview_destination_blocker(
-            &handle,
-            "destination is missing or provider-backed; preview only validates explicit existing local paths",
-        ));
+        let config = defaults::load_config();
+        let identity = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(&handle, &config)?;
+        if homeboy::core::worktree_providers::worktree_provider_path_requires_materialization(
+            &identity.path,
+        ) {
+            return Ok((
+                args,
+                serde_json::json!({
+                    "action": "materialization_required",
+                    "kind": "provider",
+                    "handle": handle,
+                    "provider_id": identity.provider_id,
+                    "remote_path": identity.path,
+                    "reason": "the configured provider resolved a registered remote workspace that requires materialization before filesystem planning",
+                    "apply": "rerun Cook without --preview to converge the destination through its configured provider",
+                }),
+            ));
+        }
+        let path = PathBuf::from(identity.path);
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
+        validate_cook_destination_identity(&args, &path)?;
+        path
     };
     Ok((
         args,

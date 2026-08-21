@@ -238,6 +238,85 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
     Ok(record)
 }
 
+/// Replace a pre-acceptance Lab proxy with the verified controller-local
+/// outcome when an automatic placement discovers immutable runner identity
+/// drift before daemon submission.
+pub fn record_local_lab_identity_fallback(
+    run_id: &str,
+    runner_id: &str,
+    identity_drift: &Value,
+    fallback_reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    record_local_lab_identity_fallback_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        identity_drift,
+        fallback_reason,
+    )
+}
+
+/// The store-rooted counterpart of [`record_local_lab_identity_fallback`].
+pub(crate) fn record_local_lab_identity_fallback_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    identity_drift: &Value,
+    fallback_reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
+    if record.has_accepted_lab_handoff() || record.runner_job_id().is_some() {
+        return Err(Error::validation_invalid_argument(
+            "lab_identity_fallback",
+            "cannot replace an accepted Lab runner job with a local fallback",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+
+    record.updated_at = Some(now_timestamp());
+    record.lab_handoff = None;
+    let metadata = record.ensure_metadata_object();
+    for key in [
+        "runner_id",
+        "runner_job_id",
+        "runner_execution_record",
+        "runner_submission_intent",
+        "runner_handoff",
+        "handoff_acceptance",
+        "lab_admission_reservation",
+        "lab_staging_controller_job_id",
+        "lab_staging_controller_runner_id",
+        "remote_workspace",
+        "remote_command",
+    ] {
+        metadata.remove(key);
+    }
+    metadata.insert("phase".to_string(), json!("local_fallback"));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("Lab identity drift returned the attempt to controller-local execution"),
+    );
+    metadata.insert("provider_state".to_string(), json!("pending"));
+    metadata.insert(
+        "lab_identity_fallback".to_string(),
+        json!({
+            "schema": "homeboy/lab-identity-fallback/v1",
+            "selected_runner": runner_id,
+            "identity_drift": identity_drift,
+            "fallback_reason": fallback_reason,
+            "final_placement": "local",
+            "runner_jobs_created": 0,
+            "transport_retry_attempts": 0,
+        }),
+    );
+    lifecycle_store.write_record(&record)?;
+    Ok(record)
+}
+
 /// Record child setup executions against the controller proxy. A staging job
 /// can outlive the foreground caller, so its runner IDs belong to the durable
 /// phase record rather than only transient command output.
@@ -932,6 +1011,55 @@ mod admission_tests {
 
         let error = validate_lab_handoff_plan(Some(&plan)).expect_err("invalid plan");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn identity_fallback_replaces_only_an_unaccepted_proxy_with_local_evidence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "identity-fallback";
+            let plan = AgentTaskPlan::new(run_id, Vec::new());
+            submit_plan(&plan, Some(run_id)).expect("persist run");
+            record_lab_offload_phase(
+                run_id,
+                "homeboy-lab",
+                "provider_dispatch",
+                Some("/runner/workspace"),
+                None,
+                None,
+                Some(&plan),
+            )
+            .expect("seed unaccepted proxy");
+
+            record_local_lab_identity_fallback(
+                run_id,
+                "homeboy-lab",
+                &json!({ "mismatch_predicate": "test_identity_drift" }),
+                "runner_identity_drift: test",
+            )
+            .expect("record fallback");
+
+            let record = store::read_record(run_id).expect("fallback record");
+            assert!(record.lab_handoff.is_none());
+            assert!(record.metadata.get("runner_id").is_none());
+            assert!(record.metadata.get("runner_job_id").is_none());
+            assert!(record.metadata.get("runner_execution_record").is_none());
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["selected_runner"],
+                "homeboy-lab"
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["final_placement"],
+                "local"
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["runner_jobs_created"],
+                0
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["transport_retry_attempts"],
+                0
+            );
+        });
     }
 }
 

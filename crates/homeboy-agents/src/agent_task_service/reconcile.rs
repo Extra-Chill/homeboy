@@ -60,7 +60,41 @@ pub struct AgentTaskReconcileRun {
 /// Genuinely-active runs (live owner/runner with a fresh heartbeat, or queued
 /// work) are never touched. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
+/// [`agent_task_lifecycle::status`] against an explicitly injected root.
+fn rooted_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    Ok(agent_task_lifecycle::status_in_store(
+        lifecycle_store,
+        run_id,
+        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+        false,
+    )?
+    .record)
+}
+
+/// [`agent_task_lifecycle::exact_status`] against an explicitly injected root.
+fn rooted_exact_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    Ok(agent_task_lifecycle::status_in_store(
+        lifecycle_store,
+        run_id,
+        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+        true,
+    )?
+    .record)
+}
+
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    // One store for the whole sweep. Every run this classifies, expires, and
+    // cancels is decided from a record read here; a decision taken against one
+    // installation and committed into another cancels a run it never saw
+    // (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Read the durable snapshot first so an expired controller handoff remains
     // visible to this managed recovery command. `status` also converges expiry,
     // but would otherwise terminalize it before this report can record the
@@ -91,7 +125,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         // daemon may still be active or may have already published the terminal
         // aggregate and artifacts while the controller caller was gone.
         if run.runner_id.is_some() && run.runner_job_id.is_some() {
-            match agent_task_lifecycle::status(&run.run_id) {
+            match rooted_status(&lifecycle_store, &run.run_id) {
                 Ok(refreshed) if refreshed.state.is_terminal() => continue,
                 Ok(refreshed) if !refreshed.is_stale_running() => continue,
                 Ok(refreshed) => authoritative_state = refreshed.state,
@@ -113,9 +147,11 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             }
         }
 
-        let expired_handoff =
-            agent_task_lifecycle::has_expired_unaccepted_lab_handoff(&run.run_id)?;
-        let record = agent_task_lifecycle::exact_record(&run.run_id)?;
+        let expired_handoff = agent_task_lifecycle::has_expired_unaccepted_lab_handoff_in_store(
+            &lifecycle_store,
+            &run.run_id,
+        )?;
+        let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
         let expired_detached_admission =
             agent_task_lifecycle::has_expired_detached_cook_admission(&record, chrono::Utc::now());
         if dry_run {
@@ -132,14 +168,17 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             continue;
         }
         if expired_detached_admission {
-            match agent_task_lifecycle::expire_detached_cook_admission(&run.run_id) {
+            match agent_task_lifecycle::expire_detached_cook_admission_in_store(
+                &lifecycle_store,
+                &run.run_id,
+            ) {
                 Ok(true) => {
                     reconciled += 1;
                     runs.push(AgentTaskReconcileRun {
                         run_id: run.run_id.clone(),
                         liveness,
                         source: run.source,
-                        authoritative_state: agent_task_lifecycle::status(&run.run_id)?.state,
+                        authoritative_state: rooted_status(&lifecycle_store, &run.run_id)?.state,
                         stale_reason: run.stale_reason,
                         action: "reconciled",
                         error: None,
@@ -149,7 +188,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                     run_id: run.run_id.clone(),
                     liveness,
                     source: run.source,
-                    authoritative_state: agent_task_lifecycle::status(&run.run_id)?.state,
+                    authoritative_state: rooted_status(&lifecycle_store, &run.run_id)?.state,
                     stale_reason: run.stale_reason,
                     action: "no-op",
                     error: None,
@@ -177,13 +216,18 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         let result = if expired_handoff {
             // Handoff expiry answers whether it expired, not what state that
             // left behind; re-read the record for the post-mutation state.
-            agent_task_lifecycle::expire_unaccepted_lab_handoff(&run.run_id).map(|_| {
-                agent_task_lifecycle::status(&run.run_id)
+            agent_task_lifecycle::expire_unaccepted_lab_handoff_in_store(
+                &lifecycle_store,
+                &run.run_id,
+            )
+            .map(|_| {
+                rooted_status(&lifecycle_store, &run.run_id)
                     .map(|record| record.state)
                     .unwrap_or(authoritative_state)
             })
         } else {
-            agent_task_lifecycle::cancel_run(&run.run_id, Some(&reason)).map(|record| record.state)
+            agent_task_lifecycle::cancel_run_in_store(&lifecycle_store, &run.run_id, Some(&reason))
+                .map(|record| record.state)
         };
         match result {
             Ok(state) => {
@@ -235,13 +279,19 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    // One store for the whole reconciliation: the scope resolution, every
+    // authoritative read, and the expiry or cancellation that follows are one
+    // answer about one run.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let requested_run_id = run_id.to_string();
-    let resolved_run_ids = agent_task_lifecycle::reconcile_scope_run_ids(run_id)?;
+    let resolved_run_ids =
+        agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)?;
     let mut runs = Vec::new();
     let mut reconciled = 0;
     let mut failed = 0;
     for resolved_run_id in &resolved_run_ids {
-        let authoritative = agent_task_lifecycle::exact_status(resolved_run_id)?;
+        let authoritative = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
         let source = authoritative
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
@@ -255,7 +305,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                 let liveness = run.liveness.expect("checked reconcilable liveness");
                 // Re-read immediately before apply. A newly-live runner or a changed
                 // owner is authoritative and turns this scoped request into a no-op.
-                let refreshed = agent_task_lifecycle::exact_status(resolved_run_id)?;
+                let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
                 let still_reconcilable = discover_runs(AgentTaskDiscoveryFilter::Active)?
                     .runs
                     .into_iter()
@@ -289,15 +339,18 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                             chrono::Utc::now(),
                         );
                     if expired_detached_admission {
-                        match agent_task_lifecycle::expire_detached_cook_admission(resolved_run_id)
-                        {
+                        match agent_task_lifecycle::expire_detached_cook_admission_in_store(
+                            &lifecycle_store,
+                            resolved_run_id,
+                        ) {
                             Ok(true) => {
                                 reconciled += 1;
                                 runs.push(AgentTaskReconcileRun {
                                     run_id: resolved_run_id.clone(),
                                     liveness,
                                     source: run.source,
-                                    authoritative_state: agent_task_lifecycle::status(
+                                    authoritative_state: rooted_status(
+                                        &lifecycle_store,
                                         resolved_run_id,
                                     )?
                                     .state,
@@ -310,8 +363,11 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                                 run_id: resolved_run_id.clone(),
                                 liveness,
                                 source: run.source,
-                                authoritative_state: agent_task_lifecycle::status(resolved_run_id)?
-                                    .state,
+                                authoritative_state: rooted_status(
+                                    &lifecycle_store,
+                                    resolved_run_id,
+                                )?
+                                .state,
                                 stale_reason: run.stale_reason,
                                 action: "no-op",
                                 error: None,
@@ -335,7 +391,11 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         .stale_reason
                         .clone()
                         .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-                    match agent_task_lifecycle::cancel_exact_run(resolved_run_id, Some(&reason)) {
+                    match agent_task_lifecycle::cancel_exact_run_in_store(
+                        &lifecycle_store,
+                        resolved_run_id,
+                        Some(&reason),
+                    ) {
                         Ok(record) => {
                             reconciled += 1;
                             runs.push(AgentTaskReconcileRun {

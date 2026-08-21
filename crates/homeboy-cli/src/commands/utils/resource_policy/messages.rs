@@ -48,7 +48,13 @@ pub(super) fn primary_action(
     {
         // Portable command, but no Lab runner is configured on this host (#7749):
         // do not point the operator at nonexistent Lab infrastructure.
-        return "No Homeboy Lab runner is configured on this host, so this portable command cannot run through Lab. Defer verification to CI or connect a runner with `homeboy runner connect`. Local execution requires an explicit, authorized `--placement local` override.".to_string();
+        return "No Homeboy Lab runner is configured on this host, so this portable command cannot run through Lab. Defer verification to CI or wait for controller pressure to fall. Local execution requires an explicit, authorized `--placement local` override.".to_string();
+    }
+    if warning
+        .message
+        .contains("No configured Lab runner is expected for this host")
+    {
+        return "No configured Homeboy Lab runner is expected for this host. Wait for controller pressure to fall or defer verification to CI. Local execution requires an explicit, authorized `--placement local` override.".to_string();
     }
     if warning.message.contains("Lab runner inventory is") {
         return "This portable command requires a ready Lab runner. Follow the listed runner recovery command or defer verification until Lab is available. Local execution requires an explicit, authorized `--placement local` override.".to_string();
@@ -78,16 +84,22 @@ pub(super) fn warning_message(
             );
                 }
             }
+            let remediation =
+                if readiness.state == crate::runner::runners::LabRunnerReadinessState::Absent {
+                    "No configured Lab runner is expected for this host.".to_string()
+                } else {
+                    readiness.remediation_commands.join("; ")
+                };
             return format!(
                 "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Lab runner inventory is {} (available runner IDs: {}). {}",
                 command.label,
                 readiness.state.as_str(),
                 if readiness.available_runner_ids.is_empty() { "none".to_string() } else { readiness.available_runner_ids.join(", ") },
-                readiness.remediation_commands.join("; "),
+                remediation,
             );
         }
         return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; connect a runner (`homeboy runner connect`) or defer verification to CI. Local execution requires an explicit, authorized `--placement local` override.",
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; defer verification to CI or wait for controller pressure to fall. Local execution requires an explicit, authorized `--placement local` override.",
             command.label
         );
     }

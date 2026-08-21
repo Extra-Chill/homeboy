@@ -226,20 +226,28 @@ homeboy tunnel preview-client start \
 
 The client registers exactly one public host; wildcard public hosts are rejected so a lab runtime cannot implicitly claim a whole domain. `--local-origin` must be an HTTP(S) origin supplied by the caller, commonly a local development server or lab-managed preview service.
 
-The preview ingress contract is JSON-over-HTTP with bearer auth from `--token-env`:
+The preview ingress contract is JSON-over-HTTP with bearer auth from `--token-env`. Registration returns an opaque `channel_id`; WebSocket operations require both that route-owned capability and the registered `public_host`:
 
 - `POST /preview/client/register`: register `{ public_host, local_origin }`.
-- `POST /preview/client/next`: long-poll for one request with `{ public_host, timeout_secs }`.
+- `POST /preview/client/next`: long-poll for one HTTP request or WebSocket open record with `{ public_host, channel_id, timeout_secs }`.
 - `POST /preview/client/respond`: return `{ public_host, response }` for a request.
+- `POST /preview/client/respond-chunk`: append one streamed HTTP response chunk.
+- `POST /preview/client/websocket/open`: accept or reject a queued WebSocket session after the preview client attempts the local-origin handshake.
+- `POST /preview/client/websocket/next`: poll one public-client-to-local-origin WebSocket frame.
+- `POST /preview/client/websocket/frame`: send one local-origin-to-public-client WebSocket frame.
 - `POST /preview/client/close`: mark the public host session closed on shutdown.
 
 Ingress requests carry `request_id`, `method`, `path`, selected `headers`, and optional `body_base64`. Client responses carry `request_id`, `status`, response `headers`, `body_base64`, and optional structured `error`. Local-origin failures are returned as `502` responses with `error.kind` such as `local_origin_request_failed`, distinct from ingress/channel failures logged by the client process.
 
 Each claimed ingress request is forwarded on a worker thread so browser static asset fanout can be served concurrently. Hop-by-hop headers are filtered before forwarding to the local origin and before returning the local response to ingress.
 
+Public WebSocket upgrades use the same outbound reverse channel: public client -> preview ingress -> authenticated preview client -> local `ws://` origin. The ingress does not connect to route registration metadata or `upstream_origin`. It emits the public `101 Switching Protocols` response only after the preview client reports a successful local handshake, then incrementally relays text, binary, ping, pong, and close frames in both directions. Close code/reason, browser disconnect, client cancellation/re-registration, and failed local handshakes are explicit session transitions; setup failures return a deterministic HTTP diagnostic before upgrade.
+
+WebSocket protocol limits are 1 MiB per frame and assembled message, 16 concurrent sessions per registered route, 64 queued opens or frames per direction, a 10-second local-handshake deadline, and a 60-second idle lifetime. The ingress retains at most 50 recent diagnostics. A limit, timeout, disconnect, failed handshake, normal close, route close, or replacement registration removes the terminal WebSocket state.
+
 ## Preview Ingress
 
-`preview-ingress` is the VPS-side HTTP daemon surface for Homeboy-native public preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
+`preview-ingress` is the VPS-side HTTP and WebSocket daemon surface for Homeboy-native public preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
 
 ```text
 Client
@@ -247,10 +255,11 @@ Client
   -> TLS/proxy layer
   -> homeboy tunnel preview-ingress serve --bind 127.0.0.1:7350
   -> active Homeboy preview route
-  -> local/reverse-channel HTTP origin
+  -> authenticated outbound preview-client channel
+  -> local HTTP or WebSocket origin
 ```
 
-The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior, asset health policy, and preview interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
+The core contract is generic HTTP and WebSocket ingress: public host/session routing, reverse-channel-compatible local origins, request/response streaming, bidirectional WebSocket frames, status, logs, and cleanup. Workload-specific behavior, asset health policy, and preview interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
 
 Render a non-destructive operator install plan for a wildcard preview ingress domain:
 
@@ -313,7 +322,7 @@ homeboy tunnel preview-ingress serve \
   --public-host-pattern '*.preview.example.net'
 ```
 
-The daemon routes by `Host`, handles concurrent preview requests in separate worker threads, proxies request bodies to the configured upstream origin, streams upstream response bodies back to the client, and preserves response status plus non-hop-by-hop headers such as `content-type` and cache headers.
+The daemon routes by `Host`, handles concurrent preview requests in separate worker threads, streams reverse-channel response bodies, and preserves response status plus repeated non-hop-by-hop headers such as `content-type`, cache headers, and `set-cookie`. A live preview-client registration takes precedence over persisted route metadata. Persisted directly reachable HTTP routes retain their existing proxy behavior; reverse-channel WebSockets always travel through the authenticated preview client.
 
 Diagnostics are structured so generic preview workloads can distinguish ingress and upstream problems:
 

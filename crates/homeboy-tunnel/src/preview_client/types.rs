@@ -52,6 +52,59 @@ pub struct PreviewIngressRequest {
 pub struct PreviewIngressNextResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<PreviewIngressRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<PreviewWebSocketOpen>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWebSocketOpen {
+    pub websocket_id: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWebSocketOpenResult {
+    pub websocket_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewWebSocketFrameKind {
+    Text,
+    Binary,
+    Ping,
+    Pong,
+    Close,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWebSocketFrame {
+    pub websocket_id: String,
+    pub sequence: u64,
+    pub kind: PreviewWebSocketFrameKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub payload_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWebSocketNextResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<PreviewWebSocketFrame>,
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

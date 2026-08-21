@@ -924,6 +924,20 @@ fn delegate_agent_task_cook_to_pinned_runtime(
     cli: &Cli,
     normalized_args: &[String],
 ) -> homeboy::core::Result<Option<i32>> {
+    let is_cook_preview = matches!(
+        &cli.command,
+        Commands::AgentTask(agent_task)
+            if matches!(
+                &agent_task.command,
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) if cook.preview
+            )
+    );
+    if is_cook_preview {
+        // Preview compiles a read-only controller-local plan. It must reach the
+        // placement bypass below without sealing or re-executing a runtime.
+        return Ok(None);
+    }
+
     if !matches!(
         &cli.command,
         Commands::AgentTask(agent_task)
@@ -1876,19 +1890,10 @@ fn preflight_hot_command_with(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
-                    resource_policy::rerun_command(
-                        hot_command,
+                    resource_policy::admission_recovery(
                         &std::env::args().collect::<Vec<_>>(),
-                        selected_lab_runner,
-                    )
-                    .or_else(|| {
-                        // No ready runner means there is no placement rewrite,
-                        // but the original request remains the deterministic
-                        // resume input after the targeted recovery action.
-                        Some(crate::core::engine::shell::quote_args(
-                            &std::env::args().collect::<Vec<_>>(),
-                        ))
-                    }),
+                        lab_readiness.as_ref(),
+                    ),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if let Some(diagnostic) = lab_inventory_diagnostic {
@@ -2413,6 +2418,52 @@ mod tests {
                 "{placement:?}"
             );
         }
+    }
+
+    #[test]
+    fn cook_preview_bypasses_runtime_sealing_before_runner_routing() {
+        crate::test_support::with_isolated_home(|home| {
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "inspect the task",
+                "--to-worktree",
+                "fixture@preview",
+                "--verify",
+                "true",
+            ]);
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--prompt".to_string(),
+                "inspect the task".to_string(),
+                "--to-worktree".to_string(),
+                "fixture@preview".to_string(),
+                "--verify".to_string(),
+                "true".to_string(),
+            ];
+            let before = std::fs::read_dir(home).expect("read isolated home").count();
+
+            assert_eq!(
+                delegate_agent_task_cook_to_pinned_runtime(&cli, &args)
+                    .expect("preview bypasses runtime sealing"),
+                None
+            );
+            assert_eq!(
+                std::fs::read_dir(home).expect("read isolated home").count(),
+                before,
+                "preview must not create controller runtime state before runner routing"
+            );
+        });
     }
 
     #[test]
