@@ -356,23 +356,38 @@ fn ensure_running_failure_delete_error_routes_bytes_to_owned_cleanup() {
 }
 
 #[test]
-fn ensure_running_failure_summary_is_bounded_and_actionable_for_twenty_candidates() {
+fn ensure_running_failure_reports_the_ambiguous_blocker_and_retains_all_candidates() {
     let artifact_root = tempfile::tempdir().expect("artifact root");
     let store = homeboy_core::observation::ObservationStore::open_initialized_at(
         artifact_root.path().join("observations.sqlite"),
     )
     .expect("store");
-    let candidates = (0..20)
-        .map(|pid| serde_json::json!({ "pid": pid % 3, "ownership": "ambiguous" }))
+    let mut candidates = (0..36)
+        .map(|pid| {
+            serde_json::json!({
+                "pid": pid,
+                "ownership": "unrelated",
+                "durable_store": format!("/tmp/test-daemon-store-{pid}"),
+                "endpoint": format!("127.0.0.1:{}", 7000 + pid),
+                "startup_token": format!("unrelated-{pid}"),
+            })
+        })
         .collect::<Vec<_>>();
+    candidates.push(serde_json::json!({
+        "pid": 999,
+        "ownership": "ambiguous",
+        "durable_store": "/var/lib/homeboy/daemon",
+        "endpoint": "127.0.0.1:7421",
+        "startup_token": "blocker",
+    }));
     let error = serde_json::json!({
         "code": "internal.unexpected",
-        "message": "foreground daemon candidates block replacement",
+        "message": "ambiguous daemon PID 999 blocks replacement",
         "details": {
             "classification": "daemon_unleased_process_conflict",
-            "candidate_count": 20,
+            "candidate_count": 37,
             "candidates": candidates,
-            "safe_next_action": "Run `homeboy daemon status` and reconcile the exact owner."
+            "safe_next_action": "Run `homeboy daemon reconcile-unleased-candidates --apply` after verifying PID 999."
         }
     });
 
@@ -383,13 +398,17 @@ fn ensure_running_failure_summary_is_bounded_and_actionable_for_twenty_candidate
         "",
         Some(&store),
     );
+    let reference = summary.evidence_ref.expect("registered evidence reference");
     let summary = summary.message;
 
     assert!(summary.contains("summary_v1"));
     assert!(summary.contains("classification=daemon_unleased_process_conflict"));
-    assert!(summary.contains("candidate_count=20"));
-    assert!(summary.contains("blocker=foreground daemon candidates block replacement"));
-    assert!(summary.contains("next_action=Run `homeboy daemon status`"));
+    assert!(summary.contains("candidate_count=37"));
+    assert!(summary.contains("blocker=ambiguous daemon PID 999 blocks replacement"));
+    assert!(
+        summary.contains("next_action=Run `homeboy daemon reconcile-unleased-candidates --apply`")
+    );
+    assert!(summary.contains("\"pid\":999"));
     let candidates = summary
         .split(" candidates=")
         .nth(1)
@@ -398,8 +417,42 @@ fn ensure_running_failure_summary_is_bounded_and_actionable_for_twenty_candidate
         .next()
         .unwrap();
     assert!(candidates.len() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLAR_BYTES);
-    assert!(summary.contains("evidence_ref=homeboy://run/"));
+    assert_eq!(summary.matches("\"ownership\":\"ambiguous\"").count(), 1);
+    assert!(summary.matches("\"ownership\":\"unrelated\"").count() <= 2);
+    assert!(summary.contains(&format!("evidence_ref={}", reference.uri)));
     assert!(summary.len() <= super::remote_daemon::MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES);
+
+    let (mut report, _) = super::session_store::failed_connect(
+        "lab",
+        std::path::PathBuf::from("/session.json"),
+        RunnerFailureKind::DaemonStartupFailure,
+        summary.clone(),
+    );
+    report
+        .failure_evidence
+        .as_mut()
+        .expect("failure evidence")
+        .failure_evidence_ref = Some(reference.clone());
+    let structured = serde_json::to_value(report).expect("serialize failed connect");
+    assert_eq!(structured["failure_message"], summary);
+    assert_eq!(
+        structured["failure_evidence"]["failure_evidence_ref"]["uri"],
+        reference.uri
+    );
+    assert!(structured.to_string().len() < 2_500);
+
+    let artifact = store
+        .get_artifact(&reference.artifact_id)
+        .expect("read artifact")
+        .expect("failure evidence artifact");
+    let retained: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(artifact.path).expect("read evidence"))
+            .expect("evidence JSON");
+    let retained_candidates = retained["remote_envelope"]["details"]["candidates"]
+        .as_array()
+        .expect("retained candidates");
+    assert_eq!(retained_candidates.len(), 37);
+    assert_eq!(retained_candidates[36]["pid"], 999);
 }
 
 #[test]
