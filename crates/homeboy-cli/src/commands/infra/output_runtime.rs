@@ -294,6 +294,7 @@ pub struct CommandRun {
     pub output_file_result: Option<homeboy::core::Result<Value>>,
     pub presentation: CommandPresentation,
     pub raw_stdout: Option<homeboy::core::Result<String>>,
+    pub raw_completion_stderr: Option<String>,
     output_file_already_written: bool,
 }
 
@@ -321,12 +322,20 @@ impl CommandRun {
             output_file_result: None,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
 
     pub fn with_presentation(mut self, presentation: CommandPresentation) -> Self {
         self.presentation = presentation;
+        self
+    }
+
+    /// Diagnostics emitted only after raw stdout has been durably handed to the
+    /// caller. SSH uses this for terminal lifecycle phases.
+    pub fn with_raw_completion_stderr(mut self, stderr: impl Into<String>) -> Self {
+        self.raw_completion_stderr = Some(stderr.into());
         self
     }
 
@@ -373,6 +382,7 @@ impl CommandRun {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: Some(raw_stdout),
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
@@ -424,8 +434,22 @@ impl<'a> OutputService<'a> {
     pub(crate) fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
         if let Some(raw_stdout) = run.raw_stdout {
+            if let Some(stderr) = &run.presentation.stderr {
+                eprint!("{}", stderr);
+            }
             match raw_stdout {
-                Ok(content) => print!("{}", content),
+                Ok(content) => {
+                    use std::io::Write;
+
+                    let mut stdout = std::io::stdout().lock();
+                    if let Err(error) = stdout
+                        .write_all(content.as_bytes())
+                        .and_then(|_| stdout.flush())
+                    {
+                        eprintln!("Homeboy could not deliver raw stdout: {error}");
+                        return 1;
+                    }
+                }
                 Err(err) => {
                     output::print_json_result_for_identity(
                         Err(err),
@@ -438,6 +462,10 @@ impl<'a> OutputService<'a> {
                     )
                     .ok();
                 }
+            }
+
+            if let Some(stderr) = &run.raw_completion_stderr {
+                eprint!("{}", stderr);
             }
 
             return run.exit_code;
@@ -574,6 +602,7 @@ pub fn run_json(
                 output_file_result,
                 presentation: CommandPresentation::default(),
                 raw_stdout: None,
+                raw_completion_stderr: None,
                 output_file_already_written: false,
             }
         }
@@ -644,6 +673,7 @@ mod tests {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
@@ -667,6 +697,22 @@ mod tests {
 
         assert_eq!(run.raw_stdout.unwrap().unwrap(), "markdown output");
         assert_eq!(run.stdout_result.unwrap(), json!({ "artifact": true }));
+    }
+
+    #[test]
+    fn raw_completion_diagnostics_are_separate_from_remote_stderr() {
+        let run = CommandRun::from_raw_stdout("ssh", Ok("payload".to_string()), 0, None)
+            .with_presentation(CommandPresentation {
+                stdout: None,
+                stderr: Some("remote stderr\n".to_string()),
+            })
+            .with_raw_completion_stderr("[ssh] phase=command-finished\n");
+
+        assert_eq!(run.presentation.stderr.as_deref(), Some("remote stderr\n"));
+        assert_eq!(
+            run.raw_completion_stderr.as_deref(),
+            Some("[ssh] phase=command-finished\n")
+        );
     }
 
     #[test]

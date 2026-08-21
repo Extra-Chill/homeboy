@@ -79,14 +79,23 @@ fn run_plain_text(command: Commands) -> CommandRun {
 /// stderr, exiting with the remote exit code (#9894).
 fn ssh_raw(args: ssh::SshArgs) -> CommandRun {
     match ssh::execute_raw_command(&args) {
-        Ok((stdout, stderr, exit_code)) => {
-            CommandRun::from_raw_stdout("ssh", Ok(stdout), exit_code, None).with_presentation(
-                CommandPresentation {
-                    stdout: None,
-                    stderr: Some(stderr),
-                },
-            )
-        }
+        Ok(execution) => CommandRun::from_raw_stdout(
+            "ssh",
+            Ok(execution.stdout.clone()),
+            execution.exit_code,
+            Some(Ok(serde_json::json!({
+                "stdout": execution.stdout,
+                "stderr": execution.stderr.clone(),
+                "exit_code": execution.exit_code,
+                "result_classification": execution.result_classification,
+                "observation_lost": execution.observation_lost,
+            }))),
+        )
+        .with_presentation(CommandPresentation {
+            stdout: None,
+            stderr: Some(execution.stderr.clone()),
+        })
+        .with_raw_completion_stderr(execution.completion_phase_stderr()),
         Err(err) => CommandRun::from_raw_stdout("ssh", Err(err), 1, None),
     }
 }
