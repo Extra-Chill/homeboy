@@ -2152,12 +2152,17 @@ fn migrate_record_controller_runtime_in_store(
         return Ok(());
     };
     let original = runtime.clone();
-    let migrated =
-        homeboy_core::controller_runtime::migrate_legacy_pin_and_persist(&original, |migrated| {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
+    let migrated = homeboy_core::controller_runtime::migrate_legacy_pin_and_persist_in_root(
+        &runtime_root,
+        &original,
+        |migrated| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 migrated.clone();
             lifecycle_store.write_record(record)
-        })?;
+        },
+    )?;
     record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
 }
