@@ -89,16 +89,11 @@ const STORES: &[Store] = &[
 /// cannot outlive the debt it records. Adding a row is the edit this test exists
 /// to make someone argue for in review.
 const KNOWN_MIXED_STORE_FUNCTIONS: &[(&str, &str)] = &[
-    // Takes `&CookRecipeStore` and resolves the lifecycle store through a
-    // `match` so the *resolution failure* still lands in
-    // `durable_cook_error_report_with_store`, where the spine's own failure used
-    // to land. Its only caller, `run_cook_with_boundaries_observed_policy_with_store`,
-    // holds no lifecycle store, so closing this means threading one through the
-    // entire `run_cook_with_boundaries_observed*` wrapper chain.
-    (
-        "crates/homeboy-agents/src/agent_task_service/cook.rs",
-        "run_cook_with_boundaries_reported",
-    ),
+    // Empty. The former entry, `run_cook_with_boundaries_reported`, is gone: the
+    // `run_cook_with_boundaries_observed*` wrapper chain this row asked us to
+    // thread a lifecycle store through was collapsed into a single `run_cook`
+    // taking `CookContext`, which carries both stores as fields. The mixed
+    // resolution had nowhere left to hide once the chain stopped existing.
 ];
 
 /// Every scanned source as `(repo-relative path, contents)`.

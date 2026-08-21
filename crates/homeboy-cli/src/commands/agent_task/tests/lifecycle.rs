@@ -255,7 +255,7 @@ fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget(
                 run_id.clone(),
                 "--no-finalize".to_string(),
             ]);
-            let executor = CountingCookExecutor::default();
+            let executor = Arc::new(CountingCookExecutor::default());
             let dispatcher = Arc::new(CountingCookDispatcher::default());
 
             let error = run_cook_with_executor_and_dispatcher(
@@ -479,7 +479,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
 
         let (failed, exit_code) = run_cook_with_executor_and_dispatcher(
             recoverable_runner_cook_args(&source),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             Some(dispatcher.clone()),
         )
         .expect("runner preflight failure is durably reported");
@@ -518,7 +518,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         dispatcher.unavailable.store(false, Ordering::SeqCst);
         let (resumed, exit_code) = run_cook_with_executor_and_dispatcher(
             recoverable_runner_cook_args(&source),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             Some(dispatcher.clone()),
         )
         .expect("same immutable cook resumes after runner repair");
@@ -617,7 +617,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
         assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("status did not index"));
         assert_eq!(filesystem_snapshot(&data_root), before_status);
 
-        let executor = CountingCookExecutor::default();
+        let executor = Arc::new(CountingCookExecutor::default());
         let continued = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
@@ -749,7 +749,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist provider attempt");
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
             .expect("bind immutable Cook attempt");
-        let executor = CountingCookExecutor::default();
+        let executor = Arc::new(CountingCookExecutor::default());
         let before = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
@@ -1117,7 +1117,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
             Some("selected"),
         )
         .expect("restart rewrites the aggregate to the controller projection");
-        let executor = CountingCookExecutor::default();
+        let executor = Arc::new(CountingCookExecutor::default());
         let ambiguous = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
@@ -1365,7 +1365,7 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
             },
         )
         .expect("controller proxy persisted");
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
 
         let error = run_submitted_with_executor(
             "run-cli-transport-proxy".to_string(),
@@ -1409,7 +1409,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
             },
         )
         .expect("controller proxy persisted");
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
 
         let error = run_resume_with_executor(
             "run-cli-resume-transport-proxy".to_string(),
@@ -1461,7 +1461,7 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
         )
         .expect("controller proxy persisted");
 
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
         let error = run_submitted_with_executor(
             "run-cli-runner-resume-proxy".to_string(),
             None,
@@ -1495,7 +1495,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
             },
         )
         .expect("controller proxy persisted");
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
 
         let (_, exit_code) =
             run_next_with_executor(executor.clone()).expect("run-next skips proxy");
@@ -1614,8 +1614,12 @@ fn submit_run_status_reports_terminal_state() {
 fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnostic-summary";
-        run_loaded_plan(test_plan(), Some(run_id), DiagnosticFailureExecutor)
-            .expect("run completed with failed outcome");
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(DiagnosticFailureExecutor),
+        )
+        .expect("run completed with failed outcome");
 
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
@@ -1669,10 +1673,10 @@ fn evidence_command_hydrates_homeboy_and_file_refs_with_filters_and_redaction() 
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            EvidenceFixtureExecutor {
+            Arc::new(EvidenceFixtureExecutor {
                 run_id: run_id.to_string(),
                 file_uri: format!("file://{}", file_path.display()),
-            },
+            }),
         )
         .expect("run completed");
 
@@ -1741,9 +1745,9 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
         run_loaded_plan(
             test_plan(),
             Some("run-cli-diagnose-evidence"),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with failed outcome");
 
@@ -1993,9 +1997,9 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with failed outcome");
 
@@ -2101,9 +2105,9 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with failed outcome");
 
@@ -2185,9 +2189,9 @@ fn diagnose_surfaces_a_raw_provider_cause_from_a_bounded_stream_uri() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with failed outcome");
 
@@ -2241,9 +2245,9 @@ fn diagnose_reports_unavailable_process_streams_without_failing() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with failed outcome");
 
@@ -2276,9 +2280,9 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ClassifiedFailureExecutor {
+            Arc::new(ClassifiedFailureExecutor {
                 classification: AgentTaskFailureClassification::Timeout,
-            },
+            }),
         )
         .expect("run completed with a classified failure");
 
@@ -2347,9 +2351,9 @@ fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ClassifiedFailureExecutor {
+            Arc::new(ClassifiedFailureExecutor {
                 classification: AgentTaskFailureClassification::Unknown,
-            },
+            }),
         )
         .expect("run completed with an unclassified failure");
 
@@ -2393,9 +2397,9 @@ fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ExecutorResultEvidenceFailureExecutor {
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
                 evidence_uri: format!("file://{}", evidence_path.display()),
-            },
+            }),
         )
         .expect("run completed with missing declared artifacts");
 
@@ -2486,12 +2490,12 @@ fn replay_provider_boundary_projects_latest_executor_input() {
         run_loaded_plan(
             test_plan(),
             Some("run-cli-provider-boundary-replay"),
-            ExecutorInputEvidenceExecutor {
+            Arc::new(ExecutorInputEvidenceExecutor {
                 evidence_uris: vec![
                     format!("file://{}", stale_evidence_path.display()),
                     format!("file://{}", evidence_path.display()),
                 ],
-            },
+            }),
         )
         .expect("run completed");
 
@@ -2546,11 +2550,11 @@ fn replay_provider_boundary_hydrates_persisted_plan_executor_input() {
         run_loaded_plan(
             plan,
             Some(run_id),
-            ExecutorInputEvidenceExecutor {
+            Arc::new(ExecutorInputEvidenceExecutor {
                 evidence_uris: vec![format!(
                     "homeboy://agent-task/run/{run_id}/plan#task=task-a"
                 )],
-            },
+            }),
         )
         .expect("run completed");
 
@@ -2587,7 +2591,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            FixtureOutcomeExecutor { outcome },
+            Arc::new(FixtureOutcomeExecutor { outcome }),
         )
         .expect("run completed with fixture outcome");
 
@@ -2878,7 +2882,7 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            FixtureOutcomeExecutor { outcome },
+            Arc::new(FixtureOutcomeExecutor { outcome }),
         )
         .expect("run completed with fixture outcome");
 
@@ -2965,10 +2969,10 @@ fn evidence_command_hydrates_plain_local_path_refs_and_summarizes_unsupported_re
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            EvidencePathFixtureExecutor {
+            Arc::new(EvidencePathFixtureExecutor {
                 local_path: file_path.display().to_string(),
                 unsupported_uri: "provider-result://opaque/ref".to_string(),
-            },
+            }),
         )
         .expect("run completed");
 
@@ -3053,10 +3057,10 @@ fn evidence_command_truncates_large_file_evidence() {
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            EvidenceFixtureExecutor {
+            Arc::new(EvidenceFixtureExecutor {
                 run_id: run_id.to_string(),
                 file_uri: format!("file://{}", file_path.display()),
-            },
+            }),
         )
         .expect("run completed");
 
@@ -3083,9 +3087,9 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_full_readers_lo
         run_loaded_plan(
             test_plan(),
             Some(run_id),
-            ClassifiedFailureExecutor {
+            Arc::new(ClassifiedFailureExecutor {
                 classification: AgentTaskFailureClassification::PolicyDenied,
-            },
+            }),
         )
         .expect("terminal provider failure");
         let patch = "x".repeat(30 * 1024);
@@ -3186,10 +3190,10 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
     with_temp_home(|| {
         let run_id = "run-plan-durable";
         let observed_status = Arc::new(Mutex::new(None));
-        let executor = InspectingExecutor {
+        let executor = Arc::new(InspectingExecutor {
             run_id: run_id.to_string(),
             observed_status: Arc::clone(&observed_status),
-        };
+        });
 
         let (value, exit_code) =
             run_loaded_plan(test_plan(), Some(run_id), executor).expect("run-plan completed");
@@ -3225,7 +3229,7 @@ fn run_plan_lab_context_returns_lossless_terminal_aggregate() {
         let result = run_loaded_plan(
             test_plan(),
             Some("run-plan-lab-terminal"),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
         );
 
         match previous {
@@ -3251,7 +3255,7 @@ fn run_plan_fails_fast_when_required_secret_env_is_missing() {
         std::env::remove_var(missing_secret);
         let mut plan = test_plan();
         plan.tasks[0].executor.secret_env = vec![missing_secret.to_string()];
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
         let observed_request = Arc::clone(&executor.observed_request);
 
         let error = run_loaded_plan(plan, Some("run-plan-missing-secret"), executor)
@@ -3311,10 +3315,10 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_next_with_executor(InspectingExecutor {
+        let (_value, exit_code) = run_next_with_executor(Arc::new(InspectingExecutor {
             run_id: "run-next-a".to_string(),
             observed_status: Arc::clone(&observed_status),
-        })
+        }))
         .expect("claimed run completed");
 
         let observed = observed_status
@@ -3375,7 +3379,7 @@ fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queu
         .expect("fanout persisted");
 
         let (_value, exit_code) = run_next_with_executor_and_fanout(
-            InspectingExecutor::noop("target-child-a"),
+            Arc::new(InspectingExecutor::noop("target-child-a")),
             Some("target-fanout".to_string()),
         )
         .expect("scoped queue claim succeeds");
@@ -3405,10 +3409,10 @@ fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queu
 #[test]
 fn run_next_returns_unclaimed_when_no_queued_runs_exist() {
     with_temp_home(|| {
-        let (value, exit_code) = run_next_with_executor(InspectingExecutor {
+        let (value, exit_code) = run_next_with_executor(Arc::new(InspectingExecutor {
             run_id: "unused".to_string(),
             observed_status: Arc::new(Mutex::new(None)),
-        })
+        }))
         .expect("run-next checked queue");
 
         assert_eq!(exit_code, 0);
@@ -3595,7 +3599,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
         )
         .expect("terminalize retryable source attempt");
 
-        let executor = CountingCookExecutor::default();
+        let executor = Arc::new(CountingCookExecutor::default());
         let (value, _exit_code) = retry_with(
             RetryArgs {
                 run_id: source_run_id.to_string(),
@@ -3695,7 +3699,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             artifact_id: None,
                             full: false,
                         },
-                        CountingCookExecutor::default(),
+                        Arc::new(CountingCookExecutor::default()),
                         |_| Ok(Some(Arc::new(RetryRunDispatcher))),
                     )
                 })
@@ -3775,10 +3779,10 @@ fn resume_command_executes_existing_run() {
 
         let (_value, exit_code) = run_resume_with_executor(
             "run-resume-cli".to_string(),
-            InspectingExecutor {
+            Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
                 observed_status: Arc::clone(&observed_status),
-            },
+            }),
         )
         .expect("resumed");
 
@@ -3969,9 +3973,9 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         init_runtime_component_checkout(workspace.path());
         let workspace_root = workspace.path().display().to_string();
         let observed_request = Arc::new(Mutex::new(None));
-        let executor = CapturingExecutor {
+        let executor = Arc::new(CapturingExecutor {
             observed_request: Arc::clone(&observed_request),
-        };
+        });
         let mut plan = test_plan();
         plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
         plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
@@ -4030,7 +4034,7 @@ fn run_plan_rejects_component_worktree_without_branch() {
         plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
         plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
 
-        let error = run_loaded_plan(plan, None, CapturingExecutor::default())
+        let error = run_loaded_plan(plan, None, Arc::new(CapturingExecutor::default()))
             .expect_err("component worktree without branch rejected");
         let message = error.to_string();
 
@@ -4106,7 +4110,7 @@ fn cook_without_gate_but_with_no_finalize_passes_the_gate_requirement() {
 
         let result = run_cook_with_executor(
             gate_requirement_cook_args(&target, false, true),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
         );
 
         if let Err(error) = result {

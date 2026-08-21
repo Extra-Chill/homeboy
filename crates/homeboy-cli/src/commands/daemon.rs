@@ -139,9 +139,8 @@ enum DaemonCommand {
         #[arg(long)]
         replacement_operation_id: Option<String>,
     },
-    /// Preview unleased daemon candidates, or explicitly retire only proven
-    /// orphan candidates and start a replacement when the durable store is idle.
-    #[cfg_attr(not(target_os = "linux"), command(hide = true))]
+    /// On Linux, preview unleased daemon candidates, or explicitly retire only
+    /// proven orphan candidates and start a replacement when the durable store is idle.
     ReconcileUnleasedCandidates {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
