@@ -416,11 +416,9 @@ impl DependencyMaterializationCache {
 
 /// Durable root shared by local and runner-side Homeboy processes. Lab invokes
 /// the same rig materialization contract on the runner outside its workspace.
-pub fn cache_root() -> Result<PathBuf> {
-    Ok(cache_root_in_roots(
-        homeboy_paths::PathRoots::from_environment()?.data(),
-    ))
-}
+// The ambient `cache_root()` shim that used to sit here is gone. Its only
+// caller was the rig resource-lifecycle index, which now derives the root from
+// the observation store the index is recorded into (#7505).
 
 /// [`cache_root`] below an explicitly injected data root.
 pub fn cache_root_in_roots(data_root: &Path) -> PathBuf {
