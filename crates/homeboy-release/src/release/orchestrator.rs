@@ -21,21 +21,24 @@ use homeboy_core::worktree_providers::WorktreeProviderTerminalDisposition;
 /// Runs the executable preflight validations, rebuilds the full release plan
 /// after those preflights, then walks the planned release steps in order.
 pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
-    run_with_plan(component_id, options).map(|(_plan, run, _workspace)| run)
+    // The public convenience entry: callers without roots of their own get one
+    // resolution here, which `run_with_plan` then threads through the release.
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    run_with_plan(&roots, component_id, options).map(|(_plan, run, _workspace)| run)
 }
 
 /// Execute a release and return the plan that drove it alongside the run.
 pub(crate) fn run_with_plan(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<(ReleasePlan, ReleaseRun, Option<ReleaseWorkspaceOutput>)> {
-    // One resolution for the entire release. Both plan phases below — the
-    // executable preflight pass and the rebuilt mutation pass — receive it,
-    // so a release cannot package into one home and then clean up, checkpoint,
-    // or record its deploy recovery against another (#7505).
-    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    // Roots arrive from the caller and cover the entire release: workspace
+    // provisioning and its finalization record, both plan phases, packaging,
+    // cleanup, and the deploy checkpoint. A release therefore cannot package
+    // into one home and then record its state against another (#7505).
     let component = super::context::load_component(component_id, options)?;
-    let mut workspace = super::workspace::ReleaseWorkspace::select(&component)?;
+    let mut workspace = super::workspace::ReleaseWorkspace::select(roots, &component)?;
     let mut workspace_options = options.clone();
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
@@ -43,7 +46,7 @@ pub(crate) fn run_with_plan(
 
     let staging_source_sha = workspace.source_sha();
     match run_with_plan_inner(
-        &roots,
+        roots,
         component_id,
         &workspace_options,
         checkout_guard.as_ref(),

@@ -490,8 +490,10 @@ fn remove_recovery(data_root: &Path, component_id: &str) -> Result<()> {
 /// another. The redeploy between them — `deploy::run_multi` — still resolves
 /// its own roots inside `homeboy-deploy`; that boundary is not reachable from
 /// here without changing a public signature (#7505).
-pub(super) fn resume_deployment(component_id: &str) -> Result<Option<ReleaseDeploymentResult>> {
-    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+pub(super) fn resume_deployment(
+    roots: &homeboy_core::paths::PathRoots,
+    component_id: &str,
+) -> Result<Option<ReleaseDeploymentResult>> {
     let path = recovery_path_in_roots(roots.data(), component_id);
     if !path.exists() {
         return Ok(None);
@@ -1256,7 +1258,7 @@ mod tests {
                 "terminal success clears the durable checkpoint"
             );
 
-            assert!(super::resume_deployment(&component.id)
+            assert!(super::resume_deployment(&test_roots(), &component.id)
                 .expect("terminal recovery lookup")
                 .is_none());
             assert_eq!(run_git(&source, &["tag", "--list"]), "v1.2.4");
