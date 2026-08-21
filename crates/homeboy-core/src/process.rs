@@ -217,7 +217,13 @@ impl ProcessContainment {
         #[cfg(target_os = "linux")]
         {
             if leader_has_exited {
-                return terminate_linux_scope_members(&self.scope, timeout, None);
+                let cleanup = terminate_linux_scope_members(&self.scope, timeout, None)?;
+                if cleanup.complete {
+                    return Ok(());
+                }
+                return Err(Error::internal_unexpected(cleanup.detail.unwrap_or_else(
+                    || "process-scope cleanup could not be verified".to_string(),
+                )));
             }
             return terminate_linux_process_scope(pid, &self.scope, timeout);
         }
@@ -228,9 +234,9 @@ impl ProcessContainment {
         }
     }
 
-    /// Clean up descendants after the direct child has exited. Linux uses only
-    /// the inherited marker here, never the former leader's process-group ID.
-    /// Other platforms intentionally preserve their existing normal-exit path.
+    /// Clean up descendants after the direct child has exited. Linux composes
+    /// marker discovery with the former leader's process group, while reporting
+    /// when marker discovery could not verify escaped descendants.
     pub fn cleanup_after_leader_exit_bounded(
         &self,
         timeout: Duration,
@@ -283,6 +289,7 @@ impl ProcessContainment {
     ) -> Result<ProcessContainmentCleanup> {
         #[cfg(target_os = "linux")]
         {
+            let _ = leader_has_exited;
             let cleanup = terminate_linux_scope_members_with_grace(&self.scope, grace)?;
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
