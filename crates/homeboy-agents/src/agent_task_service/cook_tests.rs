@@ -11604,9 +11604,22 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         assert_eq!(fixture.continuation_record.state, "partial_failure");
 
+        let before_preflight =
+            serde_json::to_value(agent_task_lifecycle::status(&historical.initial_run_id).unwrap())
+                .unwrap();
+        assert!(
+            authenticated_historical_review_form_workspace_with_trace(&historical, false).unwrap(),
+            "the exact dirty candidate authorizes only this historical continuation"
+        );
+        assert_eq!(
+            serde_json::to_value(agent_task_lifecycle::status(&historical.initial_run_id).unwrap())
+                .unwrap(),
+            before_preflight,
+            "read-only admission must not persist a continuation trace"
+        );
         assert!(
             authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "the exact dirty candidate authorizes only this historical continuation"
+            "execution records its exact admission trace"
         );
         historical.attempt_dispatcher = None;
         let executions = Arc::new(AtomicUsize::new(0));

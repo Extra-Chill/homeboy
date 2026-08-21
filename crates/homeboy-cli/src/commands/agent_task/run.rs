@@ -1174,7 +1174,10 @@ where
         };
         let mut result = None;
         let historical_terminal =
-            recipe.runtime_generation != homeboy::core::build_identity::current().display;
+            agent_task_service_direct::historical_terminal_continuation_is_eligible(
+                &recipe,
+                record.state,
+            );
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
         let execute = |options| {
@@ -1469,7 +1472,12 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         .expect("continuation selection is recipe-bound");
     let terminal_review =
         agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
-    let mut options = match if terminal_review {
+    let historical_terminal =
+        agent_task_service_direct::historical_terminal_continuation_is_eligible(
+            &recipe,
+            record.state,
+        );
+    let mut options = match if terminal_review || historical_terminal {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
@@ -1512,6 +1520,16 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             "admitted": true,
             "selected_attempt": { "run_id": selected_run_id },
             "candidate_fingerprint": candidate_fingerprint,
+            "continuation": {
+                "path": if historical_terminal {
+                    "historical_terminal"
+                } else if terminal_review {
+                    "terminal_review_form"
+                } else {
+                    "current_runtime"
+                },
+                "provider_replay": terminal_review
+            },
             "phases": phases,
             "side_effects": { "provider_dispatch": false, "git_mutation": false, "github_mutation": false, "finalization": false }
         }),

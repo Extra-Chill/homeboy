@@ -3654,7 +3654,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
                 == Some("verification_pending")
         });
     let authenticated_historical_review_continuation =
-        authenticated_historical_review_form_workspace(options)?;
+        authenticated_historical_review_form_workspace_with_trace(options, false)?;
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
@@ -6647,7 +6647,21 @@ fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path
 fn authenticated_historical_review_form_workspace(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<bool> {
+    authenticated_historical_review_form_workspace_with_trace(options, true)
+}
+
+fn authenticated_historical_review_form_workspace_with_trace(
+    options: &AgentTaskCookServiceOptions,
+    persist_trace: bool,
+) -> Result<bool> {
     let mut trace = ContinuationAdmissionTrace::new();
+    let record_trace = |trace: &ContinuationAdmissionTrace| {
+        if persist_trace {
+            record_continuation_admission_trace(&options.initial_run_id, trace)
+        } else {
+            Ok(())
+        }
+    };
     if !agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
         trace.deny("run_record", "unavailable");
         return Ok(false);
@@ -6658,24 +6672,24 @@ fn authenticated_historical_review_form_workspace(
         Ok(true) => trace.pass("terminal_review_form_eligibility"),
         Ok(false) => {
             trace.deny("terminal_review_form_eligibility", "fail");
-            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            record_trace(&trace)?;
             return Ok(false);
         }
         Err(_) => {
             trace.deny("terminal_review_form_eligibility", "unavailable");
-            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            record_trace(&trace)?;
             return Ok(false);
         }
     }
     let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id).unwrap_or(None)
     else {
         trace.deny("applied_promotion", "unavailable");
-        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        record_trace(&trace)?;
         return Ok(false);
     };
     if promotion.status != AgentTaskPromotionStatus::Applied {
         trace.deny("applied_promotion", "fail");
-        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        record_trace(&trace)?;
         return Ok(false);
     }
     trace.pass("applied_promotion");
@@ -6683,12 +6697,12 @@ fn authenticated_historical_review_form_workspace(
         Ok(Some(continuation)) => continuation,
         Ok(None) => {
             trace.deny("continuation_evidence", "unavailable");
-            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            record_trace(&trace)?;
             return Ok(false);
         }
         Err(_) => {
             trace.deny("continuation_evidence", "fail");
-            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            record_trace(&trace)?;
             return Ok(false);
         }
     };
@@ -6709,7 +6723,7 @@ fn authenticated_historical_review_form_workspace(
                     "provider_resolution"
                 };
                 trace.deny(predicate, "fail");
-                record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+                record_trace(&trace)?;
                 return Ok(false);
             }
         };
@@ -6723,22 +6737,22 @@ fn authenticated_historical_review_form_workspace(
         .is_err()
     {
         trace.deny("worktree_root", "fail");
-        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        record_trace(&trace)?;
         return Ok(false);
     }
     trace.pass("worktree_root");
     let Ok(target) = std::fs::canonicalize(&resolution.worktree.path) else {
         trace.deny("candidate_fingerprint", "unavailable");
-        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        record_trace(&trace)?;
         return Ok(false);
     };
     if authenticate_tracked_promotion_continuation(&target, &continuation).is_err() {
         trace.deny("candidate_fingerprint", "fail");
-        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        record_trace(&trace)?;
         return Ok(false);
     }
     trace.pass("candidate_fingerprint");
-    record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+    record_trace(&trace)?;
     Ok(true)
 }
 
