@@ -1,54 +1,83 @@
-//! Pins nextest shard replay to process-per-test parallelism.
+//! Pins nextest shard replay to serial execution.
 //!
 //! `extensions.rust.settings.rust_nextest_shard_threads` is the `--test-threads`
 //! value the rust extension passes to `cargo nextest run` during shard replay
-//! (`rust/scripts/test-runner.sh`). The extension's own schema states the
-//! semantics: "Zero selects nextest's num-cpus parallelism. nextest runs every
-//! test in its own process, so process-global state is already isolated and
-//! serial replay is only the conservative default."
+//! (`rust/scripts/test-runner.sh`).
 //!
-//! ## Why this needs a test rather than a comment
+//! ## Why serial, when nextest already isolates processes
 //!
-//! The setting has already regressed once, silently, and the mechanism is worth
-//! naming because it will recur.
+//! The rust extension's schema says of the `0` value: "Zero selects nextest's
+//! num-cpus parallelism. nextest runs every test in its own process, so
+//! process-global state is already isolated and serial replay is only the
+//! conservative default."
 //!
-//! `716370152` ("fix(test): restore parallel hermetic shards") introduced the
-//! setting at `0` — that commit exists *only* to turn shard parallelism on, and
-//! it updated `docs/internals/test-tiers.md` to say so. `fcc6a5029` ("ci: bound
-//! archived test replay") then flipped it to `1`. That commit's subject and its
-//! other hunk are about pinning a homeboy-action revision so downloaded Test
-//! archives stay out of consumer Git state; the thread change rode along
-//! unmentioned. The docs were not updated and continued to document `0`, so for
-//! the entire window the documented configuration and the actual configuration
-//! disagreed, and the disagreement was invisible.
+//! That statement is true and it is not sufficient, which is the whole reason
+//! this file says `1` today and said `0` before.
 //!
-//! Nothing caught it because the failure mode is not a failure. A serialized
-//! suite is *green*. It produces the same results as a parallel one, only
-//! slower, so neither CI nor a reviewer reading a diff has a signal to react
-//! to. A one-token numeric change inside a config blob is also close to
-//! invisible in review when the surrounding commit is about something else.
-//! That combination — no runtime signal, low diff salience — is what makes a
-//! test the right instrument here rather than a comment or a doc line.
+//! Process-per-test isolates process-global *memory and environment* — the
+//! `HOME`/`XDG_*` mutation that `HomeGuard` performs, which is the race #7505
+//! exists to remove. It does nothing whatsoever for machine-global *filesystem*
+//! state. The controller-runtime admission store and the rig registry are
+//! directories on disk beneath the real `$HOME`. Two test processes running at
+//! the same time share them completely, and a fresh process is not a fresh
+//! disk.
 //!
-//! ## What is and is not pinned
+//! This is not a theoretical distinction. With shard replay parallel, the run
+//! at `32294476539` failed `status_preserves_existing_terminal_runtime_evidence`
+//! on an `assert_eq!(before, after)` whose two sides differed in exactly one
+//! field:
 //!
-//! This pins the value to `0` specifically, not merely "not 1". The setting is
-//! a thread count, so a well-meaning future edit could set it to `4` or `8` to
-//! "bound" resource use, which would re-cap parallelism at an arbitrary number
-//! unrelated to the runner's core count. `0` is the only value that delegates
-//! to nextest.
+//! ```text
+//! before  metadata.controller_admission.owner = { pid: 9913, advisory_lock: true,
+//!                                                 request_id: "run_store-contract", .. }
+//! after   metadata.controller_admission.owner = Null
+//! ```
 //!
-//! `rust_cargo_test_threads` is deliberately *not* pinned here. It caps the
-//! Cargo fallback runner, which shares one process across threads and therefore
-//! genuinely does need serialization while `HomeGuard` still mutates
-//! process-global environment (#7505). The two settings look similar and are
-//! not: one is a workaround for a real in-process race, the other is a
-//! conservative default for a runner that has no such race. Conflating them is
-//! how the parallel setting gets "fixed" back to serial.
+//! `run_store-contract` is the run id of a *different test in this same file*.
+//! One test observed another test's admission lease through the shared on-disk
+//! controller-runtime store, mid-flight. Process isolation was total and
+//! irrelevant. Ten `workspace::tests::prune::*` tests fail the same way through
+//! the shared rig registry, where a peer's `create` leaves the registry in a
+//! state the assertions were not written for.
 //!
-//! If shard parallelism is ever intentionally retired, delete this test in the
-//! same commit that changes the value, so the intent is recorded once rather
-//! than argued twice.
+//! ## What has to be true before this goes back to `0`
+//!
+//! Not "the flakes stopped". The stores have to stop being machine-global:
+//! controller admission and the rig registry need the same explicit-root
+//! treatment #7505 is applying everywhere else, so that a test's writes land in
+//! its own `HermeticTestContext` rather than in a directory every concurrent
+//! test can see.
+//!
+//! Until then a parallel value is not faster, it is red. Serial is slower and
+//! correct, and slower-and-correct is the side to err on for a gate whose
+//! entire job is to be believed.
+//!
+//! ## Why this is pinned rather than commented
+//!
+//! The value has now moved three times, and only one of those moves announced
+//! itself:
+//!
+//! - `716370152` ("fix(test): restore parallel hermetic shards") introduced it
+//!   at `0` and updated `docs/internals/test-tiers.md` to match.
+//! - `fcc6a5029` ("ci: bound archived test replay") flipped it to `1`. That
+//!   commit's subject and its other hunk are about pinning a homeboy-action
+//!   revision; the thread change rode along unmentioned and the docs were not
+//!   updated.
+//! - `522c7cda2` (#12626) read that silence as an accident and flipped it back
+//!   to `0`, adding this file to hold the line. The reasoning was that nextest's
+//!   process isolation made serialization unnecessary — correct about processes,
+//!   wrong about the filesystem, and the tests above are the bill for it.
+//!
+//! The failure mode in both directions is quiet. A serialized suite is green and
+//! merely slow, so nothing signals. A parallel suite is red intermittently and
+//! in tests that look unrelated to the change under review, so the signal points
+//! somewhere else. A one-token numeric edit inside a config blob is close to
+//! invisible in review either way. That is what makes a test the right
+//! instrument here.
+//!
+//! If shard parallelism is intentionally restored, delete or invert this test in
+//! the same commit that changes the value, so the intent is recorded once rather
+//! than argued a fourth time.
 
 use serde_json::Value;
 
@@ -60,7 +89,7 @@ fn rust_settings() -> Value {
 }
 
 #[test]
-fn nextest_shard_replay_uses_process_per_test_parallelism() {
+fn nextest_shard_replay_stays_serial_while_stores_are_machine_global() {
     let settings = rust_settings();
 
     let threads = settings
@@ -69,12 +98,14 @@ fn nextest_shard_replay_uses_process_per_test_parallelism() {
         .expect("extensions.rust.settings.rust_nextest_shard_threads is present and numeric");
 
     assert_eq!(
-        threads, 0,
-        "rust_nextest_shard_threads must stay 0 so nextest shard replay uses its \
-         num-cpus process-per-test parallelism. A non-zero value caps replay at a \
-         fixed thread count; 1 serializes the suite outright, which is green and \
-         therefore silent. See this file's module docs for the regression this \
-         guards (716370152 set 0, fcc6a5029 reverted it to 1 unmentioned)."
+        threads, 1,
+        "rust_nextest_shard_threads must stay 1 while the controller-runtime \
+         admission store and the rig registry live in machine-global directories. \
+         nextest gives every test its own process, which isolates env but not the \
+         filesystem those stores sit on, so concurrent tests observe each other's \
+         leases and registry writes. See this file's module docs for the observed \
+         cross-test contamination (run 32294476539). Restore 0 only after those \
+         stores take explicit roots (#7505)."
     );
 }
 
@@ -84,8 +115,8 @@ fn nextest_is_the_selected_runner() {
 
     // The shard-threads pin above is meaningless under the Cargo runner, which
     // ignores it. Pinning the runner keeps the two facts from drifting apart:
-    // a silent switch back to Cargo would leave a passing parallelism test
-    // guarding a setting nothing reads.
+    // a silent switch back to Cargo would leave a passing test guarding a
+    // setting nothing reads.
     assert_eq!(
         settings.get("rust_test_runner").and_then(Value::as_str),
         Some("nextest"),
@@ -98,11 +129,11 @@ fn nextest_is_the_selected_runner() {
 fn cargo_fallback_stays_serialized_while_home_guard_mutates_process_env() {
     let settings = rust_settings();
 
-    // Deliberately the opposite pin from the nextest one, and for the opposite
-    // reason. libtest shares a process across its threads, so a test that
-    // mutates HOME through HomeGuard can be observed mid-window by a reader on
-    // another thread. Until #7505 removes process-global mutation, the Cargo
-    // fallback must stay at one thread.
+    // Same value as the nextest pin now, but for a different reason, and the
+    // two must not be collapsed into one rule. libtest shares a process across
+    // its threads, so a test mutating HOME through HomeGuard can be observed
+    // mid-window by a reader on another thread. That race is in-process and
+    // survives even if every store on disk becomes explicitly rooted.
     assert_eq!(
         settings
             .get("rust_cargo_test_threads")
@@ -110,7 +141,7 @@ fn cargo_fallback_stays_serialized_while_home_guard_mutates_process_env() {
         Some(1),
         "rust_cargo_test_threads must stay 1 while HomeGuard mutates process-global \
          environment (#7505); the Cargo runner shares one process across threads, so \
-         env writers can race readers. This is not the same knob as \
-         rust_nextest_shard_threads and must not be aligned with it."
+         env writers can race readers. This is a different race from the one \
+         rust_nextest_shard_threads guards and clears on a different condition."
     );
 }

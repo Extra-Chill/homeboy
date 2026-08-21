@@ -2,7 +2,7 @@
 //!
 //! Extracted from `cook.rs`: promotion-source resolution
 //! (`promotion_source`/`source_spec_path`/`source_worktree_path`), the durable
-//! promote-or-load boundary (`promote_attempt`/`promote_or_load_attempt`/
+//! promote-or-load boundary (`promote_attempt`/`promote_or_load_attempt_in_store`/
 //! `persisted_promotion_for_attempt`), PR finalization
 //! (`finalize_or_load_cook_pr*`/`finalize_cook_pr_with_backend`), the
 //! `cook_report` builder, and small spec helpers. These sit downstream of a
@@ -384,18 +384,17 @@ pub(crate) fn selected_candidate_task_id_in_store(
         .map(|outcome| outcome.task_id.clone()))
 }
 
+// The ambient `promote_or_load_attempt()` shim that used to sit above this
+// resolved a root and delegated straight here. It had no callers, so it was a
+// resolution point that existed for nobody (#7505).
+
 /// Promotion is the durable boundary between a terminal provider result and
 /// controller-owned gates. Reconciliation must reuse this exact report rather
 /// than apply the selected artifact again.
-pub(crate) fn promote_or_load_attempt(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-) -> Result<AgentTaskPromotionReport> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    promote_or_load_attempt_in_store(&lifecycle_store, options, run_id)
-}
-
+///
+/// The persisted promotion this loads and the one it writes have to come from
+/// one installation, or a reconciliation would reuse a report the injected
+/// store never recorded.
 pub(crate) fn promote_or_load_attempt_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
@@ -466,14 +465,6 @@ pub(crate) fn promote_or_load_attempt_in_store(
         })?,
     )?;
     Ok(promotion)
-}
-
-/// A selector is accepted only from the route authority written by
-/// `cook-continue`; normal Cook promotion retains automatic selection.
-fn continuation_artifact_id(run_id: &str) -> Result<Option<String>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    continuation_artifact_id_in_store(&lifecycle_store, run_id)
 }
 
 fn continuation_artifact_id_in_store(

@@ -138,54 +138,82 @@ fn cook_alias_status_has_no_adoption_projection_without_indexed_adoption() {
     assert!(projected.candidate_adoption.is_none());
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The alias projection is a *selection* across three indexed
+/// attempts, decided by adoption timestamps this test plants by hand. The
+/// index, all three records and the alias read have to come out of one
+/// installation or the tie-break being asserted is not the tie-break that ran.
+///
+/// `start_candidate_adoption(a, b, c, d)` is exactly
+/// `start_candidate_adoption_with_policy_in_store(store, a, b, c, d, false,
+/// false)`: the ambient entry point delegates through
+/// `start_candidate_adoption_with_rerun_policy` with both policy flags `false`.
 #[test]
 fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-issue-9168-terminal";
-        let mut runs = Vec::new();
-        for attempt in 1..=3 {
-            let run = submit_plan(&test_plan(), Some(&format!("terminal-adoption-{attempt}")))
-                .expect("terminal run");
-            record_cook_attempt(cook_id, attempt, &run.run_id).expect("index terminal run");
-            start_candidate_adoption(
-                &run.run_id,
-                &format!("{attempt:040}"),
-                "openai/gpt-5.6-sol",
-                "cargo test",
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-issue-9168-terminal";
+    let mut runs = Vec::new();
+    for attempt in 1..=3 {
+        let run = lifecycle_store
+            .submit_plan_with_runtime_admission(
+                &test_plan(),
+                &format!("terminal-adoption-{attempt}"),
+                |_| Ok(json!({})),
             )
-            .expect("start terminal adoption");
-            finish_candidate_adoption(
-                &run.run_id,
-                (attempt != 1).then(|| format!("attempt {attempt} failed")),
-            )
-            .expect("finish terminal adoption");
-            runs.push(run);
-        }
-        for (run, timestamp) in runs.iter().zip([
-            "2026-07-20T12:00:03+00:00",
-            "2026-07-20T12:00:01+00:00",
-            "2026-07-20T12:00:03+00:00",
-        ]) {
-            rewrite_record_for_test(&run.run_id, |record| {
-                record
-                    .candidate_adoption
-                    .as_mut()
-                    .expect("terminal adoption")
-                    .updated_at = timestamp.to_string();
-            })
-            .expect("set deterministic adoption timestamp");
-        }
+            .expect("terminal run");
+        record_cook_attempt_in_store(&lifecycle_store, cook_id, attempt, &run.run_id)
+            .expect("index terminal run");
+        start_candidate_adoption_with_policy_in_store(
+            &lifecycle_store,
+            &run.run_id,
+            &format!("{attempt:040}"),
+            "openai/gpt-5.6-sol",
+            "cargo test",
+            false,
+            false,
+        )
+        .expect("start terminal adoption");
+        finish_candidate_adoption_in_store(
+            &lifecycle_store,
+            &run.run_id,
+            (attempt != 1).then(|| format!("attempt {attempt} failed")),
+        )
+        .expect("finish terminal adoption");
+        runs.push(run);
+    }
+    for (run, timestamp) in runs.iter().zip([
+        "2026-07-20T12:00:03+00:00",
+        "2026-07-20T12:00:01+00:00",
+        "2026-07-20T12:00:03+00:00",
+    ]) {
+        rewrite_record_for_test_in_store(&lifecycle_store, &run.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("terminal adoption")
+                .updated_at = timestamp.to_string();
+        })
+        .expect("set deterministic adoption timestamp");
+    }
 
-        let projected = status(cook_id).expect("Cook alias status");
-        assert_eq!(projected.run_id, runs[2].run_id);
-        assert_eq!(
-            projected.adoption_run_id.as_deref(),
-            Some(runs[2].run_id.as_str())
-        );
-        let adoption = projected.candidate_adoption.expect("terminal projection");
-        assert_eq!(adoption.state, "failed");
-        assert_eq!(adoption.candidate_sha, format!("{:040}", 3));
-    });
+    let projected = status_in_store(
+        &lifecycle_store,
+        cook_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("Cook alias status")
+    .record;
+    assert_eq!(projected.run_id, runs[2].run_id);
+    assert_eq!(
+        projected.adoption_run_id.as_deref(),
+        Some(runs[2].run_id.as_str())
+    );
+    let adoption = projected.candidate_adoption.expect("terminal projection");
+    assert_eq!(adoption.state, "failed");
+    assert_eq!(adoption.candidate_sha, format!("{:040}", 3));
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -251,160 +279,247 @@ fn exact_run_id_status_keeps_its_own_adoption_without_alias_projection() {
     assert!(exact_latest.candidate_adoption.is_none());
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). This is one adoption walked through claim, duplicate rejection,
+/// staleness, resume, checkpoint and completion. Every step reads the state the
+/// previous step committed — `resume_count == 1` at the end is a claim about
+/// that whole sequence — so a single record in a single installation is the
+/// only arrangement that makes the walk coherent.
+///
+/// `start_candidate_adoption(a, b, c, d)` is
+/// `start_candidate_adoption_with_policy_in_store(store, a, b, c, d, false,
+/// false)`, and `start_candidate_adoption_with_rerun_policy(a, b, c, d, rerun)`
+/// is the same with `rerun_completed_gates = rerun, replace_interrupted =
+/// false`: both ambient entry points delegate straight through
+/// `start_candidate_adoption_with_policy`.
 #[test]
 fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
-    with_isolated_home(|_| {
-        let record = submit_plan(&test_plan(), Some("adoption-progress")).expect("submit");
-        let candidate = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), "adoption-progress", |_| Ok(json!({})))
+        .expect("submit");
+    let candidate = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
 
-        start_candidate_adoption(
-            &record.run_id,
-            candidate,
-            "openai/gpt-5.6-terra",
-            "cargo test",
-        )
-        .expect("claim before verifier starts");
-        let running = status(&record.run_id).expect("status exposes active adoption");
-        let adoption = running
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        false,
+        false,
+    )
+    .expect("claim before verifier starts");
+    let running = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status exposes active adoption")
+    .record;
+    let adoption = running
+        .candidate_adoption
+        .expect("durable adoption attempt");
+    assert_eq!(adoption.state, "verification_running");
+    assert_eq!(adoption.candidate_sha, candidate);
+    assert_eq!(adoption.active_gate, "cargo test");
+
+    let duplicate = start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        false,
+        false,
+    )
+    .expect_err("live duplicate is rejected");
+    assert_eq!(duplicate.details["field"], "candidate_ref");
+
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        record
             .candidate_adoption
-            .expect("durable adoption attempt");
-        assert_eq!(adoption.state, "verification_running");
-        assert_eq!(adoption.candidate_sha, candidate);
-        assert_eq!(adoption.active_gate, "cargo test");
+            .as_mut()
+            .expect("attempt")
+            .owner_pid = u32::MAX;
+    })
+    .expect("make owner stale without sleeping");
+    let interrupted = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status reconciles stale owner")
+    .record;
+    assert_eq!(
+        interrupted.candidate_adoption.expect("attempt").state,
+        "interrupted"
+    );
 
-        let duplicate = start_candidate_adoption(
-            &record.run_id,
-            candidate,
+    for (other_candidate, other_model) in [
+        (
+            "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
             "openai/gpt-5.6-terra",
+        ),
+        (candidate, "openai/gpt-5.6-sol"),
+    ] {
+        let conflict = start_candidate_adoption_with_policy_in_store(
+            &lifecycle_store,
+            &record.run_id,
+            other_candidate,
+            other_model,
             "cargo test",
+            false,
+            false,
         )
-        .expect_err("live duplicate is rejected");
-        assert_eq!(duplicate.details["field"], "candidate_ref");
+        .expect_err("interrupted attempt only resumes with exact candidate and model");
+        assert_eq!(conflict.details["field"], "candidate_ref");
+    }
 
-        rewrite_record_for_test(&record.run_id, |record| {
-            record
-                .candidate_adoption
-                .as_mut()
-                .expect("attempt")
-                .owner_pid = u32::MAX;
-        })
-        .expect("make owner stale without sleeping");
-        let interrupted = status(&record.run_id).expect("status reconciles stale owner");
-        assert_eq!(
-            interrupted.candidate_adoption.expect("attempt").state,
-            "interrupted"
-        );
-
-        for (other_candidate, other_model) in [
-            (
-                "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
-                "openai/gpt-5.6-terra",
-            ),
-            (candidate, "openai/gpt-5.6-sol"),
-        ] {
-            let conflict = start_candidate_adoption(
-                &record.run_id,
-                other_candidate,
-                other_model,
-                "cargo test",
-            )
-            .expect_err("interrupted attempt only resumes with exact candidate and model");
-            assert_eq!(conflict.details["field"], "candidate_ref");
-        }
-
-        start_candidate_adoption(
-            &record.run_id,
-            candidate,
-            "openai/gpt-5.6-terra",
-            "cargo test",
-        )
-        .expect("same immutable candidate resumes");
-        checkpoint_candidate_adoption(&record.run_id, "finalization", "finalize pull request")
-            .expect("finalization checkpoint");
-        let finalizing = status(&record.run_id).expect("finalization status");
-        let adoption = finalizing.candidate_adoption.expect("attempt");
-        assert_eq!(adoption.phase, "finalization");
-        assert_eq!(adoption.active_gate, "finalize pull request");
-        finish_candidate_adoption(&record.run_id, None).expect("terminal completion");
-        let completed = status(&record.run_id).expect("completed status");
-        let adoption = completed
-            .candidate_adoption
-            .expect("terminal attempt retained");
-        assert_eq!(adoption.state, "completed");
-        assert_eq!(adoption.resume_count, 1);
-        assert!(adoption.completed_at.is_some());
-        assert!(start_candidate_adoption(
-            &record.run_id,
-            candidate,
-            "openai/gpt-5.6-terra",
-            "cargo test",
-        )
-        .is_err());
-        start_candidate_adoption_with_rerun_policy(
-            &record.run_id,
-            candidate,
-            "openai/gpt-5.6-terra",
-            "cargo test",
-            true,
-        )
-        .expect("explicit recipe policy permits a completed gate rerun");
-    });
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        false,
+        false,
+    )
+    .expect("same immutable candidate resumes");
+    checkpoint_candidate_adoption_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        "finalization",
+        "finalize pull request",
+    )
+    .expect("finalization checkpoint");
+    let finalizing = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("finalization status")
+    .record;
+    let adoption = finalizing.candidate_adoption.expect("attempt");
+    assert_eq!(adoption.phase, "finalization");
+    assert_eq!(adoption.active_gate, "finalize pull request");
+    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None)
+        .expect("terminal completion");
+    let completed = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("completed status")
+    .record;
+    let adoption = completed
+        .candidate_adoption
+        .expect("terminal attempt retained");
+    assert_eq!(adoption.state, "completed");
+    assert_eq!(adoption.resume_count, 1);
+    assert!(adoption.completed_at.is_some());
+    assert!(start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        false,
+        false,
+    )
+    .is_err());
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        true,
+        false,
+    )
+    .expect("explicit recipe policy permits a completed gate rerun");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The audit history asserted at the end is the *original* adoption
+/// preserved alongside its replacement, so the record that gets replaced and
+/// the record the history is read from have to be the same one. The
+/// intervening `status_in_store` is what reconciles the falsified owner pid
+/// into `interrupted`, and it must see the rewrite that preceded it.
 #[test]
 fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history() {
-    with_isolated_home(|_| {
-        let record = submit_plan(&test_plan(), Some("adoption-replacement")).expect("submit");
-        let original = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
-        let replacement = "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
-        start_candidate_adoption(
-            &record.run_id,
-            original,
-            "openai/gpt-5.6-terra",
-            "cargo test",
-        )
-        .expect("start original adoption");
-        assert!(start_candidate_adoption_with_policy(
-            &record.run_id,
-            replacement,
-            "openai/gpt-5.6-sol",
-            "cargo test",
-            false,
-            true,
-        )
-        .is_err());
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), "adoption-replacement", |_| Ok(json!({})))
+        .expect("submit");
+    let original = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+    let replacement = "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        original,
+        "openai/gpt-5.6-terra",
+        "cargo test",
+        false,
+        false,
+    )
+    .expect("start original adoption");
+    assert!(start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        replacement,
+        "openai/gpt-5.6-sol",
+        "cargo test",
+        false,
+        true,
+    )
+    .is_err());
 
-        rewrite_record_for_test(&record.run_id, |record| {
-            record
-                .candidate_adoption
-                .as_mut()
-                .expect("original adoption")
-                .owner_pid = u32::MAX;
-        })
-        .unwrap();
-        status(&record.run_id).expect("reconcile stale owner");
-        let replaced = start_candidate_adoption_with_policy(
-            &record.run_id,
-            replacement,
-            "openai/gpt-5.6-sol",
-            "cargo test",
-            false,
-            true,
-        )
-        .expect("explicitly replace interrupted adoption");
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        record
+            .candidate_adoption
+            .as_mut()
+            .expect("original adoption")
+            .owner_pid = u32::MAX;
+    })
+    .unwrap();
+    status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("reconcile stale owner");
+    let replaced = start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        replacement,
+        "openai/gpt-5.6-sol",
+        "cargo test",
+        false,
+        true,
+    )
+    .expect("explicitly replace interrupted adoption");
 
-        let current = replaced.candidate_adoption.expect("replacement adoption");
-        assert_eq!(current.candidate_sha, replacement);
-        assert_eq!(current.ai_model, "openai/gpt-5.6-sol");
-        assert_eq!(
-            replaced.metadata["candidate_adoption_replacements"][0]["candidate_sha"],
-            original
-        );
-        assert_eq!(
-            replaced.metadata["candidate_adoption_replacements"][0]["state"],
-            "interrupted"
-        );
-    });
+    let current = replaced.candidate_adoption.expect("replacement adoption");
+    assert_eq!(current.candidate_sha, replacement);
+    assert_eq!(current.ai_model, "openai/gpt-5.6-sol");
+    assert_eq!(
+        replaced.metadata["candidate_adoption_replacements"][0]["candidate_sha"],
+        original
+    );
+    assert_eq!(
+        replaced.metadata["candidate_adoption_replacements"][0]["state"],
+        "interrupted"
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -557,90 +672,158 @@ fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
     assert!(!persisted.contains("private output secret"));
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The alias resolves across two indexed attempts to project the
+/// adoption owned by the *earlier* one, so the Cook index, both runs and the
+/// alias read all have to name one installation. An alias resolved against
+/// another home's index would name attempts this store has never heard of.
 #[test]
 fn cook_alias_status_projects_active_adoption_remediation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-adoption-remediation-status";
-        let source_run_id = "cook-adoption-remediation-status-attempt-1";
-        let remediation_run_id = "cook-adoption-remediation-status-attempt-2";
-        let plan = test_plan();
-        submit_plan(&plan, Some(source_run_id)).expect("source run");
-        submit_plan(&plan, Some(remediation_run_id)).expect("remediation run");
-        record_cook_attempt(cook_id, 1, source_run_id).expect("source attempt");
-        record_cook_attempt(cook_id, 2, remediation_run_id).expect("remediation attempt");
-        start_candidate_adoption(source_run_id, "candidate", "model", "cargo test")
-            .expect("active adoption");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-adoption-remediation-status";
+    let source_run_id = "cook-adoption-remediation-status-attempt-1";
+    let remediation_run_id = "cook-adoption-remediation-status-attempt-2";
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, source_run_id, |_| Ok(json!({})))
+        .expect("source run");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, remediation_run_id, |_| Ok(json!({})))
+        .expect("remediation run");
+    record_cook_attempt_in_store(&lifecycle_store, cook_id, 1, source_run_id)
+        .expect("source attempt");
+    record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, remediation_run_id)
+        .expect("remediation attempt");
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        source_run_id,
+        "candidate",
+        "model",
+        "cargo test",
+        false,
+        false,
+    )
+    .expect("active adoption");
 
-        checkpoint_candidate_adoption_remediation(source_run_id, remediation_run_id)
-            .expect("remediation checkpoint");
+    checkpoint_candidate_adoption_remediation_in_store(
+        &lifecycle_store,
+        source_run_id,
+        remediation_run_id,
+    )
+    .expect("remediation checkpoint");
 
-        let projected = status(cook_id).expect("Cook alias status");
-        assert_eq!(projected.adoption_run_id.as_deref(), Some(source_run_id));
-        let adoption = projected.candidate_adoption.expect("projected adoption");
-        assert_eq!(adoption.state, "verification_running");
-        assert_eq!(adoption.phase, "provider_remediation");
-        assert_eq!(
-            adoption.remediation_run_id.as_deref(),
-            Some(remediation_run_id)
-        );
-        assert_eq!(
-            adoption.remediation_status_command.as_deref(),
-            Some("homeboy agent-task status cook-adoption-remediation-status-attempt-2 --full")
-        );
-    });
+    let projected = status_in_store(
+        &lifecycle_store,
+        cook_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("Cook alias status")
+    .record;
+    assert_eq!(projected.adoption_run_id.as_deref(), Some(source_run_id));
+    let adoption = projected.candidate_adoption.expect("projected adoption");
+    assert_eq!(adoption.state, "verification_running");
+    assert_eq!(adoption.phase, "provider_remediation");
+    assert_eq!(
+        adoption.remediation_run_id.as_deref(),
+        Some(remediation_run_id)
+    );
+    assert_eq!(
+        adoption.remediation_status_command.as_deref(),
+        Some("homeboy agent-task status cook-adoption-remediation-status-attempt-2 --full")
+    );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The gate process group is persisted on this record and the
+/// cancellation reaps whatever group that record names, so planting the gate
+/// identity in one home and cancelling from another would either reap nothing
+/// or reap a group this test never spawned. The run is controller-local — no
+/// runner id and no runner job id — so `cancel_run_in_store` never reaches
+/// `classify_live_cancellation`'s runner-backed branch and the process-global
+/// runner-continuation registry stays untouched. Same argument as
+/// `candidate_adoption_cancellation_persists_request_before_group_termination`.
 #[cfg(unix)]
 #[test]
 fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
-    with_isolated_home(|_| {
-        let record = submit_plan(&test_plan(), Some("adoption-orphaned-gate")).expect("submit");
-        start_candidate_adoption(
-            &record.run_id,
-            "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
-            "openai/gpt-5.6-terra",
-            "sleep 30",
-        )
-        .expect("start adoption");
-        let mut command = std::process::Command::new("sh");
-        command.args(["-lc", "sleep 30"]);
-        homeboy_core::engine::command::isolate_process_tree(&mut command);
-        let mut child = command.spawn().expect("spawn isolated fake gate");
-        start_candidate_adoption_gate(&record.run_id, "sleep 30", child.id(), 1800)
-            .expect("persist gate identity");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record
-                .candidate_adoption
-                .as_mut()
-                .expect("adoption")
-                .owner_pid = u32::MAX;
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), "adoption-orphaned-gate", |_| {
+            Ok(json!({}))
         })
-        .expect("simulate controller interruption");
+        .expect("submit");
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+        "openai/gpt-5.6-terra",
+        "sleep 30",
+        false,
+        false,
+    )
+    .expect("start adoption");
+    let mut command = std::process::Command::new("sh");
+    command.args(["-lc", "sleep 30"]);
+    homeboy_core::engine::command::isolate_process_tree(&mut command);
+    let mut child = command.spawn().expect("spawn isolated fake gate");
+    start_candidate_adoption_gate_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        "sleep 30",
+        child.id(),
+        1800,
+    )
+    .expect("persist gate identity");
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        record
+            .candidate_adoption
+            .as_mut()
+            .expect("adoption")
+            .owner_pid = u32::MAX;
+    })
+    .expect("simulate controller interruption");
 
-        let interrupted = status(&record.run_id).expect("reconcile orphaned gate");
-        assert_eq!(
-            interrupted.candidate_adoption.expect("adoption").phase,
-            "gate_orphaned"
-        );
-        assert!(start_candidate_adoption(
-            &record.run_id,
-            "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
-            "openai/gpt-5.6-terra",
-            "sleep 30",
-        )
-        .is_err());
-        let cancelled = cancel_run(&record.run_id, Some("recover orphaned gate"))
-            .expect("cancel orphaned gate");
-        assert_eq!(
-            cancelled.candidate_adoption.expect("adoption").state,
-            "cancelled"
-        );
-        assert!(
-            !homeboy_core::process::isolated_process_group_is_running(child.id())
-                .expect("inspect terminated gate group")
-        );
-        let _ = child.wait();
-    });
+    let interrupted = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("reconcile orphaned gate")
+    .record;
+    assert_eq!(
+        interrupted.candidate_adoption.expect("adoption").phase,
+        "gate_orphaned"
+    );
+    assert!(start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+        "openai/gpt-5.6-terra",
+        "sleep 30",
+        false,
+        false,
+    )
+    .is_err());
+    let cancelled = cancel_run_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        Some("recover orphaned gate"),
+    )
+    .expect("cancel orphaned gate");
+    assert_eq!(
+        cancelled.candidate_adoption.expect("adoption").state,
+        "cancelled"
+    );
+    assert!(
+        !homeboy_core::process::isolated_process_group_is_running(child.id())
+            .expect("inspect terminated gate group")
+    );
+    let _ = child.wait();
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1425,95 +1608,133 @@ fn terminal_lab_record_persists_from_inside_a_config_lock_section() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The mirrored transport event is written onto this record and the
+/// log projection is read back off it, so the events the log exposes are the
+/// events this test persisted. `log.events.len() == 1` and `raw_events.len()
+/// == 1` are population counts over one record.
 #[test]
 fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "live-runner-events",
             runner_id: "homeboy-lab",
             runner_job_id: "job-live",
             remote_workspace: "/runner/workspace/homeboy",
             remote_command: &command,
-        })
-        .expect("running proxy");
-        record.metadata["runner_job_events"] = json!([JobEvent {
-            sequence: 1,
-            job_id: uuid::Uuid::new_v4(),
-            kind: JobEventKind::Progress,
-            timestamp_ms: 42,
-            message: Some("provider started".to_string()),
-            data: Some(json!({
-                "provider": "openai/gpt-5.6-terra",
-                "phase": "implementing",
-                "activity": "editing lifecycle projection"
-            })),
-        }]);
-        store::write_record(&record).expect("persist mirrored event");
+        },
+    )
+    .expect("running proxy");
+    record.metadata["runner_job_events"] = json!([JobEvent {
+        sequence: 1,
+        job_id: uuid::Uuid::new_v4(),
+        kind: JobEventKind::Progress,
+        timestamp_ms: 42,
+        message: Some("provider started".to_string()),
+        data: Some(json!({
+            "provider": "openai/gpt-5.6-terra",
+            "phase": "implementing",
+            "activity": "editing lifecycle projection"
+        })),
+    }]);
+    lifecycle_store
+        .write_record(&record)
+        .expect("persist mirrored event");
 
-        let log = logs("live-runner-events").expect("live logs resolve");
+    let log = logs_in_store(&lifecycle_store, "live-runner-events").expect("live logs resolve");
 
-        assert_eq!(log.events.len(), 1);
-        assert!(log.events[0]
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("provider started")));
-        assert_eq!(
-            log.events[0].provider.as_deref(),
-            Some("openai/gpt-5.6-terra")
-        );
-        assert_eq!(log.events[0].phase.as_deref(), Some("implementing"));
-        assert_eq!(
-            log.events[0].activity.as_deref(),
-            Some("editing lifecycle projection")
-        );
-        assert_eq!(log.events[0].heartbeat_at_ms, Some(42));
-        assert!(log.raw_events.is_empty(), "raw transport is opt-in");
+    assert_eq!(log.events.len(), 1);
+    assert!(log.events[0]
+        .message
+        .as_deref()
+        .is_some_and(|message| message.contains("provider started")));
+    assert_eq!(
+        log.events[0].provider.as_deref(),
+        Some("openai/gpt-5.6-terra")
+    );
+    assert_eq!(log.events[0].phase.as_deref(), Some("implementing"));
+    assert_eq!(
+        log.events[0].activity.as_deref(),
+        Some("editing lifecycle projection")
+    );
+    assert_eq!(log.events[0].heartbeat_at_ms, Some(42));
+    assert!(log.raw_events.is_empty(), "raw transport is opt-in");
 
-        let raw_log = logs_with_raw("live-runner-events", true).expect("raw logs resolve");
-        assert_eq!(
-            raw_log.events[0].metadata["provider"],
-            "openai/gpt-5.6-terra"
-        );
-        assert_eq!(raw_log.raw_events.len(), 1);
-        assert_eq!(
-            raw_log.raw_events[0]["data"]["activity"],
-            "editing lifecycle projection"
-        );
-    });
+    let raw_log = logs_with_raw_in_store(&lifecycle_store, "live-runner-events", true)
+        .expect("raw logs resolve");
+    assert_eq!(
+        raw_log.events[0].metadata["provider"],
+        "openai/gpt-5.6-terra"
+    );
+    assert_eq!(raw_log.raw_events.len(), 1);
+    assert_eq!(
+        raw_log.raw_events[0]["data"]["activity"],
+        "editing lifecycle projection"
+    );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Acceptance validates the runner identity a *previously persisted*
+/// record already holds, so the rejection only proves anything if the second
+/// acceptance is validated against the record the first one wrote. Reading a
+/// different home there would either reject for the wrong reason or find no
+/// record to conflict with at all.
+///
+/// The runner-continuation registry `status_in_store` consults stays
+/// process-global by design: it is configured trust material and a subprocess
+/// contract, not a lifecycle root (#12618).
 #[test]
 fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        record_detached_lab_run(DetachedLabRunRecord {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "agent-task-late-artifact-mismatch",
             runner_id: "homeboy-lab",
             runner_job_id: "job-original",
             remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact-mismatch",
             remote_command: &command,
-        })
-        .expect("running proxy");
-        let mut record = status("agent-task-late-artifact-mismatch").expect("status");
-        apply_runner_job_terminal_state(
-            &mut record,
-            homeboy_core::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
-        store::write_record(&record).expect("terminal record");
+        },
+    )
+    .expect("running proxy");
+    let mut record = status_in_store(
+        &lifecycle_store,
+        "agent-task-late-artifact-mismatch",
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status")
+    .record;
+    apply_runner_job_terminal_state(
+        &mut record,
+        homeboy_core::api_jobs::JobStatus::Succeeded,
+        &[],
+    );
+    lifecycle_store
+        .write_record(&record)
+        .expect("terminal record");
 
-        let error = record_detached_lab_run(DetachedLabRunRecord {
+    let error = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "agent-task-late-artifact-mismatch",
             runner_id: "different-lab",
             runner_job_id: "job-artifact-attach",
             remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact-mismatch",
             remote_command: &command,
-        })
-        .expect_err("artifact provenance must retain its original runner");
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "lab_handoff");
-    });
+        },
+    )
+    .expect_err("artifact provenance must retain its original runner");
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(error.details["field"], "lab_handoff");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1592,131 +1813,178 @@ fn terminal_projection_keeps_prior_commit_when_interrupted_before_commit() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The fixture deliberately points `plan_path` at a *runner-local*
+/// path that does not exist here, and the claim is that hydration succeeds
+/// without reading it. Both writes, both reconciliations, the status, the
+/// artifact reports and the aggregate read all have to name one installation —
+/// and the closing idempotence assertion (still exactly one artifact after a
+/// replay) is a population count over that one home.
 #[test]
 fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "agent-task-persisted-result",
             runner_id: "homeboy-lab",
             runner_job_id: "00000000-0000-0000-0000-000000000123",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
-        })
-        .expect("running proxy");
-        record.plan_path =
-            "/home/lab/.local/share/homeboy/agent-task-runs/agent-task-persisted-result/plan.json"
-                .to_string();
-        store::write_record(&record).expect("runner-local plan projection");
-        apply_runner_job_terminal_state(
-            &mut record,
-            homeboy_core::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
-        store::write_record(&record).expect("legacy terminal projection without aggregate");
+        },
+    )
+    .expect("running proxy");
+    record.plan_path =
+        "/home/lab/.local/share/homeboy/agent-task-runs/agent-task-persisted-result/plan.json"
+            .to_string();
+    lifecycle_store
+        .write_record(&record)
+        .expect("runner-local plan projection");
+    apply_runner_job_terminal_state(
+        &mut record,
+        homeboy_core::api_jobs::JobStatus::Succeeded,
+        &[],
+    );
+    lifecycle_store
+        .write_record(&record)
+        .expect("legacy terminal projection without aggregate");
 
-        let mut aggregate = succeeded_aggregate(&test_plan());
-        aggregate.outcomes[0].artifacts = vec![AgentTaskArtifact {
-            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "final-patch".to_string(),
-            kind: "patch".to_string(),
-            name: Some("final.patch".to_string()),
-            label: None,
-            role: Some("patch".to_string()),
-            semantic_key: None,
-            path: Some("artifacts/final.patch".to_string()),
-            url: None,
-            mime: Some("text/x-diff".to_string()),
-            size_bytes: Some(18_928),
-            sha256: Some(
-                "062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071".to_string(),
-            ),
-            metadata: json!({ "source_snapshot": "snapshot-1" }),
-        }];
-        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-            kind: "transcript".to_string(),
-            uri: "homeboy://lab/transcript".to_string(),
-            label: Some("Provider transcript".to_string()),
-        }];
-        aggregate.outcomes[0].metadata = json!({
-            "provider": "opencode",
-            "provider_run_id": "provider-run-1",
-        });
-        let snapshot = persisted_terminal_result_snapshot(&aggregate);
-
-        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("hydrate persisted result");
-        let status = status(&record.run_id).expect("hydrated status without runner plan access");
-        let artifact_report = artifacts(&record.run_id).expect("hydrated artifacts");
-        assert_eq!(status.state, AgentTaskRunState::Succeeded);
-        assert_eq!(artifact_report.artifacts.len(), 1);
-        assert_eq!(artifact_report.artifacts[0].id, "final-patch");
-        assert_eq!(artifact_report.artifacts[0].size_bytes, Some(18_928));
-        assert_eq!(
-            artifact_report.artifacts[0].sha256.as_deref(),
-            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
-        );
-        assert!(artifact_report
-            .evidence_refs
-            .iter()
-            .any(|reference| reference.kind == "transcript"));
-        let aggregate =
-            store::read_aggregate(&record.run_id).expect("persisted authoritative aggregate");
-        let review =
-            crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes);
-        assert_eq!(review.summary.apply_candidates, 1);
-        assert_eq!(review.apply_candidates[0].artifact_ids, vec!["final-patch"]);
-
-        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent replay");
-        assert_eq!(
-            artifacts(&record.run_id)
-                .expect("replayed artifacts")
-                .artifacts
-                .len(),
-            1
-        );
+    let mut aggregate = succeeded_aggregate(&test_plan());
+    aggregate.outcomes[0].artifacts = vec![AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "final-patch".to_string(),
+        kind: "patch".to_string(),
+        name: Some("final.patch".to_string()),
+        label: None,
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some("artifacts/final.patch".to_string()),
+        url: None,
+        mime: Some("text/x-diff".to_string()),
+        size_bytes: Some(18_928),
+        sha256: Some(
+            "062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071".to_string(),
+        ),
+        metadata: json!({ "source_snapshot": "snapshot-1" }),
+    }];
+    aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+        kind: "transcript".to_string(),
+        uri: "homeboy://lab/transcript".to_string(),
+        label: Some("Provider transcript".to_string()),
+    }];
+    aggregate.outcomes[0].metadata = json!({
+        "provider": "opencode",
+        "provider_run_id": "provider-run-1",
     });
+    let snapshot = persisted_terminal_result_snapshot(&aggregate);
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("hydrate persisted result");
+    let status = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("hydrated status without runner plan access")
+    .record;
+    let artifact_report =
+        artifacts_in_store(&lifecycle_store, &record.run_id).expect("hydrated artifacts");
+    assert_eq!(status.state, AgentTaskRunState::Succeeded);
+    assert_eq!(artifact_report.artifacts.len(), 1);
+    assert_eq!(artifact_report.artifacts[0].id, "final-patch");
+    assert_eq!(artifact_report.artifacts[0].size_bytes, Some(18_928));
+    assert_eq!(
+        artifact_report.artifacts[0].sha256.as_deref(),
+        Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+    );
+    assert!(artifact_report
+        .evidence_refs
+        .iter()
+        .any(|reference| reference.kind == "transcript"));
+    let aggregate = lifecycle_store
+        .read_aggregate(&record.run_id)
+        .expect("persisted authoritative aggregate");
+    let review = crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes);
+    assert_eq!(review.summary.apply_candidates, 1);
+    assert_eq!(review.apply_candidates[0].artifact_ids, vec!["final-patch"]);
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("idempotent replay");
+    assert_eq!(
+        artifacts_in_store(&lifecycle_store, &record.run_id)
+            .expect("replayed artifacts")
+            .artifacts
+            .len(),
+        1
+    );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Reconciliation is not a pure function of the in-memory record it
+/// mutates: it binds the pending handoff, reads the aggregate to decide
+/// idempotence and commits the terminal projection, all durably. Those writes
+/// and that read have to name the installation the planned proxy was persisted
+/// into, or the terminal record asserted below would be reconciled from one
+/// home's aggregate and committed into another's (#7505).
+///
+/// The proxy is created through the `*_with_submission_in_store` form because
+/// the default Lab-offload submission admits through the machine-global
+/// controller-runtime store; see `stub_lab_offload_submission`. Nothing here
+/// asserts on controller-runtime provenance, so the stub pin is invisible to
+/// this test.
 #[test]
 fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_lab_offload_planned_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadProxyPlan {
             run_id: "agent-task-disconnected-child",
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
             durable_plan: None,
-        })
-        .expect("planned proxy");
-        let job_id = "00000000-0000-0000-0000-000000000123";
-        let metadata = record.ensure_metadata_object();
-        metadata.insert("runner_job_id".to_string(), json!(job_id));
-        metadata.insert(
-            "runner_execution_record".to_string(),
-            serde_json::to_value(
-                homeboy_core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
-                    job_id,
-                    "homeboy-lab",
-                    "daemon",
-                )
-                .with_job_id(job_id),
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("planned proxy");
+    let job_id = "00000000-0000-0000-0000-000000000123";
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_id".to_string(), json!(job_id));
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
+                job_id,
+                "homeboy-lab",
+                "daemon",
             )
-            .expect("execution record"),
-        );
+            .with_job_id(job_id),
+        )
+        .expect("execution record"),
+    );
 
-        let aggregate = succeeded_aggregate(&test_plan());
-        reconcile_transport_proxy_snapshot(&mut record, &terminal_child_snapshot(&aggregate))
-            .expect("transport proxy reconciliation");
+    let aggregate = succeeded_aggregate(&test_plan());
+    reconcile_transport_proxy_snapshot_in_store(
+        &lifecycle_store,
+        &mut record,
+        &terminal_child_snapshot(&aggregate),
+    )
+    .expect("transport proxy reconciliation");
 
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
-        assert_eq!(record.metadata["runner_job_status"], "succeeded");
-        assert_eq!(
-            record.metadata["runner_execution_record"]["status"],
-            "succeeded"
-        );
-    });
+    assert_eq!(record.state, AgentTaskRunState::Succeeded);
+    assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
+    assert_eq!(record.metadata["runner_job_status"], "succeeded");
+    assert_eq!(
+        record.metadata["runner_execution_record"]["status"],
+        "succeeded"
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2195,81 +2463,137 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Status may persist current admission and reconciliation projections;
+/// the invariant here is that existing terminal provider evidence is unchanged.
+///
+/// `record_completed_run_in_store` reaches automatic artifact retention only
+/// when a task declares a workspace root that exists; `test_plan()` declares
+/// none, so no ambient retention pass is entered here.
 #[test]
 fn status_preserves_existing_terminal_runtime_evidence() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "opencode".to_string();
-        let aggregate = succeeded_aggregate(&plan);
-        let record = record_completed_run(&plan, &aggregate, Some("existing-runtime"))
-            .expect("terminal record");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.lifecycle.provider_runtime[0].metadata = json!({
-                "evidence_source": "native_provider",
-                "manual": true,
-            });
-        })
-        .expect("native evidence persisted");
-        let before = store::read_record(&record.run_id).expect("record before status");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = test_plan();
+    plan.tasks[0].executor.backend = "opencode".to_string();
+    let aggregate = succeeded_aggregate(&plan);
+    let record = record_completed_run_in_store(
+        &lifecycle_store,
+        &plan,
+        &aggregate,
+        Some("existing-runtime"),
+    )
+    .expect("terminal record");
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        record.lifecycle.provider_runtime[0].metadata = json!({
+            "evidence_source": "native_provider",
+            "manual": true,
+        });
+    })
+    .expect("native evidence persisted");
+    let before = lifecycle_store
+        .read_record(&record.run_id)
+        .expect("record before status");
 
-        let loaded = status(&record.run_id).expect("status preserves runtime evidence");
-        let after = store::read_record(&record.run_id).expect("record after status");
+    let loaded = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status preserves runtime evidence")
+    .record;
+    let after = lifecycle_store
+        .read_record(&record.run_id)
+        .expect("record after status");
 
-        assert_eq!(before, after);
-        assert_eq!(
-            loaded.lifecycle.provider_runtime[0].metadata["manual"],
-            true
-        );
-    });
+    assert_eq!(
+        loaded.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
+    assert_eq!(
+        after.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
+    assert_eq!(
+        loaded.lifecycle.provider_runtime[0].metadata["manual"],
+        true
+    );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). `records.len() == 1` is a population count over one installation's
+/// run directory — read ambiently it would count the operator's real runs — and
+/// the four projections (status, logs, artifacts, existence) are all asserted
+/// to describe the single run this test recorded under an unsanitized id.
+///
+/// `record_completed_run_in_store` reaches automatic artifact retention only
+/// when a task declares a workspace root that exists; this plan declares only a
+/// cleanup mode, so no ambient retention pass is entered here.
 #[test]
 fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
-            "patch",
-            "patch",
-            None,
-            Some("/tmp/patch.diff"),
-        )];
-        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-            kind: "transcript".to_string(),
-            uri: "file:///tmp/transcript.json".to_string(),
-            label: Some("provider transcript".to_string()),
-        }];
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = test_plan();
+    plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
+        "patch",
+        "patch",
+        None,
+        Some("/tmp/patch.diff"),
+    )];
+    aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+        kind: "transcript".to_string(),
+        uri: "file:///tmp/transcript.json".to_string(),
+        label: Some("provider transcript".to_string()),
+    }];
 
-        let record = record_completed_run(&plan, &aggregate, Some("run/store-contract"))
-            .expect("completed run recorded");
-        let loaded = status("run/store-contract").expect("status loaded by unsanitized id");
-        let log = logs("run/store-contract").expect("logs loaded by unsanitized id");
-        let artifact_report =
-            artifacts("run/store-contract").expect("artifacts loaded by unsanitized id");
-        let records = list_records().expect("records listed");
+    let record = record_completed_run_in_store(
+        &lifecycle_store,
+        &plan,
+        &aggregate,
+        Some("run/store-contract"),
+    )
+    .expect("completed run recorded");
+    let loaded = status_in_store(
+        &lifecycle_store,
+        "run/store-contract",
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status loaded by unsanitized id")
+    .record;
+    let log = logs_in_store(&lifecycle_store, "run/store-contract")
+        .expect("logs loaded by unsanitized id");
+    let artifact_report = artifacts_in_store(&lifecycle_store, "run/store-contract")
+        .expect("artifacts loaded by unsanitized id");
+    let records = list_records_in_store(&lifecycle_store).expect("records listed");
 
-        assert_eq!(record.run_id, "run_store-contract");
-        assert!(run_record_exists("run/store-contract").expect("record exists"));
-        assert_eq!(loaded.state, AgentTaskRunState::Succeeded);
-        assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
-        assert_eq!(
-            loaded.lifecycle.execution.state,
-            RunExecutionState::Succeeded
-        );
-        assert_eq!(loaded.lifecycle.cleanup.state, CleanupState::Preserved);
-        assert_eq!(
-            loaded.lifecycle.artifact_retention.status,
-            ArtifactRetentionStatus::Retained
-        );
-        assert_eq!(log.schema, schemas::RUN_LOG);
-        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
-        assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
-        assert_eq!(artifact_report.artifacts[0].id, "patch");
-        assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].run_id, "run_store-contract");
-    });
+    assert_eq!(record.run_id, "run_store-contract");
+    assert!(
+        run_record_exists_in_store(&lifecycle_store, "run/store-contract").expect("record exists")
+    );
+    assert_eq!(loaded.state, AgentTaskRunState::Succeeded);
+    assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
+    assert_eq!(
+        loaded.lifecycle.execution.state,
+        RunExecutionState::Succeeded
+    );
+    assert_eq!(loaded.lifecycle.cleanup.state, CleanupState::Preserved);
+    assert_eq!(
+        loaded.lifecycle.artifact_retention.status,
+        ArtifactRetentionStatus::Retained
+    );
+    assert_eq!(log.schema, schemas::RUN_LOG);
+    assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
+    assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
+    assert_eq!(artifact_report.artifacts[0].id, "patch");
+    assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].run_id, "run_store-contract");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2360,9 +2684,45 @@ fn cancel_run_signals_live_running_record() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
+    let identity = homeboy_core::build_identity::current().display;
+    let artifact = context.root().join("fake-controller");
+    let digest = fake_controller_artifact(&artifact, &identity, "live cancellation fixture");
     lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| Ok(json!({})))
+        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| {
+            Ok(json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": artifact,
+                    "sha256": digest,
+                }
+            }))
+        })
         .expect("submitted");
+    // Drop the stub admission before marking running (#12721).
+    //
+    // `mark_running_in_store` migrates the pin before it validates it, and
+    // migration skips only when the key is ABSENT -- an empty object is
+    // present, so `migrate_legacy_pin_unlocked` demands
+    // `/originating/build_identity` and fails closed. That contract is
+    // correct: `{}` is malformed durable metadata and refusing to mutate on
+    // it is the point. What is wrong is persisting `{}` in the first place.
+    //
+    // Cancellation reads `runner_pid` and never touches the runtime pin, so
+    // the record this test needs is one with no pin at all. This mirrors
+    // `mark_running_reclaims_stale_running_record`, which uses the same stub
+    // and passes only because it replaces metadata wholesale first.
+    let mut submitted = lifecycle_store
+        .read_record("run-cancel-live")
+        .expect("submitted record");
+    submitted
+        .metadata
+        .as_object_mut()
+        .expect("record metadata is an object")
+        .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+    lifecycle_store
+        .write_record(&submitted)
+        .expect("drop stub controller runtime pin");
+
     mark_running_in_store(&lifecycle_store, "run-cancel-live").expect("marked running");
 
     // The test binary cannot be a cancellation target: process cleanup
@@ -2528,46 +2888,62 @@ fn artifact_refs_treat_empty_url_as_missing_and_fall_back_to_path() {
     assert_eq!(refs[0].uri, "/tmp/artifacts/dir");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The log projection reads back the aggregate the completed run
+/// wrote, so `log.events.len() == 2` and the per-event envelope fields
+/// describe the aggregate this test recorded rather than whatever an ambient
+/// home holds under this run id.
+///
+/// `record_completed_run_in_store` reaches automatic artifact retention only
+/// when a task declares a workspace root that exists; `test_plan()` declares
+/// none, so no ambient retention pass is entered here.
 #[test]
 fn logs_include_normalized_event_envelopes() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.events = vec![
-            AgentTaskProgressEvent {
-                task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
-                attempt: 1,
-                message: Some("started".to_string()),
-            },
-            AgentTaskProgressEvent {
-                task_id: "task-a".to_string(),
-                state: AgentTaskState::Succeeded,
-                attempt: 1,
-                message: Some("ok".to_string()),
-            },
-        ];
-        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-            kind: "transcript".to_string(),
-            uri: "file:///tmp/transcript.json".to_string(),
-            label: Some("Transcript".to_string()),
-        }];
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.events = vec![
+        AgentTaskProgressEvent {
+            task_id: "task-a".to_string(),
+            state: AgentTaskState::Running,
+            attempt: 1,
+            message: Some("started".to_string()),
+        },
+        AgentTaskProgressEvent {
+            task_id: "task-a".to_string(),
+            state: AgentTaskState::Succeeded,
+            attempt: 1,
+            message: Some("ok".to_string()),
+        },
+    ];
+    aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+        kind: "transcript".to_string(),
+        uri: "file:///tmp/transcript.json".to_string(),
+        label: Some("Transcript".to_string()),
+    }];
 
-        record_completed_run(&plan, &aggregate, Some("run-event-envelope")).expect("recorded");
+    record_completed_run_in_store(
+        &lifecycle_store,
+        &plan,
+        &aggregate,
+        Some("run-event-envelope"),
+    )
+    .expect("recorded");
 
-        let log = logs("run-event-envelope").expect("logs");
+    let log = logs_in_store(&lifecycle_store, "run-event-envelope").expect("logs");
 
-        assert_eq!(log.schema, "homeboy/agent-task-run-log/v2");
-        assert_eq!(log.events.len(), 2);
-        assert_eq!(log.events[0].schema, schemas::EVENT);
-        assert_eq!(log.events[0].run_id, "run-event-envelope");
-        assert_eq!(log.events[0].task_id, "task-a");
-        assert_eq!(log.events[0].sequence, 1);
-        assert_eq!(log.events[0].status, AgentTaskState::Running);
-        assert_eq!(log.events[1].message.as_deref(), Some("ok"));
-        assert_eq!(log.events[1].artifact_refs.len(), 1);
-        assert!(log.raw_events.is_empty());
-    });
+    assert_eq!(log.schema, "homeboy/agent-task-run-log/v2");
+    assert_eq!(log.events.len(), 2);
+    assert_eq!(log.events[0].schema, schemas::EVENT);
+    assert_eq!(log.events[0].run_id, "run-event-envelope");
+    assert_eq!(log.events[0].task_id, "task-a");
+    assert_eq!(log.events[0].sequence, 1);
+    assert_eq!(log.events[0].status, AgentTaskState::Running);
+    assert_eq!(log.events[1].message.as_deref(), Some("ok"));
+    assert_eq!(log.events[1].artifact_refs.len(), 1);
+    assert!(log.raw_events.is_empty());
 }
 
 #[test]
@@ -2578,30 +2954,40 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
     // hand-listed terminal subset omitted CandidateRecoverable, leaving these
     // runs without a finished_at while the legacy-record migration path stamped
     // one.
-    with_isolated_home(|_| {
-        let record =
-            submit_plan(&test_plan(), Some("candidate-recoverable-finished-at")).expect("submit");
-        rewrite_record_for_test(&record.run_id, |record| {
-            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
-            assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
-            assert!(
-                record.lifecycle.execution.finished_at.is_some(),
-                "a terminal CandidateRecoverable run must stamp finished_at"
-            );
-        })
-        .expect("rewrite record");
+    //
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). `set_run_state` is a pure in-memory setter; the store is only
+    // needed to own the submitted record the two rewrites read and write back.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(
+            &test_plan(),
+            "candidate-recoverable-finished-at",
+            |_| Ok(json!({})),
+        )
+        .expect("submit");
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
+        assert!(
+            record.lifecycle.execution.finished_at.is_some(),
+            "a terminal CandidateRecoverable run must stamp finished_at"
+        );
+    })
+    .expect("rewrite record");
 
-        // And a non-terminal state must NOT stamp finished_at.
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.lifecycle.execution.finished_at = None;
-            set_run_state(record, AgentTaskRunState::Running);
-            assert!(
-                record.lifecycle.execution.finished_at.is_none(),
-                "a non-terminal Running run must not stamp finished_at"
-            );
-        })
-        .expect("rewrite record running");
-    });
+    // And a non-terminal state must NOT stamp finished_at.
+    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
+        record.lifecycle.execution.finished_at = None;
+        set_run_state(record, AgentTaskRunState::Running);
+        assert!(
+            record.lifecycle.execution.finished_at.is_none(),
+            "a non-terminal Running run must not stamp finished_at"
+        );
+    })
+    .expect("rewrite record running");
 }
 
 /// A runner-continuation provider that counts every runner interaction so a

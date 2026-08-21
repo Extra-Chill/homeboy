@@ -5,32 +5,12 @@
 //! orchestration of directory creation and byte writes lives here.
 
 use homeboy::core::error::{Error, Result};
-use homeboy::core::paths;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Sanitize an artifact file name so it cannot escape its target directory.
 pub fn sanitize_artifact_file_name(raw: &str) -> String {
     raw.replace(['/', '\\', '\0'], "_")
-}
-
-/// Materialize a downloaded artifact file under the homeboy data dir.
-///
-/// Creates `<data>/artifacts/<homeboy_run_id>/` and writes
-/// `<artifact_id>-<safe_name>`, returning the written path. Errors propagate.
-pub fn persist_artifact_file(
-    homeboy_run_id: &str,
-    artifact_id: &str,
-    file_name: &str,
-    bytes: &[u8],
-) -> Result<PathBuf> {
-    persist_artifact_file_in_roots(
-        &paths::homeboy_data()?,
-        homeboy_run_id,
-        artifact_id,
-        file_name,
-        bytes,
-    )
 }
 
 /// Materialize a downloaded artifact file under an already-resolved data root.
@@ -61,14 +41,6 @@ pub fn persist_artifact_file_in_roots(
         )
     })?;
     Ok(target)
-}
-
-/// Compute (and ensure) the cache path for a list-runs cache entry.
-///
-/// Creates `<homeboy>/cache/gh-actions-runs/` and returns the path for
-/// `<key>.<ext>`. Errors propagate.
-pub fn list_runs_cache_path(key: &str, ext: &str) -> Result<PathBuf> {
-    list_runs_cache_path_in_roots(&paths::homeboy()?, key, ext)
 }
 
 /// Compute (and ensure) a list-runs cache entry under an injected config root.

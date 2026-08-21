@@ -123,28 +123,6 @@ pub struct ArtifactCleanupOptions {
     pub include_active_worktrees: bool,
 }
 
-/// Run the existing reconstructable-artifact owner as bounded automatic
-/// retention across several repository roots. All roots share one candidate
-/// ordering and limit, so a small root cannot consume the budget before a
-/// larger eligible artifact is considered.
-pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
-    let data_root = homeboy_paths::homeboy_data()?;
-    run_automatic_artifact_retention_in_root(&data_root, roots)
-}
-
-/// [`run_automatic_artifact_retention`] against an explicitly injected data
-/// root, which is where the cross-process retention lock lives.
-pub fn run_automatic_artifact_retention_in_root(
-    data_root: &Path,
-    roots: Vec<PathBuf>,
-) -> Result<ArtifactCleanupOutput> {
-    try_run_automatic_artifact_retention_in_root(data_root, roots)?.ok_or_else(|| {
-        Error::internal_unexpected(
-            "automatic artifact retention is already running; remeasure capacity before admitting work",
-        )
-    })
-}
-
 /// Reclaim idle, reconstructable worktree artifacts before managed work writes
 /// into `roots`, then require the configured free-space reserve to be present.
 ///

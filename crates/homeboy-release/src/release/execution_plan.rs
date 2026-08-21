@@ -97,16 +97,32 @@ fn early_tag_availability_step(options: &ReleaseOptions, dry_run: bool) -> Optio
 }
 
 pub(super) fn execute_plan_steps(
+    roots: &homeboy_core::paths::PathRoots,
     steps: &[PlanStep],
     component_id: &str,
     options: &ReleaseOptions,
     results: &mut Vec<ReleaseStepResult>,
     skip_step_ids: &HashSet<&'static str>,
 ) -> Result<bool> {
-    execute_plan_steps_at_source(steps, component_id, options, results, skip_step_ids, None)
+    execute_plan_steps_at_source(
+        roots,
+        steps,
+        component_id,
+        options,
+        results,
+        skip_step_ids,
+        None,
+    )
 }
 
+/// Walk planned release steps against roots resolved by the caller.
+///
+/// A release runs this twice — once for executable preflight, once for the
+/// rebuilt mutation plan — and both phases must address the same home. Taking
+/// roots rather than resolving them here is what makes that guarantee
+/// structural instead of incidental (#7505).
 pub(super) fn execute_plan_steps_at_source(
+    roots: &homeboy_core::paths::PathRoots,
     steps: &[PlanStep],
     component_id: &str,
     options: &ReleaseOptions,
@@ -120,11 +136,17 @@ pub(super) fn execute_plan_steps_at_source(
 
     let component = load_component(component_id, options)?;
     let extensions = resolve_extensions(&component)?;
+    // Every step that touches Homeboy state — package artifacts, the
+    // failed-attempt ownership record, the deploy recovery checkpoint — now
+    // reads the caller's roots off the context instead of consulting the
+    // environment again, so a repoint mid-plan cannot split a single release
+    // across two homes (#7505).
     let mut context = ReleaseExecutionContext {
         component: &component,
         extensions: &extensions,
         component_id,
         options,
+        roots: roots.clone(),
         state: initial_release_state(&component, component_id, options)?,
         publish_failed: false,
     };
@@ -310,6 +332,15 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
+    /// The isolated home each test below installs, named as roots.
+    ///
+    /// These tests call the plan executor directly, so they occupy the
+    /// position `orchestrator::run_with_plan` holds in production: resolve
+    /// once, then hand the result down (#7505).
+    fn test_roots() -> homeboy_core::paths::PathRoots {
+        homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+    }
+
     use super::{
         build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
         initial_executable_preflight_ids, release_tag_version, resolve_head_release,
@@ -609,6 +640,7 @@ mod tests {
         let plan = build_dry_run_preflight_plan("fixture", &options);
         let mut results = Vec::new();
         let stopped = execute_plan_steps(
+            &test_roots(),
             &plan.plan.steps,
             "fixture",
             &options,
@@ -726,6 +758,7 @@ mod tests {
         let mut results = Vec::new();
 
         let error = execute_plan_steps(
+            &test_roots(),
             &plan.plan.steps,
             "fixture",
             &options,
@@ -785,6 +818,7 @@ mod tests {
         let mut results = Vec::new();
 
         let stopped = execute_plan_steps(
+            &test_roots(),
             &plan.plan.steps,
             "fixture",
             &options,
@@ -853,6 +887,7 @@ mod tests {
         let mut results = Vec::new();
 
         let stopped = execute_plan_steps(
+            &test_roots(),
             &[],
             "missing-component-is-not-loaded-for-empty-plan",
             &ReleaseOptions::default(),
@@ -957,6 +992,7 @@ mod tests {
         let mut results = Vec::new();
 
         let error = execute_plan_steps(
+            &test_roots(),
             &plan.plan.steps,
             "fixture",
             &options,

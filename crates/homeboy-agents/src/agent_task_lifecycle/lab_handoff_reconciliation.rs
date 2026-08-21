@@ -9,13 +9,18 @@
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 
-pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
-    reconcile_active_lab_runner_handoffs_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-    )
-}
+// The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
+// above this resolved a root and delegated straight here. It had no callers, so
+// it was a resolution point that existed for nobody (#7505).
+//
+// Worth naming rather than burying: the rooted form below is reached only by
+// `tests::terminal_and_reconcile`, so this scan currently has no production
+// caller either. That is a coverage question, not a rooting one, and deleting
+// the ambient half does not change it — but it is why the shim could rot here
+// unnoticed. The module carries `#[allow(dead_code)]` in `lib.rs`, so the
+// compiler was never going to say so.
 
-/// The store-rooted counterpart of [`reconcile_active_lab_runner_handoffs`].
+/// Reconcile every active lab-runner handoff inside an explicitly rooted store.
 ///
 /// This is a queue scan that mutates every row it selects, so the scan and its
 /// consequences have to name one installation. The queue itself is read from

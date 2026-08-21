@@ -25,7 +25,7 @@ use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
-use homeboy_core::notify::{NotifyDelivery, NotifyEvent, NotifyOutcome};
+use homeboy_core::notify::{terminal_rejection_result, NotifyDelivery, NotifyEvent, NotifyOutcome};
 use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDisposition};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -139,13 +139,16 @@ fn terminal_outcome(
         "delivered"
     } else if matches!(disposition, NotifyOutboxDisposition::Queued { .. }) {
         "queued"
+    } else if matches!(disposition, NotifyOutboxDisposition::Rejected { .. }) {
+        "rejected"
     } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) {
         "not_configured"
     } else {
         "failed"
     };
     let outbox_entry_id = match disposition {
-        NotifyOutboxDisposition::Queued { entry_id } => Some(entry_id.clone()),
+        NotifyOutboxDisposition::Queued { entry_id }
+        | NotifyOutboxDisposition::Rejected { entry_id } => Some(entry_id.clone()),
         _ => None,
     };
     json!({
@@ -159,6 +162,8 @@ fn terminal_outcome(
         "error_class": error_class,
         "outbox_entry_id": outbox_entry_id,
         "transport_result": safe_transport_result(outcome.result.as_ref()),
+        "rejection_reason": terminal_rejection_result(outcome.result.as_ref()).map(|rejection| rejection.reason_code),
+        "validation_context": terminal_rejection_context(outcome.result.as_ref()),
     })
 }
 
@@ -173,6 +178,9 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         "route_kind",
         "retryable",
         "truncated",
+        "reason_code",
+        "validation_code",
+        "validation_field",
     ];
     let object = result?.as_object()?;
     let mut safe = Map::new();
@@ -191,6 +199,18 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         }
     }
     (!safe.is_empty()).then_some(Value::Object(safe))
+}
+
+fn terminal_rejection_context(result: Option<&Value>) -> Option<Value> {
+    let rejection = terminal_rejection_result(result)?;
+    let mut context = Map::new();
+    if let Some(value) = rejection.validation_code {
+        context.insert("validation_code".to_string(), Value::String(value));
+    }
+    if let Some(value) = rejection.validation_field {
+        context.insert("validation_field".to_string(), Value::String(value));
+    }
+    (!context.is_empty()).then_some(Value::Object(context))
 }
 
 fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifySubject {
@@ -387,11 +407,27 @@ fn terminal_payload(
 /// terminal boundary — a `--continue` over an already-terminal cook, an adopted
 /// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
+    // Resolve one lifecycle store for the whole claim/record/confirm/release
+    // protocol. These four steps are a single exactly-once transaction, and a
+    // step that lands in a different home than the claim cannot fail while
+    // getting it wrong: a confirm against the wrong root consumes an
+    // eligibility nobody holds, and a release against the wrong root deletes
+    // nothing and returns `Ok(())`, leaving the real claim to expire and be
+    // re-delivered. Resolving once is what makes them agree (#7505).
+    //
+    // An unresolvable store is treated exactly as a lost claim, which is the
+    // rule this function already applied to a failed claim.
+    let Ok(lifecycle_store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
     // Claim before building the payload, and treat a failed claim the same as a
     // lost one: the runner-direct and daemon-backstop paths also decline to
     // dispatch when their marker cannot be established, because a duplicated
     // terminal notification is worse than a missing one.
-    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+        &lifecycle_store,
         &report.cook_id,
         COOK_TERMINAL_DELIVERED_BY,
     )
@@ -434,7 +470,8 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         &dispatch.outcome,
         &dispatch.disposition,
     );
-    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome(
+    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
+        &lifecycle_store,
         &report.cook_id,
         persisted,
     );
@@ -448,7 +485,8 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         // budget is twenty, so leaving the claim merely *held* would let it
         // expire mid-retry and produce a duplicate.
         NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
-            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
+                &lifecycle_store,
                 &report.cook_id,
                 COOK_TERMINAL_DELIVERED_BY,
             );
@@ -456,8 +494,9 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         // Nothing durable exists — no transport is configured, or the queue
         // could not be written. Release, exactly as before, so a later
         // terminal observer is eligible to try again.
-        NotifyOutboxDisposition::Dropped => {
-            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
+                &lifecycle_store,
                 &report.cook_id,
             );
         }
@@ -604,10 +643,19 @@ pub fn batch_terminal(
     portfolio: Option<BatchPortfolioCounts>,
     exit_code: i32,
 ) {
+    // One store for the whole protocol, exactly as `cook_terminal` does, and
+    // for the same reason: claim, record, confirm, and release are one
+    // exactly-once transaction that has to name one installation (#7505).
+    let Ok(lifecycle_store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
     // Claim before building the payload, exactly as `cook_terminal` does: a
     // duplicated wave summary is worse than a missing one, and a failed claim
     // is treated the same as a lost one.
-    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+        &lifecycle_store,
         subject_id,
         BATCH_TERMINAL_DELIVERED_BY,
     )
@@ -648,19 +696,24 @@ pub fn batch_terminal(
         &dispatch.outcome,
         &dispatch.disposition,
     );
-    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome(
-        subject_id, persisted,
+    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
+        &lifecycle_store,
+        subject_id,
+        persisted,
     );
     match dispatch.disposition {
         NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
-            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
+                &lifecycle_store,
                 subject_id,
                 BATCH_TERMINAL_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
-            let _ =
-                crate::agent_task_lifecycle::release_cook_terminal_notification_claim(subject_id);
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
+                &lifecycle_store,
+                subject_id,
+            );
         }
     }
 }
@@ -902,7 +955,15 @@ fn run_reconciled_payload(
 /// Claimed once per run through the same marker the cook terminal event uses,
 /// so a reconcile that repeats across daemon restarts announces once.
 pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<&str>) {
-    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+    // One store for claim, confirm, and release — the same exactly-once
+    // protocol `cook_terminal` runs, through the same marker (#7505).
+    let Ok(lifecycle_store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+        &lifecycle_store,
         run_id,
         RUN_RECONCILED_DELIVERED_BY,
     )
@@ -925,13 +986,17 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
     );
     match dispatch.disposition {
         NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
-            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
+                &lifecycle_store,
                 run_id,
                 RUN_RECONCILED_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
-            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(run_id);
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
+                &lifecycle_store,
+                run_id,
+            );
         }
     }
 }

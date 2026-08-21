@@ -74,9 +74,10 @@ fn shipped_root_binary_reports_root_version_and_source_commit() {
     assert_eq!(output.status.code(), Some(0));
     let version = String::from_utf8(output.stdout).expect("version output is UTF-8");
     assert!(version.contains(&expected.version));
-    if let Some(commit) = expected.git_commit {
-        assert!(version.contains(&commit));
+    if let Some(commit) = &expected.git_commit {
+        assert!(version.contains(commit));
     }
+    assert_eq!(version.contains("-dirty"), expected.git_dirty == Some(true));
     assert!(!version.contains("0.1.0"));
 }
 

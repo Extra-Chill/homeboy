@@ -2055,7 +2055,8 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
             argv: vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "printf provider-stdout; printf provider-stderr >&2; exit 7".to_string(),
+                "cat >/dev/null; printf provider-stdout; printf provider-stderr >&2; exit 7"
+                    .to_string(),
             ],
             ..Default::default()
         },
@@ -2153,8 +2154,72 @@ fn provider_response_validation_distinguishes_json_schema_and_required_field_err
         )
         .expect_err("invalid provider response");
 
-        assert!(error.message.contains(expected), "{}", error.message);
+        // Print `details` too. `Error::message` for an infrastructure failure
+        // is the canned string "IO error"; the operation that actually failed
+        // lives only in `details` (#12741). Asserting on `message` alone made
+        // every such failure undiagnosable from CI.
+        assert!(
+            error.message.contains(expected),
+            "{} {}",
+            error.message,
+            error.details
+        );
         assert_eq!(error.details["command_evidence"]["exit_code"], 0);
         assert_eq!(error.details["command_evidence"]["stdout"], response);
     }
+}
+
+/// A provider that exits without draining its request keeps its own verdict.
+///
+/// Rust sets SIGPIPE to SIG_IGN, so writing to a pipe whose read end has closed
+/// returns `BrokenPipe` here instead of terminating this process. Treating that
+/// as `internal_io` replaced the provider's actual result with the canned
+/// message "IO error" and discarded its exit code and captured stdout (#12741).
+///
+/// Every provider in this module's other tests exits immediately without
+/// reading stdin, so they hit this racily -- whichever side won scheduling
+/// decided whether the run passed. The request below is deliberately larger
+/// than a pipe buffer (64 KiB on Linux) so `write_all` cannot possibly finish
+/// before the provider exits. That makes `BrokenPipe` certain rather than
+/// probable, which is what makes this a regression test rather than one more
+/// dice roll.
+#[test]
+fn provider_that_exits_without_draining_its_request_still_yields_its_own_verdict() {
+    let request = AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: "target-workspace".to_string(),
+        patch: None,
+        patch_path: "changes.patch".to_string(),
+        changed_files: (0..20_000)
+            .map(|index| format!("src/generated/file_{index}.rs"))
+            .collect(),
+        gate_feedback_baseline: None,
+        dry_run: false,
+        trusted_unpushed_candidate_destination: None,
+    };
+
+    let error = run_provider_command(
+        &CommandInvocation {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '%s' \"$1\"".to_string(),
+                "sh".to_string(),
+                r#"{"schema":"homeboy/agent-task-promotion-apply-response/v1"}"#.to_string(),
+            ],
+            ..Default::default()
+        },
+        &request,
+    )
+    .expect_err("the provider response is still validated");
+
+    // The provider's own verdict, not an opaque infrastructure error.
+    assert!(
+        error.message.contains("missing field `workspace_path`"),
+        "a provider that ignored its request must still be judged on what it \
+         returned, not on the write that failed: {} {}",
+        error.message,
+        error.details
+    );
+    assert_eq!(error.details["command_evidence"]["exit_code"], 0);
 }
