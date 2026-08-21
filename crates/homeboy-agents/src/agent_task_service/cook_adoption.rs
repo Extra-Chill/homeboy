@@ -2,7 +2,7 @@
 //!
 //! Extracted from `cook.rs`: the `adopt_cook_candidate*` family that admits an
 //! externally prepared immutable commit into a durable cook, plus the adoption
-//! resolution helpers (`resolve_cook_adoption_attempt`/`resolve_adoption_target`/
+//! resolution helpers (`resolve_cook_adoption_attempt_in_store`/`resolve_adoption_target`/
 //! `candidate_adoption_source`/`concrete_adoption_ai_model`) and gate-failure
 //! comparison (`compare_adoption_gate_failures_to_base`). Adoption never replays
 //! provider work — it replaces provider artifact harvesting while the source
@@ -772,21 +772,25 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                         )
                     })?;
                 options.initial_run_id = run_id;
-                let mut result = super::cook::run_cook_with_finalizer_with_store(
-                    recipe_store,
-                    options,
-                    executor,
-                    |options, run_id, promotion| {
-                        finalize_or_load_cook_pr_with_backend_with_stores(
-                            recipe_store,
-                            lifecycle_store,
-                            options,
-                            run_id,
-                            promotion,
-                            backend,
-                        )
-                    },
-                )?;
+                let mut result = super::cook::run_cook(super::cook::CookContext {
+                    store: Some(recipe_store),
+                    side_effects: Some(Box::new(super::cook::DefaultCookSideEffects::new(
+                        |_lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+                         options: &_,
+                         run_id: &_,
+                         promotion: &_| {
+                            finalize_or_load_cook_pr_with_backend_with_stores(
+                                recipe_store,
+                                lifecycle_store,
+                                options,
+                                run_id,
+                                promotion,
+                                backend,
+                            )
+                        },
+                    ))),
+                    ..super::cook::CookContext::new(options, executor)
+                })?;
                 result.value.attempts.insert(0, attempt);
                 Ok(result)
             }
@@ -1282,17 +1286,18 @@ fn materialize_adoption_attempt_in_stores(
     Ok((record, recipe))
 }
 
+// The ambient `resolve_cook_adoption_attempt()` shim that used to sit above
+// this resolved a root and delegated straight here. It had no callers, so it
+// was a resolution point that existed for nobody (#7505).
+
 /// A retried cook may have several lifecycle attempts for the same immutable
 /// plan. The earliest is the stable target; different plans require an explicit
 /// run ID so a candidate is never attached to the wrong policy.
-fn resolve_cook_adoption_attempt(
-    recipe: &super::AgentTaskCookRecipe,
-) -> Result<&super::AgentTaskCookRecipeAttempt> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    resolve_cook_adoption_attempt_in_store(&lifecycle_store, recipe)
-}
-
+///
+/// The candidate selection this reads and the recipe attempt it returns must
+/// name one installation: selecting from an ambient store and then binding the
+/// adopted attempt into an injected one silently attaches a candidate to the
+/// wrong policy without failing.
 fn resolve_cook_adoption_attempt_in_store<'a>(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     recipe: &'a super::AgentTaskCookRecipe,

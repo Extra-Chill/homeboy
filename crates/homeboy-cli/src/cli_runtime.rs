@@ -471,7 +471,9 @@ impl CliRuntime {
         if command_capability == CommandCapability::Mutation
             && normalized.get(1).map(String::as_str) != Some("deferred-workload")
         {
-            let _ = crate::commands::deferred_workload::restart_worker_if_pending();
+            if let Ok(config_root) = crate::core::paths::homeboy() {
+                let _ = crate::commands::deferred_workload::restart_worker_if_pending(&config_root);
+            }
         }
 
         if is_top_level_version_request(&normalized) {

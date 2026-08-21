@@ -682,7 +682,7 @@ pub(super) fn run_provider_command_with_timeout(
                 Some("start agent-task promotion provider command".to_string()),
             )
         })?;
-    process
+    let write_request = process
         .stdin
         .as_mut()
         .ok_or_else(|| {
@@ -691,13 +691,24 @@ pub(super) fn run_provider_command_with_timeout(
                 Some("write agent-task promotion provider request".to_string()),
             )
         })?
-        .write_all(&request_json)
-        .map_err(|error| {
-            Error::internal_io(
+        .write_all(&request_json);
+    match write_request {
+        Ok(()) => {}
+        // A provider may exit before draining its request (#12741). Rust sets
+        // SIGPIPE to SIG_IGN, so that surfaces here as BrokenPipe rather than
+        // killing this process. It is not an infrastructure failure: the
+        // provider ran, and its exit code and captured output below are the
+        // authoritative result. Reporting it as `internal_io` discarded that
+        // evidence and replaced a real provider verdict with an opaque
+        // "IO error", racily, depending on which side won.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => {
+            return Err(Error::internal_io(
                 error.to_string(),
                 Some("write agent-task promotion provider request".to_string()),
-            )
-        })?;
+            ))
+        }
+    }
     drop(process.stdin.take());
     let stdout = process.stdout.take().ok_or_else(|| {
         Error::internal_io(

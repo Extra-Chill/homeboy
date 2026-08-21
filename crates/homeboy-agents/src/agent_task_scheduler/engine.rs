@@ -614,7 +614,8 @@ impl AgentTaskScheduler {
                             committed_harvest_preflight_outcome(task_id.clone()),
                             error,
                         );
-                        release_scratch(&scratch, "attempt_workspace_setup_failed", &outcome);
+                        let _ =
+                            release_scratch(&scratch, "attempt_workspace_setup_failed", &outcome);
                         events.push(event(
                             &task_id,
                             AgentTaskState::Failed,
@@ -648,7 +649,7 @@ impl AgentTaskScheduler {
                         task_base_sha.as_deref(),
                     ) {
                         outcome.task_id = task_id.clone();
-                        release_scratch(&scratch, "candidate_adoption_failed", &outcome);
+                        let _ = release_scratch(&scratch, "candidate_adoption_failed", &outcome);
                         record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                         continue;
                     }
@@ -695,7 +696,7 @@ impl AgentTaskScheduler {
                                 task_id.clone(),
                                 "provider execution was already reserved by an interrupted controller; reconcile the durable run instead of redispatching".to_string(),
                             );
-                            release_scratch(&scratch, "provider_execution_already_reserved", &outcome);
+                            let _ = release_scratch(&scratch, "provider_execution_already_reserved", &outcome);
                             events.push(event(&task_id, AgentTaskState::Failed, attempt, outcome.summary.clone()));
                             record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                             continue;
@@ -708,7 +709,7 @@ impl AgentTaskScheduler {
                                 error.message
                             ),
                         );
-                        release_scratch(
+                        let _ = release_scratch(
                             &scratch,
                             "provider_execution_persistence_failed",
                             &outcome,
@@ -1010,8 +1011,21 @@ impl AgentTaskScheduler {
                         retry_budget_used,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
-                        cleanup_attempt_workspace(&mut outcome, &running_task);
-                        release_scratch(&result.scratch, "retry", &outcome);
+                        let timeout_compaction = (outcome.failure_classification
+                            == Some(AgentTaskFailureClassification::Timeout))
+                        .then_some("timeout");
+                        let authorization = cleanup_attempt_workspace(
+                            &mut outcome,
+                            &running_task,
+                            timeout_compaction,
+                        );
+                        release_and_compact_attempt_workspace(
+                            &result.scratch,
+                            "retry",
+                            &mut outcome,
+                            &running_task,
+                            authorization,
+                        );
                         retry_budget_used += 1;
                         let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
                         let mut retry_attempts = running_task.retry_attempts;
@@ -1057,8 +1071,18 @@ impl AgentTaskScheduler {
                             execution_budget.max_provider_executions,
                             execution_budget.max_provider_rotations,
                         ) {
-                            cleanup_attempt_workspace(&mut outcome, &running_task);
-                            release_scratch(&result.scratch, "provider_rotation", &outcome);
+                            let authorization = cleanup_attempt_workspace(
+                                &mut outcome,
+                                &running_task,
+                                Some("provider_rotation"),
+                            );
+                            release_and_compact_attempt_workspace(
+                                &result.scratch,
+                                "provider_rotation",
+                                &mut outcome,
+                                &running_task,
+                                authorization,
+                            );
                             let mut rotation_attempts = running_task.rotation_attempts.clone();
                             rotation_attempts.push(
                                 AgentTaskScheduleSupport::rotation_attempt_record(
@@ -1160,7 +1184,7 @@ impl AgentTaskScheduler {
                         reason = "the branch deliberately shadows its pre-retry outcome before terminal mutation"
                     )]
                     let mut outcome = outcome;
-                    cleanup_attempt_workspace(&mut outcome, &running_task);
+                    cleanup_attempt_workspace(&mut outcome, &running_task, None);
                     append_unique_artifacts(
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
@@ -1203,7 +1227,7 @@ impl AgentTaskScheduler {
                         running_task.rotation_index,
                         same_provider_retries_used,
                     );
-                    release_scratch(
+                    let _ = release_scratch(
                         &result.scratch,
                         if running_task.timeout_cancel_requested {
                             "scheduler_timeout_completion"
@@ -1596,23 +1620,40 @@ pub(super) fn release_scratch(
     allocation: &crate::controller_scratch::ControllerScratchAllocation,
     reason: &str,
     outcome: &AgentTaskOutcome,
-) {
-    let evidence = serde_json::json!({
+) -> homeboy_core::Result<()> {
+    crate::controller_scratch::release_attempt(
+        allocation,
+        reason,
+        serde_json::json!({
         "task_id": outcome.task_id,
         "status": outcome.status,
         "outcome": outcome,
-    });
-    let _ = crate::controller_scratch::release_attempt(allocation, reason, evidence);
+        }),
+    )
 }
 
 /// A clean attempt is unregistered from Git before its enclosing scratch lease
 /// is released. Dirty, unpushed, and indeterminate checkouts remain registered
 /// for lifecycle cleanup instead of being force-removed.
-fn cleanup_attempt_workspace(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
+fn cleanup_attempt_workspace(
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+    compaction_reason: Option<&str>,
+) -> Option<RecoverablePatchProof> {
     let Some(workspace) = &running._attempt_workspace else {
-        return;
+        return None;
     };
     if let Err(error) = workspace.cleanup() {
+        if let Some(reason) = compaction_reason {
+            match recoverable_patch_proof(outcome, running, workspace) {
+                Ok(proof) => return Some(proof.with_reason(reason)),
+                Err(refusal) => outcome.diagnostics.push(AgentTaskDiagnostic {
+                    class: "agent_task.attempt_workspace_compaction_refused".to_string(),
+                    message: format!("attempt workspace retained: compact recovery proof refused: {refusal}"),
+                    data: serde_json::json!({ "outcome": "refused", "reason": reason, "refusal_reason": refusal, "path": running.request.workspace.root }),
+                }),
+            }
+        }
         outcome.diagnostics.push(AgentTaskDiagnostic {
             class: "agent_task.attempt_workspace_retained".to_string(),
             message: format!("attempt workspace retained for lifecycle cleanup: {error}"),
@@ -1622,6 +1663,135 @@ fn cleanup_attempt_workspace(outcome: &mut AgentTaskOutcome, running: &RunningTa
             }),
         });
     }
+    None
+}
+
+struct RecoverablePatchProof {
+    id: String,
+    sha256: String,
+    base_ref: String,
+    reason: String,
+}
+
+impl RecoverablePatchProof {
+    fn with_reason(mut self, reason: &str) -> Self {
+        self.reason = reason.to_string();
+        self
+    }
+}
+
+/// Persist terminal evidence before a force removal. A successful release is
+/// also the durable authorization a later controller-scratch cleanup rechecks
+/// if the process stops between these two operations.
+fn release_and_compact_attempt_workspace(
+    allocation: &crate::controller_scratch::ControllerScratchAllocation,
+    reason: &str,
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+    authorization: Option<RecoverablePatchProof>,
+) {
+    let Some(authorization) = authorization else {
+        let _ = release_scratch(allocation, reason, outcome);
+        return;
+    };
+    let evidence = serde_json::json!({
+        "task_id": outcome.task_id,
+        "status": outcome.status,
+        "outcome": outcome,
+        "compaction_authorization": {
+            "outcome": "authorized",
+            "reason": authorization.reason,
+            "patch_artifact_id": authorization.id,
+            "patch_sha256": authorization.sha256,
+            "base_ref": authorization.base_ref,
+        },
+    });
+    match crate::controller_scratch::release_attempt_with_compaction_authorization(
+        allocation, reason, evidence,
+    ) {
+        Ok(()) => {
+            let Some(workspace) = &running._attempt_workspace else {
+                return;
+            };
+            match workspace.cleanup_verified_recoverable_patch() {
+                Ok(()) => outcome.diagnostics.push(AgentTaskDiagnostic {
+                    class: "agent_task.attempt_workspace_compacted".to_string(),
+                    message: "attempt checkout was compacted after durable authorization and exact patch verification".to_string(),
+                    data: serde_json::json!({
+                        "outcome": "compacted",
+                        "reason": authorization.reason,
+                        "path": running.request.workspace.root,
+                        "patch_artifact_id": authorization.id,
+                        "patch_sha256": authorization.sha256,
+                        "base_ref": authorization.base_ref,
+                    }),
+                }),
+                Err(error) => outcome.diagnostics.push(AgentTaskDiagnostic {
+                    class: "agent_task.attempt_workspace_compaction_refused".to_string(),
+                    message: format!("attempt workspace retained after durable authorization: {error}"),
+                    data: serde_json::json!({ "outcome": "refused", "reason": authorization.reason, "refusal_reason": "worktree_remove_failed", "path": running.request.workspace.root }),
+                }),
+            }
+        }
+        Err(error) => outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.attempt_workspace_compaction_refused".to_string(),
+            message: format!("attempt workspace retained because durable compaction authorization could not be persisted: {}", error.message),
+            data: serde_json::json!({ "outcome": "refused", "reason": authorization.reason, "refusal_reason": "authorization_persistence_failed", "path": running.request.workspace.root }),
+        }),
+    }
+}
+
+fn recoverable_patch_proof(
+    outcome: &AgentTaskOutcome,
+    running: &RunningTask,
+    workspace: &AttemptWorkspace,
+) -> Result<RecoverablePatchProof, String> {
+    let artifact_root = artifact_root_for_running(running).map_err(|error| format!("{error:?}"))?;
+    let mut matches = outcome.artifacts.iter().filter(|artifact| {
+        artifact.kind == "patch"
+            && artifact.metadata["run_id"].as_str() == running.run_id.as_deref()
+            && artifact.metadata["task_id"].as_str() == Some(running.task_id.as_str())
+            && artifact.metadata["producer_attempt"].as_u64() == Some(running.attempt as u64)
+            && artifact.metadata["base_ref"].as_str() == Some(workspace.base_sha())
+    });
+    let Some(artifact) = matches.next() else {
+        return Err("no finalized patch artifact is bound to this attempt base".to_string());
+    };
+    if matches.next().is_some() {
+        return Err(
+            "multiple finalized patch artifacts are bound to this attempt base".to_string(),
+        );
+    }
+    let Some(path) = artifact.path.as_deref().map(std::path::PathBuf::from) else {
+        return Err("patch artifact has no readable path".to_string());
+    };
+    if !path.starts_with(&artifact_root) {
+        return Err("patch artifact is outside the durable artifact root".to_string());
+    }
+    let Some(expected_sha256) = artifact.sha256.as_deref() else {
+        return Err("patch artifact has no content hash".to_string());
+    };
+    let patch =
+        std::fs::read(&path).map_err(|error| format!("cannot read patch artifact: {error}"))?;
+    if homeboy_engine_primitives::content_hash::sha256_hex(&patch) != expected_sha256 {
+        return Err("patch artifact content hash does not match its finalized record".to_string());
+    }
+    if !crate::controller_scratch::workspace_matches_staged_patch(
+        workspace.root(),
+        workspace.base_sha(),
+        &patch,
+    ) {
+        return Err(
+            "checkout does not exactly match the finalized patch against its immutable base"
+                .to_string(),
+        );
+    }
+    Ok(RecoverablePatchProof {
+        id: artifact.id.clone(),
+        sha256: expected_sha256.to_string(),
+        base_ref: workspace.base_sha().to_string(),
+        reason: String::new(),
+    })
 }
 
 fn terminal_reason(outcome: &AgentTaskOutcome, cancelled: bool) -> &'static str {

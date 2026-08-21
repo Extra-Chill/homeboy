@@ -4,6 +4,65 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.31] - 2026-08-21
+
+### Fixed
+- an unreaped tunnel reads as live, and a fixture inherits the host's default branch
+
+## [0.350.30] - 2026-08-21
+
+### Changed
+- delete five dead ambient path wrappers
+- Root the agent-task status read
+- delete the retry wrappers the rooted boundary orphaned
+- make prune failures say why the scan withheld a workspace
+- delete the dead private-batch-plan dir wrapper
+- root the deferred-workload worker path
+
+### Fixed
+- stop one fat process withholding every prunable workspace
+- two deterministic red-main failures with environment-shaped causes
+
+## [0.350.29] - 2026-08-21
+
+### Changed
+- give OperationRecordStore its root
+- thread PathRoots from the release boundary
+
+### Fixed
+- declare a digest for every asset in the recovery manifest
+
+## [0.350.28] - 2026-08-20
+
+### Fixed
+- three root causes behind red main
+
+## [0.350.27] - 2026-08-20
+
+### Changed
+- root the Cook retry boundary
+
+### Fixed
+- scope checksum coverage to the assets cargo-dist checksums
+
+## [0.350.26] - 2026-08-20
+
+### Changed
+- root the detached-Cook handoff protocol
+- root the terminal-notification claim protocol
+
+## [0.350.25] - 2026-08-20
+
+### Changed
+- root the Cook spine's remaining ambient reads
+- stop the durable failure report splitting its roots
+- collapse the run_cook variant family into CookContext
+- delete the ambient store wrappers nobody calls
+- erase the executor type parameter
+
+### Fixed
+- compact recovered attempt worktrees
+
 ## [0.350.24] - 2026-08-19
 
 ### Fixed

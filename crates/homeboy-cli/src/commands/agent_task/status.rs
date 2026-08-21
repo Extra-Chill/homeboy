@@ -158,12 +158,18 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     }
 
     let run_id = &target.run_id;
+    // One store for the whole status read. The record and the plan compatibility
+    // check below are two halves of one answer: reading the record from one
+    // installation and the plan from another reports a run whose budget version
+    // was never checked, and reports it as if it had been (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Terminal inspection is a durable-local read. Reconciliation has its own
     // explicit command so an unavailable runner cannot hold status hostage.
     let durable_read = match if target.exact {
-        agent_task_lifecycle::exact_durable_local_read(run_id)
+        agent_task_lifecycle::exact_durable_local_read_in_store(&lifecycle_store, run_id)
     } else {
-        agent_task_lifecycle::durable_local_read(run_id)
+        agent_task_lifecycle::durable_local_read_in_store(&lifecycle_store, run_id)
     } {
         Ok(read) => read,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
@@ -182,7 +188,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         },
     ));
     // A future durable budget is incompatible, not an absent optional preview.
-    if let Err(error) = agent_task_lifecycle::load_plan(run_id) {
+    if let Err(error) = agent_task_lifecycle::load_plan_in_store(&lifecycle_store, run_id) {
         if error
             .message
             .contains("unsupported agent-task execution budget version")

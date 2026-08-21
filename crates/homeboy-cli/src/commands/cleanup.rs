@@ -98,7 +98,7 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
 /// running job still needs; `shared-cargo-targets` is reclaimed by its own
 /// separately budgeted pass (`run_automatic_cargo_retention`) and must not
 /// enter the aggregate sweep. `repo-artifacts` is likewise driven separately,
-/// by `run_automatic_artifact_retention` over registered workspace roots.
+/// by `try_run_automatic_artifact_retention_in_root` over registered workspace roots.
 const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
     (
         CleanupCategoryArg::RunnerDownloads,
@@ -1560,7 +1560,7 @@ fn automatic_retention() -> CmdResult<Value> {
             "reason": "no controller-accessible registered workspace roots",
         })
     } else {
-        match cleanup::try_run_automatic_artifact_retention(roots) {
+        match cleanup::try_run_automatic_artifact_retention_in_root(&data, roots) {
             Ok(Some(output)) => serde_json::to_value(output).map_err(|error| {
                 homeboy::core::Error::internal_json(
                     error.to_string(),
