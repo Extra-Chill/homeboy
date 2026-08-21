@@ -943,6 +943,24 @@ pub struct AgentTaskGateCargoSelection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_ids: Vec<String>,
     pub selected_count: usize,
+    /// Deterministic, redacted next action when a focused Cargo gate fails
+    /// closed rather than proving exactly one selected test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<AgentTaskGateCargoSelectionRecovery>,
+}
+
+/// Reviewer-facing recovery for a focused Cargo selection failure.
+///
+/// Both the argv and rendered command are derived from the declared command,
+/// then redacted before serialization. The rendered command quotes each argv
+/// element rather than reparsing it through a shell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateCargoSelectionRecovery {
+    pub action: String,
+    pub command: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -990,6 +1008,7 @@ const MAX_GATE_DIAGNOSTICS: usize = 8;
 const MAX_GATE_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 const MAX_GATE_DIAGNOSTIC_ACTIONS: usize = 4;
 const MAX_GATE_DIAGNOSTIC_SIDECAR_BYTES: u64 = 64 * 1024;
+const MAX_CARGO_SELECTION_RECOVERY_CANDIDATES: usize = 8;
 
 /// Best-effort compatibility ingestion for a declared producer sidecar. Missing
 /// or malformed sidecars never replace the command's authoritative gate result.
@@ -3074,9 +3093,21 @@ fn gate_failure_evidence(
         }
     };
     let agent_feedback = if invalid_focused_selection {
-        format!(
-            "The Cargo test gate must use an exact filter and execute exactly one test. Correct the filter in `{command}` before rerunning Cook."
-        )
+        cargo_selection
+            .and_then(|selection| selection.recovery.as_ref())
+            .map(|recovery| match recovery.action.as_str() {
+                "rerun_exact" => format!(
+                    "The Cargo test gate must use an exact filter and execute exactly one test. Rerun the structured exact recovery command `{}` before rerunning Cook.",
+                    recovery.command
+                ),
+                _ => format!(
+                    "The Cargo test gate must use an exact filter and execute exactly one test. Run the structured discovery command `{}` and choose one of the bounded candidate IDs before rerunning Cook.",
+                    recovery.command
+                ),
+            })
+            .unwrap_or_else(|| {
+                "The Cargo test gate must use an exact filter and execute exactly one test before rerunning Cook.".to_string()
+            })
     } else {
         match missing_script {
             Some(script) => format!(
@@ -3144,6 +3175,15 @@ fn cargo_selection(
             listed
         }
     };
+    let selected_count = selected_ids.len();
+    let recovery = cargo_selection_recovery(
+        &tokens,
+        cargo_index,
+        &discovered_ids,
+        selected_count,
+        exact,
+        has_shell_control_operator(command),
+    );
     Some(AgentTaskGateCargoSelection {
         effective_argv: effective_argv.to_vec(),
         mode: mode.to_string(),
@@ -3154,16 +3194,150 @@ fn cargo_selection(
             (true, false) => "substring_ambiguous".to_string(),
         },
         discovered_ids,
-        selected_count: selected_ids.len(),
+        selected_count,
         selected_ids,
+        recovery,
     })
 }
 
+fn cargo_selection_recovery(
+    tokens: &[String],
+    cargo_index: usize,
+    discovered_ids: &[String],
+    selected_count: usize,
+    exact: bool,
+    has_shell_control: bool,
+) -> Option<AgentTaskGateCargoSelectionRecovery> {
+    let test_index = tokens[cargo_index + 1..]
+        .iter()
+        .position(|token| token == "test")?
+        + cargo_index
+        + 1;
+    let harness = tokens[test_index + 1..]
+        .iter()
+        .position(|token| token == "--")
+        .map(|index| index + test_index + 1);
+    let filter_index =
+        cargo_test_filter_index(&tokens[test_index + 1..harness.unwrap_or(tokens.len())])
+            .map(|index| index + test_index + 1);
+    let focused = filter_index.is_some();
+    let valid = focused && exact && selected_count == 1;
+    if !focused || valid {
+        return None;
+    }
+
+    let filter_index = filter_index?;
+    let mut argv = tokens[..filter_index].to_vec();
+    let action = if discovered_ids.len() == 1 && !has_shell_control {
+        argv.push(discovered_ids[0].clone());
+        "rerun_exact"
+    } else {
+        "discover_and_choose"
+    };
+    let before_harness_end = harness.unwrap_or(tokens.len());
+    argv.extend_from_slice(&tokens[filter_index + 1..before_harness_end]);
+    if let Some(harness) = harness {
+        argv.push("--".to_string());
+        argv.extend(
+            tokens[harness + 1..]
+                .iter()
+                .filter(|argument| argument.as_str() != "--exact")
+                .cloned(),
+        );
+    } else {
+        argv.push("--".to_string());
+    }
+    argv.push(if action == "rerun_exact" {
+        "--exact".to_string()
+    } else {
+        "--list".to_string()
+    });
+    let argv = redact_cargo_recovery_argv(argv);
+    Some(AgentTaskGateCargoSelectionRecovery {
+        action: action.to_string(),
+        command: render_cargo_recovery_command(&argv),
+        argv,
+        candidate_ids: discovered_ids
+            .iter()
+            .take(MAX_CARGO_SELECTION_RECOVERY_CANDIDATES)
+            .map(|id| homeboy_core::redaction::redact_string(id))
+            .collect(),
+    })
+}
+
+/// A tokenized shell command cannot faithfully retain control-flow syntax.
+/// Recovery therefore declines an exact rerun whenever the declaration uses a
+/// shell operator, while still exposing bounded discovery metadata.
+fn has_shell_control_operator(command: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            }
+            continue;
+        }
+        if quote.is_none()
+            && matches!(
+                character,
+                ';' | '|' | '&' | '(' | ')' | '{' | '}' | '<' | '>'
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn render_cargo_recovery_command(argv: &[String]) -> String {
+    let assignment_count = argv
+        .iter()
+        .take_while(|argument| is_environment_assignment(argument))
+        .count();
+    let mut rendered = argv[..assignment_count]
+        .iter()
+        .filter_map(|assignment| {
+            let (name, value) = assignment.split_once('=')?;
+            Some(format!(
+                "{name}={}",
+                homeboy_core::engine::shell::quote_arg(value)
+            ))
+        })
+        .collect::<Vec<_>>();
+    rendered.extend(
+        argv[assignment_count..]
+            .iter()
+            .map(|argument| homeboy_core::engine::shell::quote_arg(argument)),
+    );
+    rendered.join(" ")
+}
+
+fn redact_cargo_recovery_argv(argv: Vec<String>) -> Vec<String> {
+    argv.into_iter()
+        .map(|argument| homeboy_core::redaction::redact_string(&argument))
+        .collect()
+}
+
 fn cargo_test_filter(args: &[String]) -> Option<String> {
+    cargo_test_filter_index(args).map(|index| args[index].clone())
+}
+
+fn cargo_test_filter_index(args: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         if !argument.starts_with('-') {
-            return Some(argument.clone());
+            return Some(index);
         }
         let takes_value = matches!(
             argument.as_str(),
@@ -3606,6 +3780,13 @@ mod tests {
         );
         assert_eq!(ambiguous.selected_count, 2);
         assert_eq!(effective_gate_exit_code(0, Some(&ambiguous)), 1);
+        let multiple_recovery = ambiguous.recovery.expect("discovery recovery metadata");
+        assert_eq!(multiple_recovery.action, "discover_and_choose");
+        assert_eq!(multiple_recovery.command, "cargo test -- --list");
+        assert_eq!(
+            multiple_recovery.candidate_ids,
+            vec!["selected_test", "selected_test_unrelated"]
+        );
 
         let non_exact_single = cargo_selection(
             "cargo test selected_test",
@@ -3621,13 +3802,70 @@ mod tests {
         .expect("Cargo selection");
         assert_eq!(non_exact_single.selected_count, 1);
         assert_eq!(effective_gate_exit_code(0, Some(&non_exact_single)), 1);
+        let serialized_recovery = serde_json::to_value(&non_exact_single)
+            .expect("reviewer-facing recovery metadata serializes");
+        assert_eq!(
+            serialized_recovery["recovery"]["command"],
+            "cargo test selected_test -- --exact"
+        );
+        let one_recovery = non_exact_single.recovery.expect("exact recovery metadata");
+        assert_eq!(one_recovery.action, "rerun_exact");
+        assert_eq!(
+            one_recovery.argv,
+            vec!["cargo", "test", "selected_test", "--", "--exact"]
+        );
+        assert_eq!(one_recovery.command, "cargo test selected_test -- --exact");
 
-        let zero_match = cargo_selection(
-            "cargo test missing_test -- --exact",
+        let prefixed = cargo_selection(
+            "RUSTFLAGS=\"-D warnings\" timeout --signal TERM 30 cargo test --locked -p example --test integration --features feature-a selected --lib -- --ignored --nocapture",
             &[
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test missing_test -- --exact".to_string(),
+                "RUSTFLAGS=\"-D warnings\" timeout --signal TERM 30 cargo test --locked -p example --test integration --features feature-a selected --lib -- --ignored --nocapture".to_string(),
+            ],
+            "test crate::selected ... ok\n",
+            "",
+            None,
+        )
+        .expect("prefixed Cargo selection");
+        let prefixed_recovery = prefixed.recovery.expect("prefix-preserving exact recovery");
+        assert_eq!(prefixed_recovery.action, "rerun_exact");
+        assert_eq!(
+            prefixed_recovery.argv,
+            vec![
+                "RUSTFLAGS=-D warnings",
+                "timeout",
+                "--signal",
+                "TERM",
+                "30",
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "example",
+                "--test",
+                "integration",
+                "--features",
+                "feature-a",
+                "crate::selected",
+                "--lib",
+                "--",
+                "--ignored",
+                "--nocapture",
+                "--exact",
+            ]
+        );
+        assert_eq!(
+            prefixed_recovery.command,
+            "RUSTFLAGS='-D warnings' timeout --signal TERM 30 cargo test --locked -p example --test integration --features feature-a crate::selected --lib -- --ignored --nocapture --exact"
+        );
+
+        let zero_match = cargo_selection(
+            "cargo test --test integration missing_test --lib -- --ignored --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test --test integration missing_test --lib -- --ignored --exact".to_string(),
             ],
             "selected_test: test\nselected_test_unrelated: test\n",
             "",
@@ -3638,6 +3876,76 @@ mod tests {
         assert!(zero_match.selected_ids.is_empty());
         assert_eq!(zero_match.selected_count, 0);
         assert_eq!(effective_gate_exit_code(0, Some(&zero_match)), 1);
+        let zero_recovery = zero_match.recovery.expect("discovery recovery metadata");
+        assert_eq!(zero_recovery.action, "discover_and_choose");
+        assert_eq!(
+            zero_recovery.argv,
+            vec![
+                "cargo",
+                "test",
+                "--test",
+                "integration",
+                "--lib",
+                "--",
+                "--ignored",
+                "--list",
+            ]
+        );
+        assert_eq!(
+            zero_recovery.candidate_ids,
+            vec!["selected_test", "selected_test_unrelated"]
+        );
+
+        let redacted = cargo_selection_recovery(
+            &[
+                "cargo".to_string(),
+                "test".to_string(),
+                "unsafe_filter".to_string(),
+            ],
+            0,
+            &["token=secret".to_string()],
+            1,
+            false,
+            false,
+        )
+        .expect("redacted exact recovery");
+        assert!(redacted.command.contains("[REDACTED]"));
+        assert!(!redacted.command.contains("secret"));
+
+        let quoted = cargo_selection_recovery(
+            &[
+                "cargo".to_string(),
+                "test".to_string(),
+                "unsafe_filter".to_string(),
+            ],
+            0,
+            &["module::id; touch /tmp/pwn".to_string()],
+            1,
+            false,
+            false,
+        )
+        .expect("shell-quoted exact recovery");
+        assert!(quoted.command.contains("'module::id; touch /tmp/pwn'"));
+
+        let shell_control = cargo_selection(
+            "cargo test selected_test && printf unexpected",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test selected_test && printf unexpected".to_string(),
+            ],
+            "test selected_test ... ok\n",
+            "",
+            None,
+        )
+        .expect("shell-controlled Cargo selection");
+        assert_eq!(
+            shell_control
+                .recovery
+                .expect("discovery recovery for shell control")
+                .action,
+            "discover_and_choose"
+        );
 
         let package_only = cargo_selection(
             "cargo test --locked -p empty-crate",
