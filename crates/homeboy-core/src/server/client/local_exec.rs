@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc::{self, Receiver, RecvTimeoutError},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,9 +15,13 @@ use serde::Serialize;
 
 use crate::engine::invocation;
 
+#[cfg(not(target_os = "linux"))]
+use super::super::process_cleanup::configure_process_group_cleanup;
+#[cfg(target_os = "linux")]
+use super::super::process_cleanup::prepare_process_scope_cleanup;
 use super::super::process_cleanup::{
-    active_cleanup_signal, configure_process_group_cleanup, interrupted_exit_code,
-    stderr_with_interruption, ProcessGroupCleanupGuard,
+    active_cleanup_signal, interrupted_exit_code, stderr_with_interruption,
+    ProcessGroupCleanupGuard,
 };
 use super::delegated::{
     stderr_with_delegated_failure, DelegatedRunFailureMonitor, DelegatedRunTerminalFailure,
@@ -25,6 +30,7 @@ use super::resource_monitor::ChildResourceMonitor;
 use super::CommandOutput;
 
 const PIPED_STDIN_FINISH_GRACE: Duration = Duration::from_millis(100);
+const OUTPUT_READER_CLEANUP_GRACE: Duration = Duration::from_millis(250);
 
 pub fn execute_local_command(command: &str) -> CommandOutput {
     execute_local_command_in_dir(command, None, None)
@@ -166,6 +172,21 @@ fn run_local_command(
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
+    #[cfg(target_os = "linux")]
+    let containment = match prepare_process_scope_cleanup(&mut cmd) {
+        Ok(containment) => containment,
+        Err(error) => {
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: format!("Command containment error: {error}"),
+                success: false,
+                exit_code: -1,
+                timed_out: false,
+                child_resource: None,
+            };
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     configure_process_group_cleanup(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -181,6 +202,35 @@ fn run_local_command(
             };
         }
     };
+    #[cfg(target_os = "linux")]
+    let mut cleanup_guard = {
+        let mut containment = containment;
+        if let Err(error) = containment.attach(&child) {
+            let containment_error = containment
+                .terminate_on_failure_bounded(Duration::from_secs(2), false)
+                .err();
+            ProcessGroupCleanupGuard::new(child.id()).cleanup();
+            let _ = child.wait();
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Command containment error: {error}{}",
+                    containment_error
+                        .map(|cleanup| format!("; scope cleanup also failed: {cleanup}"))
+                        .unwrap_or_default()
+                ),
+                success: false,
+                exit_code: -1,
+                timed_out: false,
+                child_resource: None,
+            };
+        }
+        Some(ProcessGroupCleanupGuard::with_containment(
+            child.id(),
+            containment,
+        ))
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
     let mut supervision = ChildSupervision::start(env, command, current_dir, child.id());
     let _invocation_child_guard = invocation_child_guard(
@@ -200,19 +250,21 @@ fn run_local_command(
             .map(|pipe| spawn_stdin_pump(pipe, source))
     });
 
-    let stdout_handle = child.stdout.take().map(|pipe| {
-        thread::spawn(move || match stream_mode {
-            StreamMode::Passthrough => tee_to(pipe, std::io::stdout()),
-            StreamMode::Capture | StreamMode::StderrPassthrough => read_all(pipe),
-        })
+    let stdout_reader = child.stdout.take().map(|pipe| {
+        spawn_output_reader(
+            pipe,
+            matches!(stream_mode, StreamMode::Passthrough).then_some(OutputSink::Stdout),
+        )
     });
-    let stderr_handle = child.stderr.take().map(|pipe| {
-        thread::spawn(move || match stream_mode {
-            StreamMode::Capture => read_all(pipe),
-            StreamMode::Passthrough | StreamMode::StderrPassthrough => {
-                tee_to(pipe, std::io::stderr())
-            }
-        })
+    let stderr_reader = child.stderr.take().map(|pipe| {
+        spawn_output_reader(
+            pipe,
+            matches!(
+                stream_mode,
+                StreamMode::Passthrough | StreamMode::StderrPassthrough
+            )
+            .then_some(OutputSink::Stderr),
+        )
     });
 
     let (status, delegated_failure, timed_out, interrupted_signal) =
@@ -225,20 +277,32 @@ fn run_local_command(
         );
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
-    if let Some(cleanup_guard) = cleanup_guard.take() {
-        cleanup_guard.cleanup();
-    }
+    let cleanup_detail = cleanup_guard
+        .take()
+        .and_then(ProcessGroupCleanupGuard::cleanup);
     let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
 
     let stdin_failed = stdin_handle
         .and_then(StdinPump::finish_after_child)
         .is_some_and(|result| result.is_err());
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
+    let reader_deadline = Instant::now() + OUTPUT_READER_CLEANUP_GRACE;
+    let (stdout, stdout_stalled) = collect_output_reader(stdout_reader, reader_deadline);
+    let (mut stderr, stderr_stalled) = collect_output_reader(stderr_reader, reader_deadline);
+    let streams_stalled = stdout_stalled || stderr_stalled;
+    if streams_stalled || cleanup_detail.is_some() {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        if let Some(detail) = cleanup_detail {
+            stderr.push_str(&format!(
+                "Homeboy containment cleanup was incomplete: {detail}.\n"
+            ));
+        }
+        if streams_stalled {
+            stderr.push_str("Homeboy command output pipes remained open after cleanup; returning partial output instead of waiting for an unverified descendant.");
+        }
+    }
+    let timed_out = timed_out || streams_stalled;
 
     let output = match status {
         Ok(status) => CommandOutput {
@@ -535,38 +599,71 @@ fn stdin_failure_exit_code(stdin_failed: bool, exit_code: i32) -> i32 {
     }
 }
 
-fn read_all<R: Read>(mut src: R) -> String {
-    let mut captured = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match src.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => captured.extend_from_slice(&buf[..n]),
-            Err(_) => break,
-        }
-    }
-    String::from_utf8_lossy(&captured).to_string()
+struct OutputReader {
+    captured: Arc<Mutex<Vec<u8>>>,
+    completed: Receiver<()>,
 }
 
-fn tee_to<R, W>(mut src: R, mut sink: W) -> String
+#[derive(Clone, Copy)]
+enum OutputSink {
+    Stdout,
+    Stderr,
+}
+
+fn spawn_output_reader<R>(mut pipe: R, sink: Option<OutputSink>) -> OutputReader
 where
-    R: Read,
-    W: Write,
+    R: Read + Send + 'static,
 {
-    let mut captured = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match src.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let _ = sink.write_all(&buf[..n]);
-                let _ = sink.flush();
-                captured.extend_from_slice(&buf[..n]);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let (completed_tx, completed) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    match sink {
+                        Some(OutputSink::Stdout) => {
+                            let _ = std::io::stdout().write_all(&buffer[..count]);
+                            let _ = std::io::stdout().flush();
+                        }
+                        Some(OutputSink::Stderr) => {
+                            let _ = std::io::stderr().write_all(&buffer[..count]);
+                            let _ = std::io::stderr().flush();
+                        }
+                        None => {}
+                    }
+                    if let Ok(mut captured) = reader_capture.lock() {
+                        captured.extend_from_slice(&buffer[..count]);
+                    }
+                }
             }
-            Err(_) => break,
         }
+        let _ = completed_tx.send(());
+    });
+    OutputReader {
+        captured,
+        completed,
     }
-    String::from_utf8_lossy(&captured).to_string()
+}
+
+fn collect_output_reader(reader: Option<OutputReader>, deadline: Instant) -> (String, bool) {
+    let Some(reader) = reader else {
+        return (String::new(), false);
+    };
+    let stalled = matches!(
+        reader
+            .completed
+            .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        Err(RecvTimeoutError::Timeout)
+    );
+    let captured = reader
+        .captured
+        .lock()
+        .map(|captured| captured.clone())
+        .unwrap_or_default();
+    (String::from_utf8_lossy(&captured).to_string(), stalled)
 }
 
 pub fn execute_local_command_interactive(

@@ -5,13 +5,42 @@ use super::shared::*;
 
 mod adaptive_concurrency_tests {
     use super::*;
+    use std::sync::Condvar;
+
+    #[derive(Default)]
+    struct OverlapState {
+        entered: usize,
+        released: bool,
+    }
+
+    struct CoordinatedExecutor {
+        state: Arc<(Mutex<OverlapState>, Condvar)>,
+    }
+
+    impl AgentTaskExecutorAdapter for CoordinatedExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().expect("overlap state");
+            state.entered += 1;
+            changed.notify_all();
+            while !state.released {
+                state = changed.wait(state).expect("overlap release");
+            }
+            drop(state);
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
 
     #[test]
     fn adaptive_concurrency_scales_up_when_runner_slots_are_available() {
-        // Leave enough overlap for serialized scratch setup on loaded CI hosts.
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_secs(1));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let state = Arc::new((Mutex::new(OverlapState::default()), Condvar::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(CoordinatedExecutor {
+            state: Arc::clone(&state),
+        }));
         let mut plan = plan_with_tasks(4);
         plan.options.max_concurrency = 1;
         plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
@@ -20,7 +49,22 @@ mod adaptive_concurrency_tests {
             ..AgentTaskAdaptiveConcurrencyPolicy::default()
         });
 
-        let aggregate = scheduler.run(plan);
+        let run = thread::spawn(move || scheduler.run(plan));
+        let (overlap, changed) = &*state;
+        let overlap = overlap.lock().expect("overlap state");
+        let (mut overlap, wait) = changed
+            .wait_timeout_while(overlap, Duration::from_secs(10), |state| state.entered < 3)
+            .expect("bounded overlap wait");
+        let entered_before_release = overlap.entered;
+        overlap.released = true;
+        changed.notify_all();
+        drop(overlap);
+
+        assert!(
+            !wait.timed_out(),
+            "adaptive scheduler started only {entered_before_release} tasks before the bounded release"
+        );
+        let aggregate = run.join().expect("scheduler run");
         let adaptive = aggregate
             .queue
             .adaptive_concurrency
@@ -30,8 +74,7 @@ mod adaptive_concurrency_tests {
             aggregate.status,
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
-        assert!(max_seen.load(Ordering::SeqCst) > 1);
-        assert!(max_seen.load(Ordering::SeqCst) <= 3);
+        assert_eq!(entered_before_release, 3);
         assert_eq!(adaptive.configured_max_concurrency, 1);
         assert_eq!(adaptive.max_concurrency, 3);
         assert!(adaptive.decisions.iter().any(|decision| {
