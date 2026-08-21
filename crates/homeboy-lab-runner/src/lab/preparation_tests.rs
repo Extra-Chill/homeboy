@@ -10,7 +10,9 @@ use crate::{
     RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
     RunnerTunnelProcessStartIdentity,
 };
-use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use homeboy_core::daemon::{
+    DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
+};
 use homeboy_core::{Error, ErrorCode};
 
 use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
@@ -887,6 +889,9 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     assert!(err.message.contains("homeboy 0.219.0"));
     assert!(err
         .message
+        .contains("typed ownership evidence is insufficient"));
+    assert!(!err
+        .message
         .contains("homeboy runner doctor lab --scope lab-offload"));
     assert!(err
         .details
@@ -894,13 +899,69 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .any(|suggestion| suggestion
+        .all(|suggestion| suggestion
             .as_str()
-            .is_some_and(|value| value.contains("homeboy runner doctor lab --scope lab-offload"))));
+            .is_none_or(|value| !value.contains("homeboy runner doctor lab --scope lab-offload"))));
     assert!(err
         .details
         .get(homeboy_core::error::ACTIONS_DETAILS_KEY)
         .is_none());
+}
+
+#[test]
+fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+    let mut freshness = restartable_daemon_freshness();
+    freshness.stale_reason_code = Some(DaemonStaleReasonCode::LeaseCorrupt);
+    freshness.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
+    freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
+    freshness.repair_plan = vec![DaemonRepairStep::text(
+        "runner_reconcile_leaseless_orphans",
+        "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+    )];
+
+    let error = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: Some(connected_direct_session(
+                    runner_id,
+                    Some("http://127.0.0.1:1234"),
+                )),
+                stale_daemon: Some(stale_daemon_warning(runner_id)),
+                configured_job_binary_build_identity: None,
+                daemon_freshness: Some(freshness.clone()),
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_jobs: Vec::new(),
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
+                active_job_recovery_evidence: None,
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |_| panic!("terminal ownership evidence must not reconnect"),
+    )
+    .expect_err("ambiguous remote lease ownership must block explicit offload");
+
+    let rendered = format!(
+        "{} {}",
+        error.message,
+        serde_json::to_string(&error.details).expect("serialize error details")
+    );
+    assert!(rendered.contains("typed ownership evidence is insufficient"));
+    assert!(rendered.contains("ambiguous remote daemon candidates"));
+    assert!(!rendered.contains("reconcile-leaseless-orphans"));
 }
 
 #[test]

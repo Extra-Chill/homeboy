@@ -674,6 +674,31 @@ pub struct DaemonFreshnessReport {
     pub repair_plan: Vec<DaemonRepairStep>,
 }
 
+impl DaemonFreshnessReport {
+    /// Typed evidence required before a controller can mutate a stale daemon
+    /// session. Textual ownership diagnostics are explanatory, not authority.
+    pub fn has_recovery_ownership_proof(&self) -> bool {
+        matches!(
+            self.recovery_evidence,
+            Some(DaemonRecoveryEvidence::ProvenDead | DaemonRecoveryEvidence::Recoverable)
+        )
+    }
+
+    /// A stale report without typed ownership proof is terminal: callers must
+    /// surface its evidence rather than offer or execute any recovery action.
+    pub fn has_terminal_recovery_ownership_blocker(&self) -> bool {
+        !self.fresh && !self.has_recovery_ownership_proof()
+    }
+
+    /// A stale report may only enter automatic recovery through a validated
+    /// typed plan. An empty plan is terminal even when its ownership proof is
+    /// sufficient, because there is no authorized mutation to execute.
+    pub fn blocks_automatic_recovery(&self) -> bool {
+        self.has_terminal_recovery_ownership_blocker()
+            || (!self.fresh && self.repair_plan.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonStartResult {
     pub pid: u32,
