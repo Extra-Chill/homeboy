@@ -4917,7 +4917,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\n  ;;\nensure)\n  git -C '{}' worktree add --quiet -b durable-ensure '{}' HEAD && touch '{}'\n  ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"remote://fixture/durable-ensure\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; fi\n  ;;\nensure)\n  git -C '{}' worktree add --quiet -b durable-ensure '{}' HEAD && touch '{}'\n  ;;\nesac\n",
                 created.display(),
                 workspace.display(),
                 source.display(),

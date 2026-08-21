@@ -7,6 +7,7 @@ use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -237,6 +238,24 @@ fn register_body(public_host: &str) -> String {
     })
     .to_string()
 }
+
+fn register_channel(port: u16, token: &str, public_host: &str) -> String {
+    let response = http_request(
+        port,
+        "POST",
+        "/preview/client/register",
+        "homeboy-health-tunnel.example.com",
+        Some(token),
+        register_body(public_host),
+    );
+    assert!(response.contains("200 OK"), "{response}");
+    response_json(&response)["channel_id"]
+        .as_str()
+        .expect("registration channel id")
+        .to_string()
+}
+
+mod websocket;
 
 #[test]
 fn client_auth_denies_every_request_when_token_env_is_unset() {

@@ -1251,6 +1251,70 @@ fn apply_direct_ssh_configured_identity_freshness(
     }
 }
 
+/// A direct-SSH identity comparison happens after selection but before daemon
+/// admission. Only an automatic policy-selected runner may return locally here.
+fn late_direct_identity_fallback(
+    request: &LabOffloadRequest<'_>,
+    selection: &LabRunnerSelection,
+    plan: &HomeboyPlan,
+    status: &RunnerStatusReport,
+    runner_homeboy: &serde_json::Value,
+    release_gate: bool,
+    overhead: &mut LabOffloadOverhead,
+) -> Result<Option<LabOffloadOutcome>> {
+    let Some(identity_drift) = status.stale_daemon.as_ref().filter(|warning| {
+        status
+            .session
+            .as_ref()
+            .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+            && warning.mismatch_predicate
+                == "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
+    }) else {
+        return Ok(None);
+    };
+    if selection.source != LabRunnerSelectionSource::Default
+        || request.placement_decision.requested != homeboy_lab_runner_contract::Placement::Auto
+        || release_gate
+        || !request.placement_decision.permits_local_fallback()
+    {
+        return Ok(None);
+    }
+
+    let reason = format!("runner_identity_drift: {}", identity_drift.message);
+    overhead.set_fallback_reason(&reason);
+    let mut metadata = lab_offload_metadata(
+        plan,
+        selection.source.metadata_value(),
+        Some(&selection.runner_id),
+        Some(selection.mode.metadata_value()),
+        "fallback",
+        None,
+        Some(&reason),
+    );
+    metadata["runner_identity_drift"] = serde_json::to_value(identity_drift.sanitized_for_output())
+        .unwrap_or(serde_json::Value::Null);
+    metadata["runner_homeboy"] = runner_homeboy.clone();
+    metadata["final_placement"] = serde_json::json!("local");
+    metadata["runner_jobs_created"] = serde_json::json!(0);
+    metadata["transport_retry_attempts"] = serde_json::json!(0);
+    attach_lab_offload_overhead(&mut metadata, overhead);
+
+    if let Some(target) = request.placement_outcome_target {
+        agent_task_lifecycle::record_local_lab_identity_fallback(
+            target.agent_task_run_id(),
+            &selection.runner_id,
+            &metadata["runner_identity_drift"],
+            &reason,
+        )?;
+    }
+    record_local_outcome(request)?;
+    Ok(Some(LabOffloadOutcome::RunLocal {
+        metadata: Some(metadata),
+        plan: plan.clone(),
+        messages: vec![format!("Lab offload: {reason}; running locally.")],
+    }))
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -1274,6 +1338,38 @@ pub(crate) fn run_lab_offload_inner(
                     .to_string(),
             ]),
         ));
+    }
+
+    // This must precede detached staging: staging would create a Lab proxy and
+    // submit controller work before this authorized local fallback is recorded.
+    if runner_status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        let early_homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
+        let configured_identity = configured_build_identity_for_admission(&runner_status, || {
+            configured_runner_homeboy_build_identity(&runner, early_homeboy_path)
+        })?;
+        apply_direct_ssh_configured_identity_freshness(
+            &mut runner_status,
+            runner_id,
+            early_homeboy_path,
+            configured_identity,
+        );
+        let runner_homeboy =
+            lab_runner_homeboy_metadata(runner_id, early_homeboy_path, &runner_status);
+        if let Some(outcome) = late_direct_identity_fallback(
+            &request,
+            &selection,
+            &plan,
+            &runner_status,
+            &runner_homeboy,
+            contract.routing_policy.release_gate,
+            &mut overhead,
+        )? {
+            return Ok(outcome);
+        }
     }
 
     // Detached commands without an agent-task argv shape receive their durable
@@ -3093,6 +3189,189 @@ mod tests {
         );
 
         assert!(require_available_lab_runner("homeboy-lab", &status, None, "cook").is_err());
+    }
+
+    #[test]
+    fn late_identity_drift_falls_back_only_for_auto_policy_with_local_permission() {
+        use homeboy_lab_runner_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+            ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+            ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
+        };
+
+        let mut status = direct_identity_status(Some("homeboy 0.339.0+configured"), "lease-a");
+        status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.339.0".to_string(),
+            "0.339.0".to_string(),
+            Some("homeboy 0.339.0+daemon".to_string()),
+            Some("homeboy 0.339.0+configured".to_string()),
+        ));
+        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "test",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "test".to_string(),
+                workspace: "test".to_string(),
+                task: "test".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Auto,
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: RunnerSelectionSource::Policy,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: true,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        let args = Vec::new();
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+        let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "late-identity-drift-fallback";
+            let mut durable_plan =
+                homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(run_id, Vec::new());
+            durable_plan.metadata = serde_json::json!({
+                "execution_placement_decision": decision,
+            });
+            homeboy_agents::agent_task_lifecycle::submit_plan(&durable_plan, Some(run_id))
+                .expect("persist durable run");
+            let request = LabOffloadRequest {
+                placement_decision: decision.clone(),
+                normalized_args: &args,
+                placement_outcome_target: Some(
+                    homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+                        run_id,
+                    },
+                ),
+                ..LabOffloadRequest::for_test(&args)
+            };
+
+            let outcome = late_direct_identity_fallback(
+                &request,
+                &selection,
+                &base_lab_plan(None),
+                &status,
+                &runner_homeboy,
+                false,
+                &mut LabOffloadOverhead::start(),
+            )
+            .expect("fallback decision")
+            .expect("automatic local fallback");
+            let LabOffloadOutcome::RunLocal { metadata, .. } = outcome else {
+                panic!("identity drift must run locally");
+            };
+            let metadata = metadata.expect("fallback evidence");
+            assert_eq!(metadata["runner_id"], "homeboy-lab");
+            assert_eq!(metadata["final_placement"], "local");
+            assert_eq!(metadata["runner_jobs_created"], 0);
+            assert_eq!(metadata["transport_retry_attempts"], 0);
+
+            let record = homeboy_agents::agent_task_lifecycle::status(run_id)
+                .expect("persisted local fallback");
+            assert!(record.lab_handoff.is_none());
+            assert!(record.runner_id().is_none());
+            assert!(record.runner_job_id().is_none());
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["identity_drift"]["mismatch_predicate"],
+                "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["final_placement"],
+                "local"
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["runner_jobs_created"],
+                0
+            );
+            assert_eq!(
+                record.metadata["lab_identity_fallback"]["transport_retry_attempts"],
+                0
+            );
+            assert_eq!(
+                record.metadata["execution_placement_outcome"]["effective"],
+                "local"
+            );
+        });
+
+        let request = LabOffloadRequest {
+            placement_decision: decision.clone(),
+            normalized_args: &args,
+            ..LabOffloadRequest::for_test(&args)
+        };
+
+        let explicit = LabRunnerSelection {
+            source: LabRunnerSelectionSource::Explicit,
+            ..selection.clone()
+        };
+        assert!(late_direct_identity_fallback(
+            &request,
+            &explicit,
+            &base_lab_plan(None),
+            &status,
+            &runner_homeboy,
+            false,
+            &mut LabOffloadOverhead::start(),
+        )
+        .expect("explicit runner fails closed")
+        .is_none());
+        assert!(late_direct_identity_fallback(
+            &request,
+            &selection,
+            &base_lab_plan(None),
+            &status,
+            &runner_homeboy,
+            true,
+            &mut LabOffloadOverhead::start(),
+        )
+        .expect("release gate fails closed")
+        .is_none());
+        let disallowed = LabOffloadRequest {
+            placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+                "test",
+                "1",
+                decision.identity,
+                Placement::Auto,
+                ExecutionPlacementRequirement::Either,
+                EffectiveExecutionPlacement::Lab,
+                decision.runner,
+                ExecutionPlacementFallback {
+                    local_allowed: false,
+                    reason: None,
+                },
+                ExecutionPlacementOverrideAuthorization {
+                    authorized: false,
+                    authority: None,
+                },
+            ),
+            normalized_args: &args,
+            ..LabOffloadRequest::for_test(&args)
+        };
+        assert!(late_direct_identity_fallback(
+            &disallowed,
+            &selection,
+            &base_lab_plan(None),
+            &status,
+            &runner_homeboy,
+            false,
+            &mut LabOffloadOverhead::start(),
+        )
+        .expect("disallowed fallback fails closed")
+        .is_none());
     }
 
     #[test]

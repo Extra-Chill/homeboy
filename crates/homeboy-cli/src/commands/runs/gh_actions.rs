@@ -125,7 +125,11 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     // writes all of them into one installation instead of re-resolving per file.
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
 
-    let store = ObservationStore::open_initialized()?;
+    // Opened against those same roots. `open_initialized()` would have read the
+    // environment a second time for the database and left artifact resolution
+    // falling back to it again, so the imported bytes and the rows indexing
+    // them were tied to `roots` only by coincidence (#7505).
+    let store = ObservationStore::open_initialized_in_roots(&roots)?;
     let pattern = compile_glob(&args.artifact_glob)?;
 
     let (runs, etag_cache_hit) = if let Some(run_id) = args.run_id {
