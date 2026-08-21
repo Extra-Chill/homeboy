@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::{list_records_with_health, AgentTaskRunState};
+use crate::agent_task_lifecycle::AgentTaskRunState;
 use homeboy_core::controller_pin_reference::{
     register_controller_pin_reference_provider, ControllerPinReferenceProvider,
 };
@@ -25,7 +25,10 @@ struct AgentTaskControllerPinReferenceProvider;
 
 impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider {
     fn referenced_controller_pins(&self) -> Result<Vec<PathBuf>> {
-        let (records, _) = list_records_with_health()?;
+        // Pins are retained against the records read here, so both halves must
+        // name one installation (#7505).
+        let lifecycle_store = super::AgentTaskLifecycleStore::from_current_environment()?;
+        let (records, _) = super::list_records_with_health_in_store(&lifecycle_store)?;
         let mut referenced = Vec::new();
         for record in records {
             if !state_retains_pin(&record) {

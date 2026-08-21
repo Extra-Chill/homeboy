@@ -71,11 +71,11 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
     let mut command = Command::new("tar");
     command.args(["-cJf"]).arg(destination).arg("-C").arg(root);
     if let Some(transform) = transform {
-        let is_gnu_tar = Command::new("tar")
+        let gnu_tar = Command::new("tar")
             .arg("--version")
             .output()
             .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("GNU tar"));
-        if is_gnu_tar {
+        if gnu_tar {
             command.arg(format!("--transform=s{transform}"));
         } else {
             command.arg("-s").arg(transform);
