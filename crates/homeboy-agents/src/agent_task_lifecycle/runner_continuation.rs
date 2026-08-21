@@ -134,10 +134,21 @@ pub trait RunnerContinuationProvider: Send + Sync {
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
+    /// Legacy two-state runner inventory retained for external provider
+    /// compatibility. New providers should implement [`Self::runner_authority`]
+    /// so an unavailable inventory remains distinct from a removed runner.
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        false
+    }
+
     /// Authoritative configuration state for a durable runner id. Providers
     /// that cannot inspect their configuration return `Unknown` fail-closed.
-    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
-        RunnerAuthority::Unknown
+    fn runner_authority(&self, runner_id: &str) -> RunnerAuthority {
+        if self.runner_exists(runner_id) {
+            RunnerAuthority::Configured
+        } else {
+            RunnerAuthority::Unknown
+        }
     }
 
     /// Execute a continuation command on the runner, returning the exit code.
@@ -258,5 +269,68 @@ impl RunnerContinuationTestGuard {
 impl Drop for RunnerContinuationTestGuard {
     fn drop(&mut self) {
         clear_runner_continuation_provider_for_test();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct LegacyProvider {
+        runner_exists: bool,
+    }
+
+    impl RunnerContinuationProvider for LegacyProvider {
+        fn runner_job_log_snapshot(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+        ) -> Result<RunnerJobLogSnapshot> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn is_runner_connected(&self, _runner_id: &str) -> bool {
+            false
+        }
+
+        fn runner_exists(&self, _runner_id: &str) -> bool {
+            self.runner_exists
+        }
+
+        fn run_continuation_exec(
+            &self,
+            _runner_id: &str,
+            _cwd: &str,
+            _command: &[String],
+            _run_id: &str,
+        ) -> Result<i32> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn submit_reverse_broker_job(
+            &self,
+            _runner_id: &str,
+            _request: RemoteRunnerJobRequest,
+        ) -> Result<Job> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+    }
+
+    #[test]
+    fn legacy_runner_exists_cannot_prove_a_runner_was_removed() {
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: true,
+            }
+            .runner_authority("legacy-runner"),
+            RunnerAuthority::Configured
+        );
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: false,
+            }
+            .runner_authority("legacy-runner"),
+            RunnerAuthority::Unknown
+        );
     }
 }

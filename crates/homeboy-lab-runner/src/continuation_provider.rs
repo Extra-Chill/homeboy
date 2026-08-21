@@ -190,16 +190,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
     fn runner_authority(&self, runner_id: &str) -> RunnerAuthority {
         // `list` failing means the registry cannot establish absence. Only a
         // successful inventory that omits this id proves a removed authority.
-        let Ok(runners) = super::list() else {
-            return RunnerAuthority::Unknown;
-        };
-        if runners.iter().any(|runner| runner.id == runner_id)
-            || (runner_id.eq_ignore_ascii_case("lab") && super::load(runner_id).is_ok())
-        {
-            RunnerAuthority::Configured
-        } else {
-            RunnerAuthority::Removed
-        }
+        runner_authority_from_inventory(runner_id, super::list(), || super::load(runner_id).is_ok())
     }
 
     fn run_continuation_exec(
@@ -235,6 +226,23 @@ impl RunnerContinuationProvider for RunnerContinuation {
         submission_key: &str,
     ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
         super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
+    }
+}
+
+fn runner_authority_from_inventory(
+    runner_id: &str,
+    runners: Result<Vec<super::Runner>>,
+    alias_resolves: impl FnOnce() -> bool,
+) -> RunnerAuthority {
+    let Ok(runners) = runners else {
+        return RunnerAuthority::Unknown;
+    };
+    if runners.iter().any(|runner| runner.id == runner_id)
+        || (runner_id.eq_ignore_ascii_case("lab") && alias_resolves())
+    {
+        RunnerAuthority::Configured
+    } else {
+        RunnerAuthority::Removed
     }
 }
 
@@ -451,4 +459,41 @@ pub fn register() {
     homeboy_agents::agent_task_lifecycle::register_runner_continuation_provider(Box::new(
         RunnerContinuation,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runner(id: &str) -> super::super::Runner {
+        let mut runner = super::super::load("local").expect("built-in local runner");
+        runner.id = id.to_string();
+        runner
+    }
+
+    #[test]
+    fn authority_distinguishes_configured_removed_alias_and_unknown_inventory() {
+        assert_eq!(
+            runner_authority_from_inventory("fixture-lab", Ok(vec![runner("fixture-lab")]), || {
+                false
+            }),
+            RunnerAuthority::Configured
+        );
+        assert_eq!(
+            runner_authority_from_inventory("removed-lab", Ok(vec![]), || false),
+            RunnerAuthority::Removed
+        );
+        assert_eq!(
+            runner_authority_from_inventory("lab", Ok(vec![runner("homeboy-lab")]), || true),
+            RunnerAuthority::Configured
+        );
+        assert_eq!(
+            runner_authority_from_inventory(
+                "fixture-lab",
+                Err(Error::internal_unexpected("runner inventory unavailable")),
+                || false,
+            ),
+            RunnerAuthority::Unknown
+        );
+    }
 }
