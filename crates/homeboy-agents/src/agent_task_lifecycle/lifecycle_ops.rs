@@ -5940,13 +5940,9 @@ pub fn exact_record_in_store(
     lifecycle_store.read_record(&sanitize_run_id(run_id))
 }
 
-/// Return the exact durable records a reconciliation request owns. A Cook id
-/// with a materialized detached-handoff parent names both that parent and its
-/// current attempt; an exact attempt remains scoped to itself.
-pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)
-}
+// The ambient `reconcile_scope_run_ids()` shim that used to sit here is gone;
+// the reconciler moved to the rooted form in a prior slice and the one
+// remaining test caller now resolves its own store (#7505).
 
 /// [`reconcile_scope_run_ids`] against explicitly injected durable lifecycle
 /// roots.

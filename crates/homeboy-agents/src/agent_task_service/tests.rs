@@ -1930,7 +1930,12 @@ fn scoped_reconcile_uses_validated_handoff_child_not_later_index_attempt() {
         .expect("bind accepted child");
         index_cook_attempts(cook_id, &attempt_one, &attempt_two);
 
-        let scope = agent_task_lifecycle::reconcile_scope_run_ids(cook_id).expect("scope");
+        let scope = agent_task_lifecycle::reconcile_scope_run_ids_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            cook_id,
+        )
+        .expect("scope");
         assert_eq!(scope, vec![cook_id.to_string(), attempt_one]);
         assert!(!scope.contains(&attempt_two));
     });

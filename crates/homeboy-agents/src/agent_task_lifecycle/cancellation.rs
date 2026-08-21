@@ -79,18 +79,9 @@ pub(crate) fn cancel_run_in_store(
     )))
 }
 
-/// Cancel one literal durable record without resolving a Cook alias.
-///
-/// Grouped lifecycle recovery uses this boundary after it has explicitly
-/// selected every parent/attempt record to mutate. Alias-aware cancellation is
-/// intentionally broader because it follows an advancing Cook index.
-pub fn cancel_exact_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
-    cancel_resolved_run_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        &sanitize_run_id(run_id),
-        reason,
-    )
-}
+// The ambient `cancel_exact_run()` shim that used to sit here is gone; its one
+// remaining caller was a cancellation test, which now cancels inside the store
+// it resolves (#7505).
 
 /// Cancel one literal run through an explicitly selected lifecycle store.
 ///
@@ -1197,7 +1188,13 @@ mod tests {
                     "parent cancellation must preserve the terminal child"
                 );
                 assert!(
-                    cancel_exact_run(&attempt_id, None).is_err(),
+                    cancel_exact_run_in_store(
+                        &AgentTaskLifecycleStore::from_current_environment()
+                            .expect("lifecycle store"),
+                        &attempt_id,
+                        None
+                    )
+                    .is_err(),
                     "direct cancellation retains strict terminal-run semantics"
                 );
             }
