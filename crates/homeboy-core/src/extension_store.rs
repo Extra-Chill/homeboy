@@ -475,14 +475,6 @@ fn handles_file_ext_with_capability(
     }
 }
 
-/// Extension directory below an already-resolved config root.
-///
-/// Infallible, unlike the ambient [`extension_path`]: the root is supplied, so
-/// there is nothing left that can fail to resolve.
-pub fn extension_path_in_root(config_root: &Path, id: &str) -> PathBuf {
-    paths::extension_in_root(config_root, id)
-}
-
 pub fn extension_path(id: &str) -> PathBuf {
     paths::extension(id).unwrap_or_else(|_| PathBuf::from(id))
 }
