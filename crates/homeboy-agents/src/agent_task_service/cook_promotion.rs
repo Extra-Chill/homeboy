@@ -2831,6 +2831,79 @@ struct CookAttemptExecution {
     review_form_only: bool,
 }
 
+fn concrete_provider_model(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .filter(|model| {
+            !matches!(
+                model.to_ascii_lowercase().as_str(),
+                "not recorded"
+                    | "unknown"
+                    | "ai-assisted"
+                    | "ai assisted"
+                    | "legacy caller did not record a model"
+            )
+        })
+        .map(str::to_string)
+}
+
+/// Resolve the model from the terminal provider execution for the scheduler's
+/// selected candidate task. Older controllers did not persist the execution
+/// ledger, so their provider-reported outcome model remains a compatible
+/// fallback; a ledger, when present, is the stronger source of execution fact.
+fn selected_execution_model(
+    provider_executions: &Value,
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    terminal_model: Option<&str>,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let executions = provider_executions
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let terminal_attempt = executions
+        .iter()
+        .filter(|execution| {
+            execution["task_id"] == outcome.task_id
+                && matches!(
+                    execution["state"].as_str(),
+                    Some("succeeded" | "candidate_recoverable")
+                )
+        })
+        .filter_map(|execution| execution["attempt"].as_u64())
+        .max();
+    let Some(terminal_attempt) = terminal_attempt else {
+        return Ok(concrete_provider_model(terminal_model)
+            .or_else(|| concrete_provider_model(outcome.selected_model())));
+    };
+    let mut models = executions
+        .iter()
+        .filter(|execution| {
+            execution["task_id"] == outcome.task_id
+                && execution["attempt"].as_u64() == Some(terminal_attempt)
+                && matches!(
+                    execution["state"].as_str(),
+                    Some("succeeded" | "candidate_recoverable")
+                )
+        })
+        .filter_map(|execution| concrete_provider_model(execution["model"].as_str()))
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    match models.as_slice() {
+        [] => Ok(concrete_provider_model(terminal_model)
+            .or_else(|| concrete_provider_model(outcome.selected_model()))),
+        [model] => Ok(Some(model.clone())),
+        _ => Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage selected provider execution has ambiguous concrete models",
+            Some(run_id.to_string()),
+            None,
+        )),
+    }
+}
+
 fn selected_outcome_for_attempt_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -2903,11 +2976,22 @@ fn cook_attempt_execution_in_store(
                 None,
             )
         })?;
-    let terminal = super::cook_pre_execution::terminal_executor_identity(&outcome, &plan, None);
-    let model = terminal
-        .as_ref()
-        .and_then(|identity| identity.model.as_deref())
-        .or_else(|| outcome.selected_model());
+    let terminal = super::cook_pre_execution::terminal_executor_identity(
+        &outcome,
+        &plan,
+        record.metadata.get("provider_executions"),
+    );
+    let model = selected_execution_model(
+        record
+            .metadata
+            .get("provider_executions")
+            .unwrap_or(&Value::Null),
+        &outcome,
+        terminal
+            .as_ref()
+            .and_then(|identity| identity.model.as_deref()),
+        run_id,
+    )?;
     let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
     let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
     let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
@@ -2948,7 +3032,7 @@ fn cook_attempt_execution_in_store(
             .as_ref()
             .map(|identity| identity.backend.clone())
             .unwrap_or_else(|| task.executor.backend.clone()),
-        model: model.map(str::to_string),
+        model,
         review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
     })
 }
@@ -3861,6 +3945,130 @@ mod recovery_action_tests {
             .legal_actions
             .iter()
             .any(|action| action.command.contains("mime-shaped")));
+    }
+}
+
+#[cfg(test)]
+mod provider_model_tests {
+    use super::*;
+
+    fn selected_outcome(model: Option<&str>) -> crate::agent_task::AgentTaskOutcome {
+        crate::agent_task::AgentTaskOutcome {
+            task_id: "selected".to_string(),
+            metadata: model.map_or(Value::Null, |model| serde_json::json!({ "model": model })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn provider_model_uses_direct_successful_provider_execution() {
+        let model = selected_execution_model(
+            &serde_json::json!([{
+                "task_id": "selected", "attempt": 1, "state": "succeeded",
+                "model": "openai/gpt-5.6-terra"
+            }]),
+            &selected_outcome(None),
+            None,
+            "run",
+        )
+        .expect("direct execution model");
+
+        assert_eq!(model.as_deref(), Some("openai/gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn provider_model_uses_terminal_gate_remediation_execution() {
+        let model = selected_execution_model(
+            &serde_json::json!([
+                {"task_id": "selected", "attempt": 1, "state": "succeeded", "model": "initial-model"},
+                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "remediation-model"}
+            ]),
+            &selected_outcome(None),
+            None,
+            "run",
+        )
+        .expect("remediation execution model");
+
+        assert_eq!(model.as_deref(), Some("remediation-model"));
+    }
+
+    #[test]
+    fn provider_model_preserves_legacy_outcome_evidence_for_review_follow_up() {
+        let outcome = selected_outcome(Some("legacy-provider-model"));
+        let initial = selected_execution_model(&Value::Null, &outcome, None, "run")
+            .expect("legacy initial model");
+        let continuation = selected_execution_model(&Value::Null, &outcome, None, "run")
+            .expect("legacy continuation model");
+
+        assert_eq!(initial, continuation);
+        assert_eq!(initial.as_deref(), Some("legacy-provider-model"));
+    }
+
+    #[test]
+    fn provider_model_rejects_missing_ambiguous_and_unrelated_evidence() {
+        let missing = selected_execution_model(&Value::Null, &selected_outcome(None), None, "run")
+            .expect("missing evidence is unresolved");
+        assert!(missing.is_none());
+
+        let unrelated = selected_execution_model(
+            &serde_json::json!([{
+                "task_id": "other", "attempt": 1, "state": "succeeded", "model": "other-model"
+            }]),
+            &selected_outcome(None),
+            None,
+            "run",
+        )
+        .expect("unrelated evidence is ignored");
+        assert!(unrelated.is_none());
+
+        let error = selected_execution_model(
+            &serde_json::json!([
+                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "model-a"},
+                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "model-b"}
+            ]),
+            &selected_outcome(None),
+            None,
+            "run",
+        )
+        .expect_err("ambiguous selected execution models fail closed");
+        assert_eq!(error.details["field"], "provider_model");
+    }
+
+    #[test]
+    fn provider_model_continuation_resolves_same_model_as_initial_finalization() {
+        let executions = serde_json::json!([{
+            "task_id": "selected",
+            "attempt": 1,
+            "state": "succeeded",
+            "model": "openai/gpt-5.6-terra"
+        }]);
+        let outcome = selected_outcome(None);
+
+        let initial = selected_execution_model(&executions, &outcome, None, "run-1")
+            .expect("initial finalization model");
+        let continuation = selected_execution_model(&executions, &outcome, None, "run-1")
+            .expect("continuation finalization model");
+
+        assert_eq!(initial, continuation);
+        assert_eq!(initial.as_deref(), Some("openai/gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn provider_model_durable_execution_evidence_takes_precedence_over_stale_outcome() {
+        let executions = serde_json::json!([{
+            "task_id": "selected",
+            "attempt": 1,
+            "state": "succeeded",
+            "model": "openai/gpt-5.6-terra"
+        }]);
+        // A stale or rotation-normalized outcome model must not override the
+        // actual executed provider model recorded in the durable ledger.
+        let outcome = selected_outcome(Some("stale-normalized-model"));
+
+        let model = selected_execution_model(&executions, &outcome, None, "run")
+            .expect("durable execution model wins");
+
+        assert_eq!(model.as_deref(), Some("openai/gpt-5.6-terra"));
     }
 }
 
