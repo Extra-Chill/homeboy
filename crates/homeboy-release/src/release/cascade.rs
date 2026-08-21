@@ -90,7 +90,7 @@ pub struct CascadeResult {
 /// dependent that consumes two cascaded upstreams is released a single time
 /// rather than once per edge. Pure — performs no IO — so the dedupe/order
 /// contract is unit-testable without a live dependency graph.
-pub fn cascade_targets(steps: &[DependencyStackPlanStep]) -> Vec<CascadeTarget> {
+pub(crate) fn cascade_targets(steps: &[DependencyStackPlanStep]) -> Vec<CascadeTarget> {
     let mut order: Vec<String> = Vec::new();
     let mut by_downstream: BTreeMap<String, CascadeTarget> = BTreeMap::new();
 
@@ -128,7 +128,7 @@ pub fn cascade_targets(steps: &[DependencyStackPlanStep]) -> Vec<CascadeTarget> 
 /// the `dependency` block carries the *upstream* release coordinates the
 /// extension needs to repin: released component id, package name, version, tag,
 /// and commit sha. The field names are package-manager-agnostic on purpose.
-pub fn build_update_dependency_payload(
+pub(crate) fn build_update_dependency_payload(
     downstream_id: &str,
     downstream_path: &str,
     package: &str,

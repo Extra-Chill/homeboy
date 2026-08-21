@@ -272,7 +272,7 @@ pub fn claim_next_at_in_roots(
 /// Claim the next deferred workload accepted by the selected runner. Records
 /// that require a different runtime or capability remain deferred for a later
 /// compatible runner.
-pub fn claim_next_matching_at(
+pub(crate) fn claim_next_matching_at(
     runner_id: &str,
     owner: &str,
     now: u64,

@@ -101,7 +101,7 @@ fn refresh_homeboy_command(runner: &Runner, workspace_root: &str) -> String {
     )
 }
 
-pub fn runner_source_checkout_prepare_options(
+pub(crate) fn runner_source_checkout_prepare_options(
     runner: &Runner,
     command: Vec<String>,
 ) -> RunnerExecOptions {

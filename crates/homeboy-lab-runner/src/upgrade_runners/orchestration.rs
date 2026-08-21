@@ -73,7 +73,7 @@ pub fn preflight_configured_runners_for_upgrade(
     Ok(failures)
 }
 
-pub fn upgrade_configured_runners(
+pub(crate) fn upgrade_configured_runners(
     force: bool,
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
@@ -176,7 +176,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
     }
 }
 
-pub fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
+pub(crate) fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
     if !runner_targets.is_empty() {
         return runner_targets
             .iter()

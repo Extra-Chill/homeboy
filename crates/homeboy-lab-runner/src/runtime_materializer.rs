@@ -630,7 +630,7 @@ impl<T: RunnerRuntimeMaterializerTransport> AgentRuntimeMaterializerOperations
 /// Materialize one exact generation. The process-global guard closes the
 /// same-process race; runtime-promotion serializes competing controller
 /// processes before any staging root is created.
-pub fn materialize_agent_runtime_generation(
+pub(crate) fn materialize_agent_runtime_generation(
     operations: &mut impl AgentRuntimeMaterializerOperations,
     plan: &AgentRuntimeMaterializationPlan,
     runner: &Runner,

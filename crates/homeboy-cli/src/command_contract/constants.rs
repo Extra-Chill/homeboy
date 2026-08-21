@@ -353,7 +353,7 @@ pub fn resource_lifecycle_index_constants() -> ResourceLifecycleIndexConstants {
     }
 }
 
-pub fn host_mutation_lifecycle_constants() -> HostMutationLifecycleConstants {
+pub(crate) fn host_mutation_lifecycle_constants() -> HostMutationLifecycleConstants {
     HostMutationLifecycleConstants {
         schema_id: registry_schema_id("host-mutation-lifecycle"),
     }

@@ -45,7 +45,7 @@ pub fn run_package_lint_at(root: &Path) -> Result<PipelineOutcome> {
     run_package_lint_at_with_ignores(root, &[])
 }
 
-pub fn run_package_lint_at_with_ignores(
+pub(crate) fn run_package_lint_at_with_ignores(
     root: &Path,
     package_ignores: &[String],
 ) -> Result<PipelineOutcome> {

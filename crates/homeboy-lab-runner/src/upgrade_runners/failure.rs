@@ -167,7 +167,7 @@ pub fn recover_and_retry_failed_upgrade(
 
 /// Builds the failure entry emitted when the post-realignment upgrade retry
 /// itself fails, preserving the realigned `homeboy_path` and bare version.
-pub fn runner_upgrade_retry_failure_entry(
+pub(crate) fn runner_upgrade_retry_failure_entry(
     runner_id: &str,
     homeboy_path: String,
     bare_version: Option<String>,

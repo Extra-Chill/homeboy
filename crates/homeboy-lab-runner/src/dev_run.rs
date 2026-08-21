@@ -117,7 +117,7 @@ pub struct ExtensionDevRunProvenance {
     pub command: Vec<String>,
 }
 
-pub fn plan_extension_dev_run(
+pub(crate) fn plan_extension_dev_run(
     extension_id: &str,
     runner_id: &str,
     source: &str,

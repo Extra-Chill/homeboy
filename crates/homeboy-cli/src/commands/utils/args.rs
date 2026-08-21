@@ -1164,7 +1164,7 @@ impl ChangedScopeArgs {
 ///
 /// Previously copied verbatim into `lint.rs`, `test.rs`, and
 /// `review/mod.rs`.
-pub fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+pub(crate) fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
     serde_json::from_str(raw).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "lab_changed_files_json",
@@ -1452,7 +1452,7 @@ impl PresentationArgs {
     }
 
     /// True when the command should pick its own default presentation.
-    pub fn is_auto_format(&self) -> bool {
+    pub(crate) fn is_auto_format(&self) -> bool {
         matches!(self.format, OutputFormat::Auto)
     }
 
