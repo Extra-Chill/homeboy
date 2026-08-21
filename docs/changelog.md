@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.31] - 2026-08-21
+
+### Fixed
+- an unreaped tunnel reads as live, and a fixture inherits the host's default branch
+
 ## [0.350.30] - 2026-08-21
 
 ### Changed
