@@ -13,7 +13,7 @@ use homeboy_core::server::Server;
 use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
 use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, reserve_loopback_port,
-    terminate_pid, wait_for_tcp, RemoteDaemon,
+    wait_for_tcp, RemoteDaemon,
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::daemon_repair;
@@ -516,26 +516,12 @@ pub(super) fn daemon_lab_handoff_capabilities_from_body(
     })
 }
 
-pub(super) fn daemon_http_runtime_stale_paths(
-    local_url: &str,
-) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
-    let response = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_stale_paths_from_body(&response.body))
-}
-
 pub(super) fn daemon_http_runtime_stale_paths_with_timeout(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
     let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
     Ok(daemon_runtime_stale_paths_from_body(&response.body))
-}
-
-pub(super) fn daemon_http_runtime_loaded_paths(
-    local_url: &str,
-) -> std::result::Result<BTreeMap<String, String>, String> {
-    let response = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_loaded_paths_from_body(&response.body))
 }
 
 pub(super) fn daemon_http_runtime_loaded_paths_with_timeout(

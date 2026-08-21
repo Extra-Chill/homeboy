@@ -286,18 +286,6 @@ fn runner_provider_unavailable_reason(
     provider_admission_reason(selection, providers)
 }
 
-/// Compact `id (backend)` inventory of discovered providers for diagnostics.
-fn provider_inventory_summary(providers: &[AgentTaskExecutorProvider]) -> String {
-    if providers.is_empty() {
-        return "<none>".to_string();
-    }
-    providers
-        .iter()
-        .map(|provider| format!("{} (backend `{}`)", provider.id, provider.backend))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 struct AgentTaskProviderProbeOutput {
     stdout: String,
     stderr: String,

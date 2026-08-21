@@ -605,14 +605,6 @@ fn peer_session_paths(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn status_peer_session_in(directory: &Path, controller_id: &str) -> Result<StatusPeerSession> {
-    status_peer_session_in_until(
-        directory,
-        controller_id,
-        Instant::now() + STATUS_PEER_SESSION_TIMEOUT,
-    )
-}
-
 fn status_peer_session_in_until(
     directory: &Path,
     controller_id: &str,
@@ -2064,10 +2056,6 @@ pub(super) fn command_failure_message(
         output.stdout.trim(),
         output.stderr.trim()
     )
-}
-
-pub(super) fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub(crate) fn terminate_pid(pid: u32) {

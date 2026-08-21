@@ -145,7 +145,6 @@ use crate::workspace::types::{
     RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::workspace::util::git_output;
-use homeboy_core::source_snapshot::SourceSnapshot;
 
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

@@ -4,7 +4,6 @@ use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
