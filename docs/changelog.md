@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.351.0] - 2026-08-21
+
+### Added
+- verify replacement gates in one command
+
+### Changed
+- collapse five more wrapper pairs
+
+### Fixed
+- preserve fail-closed containment after main merge
+- make candidate shard failures deterministic
+- make runtime cleanup contention actionable
+- diagnose the current lifecycle denial
+- align historical continuation preflight
+- emit exact Cargo gate recovery
+
 ## [0.350.37] - 2026-08-21
 
 ### Changed
