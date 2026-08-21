@@ -2464,9 +2464,8 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The assertion is that a read left the record byte-identical, which
-/// is only meaningful if the before-read, the status and the after-read all
-/// address one record in one home.
+/// (#7505). Status may persist current admission and reconciliation projections;
+/// the invariant here is that existing terminal provider evidence is unchanged.
 ///
 /// `record_completed_run_in_store` reaches automatic artifact retention only
 /// when a task declares a workspace root that exists; `test_plan()` declares
@@ -2509,7 +2508,14 @@ fn status_preserves_existing_terminal_runtime_evidence() {
         .read_record(&record.run_id)
         .expect("record after status");
 
-    assert_eq!(before, after);
+    assert_eq!(
+        loaded.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
+    assert_eq!(
+        after.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
     assert_eq!(
         loaded.lifecycle.provider_runtime[0].metadata["manual"],
         true
@@ -2678,8 +2684,19 @@ fn cancel_run_signals_live_running_record() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
+    let identity = homeboy_core::build_identity::current().display;
+    let artifact = context.root().join("fake-controller");
+    let digest = fake_controller_artifact(&artifact, &identity, "live cancellation fixture");
     lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| Ok(json!({})))
+        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| {
+            Ok(json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": artifact,
+                    "sha256": digest,
+                }
+            }))
+        })
         .expect("submitted");
     // Drop the stub admission before marking running (#12721).
     //

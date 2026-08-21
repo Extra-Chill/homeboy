@@ -4,6 +4,40 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.36] - 2026-08-21
+
+### Changed
+- collapse three more pairs and root their CLI callers
+- collapse four more lifecycle_ops wrapper pairs
+
+## [0.350.35] - 2026-08-21
+
+### Changed
+- collapse four more lifecycle_ops wrapper pairs
+- align full runner status contract
+- resolve once per linked-extension group, not per member
+- pin Homeboy Action v2.14.4
+- preserve terminal runtime evidence
+- stabilize portable command contracts
+- expose portable shard failures
+- contain startup background work
+- remove shard-sensitive fixture races
+- allow portable contract tests to complete
+- align archive fixtures with runtime contracts
+- isolate Linux prune process probes
+- expose prune liveness failures
+- bound archived test replay
+- pin one-time archive replay
+- pin repaired test tooling
+
+### Fixed
+- resolve explicit promotion paths through providers
+- keep mirrored lifecycle on injected roots
+- preserve current contracts in archive replay
+- import Linux daemon deadline clock
+- close Linux archive replay failures
+- repair bounded archive replay failures
+
 ## [0.350.34] - 2026-08-21
 
 ### Changed

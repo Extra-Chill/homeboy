@@ -3,6 +3,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 #[cfg(unix)]
 use std::{os::unix::process::CommandExt, process::Command};
 
@@ -672,7 +674,14 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
         .spawn()
         .expect("process with daemon state environment");
 
-    let store = super::process_durable_store_path(process.id(), true).expect("procfs store path");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let store = loop {
+        if let Some(store) = super::process_durable_store_path(process.id(), true) {
+            break store;
+        }
+        assert!(Instant::now() < deadline, "procfs store path");
+        std::thread::sleep(Duration::from_millis(10));
+    };
     process.kill().expect("stop process");
     process.wait().expect("reap process");
 

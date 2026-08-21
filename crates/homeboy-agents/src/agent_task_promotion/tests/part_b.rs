@@ -2055,7 +2055,8 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
             argv: vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "printf provider-stdout; printf provider-stderr >&2; exit 7".to_string(),
+                "cat >/dev/null; printf provider-stdout; printf provider-stderr >&2; exit 7"
+                    .to_string(),
             ],
             ..Default::default()
         },

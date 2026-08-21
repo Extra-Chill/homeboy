@@ -105,7 +105,7 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
 }
 
 #[test]
-fn compact_runner_status_includes_summary_and_full_continuation() {
+fn compact_local_runner_status_separates_placement_from_lab_connection() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_lab_runner(dir.path());
 
@@ -126,19 +126,20 @@ fn compact_runner_status_includes_summary_and_full_continuation() {
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
     assert_eq!(stdout_json["success"], true);
     assert_eq!(stdout_json["data"]["command"], "runner.status");
+    assert_eq!(stdout_json["data"]["id"], "lab-local");
     assert_eq!(
-        stdout_json["data"]["operator_summary"]["identity"],
-        "lab-local"
+        stdout_json["data"]["execution_capabilities"]["local_placement"]["available"],
+        true
     );
     assert_eq!(
-        stdout_json["data"]["truncation"]["full_command"],
-        "homeboy runner status lab-local --full"
+        stdout_json["data"]["execution_capabilities"]["lab_runner_connection"]["available"],
+        false
     );
     assert!(stdout_json["data"].get("selected_lab_runner").is_none());
 }
 
 #[test]
-fn full_runner_status_includes_lab_diagnostics() {
+fn full_local_runner_status_does_not_imply_a_lab_connection() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_lab_runner(dir.path());
 
@@ -159,33 +160,23 @@ fn full_runner_status_includes_lab_diagnostics() {
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
     assert_eq!(stdout_json["success"], true);
     assert_eq!(stdout_json["data"]["command"], "runner.status");
+    assert_eq!(stdout_json["data"]["id"], "lab-local");
     assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["runner_id"],
-        "lab-local"
+        stdout_json["data"]["execution_capabilities"]["local_placement"]["available"],
+        true
     );
     assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["configured_executable"],
-        "homeboy"
+        stdout_json["data"]["execution_capabilities"]["lab_runner_connection"]["available"],
+        false
     );
     assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["workspace_root"],
-        dir.path().to_string_lossy().as_ref()
+        stdout_json["data"]["selected_lab_runner"]["connected"],
+        false
     );
     assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["readiness_state"],
-        "disconnected"
+        stdout_json["data"]["selected_lab_runner"]["availability"]["connected"],
+        false
     );
-    assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["status"]["state"],
-        "disconnected"
-    );
-    assert!(stdout_json["data"]["managed_followups"]
-        .as_array()
-        .expect("managed followups")
-        .iter()
-        .any(
-            |followup| followup["command"] == "homeboy runner doctor lab-local --scope lab-offload"
-        ));
 }
 
 #[test]

@@ -857,12 +857,24 @@ fn force_with_lease_then_reconcile(
                 None,
             )
         })?;
+    // One store for both receipt writes and the status read below: the two
+    // receipts describe one force-with-lease and must land in one home.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let receipt = force_with_lease_push(path, head)?;
-    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt.clone())?;
+    agent_task_lifecycle::record_cook_force_with_lease_receipt_in_store(
+        &lifecycle_store,
+        &child.run_id,
+        receipt.clone(),
+    )?;
     agent_task_service::recover_cook_pr(&child.run_id, Vec::new(), false)?;
     let mut receipt = receipt;
     receipt["pr_refresh_completed"] = Value::Bool(true);
-    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt)?;
+    agent_task_lifecycle::record_cook_force_with_lease_receipt_in_store(
+        &lifecycle_store,
+        &child.run_id,
+        receipt,
+    )?;
     Ok(())
 }
 

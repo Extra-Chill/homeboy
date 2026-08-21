@@ -120,6 +120,16 @@ pub(crate) fn preflight_configured_workspace_provider_with_config(
     if resolve_homeboy_workspace(to_workspace)?.is_some() {
         return Ok(());
     }
+    if Path::new(to_workspace).is_dir() {
+        return worktree_providers::resolve_apply_enabled_worktree_provider_path_from_config(
+            Path::new(to_workspace),
+            config,
+            None,
+            None,
+        )?
+        .map(|_| ())
+        .ok_or_else(|| provider_path_not_found(to_workspace));
+    }
     worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
         to_workspace,
         config,
@@ -493,12 +503,22 @@ impl ExternalPromotionWorkspaceProvider {
                         head: trusted.head.clone(),
                     },
                 );
-            let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
-            &request.to_workspace,
-            &configured_fallback.config,
-            request.gate_feedback_baseline.as_ref(),
-            trusted_unpushed_destination.as_ref(),
-        )?;
+            let resolution = if Path::new(&request.to_workspace).is_dir() {
+                worktree_providers::resolve_apply_enabled_worktree_provider_path_from_config(
+                    Path::new(&request.to_workspace),
+                    &configured_fallback.config,
+                    request.gate_feedback_baseline.as_ref(),
+                    trusted_unpushed_destination.as_ref(),
+                )?
+                .ok_or_else(|| provider_path_not_found(&request.to_workspace))?
+            } else {
+                worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                    &request.to_workspace,
+                    &configured_fallback.config,
+                    request.gate_feedback_baseline.as_ref(),
+                    trusted_unpushed_destination.as_ref(),
+                )?
+            };
             let workspace = resolution.worktree.path;
             self.provenance = Some(serde_json::json!({
                 "id": resolution.provider_id,
@@ -531,6 +551,15 @@ impl ExternalPromotionWorkspaceProvider {
         }
         error
     }
+}
+
+fn provider_path_not_found(path: &str) -> Error {
+    Error::validation_invalid_argument(
+        "to_worktree",
+        format!("configured worktree providers do not own explicit destination path `{path}`"),
+        Some(path.to_string()),
+        None,
+    )
 }
 
 fn invocation_program_and_args(invocation: &CommandInvocation) -> Option<(String, Vec<String>)> {

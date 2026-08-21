@@ -1280,7 +1280,19 @@ mod tests {
     }
 
     fn commit(path: &Path, message: &str) {
-        git(path, &["commit", "-q", "-m", message]);
+        git(
+            path,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy-test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
     }
 
     fn git(path: &Path, args: &[&str]) {

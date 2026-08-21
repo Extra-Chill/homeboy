@@ -372,6 +372,33 @@ pub fn resolve_worktree_provider_path_from_config(
     path: &std::path::Path,
     config: &HomeboyConfig,
 ) -> Result<Option<WorktreeProviderResolution>> {
+    resolve_worktree_provider_path_with_policy_from_config(path, config, false, None, None)
+}
+
+/// Resolve an exact provider-owned checkout path for mutation while applying
+/// the same destination safety policy as handle-based promotion.
+pub fn resolve_apply_enabled_worktree_provider_path_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
+) -> Result<Option<WorktreeProviderResolution>> {
+    resolve_worktree_provider_path_with_policy_from_config(
+        path,
+        config,
+        true,
+        gate_feedback_baseline,
+        trusted_unpushed_destination,
+    )
+}
+
+fn resolve_worktree_provider_path_with_policy_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+    require_apply_enabled: bool,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
+) -> Result<Option<WorktreeProviderResolution>> {
     let requested = match std::fs::canonicalize(path) {
         Ok(path) => path,
         Err(_) => return Ok(None),
@@ -384,7 +411,7 @@ pub fn resolve_worktree_provider_path_from_config(
     provider_ids.sort();
     for provider_id in provider_ids {
         let provider = &config.worktree_providers[&provider_id];
-        if !provider.enabled {
+        if !provider.enabled || (require_apply_enabled && !provider.apply_enabled) {
             continue;
         }
         let worktree = if let Some(command) = provider.commands.resolve_path.as_ref() {
@@ -409,7 +436,12 @@ pub fn resolve_worktree_provider_path_from_config(
         let Some(worktree) = worktree else {
             continue;
         };
-        validate_provider_handle(&provider_id, &worktree, None, None)?;
+        validate_provider_handle(
+            &provider_id,
+            &worktree,
+            gate_feedback_baseline,
+            trusted_unpushed_destination,
+        )?;
         return Ok(Some(WorktreeProviderResolution {
             provider_id,
             worktree,
