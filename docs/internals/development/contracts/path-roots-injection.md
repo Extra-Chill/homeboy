@@ -195,6 +195,54 @@ What *was* safe to take here: `private_batch_plan_dir()` had exactly one caller
 and it was a test. A wrapper whose last non-test caller has already disappeared
 is dead weight regardless of depth — delete it on sight.
 
+## Dead wrappers: direction matters
+
+Two different things look identical to a reachability scan, and only one is debt.
+
+**A dead *ambient* wrapper is debt.** It resolves from process state, nothing
+calls it, and `pub` items are not dead-code analysed so the compiler will never
+say so. Delete on sight.
+
+**A dead *rooted* sibling is unused capacity.** It takes an explicit root, and
+nothing calls it *yet* because the callers above it have not been rooted. It is
+ahead of demand, not behind it. Deleting it means re-adding the same five lines
+when that layer's turn comes.
+
+`extension_store` has one of each, side by side:
+
+| function | callers | verdict |
+|---|---|---|
+| `is_extension_linked` (ambient) | 20+ | live |
+| `is_extension_linked_in_root` (rooted) | **0** | **keep** — it is the injection point `homeboy-extension`'s 22 ambient sites will need |
+| `broken_extension_links` (ambient) | 1, a test | **delete** |
+| `broken_extension_links_in_root` (rooted) | 0 → 1 | keep, test now calls it |
+
+Before deleting anything a scan calls dead, check which half it is.
+
+### Scanning for them correctly
+
+A wrapper delegates to its rooted sibling in one of two argument shapes, and a
+pattern that only knows the first will silently under-report:
+
+```rust
+let root = paths::homeboy()?;          // shape A: resolve, then call
+foo_in_root(&root, id)
+
+foo_in_root(&paths::homeboy()?, id)    // shape B: resolve inside the call
+```
+
+The first sweep of this codebase only matched shape A and reported the seam
+closed. Re-scanning for both found three more dead wrappers, including one in
+`config.rs`. Match both, and search `crates/`, `src/`, **and** the repo-root
+`tests/` tree — files there are pulled into libs by `#[path]` and a scan scoped
+to `crates/` reads as a false zero for anything they reference.
+
+Also beware module-qualified shadowing. `gh_actions.rs` has a private
+`mod helpers` exporting its own rooted `list_runs_cache_path`, so unqualified
+call sites resolve to that rather than to the same-named ambient function in
+`gh_actions_cache`. Confirm with a module-qualified grep before believing a
+caller count.
+
 ## Tests are a boundary too
 
 Tests that construct a carrier by hand, or call a rooted function directly,
