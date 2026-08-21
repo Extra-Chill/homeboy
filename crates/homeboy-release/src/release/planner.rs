@@ -763,7 +763,14 @@ mod tests {
         std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("version");
         std::fs::write(dir.join("package.json"), r#"{"version":"1.2.3"}"#).expect("package");
         std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").expect("changelog");
-        git(dir, &["init", "-q", "--initial-branch=main"]);
+        // Name the branch explicitly. A bare `git init` takes whatever
+        // `init.defaultBranch` says, which is `master` unless the host
+        // configured otherwise -- so this fixture produced `master` on CI and
+        // `main` only for developers who had set it. The planner then refused:
+        // "Refusing to plan release push from branch 'master' because the repo
+        // default branch is 'main'". The branch under test is part of the
+        // fixture, not of the host's git config.
+        git(dir, &["init", "-q", "-b", "main"]);
         git(dir, &["config", "user.email", "test@example.com"]);
         git(dir, &["config", "user.name", "Test"]);
         git(dir, &["add", "."]);

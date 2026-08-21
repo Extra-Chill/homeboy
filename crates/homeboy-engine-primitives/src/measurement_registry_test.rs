@@ -374,6 +374,14 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
     },
     GateLayerSite {
         file: ".github/ci-required-gates-executed.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the terminal gate first proves the declared context population is non-empty, then evaluates every required dependency and check-run conclusion before passing.",
+    },
+    GateLayerSite {
+        file: ".github/ci-required-gates-executed.sh",
         decision: "exit 1",
         basis: MeasurementBasis::Projection,
         renders_skip: false,

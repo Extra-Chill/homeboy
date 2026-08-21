@@ -21,6 +21,10 @@ pub(super) struct ReleaseWorkspace {
     output: ReleaseWorkspaceOutput,
     owned: Option<(WorktreeProviderResolution, WorktreeProviderLifecycleIntent)>,
     record_owner: Option<String>,
+    /// Bound to the roots the release boundary resolved. Provisioning and
+    /// finalization write the same record from different phases of a release,
+    /// so both must address the same home (#7505).
+    store: OperationRecordStore,
 }
 
 impl ReleaseWorkspace {
@@ -28,13 +32,18 @@ impl ReleaseWorkspace {
         self.output.source_sha.clone()
     }
 
-    pub(super) fn select(component: &Component) -> Result<Self> {
+    pub(super) fn select(
+        roots: &homeboy_core::paths::PathRoots,
+        component: &Component,
+    ) -> Result<Self> {
+        let store = OperationRecordStore::in_roots(roots);
         if in_place_eligible(component) {
             return Ok(Self {
                 component: component.clone(),
                 output: ReleaseWorkspaceOutput::in_place(&component.local_path),
                 owned: None,
                 record_owner: None,
+                store,
             });
         }
 
@@ -63,6 +72,7 @@ impl ReleaseWorkspace {
                 output: ReleaseWorkspaceOutput::in_place(&component.local_path),
                 owned: None,
                 record_owner: None,
+                store,
             });
         }
 
@@ -90,7 +100,7 @@ impl ReleaseWorkspace {
             select_apply_enabled_worktree_provider_from_config(&intent, &config)?;
         // Publish ownership before invoking the provider. A crash during ensure
         // is therefore recoverable through the same idempotency owner reference.
-        OperationRecordStore::create(&OperationRecord {
+        store.create(&OperationRecord {
             owner_run_ref: lifecycle.owner_run_ref.clone(),
             operation: "provider_workspace".to_string(),
             subject: component.id.clone(),
@@ -128,7 +138,7 @@ impl ReleaseWorkspace {
                 None,
             ));
         }
-        OperationRecordStore::update(&lifecycle.owner_run_ref, |record| {
+        store.update(&lifecycle.owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| missing_record(&lifecycle.owner_run_ref))?;
             record.provider = provision.resolution.provider_id.clone();
             record.path = Some(provision.resolution.worktree.path.clone());
@@ -140,7 +150,7 @@ impl ReleaseWorkspace {
         })?;
         if let Err(validation_error) = verify_staging_workspace(&provision.resolution, &source_sha)
         {
-            OperationRecordStore::update(&lifecycle.owner_run_ref, |record| {
+            store.update(&lifecycle.owner_run_ref, |record| {
                 let mut record = record.ok_or_else(|| missing_record(&lifecycle.owner_run_ref))?;
                 record.terminal_disposition = Some(
                     WorktreeProviderTerminalDisposition::Failed
@@ -150,6 +160,7 @@ impl ReleaseWorkspace {
                 Ok(record)
             })?;
             let finalization_error = finalize_record(
+                &store,
                 &lifecycle.owner_run_ref,
                 &provision.resolution,
                 &lifecycle,
@@ -190,6 +201,7 @@ impl ReleaseWorkspace {
             },
             owned: Some((provision.resolution, lifecycle)),
             record_owner: Some(record_owner),
+            store,
         })
     }
 
@@ -205,7 +217,7 @@ impl ReleaseWorkspace {
                     Some("provider-owned workspace has no durable owner record".to_string());
                 return self.output.clone();
             };
-            let _ = OperationRecordStore::update(owner, |record| {
+            let _ = self.store.update(owner, |record| {
                 let mut record = record.ok_or_else(|| missing_record(owner))?;
                 record.terminal_disposition = Some(disposition.as_str().to_string());
                 record.attributes.insert(
@@ -214,7 +226,7 @@ impl ReleaseWorkspace {
                 );
                 Ok(record)
             });
-            match finalize_record(owner, resolution, lifecycle, disposition) {
+            match finalize_record(&self.store, owner, resolution, lifecycle, disposition) {
                 Ok(_) => {
                     self.owned = None;
                     self.output.final_disposition = Some(
@@ -238,12 +250,14 @@ impl ReleaseWorkspace {
 }
 
 pub(super) fn reconcile_pending(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     selector: Option<&str>,
 ) -> Result<Option<OperationRecord>> {
+    let store = OperationRecordStore::in_roots(roots);
     let records = match selector {
-        Some(owner) => OperationRecordStore::load(owner)?.into_iter().collect(),
-        None => OperationRecordStore::pending_for_subject("provider_workspace", component_id)?,
+        Some(owner) => store.load(owner)?.into_iter().collect(),
+        None => store.pending_for_subject("provider_workspace", component_id)?,
     };
     let record = match records.as_slice() {
         [] => return Ok(None),
@@ -320,7 +334,7 @@ pub(super) fn reconcile_pending(
                 None,
             ));
         }
-        OperationRecordStore::update(&record.owner_run_ref, |current| {
+        store.update(&record.owner_run_ref, |current| {
             let mut current = current.ok_or_else(|| missing_record(&record.owner_run_ref))?;
             current.path = Some(provision.resolution.worktree.path.clone());
             current.lifecycle_state = "provisioned".to_string();
@@ -365,7 +379,14 @@ pub(super) fn reconcile_pending(
         Some("timed_out") => WorktreeProviderTerminalDisposition::TimedOut,
         _ => WorktreeProviderTerminalDisposition::Interrupted,
     };
-    finalize_record(&record.owner_run_ref, &resolution, &lifecycle, disposition).map(Some)
+    finalize_record(
+        &store,
+        &record.owner_run_ref,
+        &resolution,
+        &lifecycle,
+        disposition,
+    )
+    .map(Some)
 }
 
 pub(super) fn output_from_record(record: &OperationRecord) -> ReleaseWorkspaceOutput {
@@ -404,12 +425,13 @@ struct PersistedProvisionIntent {
 }
 
 fn finalize_record(
+    store: &OperationRecordStore,
     owner: &str,
     resolution: &WorktreeProviderResolution,
     lifecycle: &WorktreeProviderLifecycleIntent,
     disposition: WorktreeProviderTerminalDisposition,
 ) -> Result<OperationRecord> {
-    match OperationRecordStore::claim_finalization(owner)? {
+    match store.claim_finalization(owner)? {
         FinalizationClaim::AlreadyCompleted(record) => Ok(record),
         FinalizationClaim::InProgress(record) => Err(Error::validation_invalid_argument(
             "owner_run_ref",
@@ -427,10 +449,9 @@ fn finalize_record(
                 disposition,
                 &defaults::load_config(),
             ) {
-                Ok(_) => OperationRecordStore::complete_finalization(owner, &lease),
+                Ok(_) => store.complete_finalization(owner, &lease),
                 Err(error) => {
-                    let _ =
-                        OperationRecordStore::fail_finalization(owner, &lease, error.to_string());
+                    let _ = store.fail_finalization(owner, &lease, error.to_string());
                     Err(error)
                 }
             }
@@ -513,6 +534,22 @@ fn verify_staging_workspace(
 mod tests {
     use super::{finalize_record, in_place_eligible, reconcile_pending};
     use crate::release::operation_record::{OperationRecord, OperationRecordStore};
+
+    /// The isolated home each test below installs, named as roots.
+    fn test_roots() -> homeboy_core::paths::PathRoots {
+        homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+    }
+
+    /// The record store for the isolated home each test below installs.
+    ///
+    /// `with_isolated_home` establishes the home; this binds a store to it once,
+    /// the same way the release boundary binds one for a whole command (#7505).
+    fn test_store() -> OperationRecordStore {
+        OperationRecordStore::in_roots(
+            &homeboy_core::paths::PathRoots::from_environment().expect("path roots"),
+        )
+    }
+
     use homeboy_core::component::Component;
     use homeboy_core::defaults::{
         save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
@@ -584,15 +621,17 @@ mod tests {
                 continuation_evidence: Vec::new(),
                 attributes: serde_json::Map::new(),
             };
-            OperationRecordStore::create(&record).expect("persist completed record");
+            test_store()
+                .create(&record)
+                .expect("persist completed record");
             assert_eq!(
-                reconcile_pending("component", Some("release/completed"))
+                reconcile_pending(&test_roots(), "component", Some("release/completed"))
                     .expect("completed recovery must no-op")
                     .expect("completed record")
                     .finalization_status,
                 "completed"
             );
-            assert!(reconcile_pending("component", None)
+            assert!(reconcile_pending(&test_roots(), "component", None)
                 .expect("implicit recovery ignores historical completion")
                 .is_none());
         });
@@ -602,26 +641,27 @@ mod tests {
     fn active_finalization_lease_remains_pending_for_racing_recovery() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let owner = "release/finalizing";
-            OperationRecordStore::create(&OperationRecord {
-                owner_run_ref: owner.to_string(),
-                operation: "provider_workspace".to_string(),
-                subject: "component".to_string(),
-                provider: "fixture".to_string(),
-                handle: "release-fixture".to_string(),
-                path: Some("/workspace".to_string()),
-                source_sha: "abc".to_string(),
-                cleanup_policy: "remove_on_success".to_string(),
-                lifecycle_state: "provisioned".to_string(),
-                terminal_disposition: Some("succeeded".to_string()),
-                finalization_status: "pending".to_string(),
-                finalization_lease: None,
-                finalization_lease_started_ms: None,
-                attempt_count: 0,
-                continuation_evidence: Vec::new(),
-                attributes: serde_json::Map::new(),
-            })
-            .expect("persist record");
-            let _claim = OperationRecordStore::claim_finalization(owner).expect("claim lease");
+            test_store()
+                .create(&OperationRecord {
+                    owner_run_ref: owner.to_string(),
+                    operation: "provider_workspace".to_string(),
+                    subject: "component".to_string(),
+                    provider: "fixture".to_string(),
+                    handle: "release-fixture".to_string(),
+                    path: Some("/workspace".to_string()),
+                    source_sha: "abc".to_string(),
+                    cleanup_policy: "remove_on_success".to_string(),
+                    lifecycle_state: "provisioned".to_string(),
+                    terminal_disposition: Some("succeeded".to_string()),
+                    finalization_status: "pending".to_string(),
+                    finalization_lease: None,
+                    finalization_lease_started_ms: None,
+                    attempt_count: 0,
+                    continuation_evidence: Vec::new(),
+                    attributes: serde_json::Map::new(),
+                })
+                .expect("persist record");
+            let _claim = test_store().claim_finalization(owner).expect("claim lease");
             let resolution = WorktreeProviderResolution {
                 provider_id: "fixture".to_string(),
                 worktree: WorktreeProviderHandle {
@@ -643,6 +683,7 @@ mod tests {
             };
 
             let error = finalize_record(
+                &test_store(),
                 owner,
                 &resolution,
                 &lifecycle,
@@ -651,7 +692,8 @@ mod tests {
             .expect_err("racing recovery must not report finalization success");
             assert!(error.message.contains("already in progress"));
             assert_eq!(
-                OperationRecordStore::load(owner)
+                test_store()
+                    .load(owner)
                     .expect("load")
                     .expect("record")
                     .finalization_status,
@@ -736,16 +778,16 @@ mod tests {
             );
             save_config(&config).expect("save provider config");
             let owner = "release/pre-ensure";
-            OperationRecordStore::create(&OperationRecord {
+            test_store().create(&OperationRecord {
                 owner_run_ref: owner.to_string(), operation: "provider_workspace".to_string(), subject: "component".to_string(), provider: "fixture".to_string(), handle: "release-fixture".to_string(), path: None, source_sha: "abc".to_string(), cleanup_policy: "remove_on_success".to_string(), lifecycle_state: "provisioning".to_string(), terminal_disposition: None, finalization_status: "pending".to_string(), finalization_lease: None, finalization_lease_started_ms: None, attempt_count: 0, continuation_evidence: Vec::new(),
                 attributes: serde_json::Map::from_iter([("provision_intent".to_string(), serde_json::json!({ "repo": "repo", "base": "main", "head": "abc", "task_url": "release/pre-ensure", "idempotency_key": "release-fixture:repo:main:abc" }))]),
             }).expect("persist pre-ensure record");
 
-            let completed = reconcile_pending("component", Some(owner))
+            let completed = reconcile_pending(&test_roots(), "component", Some(owner))
                 .expect("recover provider workspace")
                 .expect("record");
             assert_eq!(completed.finalization_status, "completed");
-            let repeated = reconcile_pending("component", Some(owner))
+            let repeated = reconcile_pending(&test_roots(), "component", Some(owner))
                 .expect("completed recovery is idempotent")
                 .expect("record");
             assert_eq!(repeated.finalization_status, "completed");
@@ -763,11 +805,10 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(
-                OperationRecordStore::pending_for_subject("provider_workspace", "component")
-                    .expect("pending records")
-                    .is_empty()
-            );
+            assert!(test_store()
+                .pending_for_subject("provider_workspace", "component")
+                .expect("pending records")
+                .is_empty());
         });
     }
 }

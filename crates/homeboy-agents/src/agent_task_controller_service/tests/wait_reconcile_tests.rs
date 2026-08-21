@@ -367,7 +367,7 @@ fn resume_resolves_a_satisfied_wait_instead_of_reporting_idle() {
 
         let result = resume(
             "wait-parent-resume",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("resumed");

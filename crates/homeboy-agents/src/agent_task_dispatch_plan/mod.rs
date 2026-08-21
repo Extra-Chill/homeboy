@@ -790,6 +790,7 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
     use std::process::Command;
+    use std::sync::Arc;
 
     #[test]
     fn generated_change_guardrails_describe_positive_success_criteria() {
@@ -1828,7 +1829,7 @@ mod tests {
                     },
                     ..DispatchRequestOverrides::default()
                 }),
-                NoopExecutor,
+                Arc::new(NoopExecutor),
             )
             .expect("dispatch queued");
 
@@ -1858,7 +1859,7 @@ mod tests {
                     run_id: Some("dispatch-missing-secret".to_string()),
                     ..DispatchRequestOverrides::default()
                 }),
-                NoopExecutor,
+                Arc::new(NoopExecutor),
             )
             .expect_err("missing secret should fail before submit");
 

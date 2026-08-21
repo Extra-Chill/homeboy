@@ -120,7 +120,9 @@ pub use super::agent_task_schedule::{
 // schedule-side variant, so name it explicitly here.
 pub use super::agent_task_schedule::AgentTaskProgressEvent;
 
-pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+pub use super::agent_task_scheduler::{
+    AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,
+};
 
 pub use super::agent_tool_control_plane::{
     dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
@@ -303,20 +305,23 @@ pub mod lifecycle {
         claim_next_eligible_queued_run_with_preflight_and_filter,
         claim_next_eligible_queued_run_with_preflight_and_filter_and_limit, claim_next_queued_run,
         complete_cook_operation, cook_attempt_run_id, cook_index, cook_index_exists,
-        cook_terminal_notification_outcome, durable_local_read, exact_durable_local_read,
-        exact_record, fail_cook_operation, fail_detached_cook_handoff_parent,
+        cook_terminal_notification_outcome, durable_local_read, durable_local_read_in_store,
+        exact_durable_local_read_in_store, exact_record, fail_cook_operation,
+        fail_detached_cook_handoff_parent, fail_detached_cook_handoff_parent_in_store,
         has_accepted_runner_handoff, invalidate_cook_finalization_for_dependency, list_records,
-        load_controller_plan, load_plan, logs, mark_resuming, mark_running,
+        load_controller_plan, load_plan, load_plan_in_store, logs, mark_resuming, mark_running,
         materialize_recovered_patch_artifact, persisted_status, pin_current_controller_runtime,
         pinned_runtime_for_mutation, prune_controller_runtime_pins, quarantine_queued_run_exact,
         rearm_quarantined_run, reconcile_record_health, reconcile_terminal_artifact_projection,
         record_acceptance_verdict_with_feedback, record_completed_run, record_cook_attempt,
         record_cook_finalization, record_cook_force_with_lease_receipt,
-        record_detached_cook_handoff_child, record_detached_cook_handoff_parent,
-        record_detached_cook_supervisor, record_detached_lab_run, record_health_summary,
-        record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
-        record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
-        record_run_aggregate, record_runner_job_identity, register_acceptance_verifier,
+        record_detached_cook_handoff_child, record_detached_cook_handoff_child_in_store,
+        record_detached_cook_handoff_parent, record_detached_cook_handoff_parent_in_store,
+        record_detached_cook_supervisor, record_detached_cook_supervisor_in_store,
+        record_detached_lab_run, record_health_summary, record_lab_offload_phase,
+        record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
+        record_promotion, record_remote_dispatch_failure, record_run_aggregate,
+        record_runner_job_identity, register_acceptance_verifier,
         register_acceptance_verifier_from_config, require_detached_cook_handoff_fence_open,
         reserve_detached_cook_handoff_materialization, resolve_detached_cook_materializing_attempt,
         resolve_promotion_patch_artifact_id, retry, run_id_for_aggregate_path, run_record_exists,
@@ -449,7 +454,9 @@ pub mod scheduler {
         AgentTaskResourceBudgetStatus, AgentTaskResourcePressure, AgentTaskRetryPolicy,
         AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
     };
-    pub use super::super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+    pub use super::super::agent_task_scheduler::{
+        AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,
+    };
 }
 
 /// Secret-env mapping and resolution helpers.
@@ -487,23 +494,22 @@ pub mod service {
         register_cook_batch_job_driver, register_promotion_job_driver,
         resolve_cook_continuation_run_id, resolve_supervision_policy, resume, resume_cook,
         resume_cook_batch, retry, run_cook, run_cook_batch, run_cook_batch_with_control,
-        run_cook_with_durable_observer, run_cook_with_store, run_loaded_plan, run_next,
-        run_next_with_cook_dispatcher, run_status, run_submitted, run_submitted_with_timeout,
-        run_terminal_cook_continuation, source_worktree_path, status, submit_plan_spec,
-        terminal_review_form_continuation_is_eligible, terminal_transport_recovery_required,
-        validate_initial_recipe_compatibility, validate_recipe_attempt_record,
-        AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
-        AgentTaskCookBatchCellReport, AgentTaskCookBatchControl, AgentTaskCookBatchJob,
-        AgentTaskCookBatchJobPhase, AgentTaskCookBatchJobRequest, AgentTaskCookBatchOptions,
-        AgentTaskCookBatchReport, AgentTaskCookCellError, AgentTaskCookReport,
-        AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts,
-        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskDiscoveryRun,
-        AgentTaskHydratedEvidence, AgentTaskPromotionJob, AgentTaskPromotionJobDriver,
-        AgentTaskPromotionJobPhase, AgentTaskPromotionRequest, AgentTaskRetryServiceResult,
-        AgentTaskRunResult, CookActivityProbe, CookBatchJobDriver, CookContinuationState,
-        CookProgressEvent, CookProviderActivity, CookSupervisionTick, CookSupervisor,
-        AGENT_TASK_COOK_BATCH_JOB_TYPE, AGENT_TASK_COOK_BATCH_JOB_VERSION,
-        AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
-        DETACHED_BATCH_COORDINATOR_ENV,
+        run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status, run_submitted,
+        run_submitted_with_timeout, run_terminal_cook_continuation, source_worktree_path, status,
+        submit_plan_spec, terminal_review_form_continuation_is_eligible,
+        terminal_transport_recovery_required, validate_initial_recipe_compatibility,
+        validate_recipe_attempt_record, AgentTaskCandidateAdoptionOptions,
+        AgentTaskCookAttemptReport, AgentTaskCookBatchCellReport, AgentTaskCookBatchControl,
+        AgentTaskCookBatchJob, AgentTaskCookBatchJobPhase, AgentTaskCookBatchJobRequest,
+        AgentTaskCookBatchOptions, AgentTaskCookBatchReport, AgentTaskCookCellError,
+        AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
+        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
+        AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskPromotionJob,
+        AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase, AgentTaskPromotionRequest,
+        AgentTaskRetryServiceResult, AgentTaskRunResult, CookActivityProbe, CookBatchJobDriver,
+        CookContext, CookContinuationState, CookProgressEvent, CookProviderActivity,
+        CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
+        AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,
+        AGENT_TASK_PROMOTION_JOB_VERSION, DETACHED_BATCH_COORDINATOR_ENV,
     };
 }

@@ -2698,6 +2698,31 @@ fn cancel_run_signals_live_running_record() {
             }))
         })
         .expect("submitted");
+    // Drop the stub admission before marking running (#12721).
+    //
+    // `mark_running_in_store` migrates the pin before it validates it, and
+    // migration skips only when the key is ABSENT -- an empty object is
+    // present, so `migrate_legacy_pin_unlocked` demands
+    // `/originating/build_identity` and fails closed. That contract is
+    // correct: `{}` is malformed durable metadata and refusing to mutate on
+    // it is the point. What is wrong is persisting `{}` in the first place.
+    //
+    // Cancellation reads `runner_pid` and never touches the runtime pin, so
+    // the record this test needs is one with no pin at all. This mirrors
+    // `mark_running_reclaims_stale_running_record`, which uses the same stub
+    // and passes only because it replaces metadata wholesale first.
+    let mut submitted = lifecycle_store
+        .read_record("run-cancel-live")
+        .expect("submitted record");
+    submitted
+        .metadata
+        .as_object_mut()
+        .expect("record metadata is an object")
+        .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+    lifecycle_store
+        .write_record(&submitted)
+        .expect("drop stub controller runtime pin");
+
     mark_running_in_store(&lifecycle_store, "run-cancel-live").expect("marked running");
 
     // The test binary cannot be a cancellation target: process cleanup

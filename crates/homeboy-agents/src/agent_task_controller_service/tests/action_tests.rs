@@ -56,7 +56,7 @@ fn runtime_bundle_action_result_exposes_budgets_and_observed_wait_outcome() {
 
         let result = resume(
             "loop-service-runtime-budget-evidence",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &RuntimeBudgetDispatchHook,
         )
         .expect("controller resumed");
@@ -142,7 +142,7 @@ fn run_action_executes_only_requested_action_id() {
         let result = run_action(
             "loop-service-action",
             "action-2",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("action executed");
@@ -182,7 +182,7 @@ fn retry_action_queues_durable_retry_and_records_parent_lineage() {
 
         let result = run_next(
             "loop-service-retry",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("retry action executed");
@@ -235,7 +235,7 @@ fn request_changes_action_records_normalized_feedback() {
 
         let result = run_next(
             "loop-service-request-changes",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("request changes action executed");
@@ -282,7 +282,7 @@ fn complete_action_transitions_only_when_executed() {
 
         let result = run_next(
             "loop-service-complete",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("complete action executed");
@@ -332,7 +332,7 @@ fn route_finding_action_spawns_materialized_plan() {
 
         let result = run_next(
             "loop-service-route-finding",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("route finding executed");
@@ -402,7 +402,7 @@ fn controller_escalates_when_action_cap_is_reached() {
         // The next execution must not claim and run another action: it escalates.
         let result = run_next(
             "loop-service-action-cap",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("cap guard returns a report");
@@ -428,7 +428,7 @@ fn controller_escalates_when_action_cap_is_reached() {
         // outcomes are appended.
         let again = run_next(
             "loop-service-action-cap",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("escalated controller returns a report again");

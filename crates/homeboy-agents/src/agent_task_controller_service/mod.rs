@@ -28,7 +28,7 @@ use crate::agent_task_loop_controller::{
     AgentTaskLoopTerminalStatus, AgentTaskLoopTransition, AgentTaskPrOwnershipRequest,
     AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
 };
-use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan};
+use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan, SharedAgentTaskExecutor};
 use crate::agent_task_service::{self, AgentTaskRunResult};
 use homeboy_core::git::{pr_find, pr_view, PrFindOptions, PrState};
 use homeboy_core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
@@ -1179,13 +1179,12 @@ fn project_runner_terminal_action(
 }
 
 /// Claim and execute the first pending controller action, if any.
-pub fn run_next<E, D>(
+pub fn run_next<D>(
     loop_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<AgentTaskRunResult<ControllerActionReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let mut record = controller::controller_status(loop_id)?;
@@ -1212,14 +1211,13 @@ where
 }
 
 /// Claim and execute the named pending controller action.
-pub fn run_action<E, D>(
+pub fn run_action<D>(
     loop_id: &str,
     action_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<AgentTaskRunResult<ControllerActionReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let mut record = controller::load_controller(loop_id)?;
@@ -1227,13 +1225,12 @@ where
 }
 
 /// Drain pending controller actions until the default finite limit, idle, terminal state, or failure.
-pub fn resume<E, D>(
+pub fn resume<D>(
     loop_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
 ) -> Result<AgentTaskRunResult<ControllerResumeReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     resume_with_options(
@@ -1245,14 +1242,13 @@ where
 }
 
 /// Drain pending controller actions until the supplied finite options stop execution.
-pub fn resume_with_options<E, D>(
+pub fn resume_with_options<D>(
     loop_id: &str,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatch: &D,
     options: ControllerResumeOptions,
 ) -> Result<AgentTaskRunResult<ControllerResumeReport>>
 where
-    E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
     let mut results = Vec::new();

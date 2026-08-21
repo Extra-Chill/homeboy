@@ -18,7 +18,7 @@ use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskPlan, AgentTaskScheduler, SharedAgentTaskExecutor,
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -69,27 +69,21 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
     Ok(plan)
 }
 
-pub fn run_loaded_plan<E>(
+pub fn run_loaded_plan(
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline(plan, record_run_id, executor, None, None)
 }
 
-pub(crate) fn run_loaded_plan_with_derived_cook_baseline<E>(
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline(
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline_in_optional_store(
         None,
         plan,
@@ -100,17 +94,14 @@ where
     )
 }
 
-pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store<E>(
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_loaded_plan_with_derived_cook_baseline_in_optional_store(
         Some(lifecycle_store),
         plan,
@@ -121,17 +112,14 @@ where
     )
 }
 
-fn run_loaded_plan_with_derived_cook_baseline_in_optional_store<E>(
+fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     mut plan: AgentTaskPlan,
     record_run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(run_id) = record_run_id {
         // Prepare before persistence so the lifecycle record and scheduler use
         // the same materialized workspace contract. In particular, Cook's
@@ -278,24 +266,18 @@ pub fn submit_plan_spec(spec: &str, run_id: Option<&str>) -> Result<AgentTaskRun
     agent_task_lifecycle::submit_plan(&plan, run_id)
 }
 
-pub fn run_submitted<E>(
+pub fn run_submitted(
     run_id: String,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     run_submitted_with_timeout(run_id, None, executor)
 }
 
-pub fn run_submitted_with_timeout<E>(
+pub fn run_submitted_with_timeout(
     run_id: String,
     timeout_ms: Option<u64>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -359,25 +341,19 @@ pub struct AgentTaskQueueAdmission {
     pub limit_reached: bool,
 }
 
-pub fn run_next<E>(executor: E) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+pub fn run_next(executor: SharedAgentTaskExecutor) -> Result<AgentTaskRunNextResult> {
     run_next_with_cook_dispatcher(executor, |_| Ok(None), None)
 }
 
-pub fn run_next_with_cook_dispatcher<E>(
-    executor: E,
+pub fn run_next_with_cook_dispatcher(
+    executor: SharedAgentTaskExecutor,
     dispatcher: impl Fn(
         &Value,
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     scoped_run_ids: Option<&HashSet<String>>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     run_next_with_cook_dispatcher_and_queue_preflight(
         executor,
         dispatcher,
@@ -389,8 +365,8 @@ where
     )
 }
 
-pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
-    executor: E,
+pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
+    executor: SharedAgentTaskExecutor,
     dispatcher: impl Fn(
         &Value,
     ) -> Result<
@@ -398,10 +374,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
     >,
     scoped_run_ids: Option<&HashSet<String>>,
     queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     let mut skipped = Vec::new();
     let mut inspected = 0;
     if let Some(scoped_run_ids) = scoped_run_ids {
@@ -520,19 +493,16 @@ fn validate_queued_cook_identity(record: &AgentTaskRunRecord) -> Result<()> {
     super::validate_recipe_attempt_record(&recipe, &record.run_id, record)
 }
 
-fn consume_claimed_continuation<E>(
+fn consume_claimed_continuation(
     claim: super::ClaimedCookContinuation,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     dispatcher: &impl Fn(
         &Value,
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     mut skipped: Vec<AgentTaskRunNextSkip>,
-) -> Result<AgentTaskRunNextResult>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> Result<AgentTaskRunNextResult> {
     let store = super::CookRecipeStore::from_current_data_root()?;
     let cook_id = claim.continuation().cook_id.clone();
     let run_id = claim.continuation().run_id.clone();
@@ -567,8 +537,11 @@ where
         claim,
         |recipe| dispatcher(recipe),
         |options| {
-            super::run_cook_with_store(&store, options, executor.clone())
-                .map(|result| result.exit_code)
+            super::run_cook(super::cook::CookContext {
+                store: Some(&store),
+                ..super::cook::CookContext::new(options, executor.clone())
+            })
+            .map(|result| result.exit_code)
         },
     )?;
     let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
@@ -646,10 +619,10 @@ fn continuation_skip(
     }
 }
 
-pub fn resume<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+pub fn resume(
+    run_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -745,17 +718,29 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    let source = agent_task_lifecycle::normalize_local_execution_placement(run_id)?;
-    let cook_retry = retryable_cook_attempt(&source)?;
+    // One lifecycle store for the whole retry. Reserving the successor,
+    // proving the reservation is exact, persisting the controller plan, and
+    // binding the Cook attempt are one durable lineage: a successor reserved in
+    // one installation and bound in another is a retry that cannot be proved to
+    // own the work it replaces (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let source = agent_task_lifecycle::normalize_local_execution_placement_in_store(
+        &lifecycle_store,
+        run_id,
+    )?;
+    let cook_retry = retryable_cook_attempt(&lifecycle_store, &source)?;
     let record = match cook_retry {
         Some(cook_retry) => {
-            let discovered_run_id = agent_task_lifecycle::find_unbound_cook_retry_successor(
-                &source.run_id,
-                &cook_retry.cook_id,
-                cook_retry.attempt,
-                &cook_retry.plan,
-            )?
-            .map(|record| record.run_id);
+            let discovered_run_id =
+                agent_task_lifecycle::find_unbound_cook_retry_successor_in_store(
+                    &lifecycle_store,
+                    &source.run_id,
+                    &cook_retry.cook_id,
+                    cook_retry.attempt,
+                    &cook_retry.plan,
+                )?
+                .map(|record| record.run_id);
             let mut retry_run_id = cook_retry
                 .pending_run_id
                 .as_deref()
@@ -770,9 +755,15 @@ pub fn retry(
                         cook_retry.cook_id, cook_retry.attempt
                     )
                 });
-            let retry_exists = agent_task_lifecycle::run_record_exists(&retry_run_id)?;
+            let retry_exists =
+                agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, &retry_run_id)?;
             if retry_exists
-                && !is_exact_retry_reservation(&source, &cook_retry.plan, &retry_run_id)?
+                && !is_exact_retry_reservation(
+                    &lifecycle_store,
+                    &source,
+                    &cook_retry.plan,
+                    &retry_run_id,
+                )?
             {
                 return Err(Error::validation_invalid_argument(
                     "new_run_id",
@@ -785,8 +776,13 @@ pub fn retry(
             // before recipe/index binding, so recovery can prove ownership without
             // adopting an unrelated same-plan run.
             if !retry_exists {
-                retry_run_id =
-                    reserve_cook_retry_lifecycle(&source, &cook_retry, &retry_run_id, force)?;
+                retry_run_id = reserve_cook_retry_lifecycle(
+                    &lifecycle_store,
+                    &source,
+                    &cook_retry,
+                    &retry_run_id,
+                    force,
+                )?;
             }
             // Recipe and index are one Cook-owned binding boundary. Serialize
             // concurrent claim observers so neither can overwrite the other's
@@ -795,39 +791,59 @@ pub fn retry(
                 // The retry reservation starts from the source plan. Persist
                 // Cook-authored remediation inputs before binding either record
                 // so a restarted executor loads the same plan as the recipe.
-                agent_task_lifecycle::persist_controller_plan(&retry_run_id, &cook_retry.plan)?;
+                agent_task_lifecycle::persist_controller_plan_in_store(
+                    &lifecycle_store,
+                    &retry_run_id,
+                    &cook_retry.plan,
+                )?;
                 super::record_recipe_attempt(
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
                     &cook_retry.plan,
                 )?;
-                agent_task_lifecycle::record_cook_attempt_locked(
+                agent_task_lifecycle::record_cook_attempt_locked_in_store(
+                    &lifecycle_store,
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
                 )
             })?;
             registration.project_terminal_after_unlock()?;
-            let record = agent_task_lifecycle::status(&retry_run_id)?;
+            // `status` is this call with `Default::default()` and `exact = false`,
+            // resolved against an ambient store. Same read, explicit root.
+            let record = agent_task_lifecycle::status_in_store(
+                &lifecycle_store,
+                &retry_run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
             if record.state.is_terminal() {
                 return Ok(AgentTaskRetryServiceResult { record, run: false });
             }
             record
         }
-        None => agent_task_lifecycle::retry_with_force(&source.run_id, new_run_id, force)?,
+        None => agent_task_lifecycle::retry_with_force_in_store(
+            &lifecycle_store,
+            &source.run_id,
+            new_run_id,
+            force,
+        )?,
     };
     Ok(AgentTaskRetryServiceResult { record, run })
 }
 
 fn reserve_cook_retry_lifecycle(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     retry: &CookRetryAttempt,
     retry_run_id: &str,
     force: bool,
 ) -> Result<String> {
     let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
-    match agent_task_lifecycle::claim_cook_operation(
+    match agent_task_lifecycle::claim_cook_operation_in_store(
+        lifecycle_store,
         &source.run_id,
         &operation_key,
         Duration::from_secs(30),
@@ -836,14 +852,21 @@ fn reserve_cook_retry_lifecycle(
             // The Cook operation claim coordinates recipe/index binding; the
             // lifecycle retry lock also makes the first durable successor
             // idempotent across concurrent controllers and processes.
-            agent_task_lifecycle::retry_with_force(&source.run_id, Some(retry_run_id), force)?;
+            agent_task_lifecycle::retry_with_force_in_store(
+                lifecycle_store,
+                &source.run_id,
+                Some(retry_run_id),
+                force,
+            )?;
             let result = json!({ "run_id": retry_run_id });
-            if let Err(error) = agent_task_lifecycle::complete_cook_operation(
+            if let Err(error) = agent_task_lifecycle::complete_cook_operation_in_store(
+                lifecycle_store,
                 &source.run_id,
                 &operation_key,
                 result.clone(),
             ) {
-                let recovered = agent_task_lifecycle::find_unbound_cook_retry_successor(
+                let recovered = agent_task_lifecycle::find_unbound_cook_retry_successor_in_store(
+                    lifecycle_store,
                     &source.run_id,
                     &retry.cook_id,
                     retry.attempt,
@@ -852,7 +875,8 @@ fn reserve_cook_retry_lifecycle(
                 if recovered.as_ref().map(|record| record.run_id.as_str()) != Some(retry_run_id) {
                     return Err(error);
                 }
-                agent_task_lifecycle::recover_completed_cook_operation(
+                agent_task_lifecycle::recover_completed_cook_operation_in_store(
+                    lifecycle_store,
                     &source.run_id,
                     &operation_key,
                     result,
@@ -874,12 +898,15 @@ fn reserve_cook_retry_lifecycle(
             // handoff window. Bound the observer wait above that window so a
             // crashed winner remains recoverable rather than waiting forever.
             for _ in 0..2_000 {
-                if let Some(record) = agent_task_lifecycle::find_unbound_cook_retry_successor(
-                    &source.run_id,
-                    &retry.cook_id,
-                    retry.attempt,
-                    &retry.plan,
-                )? {
+                if let Some(record) =
+                    agent_task_lifecycle::find_unbound_cook_retry_successor_in_store(
+                        lifecycle_store,
+                        &source.run_id,
+                        &retry.cook_id,
+                        retry.attempt,
+                        &retry.plan,
+                    )?
+                {
                     return Ok(record.run_id);
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -899,6 +926,7 @@ fn reserve_cook_retry_lifecycle(
 /// ownership; the Cook index prevents a failed provider retry from superseding
 /// an already-promotable sibling candidate.
 fn retryable_cook_attempt(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<CookRetryAttempt>> {
     let Some(cook_id) = source.metadata["cook_id"].as_str() else {
@@ -949,7 +977,7 @@ fn retryable_cook_attempt(
         agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled
     ) && !retryable_pre_execution_failure
-        && agent_task_lifecycle::select_cook_candidate(cook_id)
+        && agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, cook_id)
             .ok()
             .is_some_and(|selection| {
                 selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
@@ -964,7 +992,10 @@ fn retryable_cook_attempt(
         .iter()
         .filter(|recipe_attempt| recipe_attempt.attempt == attempt.saturating_add(1))
     {
-        if !agent_task_lifecycle::run_record_exists(&recipe_attempt.run_id)? {
+        if !agent_task_lifecycle::run_record_exists_in_store(
+            lifecycle_store,
+            &recipe_attempt.run_id,
+        )? {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry recipe entry has no durable lifecycle reservation",
@@ -972,7 +1003,8 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
-        let record = agent_task_lifecycle::exact_record(&recipe_attempt.run_id)?;
+        let record =
+            agent_task_lifecycle::exact_record_in_store(lifecycle_store, &recipe_attempt.run_id)?;
         if record.metadata["retry_of"] != source.run_id {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
@@ -983,7 +1015,7 @@ fn retryable_cook_attempt(
         }
         if !cook_retry_plans_match(
             &recipe_attempt.plan,
-            &agent_task_lifecycle::load_plan(&recipe_attempt.run_id)?,
+            &agent_task_lifecycle::load_plan_in_store(lifecycle_store, &recipe_attempt.run_id)?,
         ) {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
@@ -1086,13 +1118,17 @@ fn retryable_cook_attempt(
 }
 
 fn is_exact_retry_reservation(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     plan: &AgentTaskPlan,
     run_id: &str,
 ) -> Result<bool> {
-    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
     Ok(record.metadata["retry_of"] == source.run_id
-        && cook_retry_plans_match(plan, &agent_task_lifecycle::load_plan(run_id)?))
+        && cook_retry_plans_match(
+            plan,
+            &agent_task_lifecycle::load_plan_in_store(lifecycle_store, run_id)?,
+        ))
 }
 
 pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentTaskPlan) -> bool {
@@ -1198,10 +1234,10 @@ pub fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> Result<()> {
     Ok(())
 }
 
-fn run_claimed<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+fn run_claimed(
+    run_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
         agent_task_lifecycle::record_pre_execution_failure(
@@ -1228,15 +1264,12 @@ where
     run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
-fn run_prepared_claimed<E>(
+fn run_prepared_claimed(
     run_id: String,
     plan: AgentTaskPlan,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     let aggregate = run_plan_with_scheduler(
         None,
         plan.clone(),
@@ -1322,17 +1355,14 @@ fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()
     )
 }
 
-fn run_plan_with_scheduler<E>(
+fn run_plan_with_scheduler(
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     plan: AgentTaskPlan,
     run_id: Option<&str>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskAggregate>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskAggregate> {
     let scheduler =
         AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
     let scheduler = match lifecycle_store {
@@ -1510,6 +1540,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Arc;
 
     use super::*;
     use crate::agent_task::{
@@ -1518,8 +1549,8 @@ mod tests {
         AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
-        AgentTaskExecutionContext, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
-        AgentTaskPlan, HarvestExecutionContext,
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskManagedService,
+        AgentTaskManagedServiceLifecycle, AgentTaskPlan, HarvestExecutionContext,
     };
 
     #[derive(Clone)]
@@ -1686,7 +1717,7 @@ mod tests {
                 store,
                 one_task_plan(plan_id, workspace),
                 Some(run_id),
-                SuccessfulExecutor,
+                Arc::new(SuccessfulExecutor),
                 None,
                 Some(HarvestExecutionContext::default()),
             )
