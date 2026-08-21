@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.34] - 2026-08-21
+
+### Changed
+- take the artifact root from the store the records land in
+
+## [0.350.33] - 2026-08-21
+
+### Changed
+- take one root for every lock a trace run acquires
+- free the operation-record tests from with_isolated_home
+- collapse three lifecycle_ops wrapper pairs
+- delete three more dead ambient wrappers the first scan missed
+- derive the materialization cache root from the store
+
+### Fixed
+- Fix remaining red-main test failures
+- locate terminal retention paths in the store's own home
+
+## [0.350.32] - 2026-08-21
+
+### Changed
+- free the deploy lifecycle round-trip from with_isolated_home
+- index artifacts against the store's own root
+- root the deploy receipt store
+
 ## [0.350.31] - 2026-08-21
 
 ### Fixed

@@ -327,20 +327,32 @@ fn read_path(path: &Path) -> Result<Option<OperationRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier,
     };
 
-    /// The record store for the isolated home each test below installs.
+    /// A record store bound to a caller-owned data root.
     ///
-    /// `with_isolated_home` establishes the home; this binds a store to it once,
-    /// the same way the release boundary binds one for a whole command (#7505).
-    fn test_store() -> OperationRecordStore {
-        OperationRecordStore::in_roots(
-            &homeboy_core::paths::PathRoots::from_environment().expect("path roots"),
-        )
+    /// Deliberately not `with_isolated_home`. This store reads and writes
+    /// nothing but files below the root it is constructed with -- the lock, the
+    /// record directory, and the record file are all `*_in_roots` joins -- so a
+    /// test can name its own directory instead of mutating `HOME` and reading
+    /// it straight back out through `from_environment`.
+    ///
+    /// That is the payoff #7505 is aiming at. A test that owns its root needs
+    /// neither the environment nor the process-global mutex `HomeGuard` takes
+    /// to protect it, so it runs beside every other test instead of queueing
+    /// behind all of them.
+    ///
+    /// Only the data root is meaningful here; config and artifacts are given
+    /// the same directory because this store never consults them.
+    fn test_store_at(data_root: &std::path::Path) -> OperationRecordStore {
+        OperationRecordStore::in_roots(&homeboy_core::paths::PathRoots::new(
+            data_root.to_path_buf(),
+            data_root.to_path_buf(),
+            data_root.to_path_buf(),
+        ))
     }
 
     fn record() -> OperationRecord {
@@ -366,72 +378,78 @@ mod tests {
 
     #[test]
     fn persists_reloads_and_compare_updates_operation_records() {
-        with_isolated_home(|_| {
-            let record = record();
-            test_store().create(&record).expect("persist");
-            let reloaded = test_store()
-                .load(&record.owner_run_ref)
-                .expect("load")
-                .expect("record");
-            assert_eq!(reloaded, record);
-            let updated = test_store()
-                .update(&record.owner_run_ref, |current| {
-                    let mut current = current.expect("record");
-                    current.attempt_count += 1;
-                    current.finalization_status = "completed".to_string();
-                    Ok(current)
-                })
-                .expect("atomic update");
-            assert_eq!(updated.attempt_count, 1);
-            assert!(!test_store()
-                .pending_for_subject("provider_workspace", "component")
-                .expect("pending")
-                .iter()
-                .any(|record| record.owner_run_ref == "release/test-owner"));
-        });
+        let data_root = tempfile::tempdir().expect("data root");
+        let store = test_store_at(data_root.path());
+        let record = record();
+        store.create(&record).expect("persist");
+        let reloaded = store
+            .load(&record.owner_run_ref)
+            .expect("load")
+            .expect("record");
+        assert_eq!(reloaded, record);
+        let updated = store
+            .update(&record.owner_run_ref, |current| {
+                let mut current = current.expect("record");
+                current.attempt_count += 1;
+                current.finalization_status = "completed".to_string();
+                Ok(current)
+            })
+            .expect("atomic update");
+        assert_eq!(updated.attempt_count, 1);
+        assert!(!store
+            .pending_for_subject("provider_workspace", "component")
+            .expect("pending")
+            .iter()
+            .any(|record| record.owner_run_ref == "release/test-owner"));
     }
 
     #[test]
     fn concurrent_finalizers_claim_one_provider_effect() {
-        with_isolated_home(|_| {
-            let record = record();
-            test_store().create(&record).expect("persist");
-            let barrier = Arc::new(Barrier::new(2));
-            let effects = Arc::new(AtomicUsize::new(0));
-            let workers = (0..2)
-                .map(|_| {
-                    let barrier = Arc::clone(&barrier);
-                    let effects = Arc::clone(&effects);
-                    let owner = record.owner_run_ref.clone();
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        if let FinalizationClaim::Claimed { lease, .. } =
-                            test_store().claim_finalization(&owner).expect("claim")
-                        {
-                            // This is the provider-effect boundary: only a claimant may cross it.
-                            effects.fetch_add(1, Ordering::SeqCst);
-                            test_store()
-                                .complete_finalization(&owner, &lease)
-                                .expect("complete");
-                        }
-                    })
+        let data_root = tempfile::tempdir().expect("data root");
+        let store = test_store_at(data_root.path());
+        let record = record();
+        store.create(&record).expect("persist");
+        let barrier = Arc::new(Barrier::new(2));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let workers = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let effects = Arc::clone(&effects);
+                let owner = record.owner_run_ref.clone();
+                // Each worker builds its own store over the SAME root, which is
+                // what two racing processes actually do. The ambient form had
+                // them inherit one mutated `HOME` instead, so the contention it
+                // exercised was weaker than the contention it claims to test.
+                let root = data_root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let store = test_store_at(&root);
+                    barrier.wait();
+                    if let FinalizationClaim::Claimed { lease, .. } =
+                        store.claim_finalization(&owner).expect("claim")
+                    {
+                        // This is the provider-effect boundary: only a claimant may cross it.
+                        effects.fetch_add(1, Ordering::SeqCst);
+                        store
+                            .complete_finalization(&owner, &lease)
+                            .expect("complete");
+                    }
                 })
-                .collect::<Vec<_>>();
-            for worker in workers {
-                worker.join().expect("finalizer thread");
-            }
-            assert_eq!(effects.load(Ordering::SeqCst), 1);
-            let completed = test_store()
-                .load(&record.owner_run_ref)
-                .expect("load")
-                .expect("record");
-            assert_eq!(completed.finalization_status, "completed");
-            assert!(matches!(
-                test_store()
-                    .claim_finalization(&record.owner_run_ref)
-                    .expect("completed claim"),
-                FinalizationClaim::AlreadyCompleted(_)
-            ));
-        });
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("finalizer thread");
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let completed = store
+            .load(&record.owner_run_ref)
+            .expect("load")
+            .expect("record");
+        assert_eq!(completed.finalization_status, "completed");
+        assert!(matches!(
+            store
+                .claim_finalization(&record.owner_run_ref)
+                .expect("completed claim"),
+            FinalizationClaim::AlreadyCompleted(_)
+        ));
     }
 }

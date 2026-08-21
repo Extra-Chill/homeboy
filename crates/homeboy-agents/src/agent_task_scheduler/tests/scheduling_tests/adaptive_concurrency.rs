@@ -8,7 +8,8 @@ mod adaptive_concurrency_tests {
 
     #[test]
     fn adaptive_concurrency_scales_up_when_runner_slots_are_available() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        // Leave enough overlap for serialized scratch setup on loaded CI hosts.
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_secs(1));
         let max_seen = Arc::clone(&executor.max_seen);
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(4);

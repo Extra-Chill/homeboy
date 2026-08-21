@@ -5,7 +5,6 @@
 //! orchestration of directory creation and byte writes lives here.
 
 use homeboy::core::error::{Error, Result};
-use homeboy::core::paths;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,14 +41,6 @@ pub fn persist_artifact_file_in_roots(
         )
     })?;
     Ok(target)
-}
-
-/// Compute (and ensure) the cache path for a list-runs cache entry.
-///
-/// Creates `<homeboy>/cache/gh-actions-runs/` and returns the path for
-/// `<key>.<ext>`. Errors propagate.
-pub fn list_runs_cache_path(key: &str, ext: &str) -> Result<PathBuf> {
-    list_runs_cache_path_in_roots(&paths::homeboy()?, key, ext)
 }
 
 /// Compute (and ensure) a list-runs cache entry under an injected config root.

@@ -392,14 +392,6 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                registered so the scan records the script's complete terminal contract.",
     },
     GateLayerSite {
-        file: ".github/ci-required-gates-executed.sh",
-        decision: "exit 1",
-        basis: MeasurementBasis::Projection,
-        renders_skip: false,
-        fixture: None,
-        note: "NO FIXTURE: projects a refusal after the script establishes an inactive run, missing context, skipped dependency, or non-successful gate. A non-zero exit cannot manufacture a pass.",
-    },
-    GateLayerSite {
         file: ".github/release-asset-completeness.sh",
         decision: "exit 0",
         basis: MeasurementBasis::PerUnitEvaluation,

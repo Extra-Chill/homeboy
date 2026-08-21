@@ -635,7 +635,9 @@ pub fn resume(
         }
         return Err(transport_proxy_recovery_error(recovery));
     }
-    agent_task_lifecycle::mark_resuming(&run_id)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    agent_task_lifecycle::mark_resuming_in_store(&lifecycle_store, &run_id)?;
     run_claimed(run_id, executor)
 }
 

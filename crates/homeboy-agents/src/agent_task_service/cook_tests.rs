@@ -3846,13 +3846,22 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
 
 #[test]
 fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = CookRecipeStore::new(context.path_roots());
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let mut winner = batch_cook_options(
-        "concurrent-first-cook",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    );
+    let ambient_lifecycle_store =
+        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+    let run_id = homeboy_core::test_support::with_isolated_home(|_| {
+        run_concurrent_first_cooks_recipe_creator_fixture()
+    });
+    assert!(!ambient_lifecycle_store
+        .record_exists(&run_id)
+        .expect("ambient lifecycle state remains untouched"));
+}
+
+fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
+    let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+    let store = CookRecipeStore::new(roots.clone());
+    let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+    let cook_id = format!("concurrent-first-cook-{}", uuid::Uuid::new_v4());
+    let mut winner = batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     winner.initial_plan.plan_id = "creator-plan".to_string();
     let mut loser = winner.clone();
     loser.initial_plan.plan_id = "loser-plan".to_string();
@@ -3885,23 +3894,27 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
     set_initial_recipe_creation_barrier_for_test(None);
 
     let outcomes = [winner_result.unwrap(), loser_result.unwrap()];
+    let statuses = outcomes
+        .iter()
+        .map(|outcome| outcome.value.status.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
         outcomes
             .iter()
             .filter(|outcome| outcome.value.status == "in_flight")
             .count(),
-        1
+        1,
+        "unexpected concurrent Cook statuses: {statuses:?}"
     );
     assert_eq!(
         outcomes
             .iter()
             .filter(|outcome| outcome.value.status == "durable_failure")
             .count(),
-        1
+        1,
+        "unexpected concurrent Cook statuses: {statuses:?}"
     );
-    let recipe = store
-        .load_recipe("concurrent-first-cook")
-        .expect("creator recipe");
+    let recipe = store.load_recipe(&cook_id).expect("creator recipe");
     let creator_options = super::super::reconstruct_options_with_dispatcher(
         &recipe,
         Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
@@ -3909,7 +3922,7 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
     .expect("creator options");
     let record_before = lifecycle_store
         .read_record(&creator_options.initial_run_id)
-        .expect("queued creator record");
+        .expect("running creator record");
     let plan_before = lifecycle_store
         .read_controller_plan(&creator_options.initial_run_id)
         .expect("creator controller plan");
@@ -3919,11 +3932,11 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
     )
     .ok();
 
-    assert_eq!(record_before.state, AgentTaskRunState::Queued);
+    assert_eq!(record_before.state, AgentTaskRunState::Running);
     assert_eq!(
         lifecycle_store
             .read_record(&creator_options.initial_run_id)
-            .expect("creator record remains queued")
+            .expect("creator record remains running")
             .state,
         record_before.state
     );
@@ -3941,6 +3954,7 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
         .ok(),
         aggregate_before
     );
+    creator_options.initial_run_id
 }
 
 #[test]
@@ -7036,8 +7050,14 @@ fn strict_locked_retry_registration_uses_the_outer_transaction() {
             .initial_plan;
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("reserve retry run");
             homeboy_core::config::with_config_lock(|| {
-                agent_task_lifecycle::record_cook_attempt_locked(cook_id, 2, run_id)
-                    .expect("register retry through outer transaction");
+                agent_task_lifecycle::record_cook_attempt_locked_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .expect("lifecycle store"),
+                    cook_id,
+                    2,
+                    run_id,
+                )
+                .expect("register retry through outer transaction");
                 Ok(())
             })
             .expect("strict lock accepts one owner");
