@@ -4,6 +4,7 @@ use std::sync::{Condvar, Mutex};
 
 use crate::preview_client::{
     PreviewIngressRequest, PreviewIngressResponse, PreviewIngressResponseChunk,
+    PreviewWebSocketFrame, PreviewWebSocketOpen, PreviewWebSocketOpenResult,
 };
 use homeboy_core::daemon::ServiceIdentity;
 use homeboy_core::plan::HomeboyPlan;
@@ -177,10 +178,30 @@ pub(crate) struct PreviewIngressLogLine {
 #[derive(Debug, Clone)]
 pub(crate) struct PreviewClientSession {
     pub(crate) local_origin: String,
+    pub(crate) session_id: String,
+    pub(crate) channel_id: String,
     pub(crate) pending: VecDeque<PreviewIngressRequest>,
+    pub(crate) pending_websockets: VecDeque<PreviewWebSocketOpen>,
     pub(crate) responses: HashMap<String, PreviewIngressResponse>,
     pub(crate) response_chunks: HashMap<String, VecDeque<PreviewIngressResponseChunk>>,
+    pub(crate) websockets: HashMap<String, PreviewWebSocketSession>,
     pub(crate) active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewWebSocketSession {
+    pub(crate) open_result: Option<PreviewWebSocketOpenResult>,
+    pub(crate) to_client: VecDeque<PreviewWebSocketFrame>,
+    pub(crate) to_public: VecDeque<PreviewWebSocketFrame>,
+    pub(crate) to_client_bytes: usize,
+    pub(crate) to_public_bytes: usize,
+    pub(crate) last_activity: std::time::Instant,
+    pub(crate) public_close_received: bool,
+    pub(crate) public_close_sent: bool,
+    pub(crate) client_close_received: bool,
+    pub(crate) client_close_sent: bool,
+    pub(crate) client_close_pending_delivery: bool,
+    pub(crate) close_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -214,6 +235,8 @@ pub(crate) struct PreviewRegisterRequest {
 pub(crate) struct PreviewNextRequest {
     pub(crate) public_host: String,
     #[serde(default)]
+    pub(crate) channel_id: String,
+    #[serde(default)]
     pub(crate) timeout_secs: u64,
 }
 
@@ -232,6 +255,20 @@ pub(crate) struct PreviewRespondChunkRequest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct PreviewCloseRequest {
     pub(crate) public_host: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PreviewWebSocketOperation {
+    pub(crate) public_host: String,
+    pub(crate) channel_id: String,
+    #[serde(default)]
+    pub(crate) timeout_ms: u64,
+    #[serde(default)]
+    pub(crate) websocket_id: String,
+    #[serde(default)]
+    pub(crate) result: Option<PreviewWebSocketOpenResult>,
+    #[serde(default)]
+    pub(crate) frame: Option<PreviewWebSocketFrame>,
 }
 
 fn default_true() -> bool {

@@ -3,13 +3,15 @@ use homeboy_engine_primitives::content_hash;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::preview_client::PreviewIngressRequest;
+use crate::preview_client::{
+    PreviewIngressRequest, PreviewWebSocketFrame, PreviewWebSocketFrameKind, PreviewWebSocketOpen,
+};
 use homeboy_core::error::{Error, Result};
 
 use super::http::{
@@ -27,7 +29,19 @@ use super::types::{
     PreviewIngressFailure, PreviewIngressLogLine, PreviewIngressRoute,
     PreviewIngressRouteLifecycle, PreviewIngressServeSpec, PreviewNextRequest,
     PreviewRegisterRequest, PreviewRespondChunkRequest, PreviewRespondRequest,
+    PreviewWebSocketOperation, PreviewWebSocketSession,
 };
+
+pub const PREVIEW_WEBSOCKET_MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_MAX_SESSIONS_PER_ROUTE: usize = 16;
+pub const PREVIEW_WEBSOCKET_QUEUE_DEPTH: usize = 64;
+pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION: usize = 4 * 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE: usize = 16 * 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_IDLE_SECS: u64 = 60;
+pub const PREVIEW_WEBSOCKET_HANDSHAKE_SECS: u64 = 10;
+pub const PREVIEW_WEBSOCKET_CLOSE_SECS: u64 = 5;
+const PREVIEW_WEBSOCKET_WRITE_SECS: u64 = 5;
 
 pub fn serve(spec: PreviewIngressServeSpec) -> Result<super::types::PreviewIngressStatus> {
     validate_serve_spec(&spec)?;
@@ -96,6 +110,22 @@ fn handle_connection(
     auth: Arc<PreviewIngressAuth>,
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("configure ingress read timeout".to_string()),
+            )
+        })?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(PREVIEW_WEBSOCKET_WRITE_SECS)))
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("configure ingress write timeout".to_string()),
+            )
+        })?;
     let started = Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| {
@@ -151,6 +181,25 @@ fn handle_connection(
 
     if request.target.starts_with("/preview/client/") {
         return handle_client_api(&mut stream, request, &sessions, &auth, &recent_failures);
+    }
+
+    let has_live_session = sessions
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&normalize_public_host(&host))
+        .is_some_and(|session| session.active);
+    if has_live_session {
+        return proxy_reverse_channel_request(
+            &mut stream,
+            request,
+            request_id,
+            host,
+            path,
+            started,
+            sessions,
+            recent_failures,
+        );
     }
 
     let Some(route) = route_for_host(&host)? else {
@@ -341,23 +390,41 @@ fn handle_client_api(
                 );
             }
             validate_client_local_origin(&body.local_origin)?;
-            let _session_id = body.session_id.unwrap_or_else(|| public_host.clone());
+            let session_id = body.session_id.unwrap_or_else(|| public_host.clone());
+            let registered_session_id = session_id.clone();
+            let channel_id = uuid::Uuid::new_v4().to_string();
             let mut sessions_guard = sessions
                 .sessions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             sessions_guard.insert(
-                public_host,
+                public_host.clone(),
                 PreviewClientSession {
                     local_origin: body.local_origin,
+                    session_id,
+                    channel_id: channel_id.clone(),
                     pending: std::collections::VecDeque::new(),
+                    pending_websockets: std::collections::VecDeque::new(),
                     responses: std::collections::HashMap::new(),
                     response_chunks: std::collections::HashMap::new(),
+                    websockets: std::collections::HashMap::new(),
                     active: true,
                 },
             );
             sessions.changed.notify_all();
-            write_json_response(stream, 200, json!({ "registered": true }))
+            let registered_session_id = sessions_guard
+                .get(&public_host)
+                .map(|session| session.session_id.clone())
+                .unwrap_or(registered_session_id);
+            write_json_response(
+                stream,
+                200,
+                json!({
+                    "registered": true,
+                    "channel_id": channel_id,
+                    "session_id": registered_session_id,
+                }),
+            )
         }
         "/preview/client/next" => {
             let body: PreviewNextRequest = parse_json_body(&request.body, "next")?;
@@ -370,6 +437,13 @@ fn handle_client_api(
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             loop {
                 if let Some(session) = sessions_guard.get_mut(&public_host) {
+                    if !body.channel_id.is_empty() && body.channel_id != session.channel_id {
+                        return write_json_response(
+                            stream,
+                            403,
+                            json!({ "error": "route_owner_mismatch" }),
+                        );
+                    }
                     if !session.active {
                         return write_json_response(
                             stream,
@@ -378,7 +452,20 @@ fn handle_client_api(
                         );
                     }
                     if let Some(request) = session.pending.pop_front() {
-                        return write_json_response(stream, 200, json!({ "request": request }));
+                        return write_json_response(
+                            stream,
+                            200,
+                            json!({ "request": request, "websocket": null }),
+                        );
+                    }
+                    if !body.channel_id.is_empty() {
+                        if let Some(websocket) = session.pending_websockets.pop_front() {
+                            return write_json_response(
+                                stream,
+                                200,
+                                json!({ "request": null, "websocket": websocket }),
+                            );
+                        }
                     }
                 } else {
                     return write_json_response(stream, 404, json!({ "error": "missing_session" }));
@@ -386,7 +473,11 @@ fn handle_client_api(
 
                 let elapsed = started.elapsed();
                 if elapsed >= timeout {
-                    return write_json_response(stream, 200, json!({ "request": null }));
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "request": null, "websocket": null }),
+                    );
                 }
                 let wait_for = timeout - elapsed;
                 let (guard, wait) = sessions
@@ -395,7 +486,11 @@ fn handle_client_api(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 sessions_guard = guard;
                 if wait.timed_out() {
-                    return write_json_response(stream, 200, json!({ "request": null }));
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "request": null, "websocket": null }),
+                    );
                 }
             }
         }
@@ -447,6 +542,209 @@ fn handle_client_api(
             sessions.changed.notify_all();
             write_json_response(stream, 200, json!({ "closed": true }))
         }
+        "/preview/client/websocket/open" => {
+            let body: PreviewWebSocketOperation = parse_json_body(&request.body, "websocket open")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let Some(result) = body.result else {
+                return write_json_response(stream, 400, json!({ "error": "missing_open_result" }));
+            };
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let Some(websocket) = session.websockets.get_mut(&result.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            websocket.open_result = Some(result);
+            websocket.last_activity = Instant::now();
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/websocket/next" => {
+            let body: PreviewWebSocketOperation = parse_json_body(&request.body, "websocket next")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let timeout = Duration::from_millis(body.timeout_ms.clamp(1, 1000));
+            let started = Instant::now();
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                let Some(session) = guard.get_mut(&public_host) else {
+                    return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+                };
+                if session.channel_id != body.channel_id {
+                    return write_json_response(
+                        stream,
+                        403,
+                        json!({ "error": "route_owner_mismatch" }),
+                    );
+                }
+                let Some(websocket) = session.websockets.get_mut(&body.websocket_id) else {
+                    return write_json_response(
+                        stream,
+                        404,
+                        json!({ "error": "missing_websocket" }),
+                    );
+                };
+                if let Some(frame) = websocket.to_client.pop_front() {
+                    websocket.to_client_bytes = websocket
+                        .to_client_bytes
+                        .saturating_sub(frame_payload_len(&frame));
+                    if matches!(frame.kind, PreviewWebSocketFrameKind::Close) {
+                        websocket.client_close_pending_delivery = true;
+                    }
+                    websocket.last_activity = Instant::now();
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": frame, "closed": false }),
+                    );
+                }
+                if websocket_close_complete(websocket) || websocket_close_expired(websocket) {
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": null, "closed": true }),
+                    );
+                }
+                if started.elapsed() >= timeout {
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": null, "closed": false }),
+                    );
+                }
+                let (next_guard, _) = sessions
+                    .changed
+                    .wait_timeout(guard, timeout - started.elapsed())
+                    .unwrap_or_else(|p| p.into_inner());
+                guard = next_guard;
+            }
+        }
+        "/preview/client/websocket/frame" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket frame")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let Some(frame) = body.frame else {
+                return write_json_response(stream, 400, json!({ "error": "missing_frame" }));
+            };
+            let payload_bytes = match decoded_frame_payload_len(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return write_json_response(
+                        stream,
+                        400,
+                        json!({ "error": "invalid_websocket_payload", "message": error.message }),
+                    )
+                }
+            };
+            if payload_bytes > PREVIEW_WEBSOCKET_MAX_FRAME_BYTES {
+                return write_json_response(
+                    stream,
+                    413,
+                    json!({ "error": "websocket_frame_too_large" }),
+                );
+            }
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let route_over_budget = route_queued_bytes(session, false)
+                .saturating_add(payload_bytes)
+                > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE;
+            let Some(websocket) = session.websockets.get_mut(&frame.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            if websocket.to_public.len() >= PREVIEW_WEBSOCKET_QUEUE_DEPTH
+                || websocket.to_public_bytes.saturating_add(payload_bytes)
+                    > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+                || route_over_budget
+            {
+                return write_json_response(
+                    stream,
+                    429,
+                    json!({ "error": "websocket_queue_full" }),
+                );
+            }
+            websocket.last_activity = Instant::now();
+            if matches!(frame.kind, PreviewWebSocketFrameKind::Close) {
+                websocket.client_close_received = true;
+                begin_websocket_close(websocket);
+            }
+            websocket.to_public_bytes += payload_bytes;
+            websocket.to_public.push_back(frame);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/websocket/abort" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket abort")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            if session.websockets.remove(&body.websocket_id).is_none() {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            }
+            session
+                .pending_websockets
+                .retain(|open| open.websocket_id != body.websocket_id);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "aborted": true }))
+        }
+        "/preview/client/websocket/delivered" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket delivery acknowledgement")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let Some(websocket) = session.websockets.get_mut(&body.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            if (websocket.client_close_sent || !websocket.client_close_received)
+                && !websocket.client_close_pending_delivery
+            {
+                return write_json_response(
+                    stream,
+                    409,
+                    json!({ "error": "unexpected_websocket_delivery" }),
+                );
+            }
+            websocket.client_close_pending_delivery = false;
+            websocket.client_close_sent = true;
+            begin_websocket_close(websocket);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
         _ => write_json_response(stream, 404, json!({ "error": "not_found" })),
     }
 }
@@ -463,6 +761,18 @@ fn proxy_reverse_channel_request(
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
     let public_host = normalize_public_host(&host);
+    if is_websocket_upgrade(&request) {
+        return proxy_reverse_channel_websocket(
+            stream,
+            request,
+            request_id,
+            host,
+            path,
+            started,
+            sessions,
+            recent_failures,
+        );
+    }
     let preview_request = PreviewIngressRequest {
         request_id: request_id.clone(),
         method: request.method,
@@ -557,6 +867,630 @@ fn proxy_reverse_channel_request(
             return write_diagnostic(stream, &failure, started);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proxy_reverse_channel_websocket(
+    stream: &mut TcpStream,
+    request: IngressHttpRequest,
+    request_id: String,
+    host: String,
+    path: String,
+    started: Instant,
+    sessions: Arc<PreviewClientSessions>,
+    recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
+) -> Result<()> {
+    let public_host = normalize_public_host(&host);
+    let websocket_id = uuid::Uuid::new_v4().to_string();
+    let open = PreviewWebSocketOpen {
+        websocket_id: websocket_id.clone(),
+        path: request.target,
+        headers: request.headers.clone(),
+    };
+    let setup_failure = {
+        let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.get_mut(&public_host) {
+            None => Some((
+                404,
+                "missing_session",
+                "No active Homeboy preview client is registered for this host",
+            )),
+            Some(session)
+                if session.websockets.len() >= PREVIEW_WEBSOCKET_MAX_SESSIONS_PER_ROUTE =>
+            {
+                Some((
+                    503,
+                    "websocket_session_limit",
+                    "Homeboy preview WebSocket concurrent-session limit reached",
+                ))
+            }
+            Some(session) if session.pending_websockets.len() >= PREVIEW_WEBSOCKET_QUEUE_DEPTH => {
+                Some((
+                    503,
+                    "websocket_queue_full",
+                    "Homeboy preview WebSocket open queue is full",
+                ))
+            }
+            Some(session) => {
+                session.websockets.insert(
+                    websocket_id.clone(),
+                    PreviewWebSocketSession {
+                        open_result: None,
+                        to_client: std::collections::VecDeque::new(),
+                        to_public: std::collections::VecDeque::new(),
+                        to_client_bytes: 0,
+                        to_public_bytes: 0,
+                        last_activity: Instant::now(),
+                        public_close_received: false,
+                        public_close_sent: false,
+                        client_close_received: false,
+                        client_close_sent: false,
+                        client_close_pending_delivery: false,
+                        close_deadline: None,
+                    },
+                );
+                session.pending_websockets.push_back(open);
+                sessions.changed.notify_all();
+                None
+            }
+        }
+    };
+    if let Some((status, classification, message)) = setup_failure {
+        return websocket_diagnostic(
+            stream,
+            request_id,
+            host,
+            path,
+            status,
+            classification,
+            message,
+            started,
+            &recent_failures,
+        );
+    }
+    let cleanup = WebSocketCleanupGuard::new(
+        Arc::clone(&sessions),
+        public_host.clone(),
+        websocket_id.clone(),
+    );
+
+    let handshake_timeout = Duration::from_secs(PREVIEW_WEBSOCKET_HANDSHAKE_SECS);
+    let result = loop {
+        let state = {
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            guard
+                .get_mut(&public_host)
+                .and_then(|session| session.websockets.get_mut(&websocket_id))
+                .map(|websocket| websocket.open_result.take())
+        };
+        match state {
+            None => {
+                return websocket_diagnostic(
+                    stream,
+                    request_id,
+                    host,
+                    path,
+                    502,
+                    "websocket_setup_cancelled",
+                    "Homeboy preview WebSocket setup was cancelled",
+                    started,
+                    &recent_failures,
+                )
+            }
+            Some(Some(result)) => break result,
+            Some(None) => {}
+        }
+        if started.elapsed() >= handshake_timeout {
+            return websocket_diagnostic(
+                stream,
+                request_id,
+                host,
+                path,
+                504,
+                "websocket_handshake_timeout",
+                "Homeboy preview client did not complete the local WebSocket handshake",
+                started,
+                &recent_failures,
+            );
+        }
+        let timed_out = {
+            let guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let (_wait_guard, wait) = sessions
+                .changed
+                .wait_timeout(guard, handshake_timeout - started.elapsed())
+                .unwrap_or_else(|p| p.into_inner());
+            wait.timed_out()
+        };
+        if timed_out {
+            return websocket_diagnostic(
+                stream,
+                request_id,
+                host,
+                path,
+                504,
+                "websocket_handshake_timeout",
+                "Homeboy preview client did not complete the local WebSocket handshake",
+                started,
+                &recent_failures,
+            );
+        }
+    };
+    if !result.accepted {
+        let status = if (400..600).contains(&result.status) {
+            result.status
+        } else {
+            502
+        };
+        return websocket_diagnostic(
+            stream,
+            request_id,
+            host,
+            path,
+            status,
+            "local_websocket_handshake_failed",
+            result
+                .error
+                .as_deref()
+                .unwrap_or("Local WebSocket origin rejected the handshake"),
+            started,
+            &recent_failures,
+        );
+    }
+    let Some(key) = request.headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("sec-websocket-key")
+            .then_some(value)
+    }) else {
+        return websocket_diagnostic(
+            stream,
+            request_id,
+            host,
+            path,
+            400,
+            "invalid_websocket_upgrade",
+            "WebSocket upgrade is missing Sec-WebSocket-Key",
+            started,
+            &recent_failures,
+        );
+    };
+    if let Err(error) = write!(
+        stream,
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n",
+        tungstenite::handshake::derive_accept_key(key.as_bytes())
+    ) {
+        record_websocket_terminal_failure(&recent_failures, &request_id, &host, &path, "websocket_handshake_write_failed", error.to_string());
+        return Err(Error::internal_io(error.to_string(), Some("write WebSocket handshake".to_string())));
+    }
+    for (name, value) in result.headers {
+        if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            if let Err(error) = write!(stream, "{name}: {value}\r\n") {
+                record_websocket_terminal_failure(
+                    &recent_failures,
+                    &request_id,
+                    &host,
+                    &path,
+                    "websocket_handshake_write_failed",
+                    error.to_string(),
+                );
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("write WebSocket handshake".to_string()),
+                ));
+            }
+        }
+    }
+    if let Err(error) = stream.write_all(b"\r\n") {
+        record_websocket_terminal_failure(
+            &recent_failures,
+            &request_id,
+            &host,
+            &path,
+            "websocket_handshake_write_failed",
+            error.to_string(),
+        );
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some("finish WebSocket handshake".to_string()),
+        ));
+    }
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| Error::internal_io(e.to_string(), Some("configure WebSocket".to_string())))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(PREVIEW_WEBSOCKET_WRITE_SECS)))
+        .map_err(|e| Error::internal_io(e.to_string(), Some("configure WebSocket".to_string())))?;
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(PREVIEW_WEBSOCKET_MAX_FRAME_BYTES))
+        .max_message_size(Some(PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES));
+    let mut socket = tungstenite::WebSocket::from_raw_socket(
+        match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                record_websocket_terminal_failure(
+                    &recent_failures,
+                    &request_id,
+                    &host,
+                    &path,
+                    "websocket_stream_clone_failed",
+                    error.to_string(),
+                );
+                return Err(Error::internal_io(error.to_string(), None));
+            }
+        },
+        tungstenite::protocol::Role::Server,
+        Some(config),
+    );
+    let mut sequence = 0_u64;
+    loop {
+        let outbound = {
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                break;
+            };
+            let Some(websocket) = session.websockets.get_mut(&websocket_id) else {
+                break;
+            };
+            if websocket.last_activity.elapsed() >= Duration::from_secs(PREVIEW_WEBSOCKET_IDLE_SECS)
+                && websocket.close_deadline.is_none()
+            {
+                let frame = PreviewWebSocketFrame {
+                    websocket_id: websocket_id.clone(),
+                    sequence,
+                    kind: PreviewWebSocketFrameKind::Close,
+                    payload_base64: String::new(),
+                    close_code: Some(1001),
+                    close_reason: Some("Homeboy preview WebSocket idle timeout".to_string()),
+                };
+                websocket.public_close_sent = true;
+                websocket.to_client_bytes += frame_payload_len(&frame);
+                websocket.to_client.push_back(frame.clone());
+                begin_websocket_close(websocket);
+                sessions.changed.notify_all();
+                Some(frame)
+            } else {
+                let frame = websocket.to_public.pop_front();
+                if let Some(frame) = frame.as_ref() {
+                    websocket.to_public_bytes = websocket
+                        .to_public_bytes
+                        .saturating_sub(frame_payload_len(frame));
+                    if matches!(frame.kind, PreviewWebSocketFrameKind::Close) {
+                        websocket.public_close_sent = true;
+                        begin_websocket_close(websocket);
+                    }
+                }
+                frame
+            }
+        };
+        if let Some(frame) = outbound {
+            let closing = matches!(frame.kind, PreviewWebSocketFrameKind::Close);
+            let message = match protocol_frame_to_message(frame) {
+                Ok(message) => message,
+                Err(error) => {
+                    record_websocket_terminal_failure(
+                        &recent_failures,
+                        &request_id,
+                        &host,
+                        &path,
+                        "websocket_protocol_decode_failed",
+                        error.message.clone(),
+                    );
+                    return Err(error);
+                }
+            };
+            if let Err(error) = socket.send(message) {
+                record_websocket_terminal_failure(
+                    &recent_failures,
+                    &request_id,
+                    &host,
+                    &path,
+                    "websocket_public_write_failed",
+                    error.to_string(),
+                );
+                break;
+            }
+            if closing {
+                continue;
+            }
+        }
+        let closing_complete = sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&public_host)
+            .and_then(|session| session.websockets.get(&websocket_id))
+            .is_none_or(|websocket| {
+                websocket_close_complete(websocket) || websocket_close_expired(websocket)
+            });
+        if closing_complete {
+            break;
+        }
+        match socket.read() {
+            Ok(message) => {
+                let frame = message_to_protocol_frame(&websocket_id, sequence, message);
+                sequence += 1;
+                let closing = matches!(frame.kind, PreviewWebSocketFrameKind::Close);
+                let bytes = frame_payload_len(&frame);
+                let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+                let route_over_budget = guard.get(&public_host).is_some_and(|session| {
+                    route_queued_bytes(session, true).saturating_add(bytes)
+                        > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE
+                });
+                let Some(websocket) = guard
+                    .get_mut(&public_host)
+                    .and_then(|session| session.websockets.get_mut(&websocket_id))
+                else {
+                    break;
+                };
+                if bytes > PREVIEW_WEBSOCKET_MAX_FRAME_BYTES
+                    || websocket.to_client.len() >= PREVIEW_WEBSOCKET_QUEUE_DEPTH
+                    || websocket.to_client_bytes.saturating_add(bytes)
+                        > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+                    || route_over_budget
+                {
+                    record_websocket_terminal_failure(
+                        &recent_failures,
+                        &request_id,
+                        &host,
+                        &path,
+                        "websocket_public_queue_full",
+                        "WebSocket public-to-client queue limit exceeded".to_string(),
+                    );
+                    break;
+                }
+                websocket.to_client_bytes += bytes;
+                websocket.last_activity = Instant::now();
+                websocket.to_client.push_back(frame);
+                sessions.changed.notify_all();
+                if closing {
+                    websocket.public_close_received = true;
+                    begin_websocket_close(websocket);
+                    continue;
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                let closing = sessions
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&public_host)
+                    .and_then(|session| session.websockets.get(&websocket_id))
+                    .is_some_and(|websocket| websocket.close_deadline.is_some());
+                if closing {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                break;
+            }
+            Err(error) => {
+                record_websocket_terminal_failure(
+                    &recent_failures,
+                    &request_id,
+                    &host,
+                    &path,
+                    "websocket_public_read_failed",
+                    error.to_string(),
+                );
+                break;
+            }
+        }
+    }
+    drop(cleanup);
+    Ok(())
+}
+
+fn is_websocket_upgrade(request: &IngressHttpRequest) -> bool {
+    request.method.eq_ignore_ascii_case("GET")
+        && request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket")
+        })
+        && request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("connection")
+                && value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+        })
+}
+
+fn frame_payload_len(frame: &PreviewWebSocketFrame) -> usize {
+    decoded_frame_payload_len(frame).unwrap_or(0)
+}
+
+fn decoded_frame_payload_len(frame: &PreviewWebSocketFrame) -> Result<usize> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(&frame.payload_base64)
+        .map_err(|error| {
+            Error::validation_invalid_argument("payload_base64", error.to_string(), None, None)
+        })?;
+    Ok(payload.len() + frame.close_reason.as_ref().map_or(0, String::len))
+}
+
+fn route_queued_bytes(session: &PreviewClientSession, to_client: bool) -> usize {
+    session
+        .websockets
+        .values()
+        .map(|websocket| {
+            if to_client {
+                websocket.to_client_bytes
+            } else {
+                websocket.to_public_bytes
+            }
+        })
+        .sum()
+}
+
+fn begin_websocket_close(websocket: &mut PreviewWebSocketSession) {
+    websocket
+        .close_deadline
+        .get_or_insert_with(|| Instant::now() + Duration::from_secs(PREVIEW_WEBSOCKET_CLOSE_SECS));
+}
+
+fn websocket_close_complete(websocket: &PreviewWebSocketSession) -> bool {
+    websocket.public_close_received
+        && websocket.public_close_sent
+        && websocket.client_close_received
+        && websocket.client_close_sent
+}
+
+fn websocket_close_expired(websocket: &PreviewWebSocketSession) -> bool {
+    websocket
+        .close_deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+struct WebSocketCleanupGuard {
+    sessions: Arc<PreviewClientSessions>,
+    public_host: String,
+    websocket_id: String,
+}
+
+impl WebSocketCleanupGuard {
+    fn new(
+        sessions: Arc<PreviewClientSessions>,
+        public_host: String,
+        websocket_id: String,
+    ) -> Self {
+        Self {
+            sessions,
+            public_host,
+            websocket_id,
+        }
+    }
+}
+
+impl Drop for WebSocketCleanupGuard {
+    fn drop(&mut self) {
+        cleanup_websocket(&self.sessions, &self.public_host, &self.websocket_id);
+    }
+}
+
+fn record_websocket_terminal_failure(
+    recent_failures: &Arc<Mutex<Vec<PreviewIngressFailure>>>,
+    request_id: &str,
+    host: &str,
+    path: &str,
+    classification: &str,
+    message: String,
+) {
+    record_failure(
+        recent_failures,
+        PreviewIngressFailure {
+            request_id: request_id.to_string(),
+            host: host.to_string(),
+            path: path.to_string(),
+            status: 502,
+            classification: classification.to_string(),
+            message,
+        },
+    );
+}
+
+fn message_to_protocol_frame(
+    websocket_id: &str,
+    sequence: u64,
+    message: tungstenite::Message,
+) -> PreviewWebSocketFrame {
+    let (kind, payload, close_code, close_reason) = match message {
+        tungstenite::Message::Text(value) => (
+            PreviewWebSocketFrameKind::Text,
+            value.as_bytes().to_vec(),
+            None,
+            None,
+        ),
+        tungstenite::Message::Binary(value) => (
+            PreviewWebSocketFrameKind::Binary,
+            value.to_vec(),
+            None,
+            None,
+        ),
+        tungstenite::Message::Ping(value) => {
+            (PreviewWebSocketFrameKind::Ping, value.to_vec(), None, None)
+        }
+        tungstenite::Message::Pong(value) => {
+            (PreviewWebSocketFrameKind::Pong, value.to_vec(), None, None)
+        }
+        tungstenite::Message::Close(frame) => (
+            PreviewWebSocketFrameKind::Close,
+            Vec::new(),
+            frame.as_ref().map(|frame| u16::from(frame.code)),
+            frame.map(|frame| frame.reason.to_string()),
+        ),
+        tungstenite::Message::Frame(_) => {
+            (PreviewWebSocketFrameKind::Binary, Vec::new(), None, None)
+        }
+    };
+    PreviewWebSocketFrame {
+        websocket_id: websocket_id.to_string(),
+        sequence,
+        kind,
+        payload_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+        close_code,
+        close_reason,
+    }
+}
+
+fn protocol_frame_to_message(frame: PreviewWebSocketFrame) -> Result<tungstenite::Message> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(&frame.payload_base64)
+        .map_err(|e| {
+            Error::validation_invalid_argument("payload_base64", e.to_string(), None, None)
+        })?;
+    Ok(match frame.kind {
+        PreviewWebSocketFrameKind::Text => tungstenite::Message::Text(
+            String::from_utf8(payload)
+                .map_err(|e| {
+                    Error::validation_invalid_argument("websocket_text", e.to_string(), None, None)
+                })?
+                .into(),
+        ),
+        PreviewWebSocketFrameKind::Binary => tungstenite::Message::Binary(payload.into()),
+        PreviewWebSocketFrameKind::Ping => tungstenite::Message::Ping(payload.into()),
+        PreviewWebSocketFrameKind::Pong => tungstenite::Message::Pong(payload.into()),
+        PreviewWebSocketFrameKind::Close => {
+            tungstenite::Message::Close(Some(tungstenite::protocol::CloseFrame {
+                code: frame.close_code.unwrap_or(1000).into(),
+                reason: frame.close_reason.unwrap_or_default().into(),
+            }))
+        }
+    })
+}
+
+fn cleanup_websocket(sessions: &PreviewClientSessions, public_host: &str, websocket_id: &str) {
+    let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(session) = guard.get_mut(public_host) {
+        session.websockets.remove(websocket_id);
+        session
+            .pending_websockets
+            .retain(|open| open.websocket_id != websocket_id);
+    }
+    sessions.changed.notify_all();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn websocket_diagnostic(
+    stream: &mut TcpStream,
+    request_id: String,
+    host: String,
+    path: String,
+    status: u16,
+    classification: &str,
+    message: &str,
+    started: Instant,
+    recent_failures: &Arc<Mutex<Vec<PreviewIngressFailure>>>,
+) -> Result<()> {
+    let failure = PreviewIngressFailure {
+        request_id,
+        host,
+        path,
+        status,
+        classification: classification.to_string(),
+        message: message.to_string(),
+    };
+    record_failure(recent_failures, failure.clone());
+    write_diagnostic(stream, &failure, started)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,4 +1735,116 @@ fn upstream_url(route: &PreviewIngressRoute, target: &str) -> Result<String> {
         format!("/{target}")
     };
     Ok(format!("{base}{target}"))
+}
+
+#[cfg(test)]
+mod websocket_state_tests {
+    use super::*;
+
+    fn websocket() -> PreviewWebSocketSession {
+        PreviewWebSocketSession {
+            open_result: None,
+            to_client: std::collections::VecDeque::new(),
+            to_public: std::collections::VecDeque::new(),
+            to_client_bytes: 0,
+            to_public_bytes: 0,
+            last_activity: Instant::now(),
+            public_close_received: false,
+            public_close_sent: false,
+            client_close_received: false,
+            client_close_sent: false,
+            client_close_pending_delivery: false,
+            close_deadline: None,
+        }
+    }
+
+    fn session() -> PreviewClientSession {
+        PreviewClientSession {
+            local_origin: "http://localhost".to_string(),
+            session_id: "test".to_string(),
+            channel_id: "channel".to_string(),
+            pending: std::collections::VecDeque::new(),
+            pending_websockets: std::collections::VecDeque::new(),
+            responses: std::collections::HashMap::new(),
+            response_chunks: std::collections::HashMap::new(),
+            websockets: std::collections::HashMap::new(),
+            active: true,
+        }
+    }
+
+    #[test]
+    fn cleanup_guard_releases_slot_after_setup_error() {
+        let sessions = Arc::new(PreviewClientSessions::default());
+        sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert("host".to_string(), session());
+        sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get_mut("host")
+            .expect("session")
+            .websockets
+            .insert("socket".to_string(), websocket());
+        let cleanup = WebSocketCleanupGuard::new(
+            Arc::clone(&sessions),
+            "host".to_string(),
+            "socket".to_string(),
+        );
+        drop(cleanup);
+        assert!(sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get("host")
+            .expect("session")
+            .websockets
+            .is_empty());
+    }
+
+    #[test]
+    fn close_state_waits_for_delayed_peer_acknowledgements() {
+        let mut state = websocket();
+        state.public_close_received = true;
+        state.client_close_sent = true;
+        begin_websocket_close(&mut state);
+        assert!(!websocket_close_complete(&state));
+        state.client_close_received = true;
+        state.public_close_sent = true;
+        assert!(websocket_close_complete(&state));
+    }
+
+    #[test]
+    fn route_byte_budget_sums_connections_in_each_direction() {
+        let mut state = session();
+        let mut first = websocket();
+        first.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE / 2;
+        let mut second = websocket();
+        second.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE / 2;
+        state.websockets.insert("first".to_string(), first);
+        state.websockets.insert("second".to_string(), second);
+        assert_eq!(
+            route_queued_bytes(&state, true),
+            PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE
+        );
+        assert!(
+            route_queued_bytes(&state, true).saturating_add(1)
+                > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE
+        );
+    }
+
+    #[test]
+    fn connection_byte_budget_rejects_a_frame_after_exact_budget() {
+        let mut state = websocket();
+        state.to_public_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION;
+        assert!(
+            state.to_public_bytes.saturating_add(1) > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+        );
+        state.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION;
+        assert!(
+            state.to_client_bytes.saturating_add(1) > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+        );
+    }
 }

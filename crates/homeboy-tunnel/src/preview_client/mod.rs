@@ -12,7 +12,9 @@ mod types;
 pub use types::{
     PreviewClientAuthDiagnostic, PreviewClientForwardError, PreviewClientReport,
     PreviewClientStartSpec, PreviewIngressNextResponse, PreviewIngressRequest,
-    PreviewIngressResponse, PreviewIngressResponseChunk,
+    PreviewIngressResponse, PreviewIngressResponseChunk, PreviewWebSocketFrame,
+    PreviewWebSocketFrameKind, PreviewWebSocketNextResponse, PreviewWebSocketOpen,
+    PreviewWebSocketOpenResult,
 };
 
 use base64::Engine;
@@ -20,6 +22,7 @@ use homeboy_engine_primitives::content_hash;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::io::Read;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -81,7 +84,7 @@ where
         })?;
     let local_client = build_local_origin_client()?;
 
-    register_session(&client, &spec, &token)?;
+    let mut channel_id = register_session(&client, &spec, &token)?;
     if spec.ready_stdout {
         println!("ready https://{}", spec.public_host);
     }
@@ -92,7 +95,8 @@ where
     while !stop.load(Ordering::SeqCst) {
         if !registered {
             match register_session(&client, &spec, &token) {
-                Ok(()) => {
+                Ok(new_channel_id) => {
+                    channel_id = new_channel_id;
                     registered = true;
                     reconnect_delay = Duration::from_millis(250);
                 }
@@ -113,8 +117,9 @@ where
                 }
             }
         }
-        match poll_next_request(&client, &spec, &token) {
-            Ok(Some(request)) => {
+        match poll_next_request(&client, &spec, &token, &channel_id) {
+            Ok(next) if next.request.is_some() => {
+                let request = next.request.expect("request checked above");
                 let response_client = client.clone();
                 let local_client = local_client.clone();
                 let worker_spec = spec.clone();
@@ -139,7 +144,43 @@ where
                     }
                 });
             }
-            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Ok(next) if next.websocket.is_some() => {
+                let response_client = client.clone();
+                let worker_spec = spec.clone();
+                let worker_token = token.clone();
+                let worker_channel_id = channel_id.clone();
+                let worker_stop = Arc::clone(&stop);
+                let websocket = next.websocket.expect("websocket checked above");
+                let websocket_id = websocket.websocket_id.clone();
+                thread::spawn(move || {
+                    if let Err(err) = relay_websocket(
+                        &response_client,
+                        &worker_spec,
+                        &worker_token,
+                        &worker_channel_id,
+                        websocket,
+                        &worker_stop,
+                    ) {
+                        let _ = abort_websocket(
+                            &response_client,
+                            &worker_spec,
+                            &worker_token,
+                            &worker_channel_id,
+                            &websocket_id,
+                        );
+                        eprintln!(
+                            "{}",
+                            json!({
+                                "command": "tunnel.preview_client.start",
+                                "event": "websocket_failed",
+                                "public_host": worker_spec.public_host,
+                                "error": err.message,
+                            })
+                        );
+                    }
+                });
+            }
+            Ok(_) => thread::sleep(Duration::from_millis(100)),
             Err(err) => {
                 eprintln!(
                     "{}",
@@ -439,8 +480,439 @@ fn open_local_origin_response(
     Ok((status, headers, response))
 }
 
-fn register_session(client: &Client, spec: &PreviewClientStartSpec, token: &str) -> Result<()> {
+fn relay_websocket(
+    client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    channel_id: &str,
+    open: PreviewWebSocketOpen,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let url = local_websocket_url(&spec.local_origin, &open.path)?;
+    let host = url.host_str().ok_or_else(|| {
+        Error::validation_invalid_argument("local_origin", "local origin has no host", None, None)
+    })?;
+    let address = format!("{}:{}", host, url.port_or_known_default().unwrap_or(80));
+
+    use tungstenite::client::IntoClientRequest;
+    let mut handshake = url.as_str().into_client_request().map_err(|err| {
+        Error::internal_unexpected(format!("build local WebSocket handshake: {err}"))
+    })?;
+    for (name, value) in &open.headers {
+        if matches!(
+            name.as_str(),
+            "host"
+                | "connection"
+                | "upgrade"
+                | "sec-websocket-key"
+                | "sec-websocket-version"
+                | "sec-websocket-extensions"
+        ) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            tungstenite::http::HeaderName::from_bytes(name.as_bytes()),
+            tungstenite::http::HeaderValue::from_str(value),
+        ) {
+            handshake.headers_mut().append(name, value);
+        }
+    }
+    let tcp = match connect_local_websocket(&address) {
+        Ok(tcp) => tcp,
+        Err(err) => {
+            send_websocket_open_result(
+                client,
+                spec,
+                token,
+                channel_id,
+                &PreviewWebSocketOpenResult {
+                    websocket_id: open.websocket_id,
+                    accepted: false,
+                    status: 502,
+                    headers: Vec::new(),
+                    error: Some(format!("connect local WebSocket origin: {err}")),
+                },
+            )?;
+            return Ok(());
+        }
+    };
+    tcp.set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|err| Error::internal_unexpected(format!("configure local WebSocket: {err}")))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| Error::internal_unexpected(format!("configure local WebSocket: {err}")))?;
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(
+            crate::preview_ingress::PREVIEW_WEBSOCKET_MAX_FRAME_BYTES,
+        ))
+        .max_message_size(Some(
+            crate::preview_ingress::PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES,
+        ));
+    let (mut socket, response) =
+        match tungstenite::client_tls_with_config(handshake, tcp, Some(config), None) {
+            Ok(value) => value,
+            Err(err) => {
+                let (status, headers, message) = match err {
+                    tungstenite::HandshakeError::Failure(tungstenite::Error::Http(response)) => (
+                        response.status().as_u16(),
+                        response
+                            .headers()
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value
+                                    .to_str()
+                                    .ok()
+                                    .map(|value| (name.to_string(), value.to_string()))
+                            })
+                            .collect(),
+                        format!(
+                            "local WebSocket origin rejected handshake with HTTP {}",
+                            response.status().as_u16()
+                        ),
+                    ),
+                    other => (
+                        502,
+                        Vec::new(),
+                        format!("local WebSocket handshake failed: {other}"),
+                    ),
+                };
+                send_websocket_open_result(
+                    client,
+                    spec,
+                    token,
+                    channel_id,
+                    &PreviewWebSocketOpenResult {
+                        websocket_id: open.websocket_id,
+                        accepted: false,
+                        status,
+                        headers,
+                        error: Some(message),
+                    },
+                )?;
+                return Ok(());
+            }
+        };
+    let response_headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    send_websocket_open_result(
+        client,
+        spec,
+        token,
+        channel_id,
+        &PreviewWebSocketOpenResult {
+            websocket_id: open.websocket_id.clone(),
+            accepted: true,
+            status: 101,
+            headers: response_headers,
+            error: None,
+        },
+    )?;
+
+    let mut sequence = 0_u64;
+    let mut local_close_received = false;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            abort_websocket(client, spec, token, channel_id, &open.websocket_id)?;
+            return Ok(());
+        }
+        let next = post_json(
+            client,
+            spec,
+            token,
+            "/preview/client/websocket/next",
+            json!({
+                "public_host": spec.public_host,
+                "channel_id": channel_id,
+                "websocket_id": open.websocket_id,
+                "timeout_ms": 100,
+            }),
+            "poll preview WebSocket frame",
+        )?;
+        let next: PreviewWebSocketNextResponse = serde_json::from_value(next).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse preview WebSocket frame".to_string()),
+            )
+        })?;
+        if next.closed {
+            break;
+        }
+        if let Some(frame) = next.frame {
+            let closing = matches!(frame.kind, PreviewWebSocketFrameKind::Close);
+            socket
+                .send(websocket_protocol_to_message(frame)?)
+                .map_err(|err| {
+                    Error::internal_unexpected(format!("write local WebSocket: {err}"))
+                })?;
+            if closing {
+                acknowledge_websocket_delivery(
+                    client,
+                    spec,
+                    token,
+                    channel_id,
+                    &open.websocket_id,
+                )?;
+            }
+        }
+        loop {
+            match socket.read() {
+                Ok(message) => {
+                    let frame =
+                        websocket_message_to_protocol(&open.websocket_id, sequence, message);
+                    sequence += 1;
+                    let closing = matches!(frame.kind, PreviewWebSocketFrameKind::Close);
+                    post_json(
+                        client,
+                        spec,
+                        token,
+                        "/preview/client/websocket/frame",
+                        json!({
+                            "public_host": spec.public_host,
+                            "channel_id": channel_id,
+                            "frame": frame,
+                        }),
+                        "send preview WebSocket frame",
+                    )?;
+                    if closing {
+                        // Reading a close queues Tungstenite's reply; flush it before
+                        // telling ingress that the close reached the local peer.
+                        socket.flush().map_err(|err| {
+                            Error::internal_unexpected(format!(
+                                "flush local WebSocket close: {err}"
+                            ))
+                        })?;
+                        acknowledge_websocket_delivery(
+                            client,
+                            spec,
+                            token,
+                            channel_id,
+                            &open.websocket_id,
+                        )?;
+                        local_close_received = true;
+                        // Keep polling until the public peer acknowledges this close or the
+                        // ingress close deadline expires.
+                        break;
+                    }
+                }
+                Err(tungstenite::Error::Io(err))
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    if local_close_received {
+                        return Ok(());
+                    }
+                    return Err(Error::internal_unexpected("local WebSocket disconnected"));
+                }
+                Err(err) => {
+                    return Err(Error::internal_unexpected(format!(
+                        "read local WebSocket: {err}"
+                    )))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_websocket_url(local_origin: &str, request_path: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(local_origin).map_err(|err| {
+        Error::validation_invalid_argument("local_origin", err.to_string(), None, None)
+    })?;
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "local_origin",
+                "preview WebSocket local origin must use http or https",
+                Some(local_origin.to_string()),
+                None,
+            ))
+        }
+    };
+    url.set_scheme(scheme).map_err(|_| {
+        Error::validation_invalid_argument(
+            "local_origin",
+            "cannot convert local origin",
+            None,
+            None,
+        )
+    })?;
+    let (path, query) = request_path.split_once('?').unwrap_or((request_path, ""));
+    let base = url.path().trim_end_matches('/');
+    let path = path.strip_prefix('/').unwrap_or(path);
+    url.set_path(&format!("{base}/{path}"));
+    url.set_query((!query.is_empty()).then_some(query));
+    Ok(url)
+}
+
+fn connect_local_websocket(address: &str) -> std::io::Result<TcpStream> {
+    let addresses = address.to_socket_addrs()?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("hostname resolved to no addresses")))
+}
+
+fn abort_websocket(
+    client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    channel_id: &str,
+    websocket_id: &str,
+) -> Result<()> {
     post_json(
+        client,
+        spec,
+        token,
+        "/preview/client/websocket/abort",
+        json!({
+            "public_host": spec.public_host,
+            "channel_id": channel_id,
+            "websocket_id": websocket_id,
+        }),
+        "abort preview WebSocket",
+    )
+    .map(|_| ())
+}
+
+fn acknowledge_websocket_delivery(
+    client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    channel_id: &str,
+    websocket_id: &str,
+) -> Result<()> {
+    post_json(
+        client,
+        spec,
+        token,
+        "/preview/client/websocket/delivered",
+        json!({
+            "public_host": spec.public_host,
+            "channel_id": channel_id,
+            "websocket_id": websocket_id,
+        }),
+        "acknowledge preview WebSocket delivery",
+    )
+    .map(|_| ())
+}
+
+fn send_websocket_open_result(
+    client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    channel_id: &str,
+    result: &PreviewWebSocketOpenResult,
+) -> Result<()> {
+    post_json(
+        client,
+        spec,
+        token,
+        "/preview/client/websocket/open",
+        json!({
+            "public_host": spec.public_host,
+            "channel_id": channel_id,
+            "result": result,
+        }),
+        "send preview WebSocket open result",
+    )
+    .map(|_| ())
+}
+
+fn websocket_message_to_protocol(
+    websocket_id: &str,
+    sequence: u64,
+    message: tungstenite::Message,
+) -> PreviewWebSocketFrame {
+    let (kind, payload, close_code, close_reason) = match message {
+        tungstenite::Message::Text(value) => (
+            PreviewWebSocketFrameKind::Text,
+            value.as_bytes().to_vec(),
+            None,
+            None,
+        ),
+        tungstenite::Message::Binary(value) => (
+            PreviewWebSocketFrameKind::Binary,
+            value.to_vec(),
+            None,
+            None,
+        ),
+        tungstenite::Message::Ping(value) => {
+            (PreviewWebSocketFrameKind::Ping, value.to_vec(), None, None)
+        }
+        tungstenite::Message::Pong(value) => {
+            (PreviewWebSocketFrameKind::Pong, value.to_vec(), None, None)
+        }
+        tungstenite::Message::Close(frame) => (
+            PreviewWebSocketFrameKind::Close,
+            Vec::new(),
+            frame.as_ref().map(|frame| u16::from(frame.code)),
+            frame.map(|frame| frame.reason.to_string()),
+        ),
+        tungstenite::Message::Frame(_) => {
+            (PreviewWebSocketFrameKind::Binary, Vec::new(), None, None)
+        }
+    };
+    PreviewWebSocketFrame {
+        websocket_id: websocket_id.to_string(),
+        sequence,
+        kind,
+        payload_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+        close_code,
+        close_reason,
+    }
+}
+
+fn websocket_protocol_to_message(frame: PreviewWebSocketFrame) -> Result<tungstenite::Message> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(frame.payload_base64)
+        .map_err(|err| {
+            Error::validation_invalid_argument("payload_base64", err.to_string(), None, None)
+        })?;
+    Ok(match frame.kind {
+        PreviewWebSocketFrameKind::Text => tungstenite::Message::Text(
+            String::from_utf8(payload)
+                .map_err(|err| {
+                    Error::validation_invalid_argument(
+                        "websocket_text",
+                        err.to_string(),
+                        None,
+                        None,
+                    )
+                })?
+                .into(),
+        ),
+        PreviewWebSocketFrameKind::Binary => tungstenite::Message::Binary(payload.into()),
+        PreviewWebSocketFrameKind::Ping => tungstenite::Message::Ping(payload.into()),
+        PreviewWebSocketFrameKind::Pong => tungstenite::Message::Pong(payload.into()),
+        PreviewWebSocketFrameKind::Close => {
+            tungstenite::Message::Close(Some(tungstenite::protocol::CloseFrame {
+                code: frame.close_code.unwrap_or(1000).into(),
+                reason: frame.close_reason.unwrap_or_default().into(),
+            }))
+        }
+    })
+}
+
+fn register_session(client: &Client, spec: &PreviewClientStartSpec, token: &str) -> Result<String> {
+    let value = post_json(
         client,
         spec,
         token,
@@ -451,15 +923,24 @@ fn register_session(client: &Client, spec: &PreviewClientStartSpec, token: &str)
             "session_id": spec.session_id,
         }),
         "register preview client session",
-    )
-    .map(|_| ())
+    )?;
+    value
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::internal_unexpected(
+                "register preview client session response omitted channel_id",
+            )
+        })
 }
 
 fn poll_next_request(
     client: &Client,
     spec: &PreviewClientStartSpec,
     token: &str,
-) -> Result<Option<PreviewIngressRequest>> {
+    channel_id: &str,
+) -> Result<PreviewIngressNextResponse> {
     let value = post_json(
         client,
         spec,
@@ -467,6 +948,7 @@ fn poll_next_request(
         "/preview/client/next",
         json!({
             "public_host": spec.public_host,
+            "channel_id": channel_id,
             "timeout_secs": spec.poll_timeout_secs.max(1),
         }),
         "poll preview client request",
@@ -477,7 +959,7 @@ fn poll_next_request(
             Some("parse preview client next response".to_string()),
         )
     })?;
-    Ok(next.request)
+    Ok(next)
 }
 
 fn send_response(
@@ -726,6 +1208,20 @@ mod tests {
         assert_eq!(response.status, 502);
         let error = response.error.expect("error");
         assert_eq!(error.kind, "local_origin_request_failed");
+    }
+
+    #[test]
+    fn local_websocket_url_supports_hostname_tls_and_base_path() {
+        let url = local_websocket_url(
+            "https://localhost:9443/preview/base/",
+            "/socket/events?format=json",
+        )
+        .expect("build local WebSocket URL");
+
+        assert_eq!(
+            url.as_str(),
+            "wss://localhost:9443/preview/base/socket/events?format=json"
+        );
     }
 
     #[test]
