@@ -64,3 +64,16 @@ pub enum CommandObservation {
     TransportObservationFailed,
     SpawnFailed,
 }
+
+impl CommandObservation {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::StdinDeliveryFailed => "stdin_delivery_failed",
+            Self::Cancelled => "cancelled",
+            Self::StreamDrainTimedOut => "stream_drain_timed_out",
+            Self::TransportObservationFailed => "transport_observation_failed",
+            Self::SpawnFailed => "spawn_failed",
+        }
+    }
+}

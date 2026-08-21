@@ -106,6 +106,21 @@ fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutpu
     }
 }
 
+fn map_ssh_wait_output(output: std::io::Result<std::process::Output>) -> CommandOutput {
+    match output {
+        Ok(output) => map_ssh_output(Ok(output)),
+        Err(error) => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("SSH error: {error}"),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            observation: super::CommandObservation::TransportObservationFailed,
+            child_resource: None,
+        },
+    }
+}
+
 impl SshClient {
     pub fn from_server(server: &Server, server_id: &str) -> Result<Self> {
         let identity_file = match &server.identity_file {
@@ -644,7 +659,7 @@ pub(super) fn run_command_with_stdin_source(
             success: false,
             exit_code: -1,
             timed_out: false,
-            observation: super::CommandObservation::SpawnFailed,
+            observation: super::CommandObservation::TransportObservationFailed,
             child_resource: None,
         },
     }
@@ -856,7 +871,13 @@ pub(super) fn execute_command_with_stdin_source_timeout(
             interrupted_signal = Some(signal);
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            break terminate_process_group_with_deadline(&mut child, pid, deadline);
+            break match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(status) => status,
+                Err(()) => {
+                    transport_observation_failed = true;
+                    None
+                }
+            };
         }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -865,7 +886,13 @@ pub(super) fn execute_command_with_stdin_source_timeout(
                 timed_out = true;
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
                 cleanup_deadline = Some(deadline);
-                break terminate_process_group_with_deadline(&mut child, pid, deadline);
+                break match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                    Ok(status) => status,
+                    Err(()) => {
+                        transport_observation_failed = true;
+                        None
+                    }
+                };
             }
             Err(_) => {
                 transport_observation_failed = true;
@@ -1070,14 +1097,20 @@ where
             interrupted_signal = Some(signal);
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+            match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(observed) => status = observed,
+                Err(()) => transport_observation_failed = true,
+            }
             break;
         }
         if matches!(writer_rx.try_recv(), Ok(Err(_))) {
             stdin_failed = true;
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+            match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(observed) => status = observed,
+                Err(()) => transport_observation_failed = true,
+            }
             break;
         }
         match child.try_wait() {
@@ -1090,7 +1123,10 @@ where
                 timed_out = true;
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
                 cleanup_deadline = Some(deadline);
-                status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+                match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                    Ok(observed) => status = observed,
+                    Err(()) => transport_observation_failed = true,
+                }
                 break;
             }
             Err(_) => {
@@ -1271,6 +1307,33 @@ mod bounded_probe_output_tests {
     }
 
     #[test]
+    fn transport_wait_failure_overrides_timeout_and_cancellation() {
+        for outcome in [
+            BoundedProbeOutcome {
+                timed_out: true,
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+            BoundedProbeOutcome {
+                interrupted_signal: Some(15),
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+        ] {
+            assert_eq!(
+                bounded_probe_output(
+                    String::new(),
+                    String::new(),
+                    outcome,
+                    Duration::from_secs(1)
+                )
+                .observation,
+                super::super::CommandObservation::TransportObservationFailed
+            );
+        }
+    }
+
+    #[test]
     fn a_healthy_probe_is_unchanged() {
         let output = bounded_probe_output(
             "ok".to_string(),
@@ -1318,7 +1381,7 @@ fn terminate_process_group_with_deadline(
     child: &mut std::process::Child,
     pid: u32,
     deadline: Instant,
-) -> Option<std::process::ExitStatus> {
+) -> std::result::Result<Option<std::process::ExitStatus>, ()> {
     #[cfg(unix)]
     unsafe {
         libc::kill(-(pid as i32), libc::SIGTERM);
@@ -1328,8 +1391,11 @@ fn terminate_process_group_with_deadline(
         let _ = child.kill();
     }
     let graceful_deadline = std::cmp::min(deadline, Instant::now() + PROCESS_TERMINATION_GRACE);
-    if let Some(status) = poll_child_until(child, graceful_deadline) {
-        return Some(status);
+    let mut observation_failed = false;
+    match poll_child_until(child, graceful_deadline) {
+        Ok(Some(status)) => return Ok(Some(status)),
+        Ok(None) => {}
+        Err(()) => observation_failed = true,
     }
     #[cfg(unix)]
     unsafe {
@@ -1339,7 +1405,10 @@ fn terminate_process_group_with_deadline(
     {
         let _ = child.kill();
     }
-    poll_child_until(child, deadline)
+    match poll_child_until(child, deadline) {
+        Ok(_) if observation_failed => Err(()),
+        result => result,
+    }
 }
 
 fn terminate_unreaped_process_group(pid: u32) {
@@ -1352,12 +1421,13 @@ fn terminate_unreaped_process_group(pid: u32) {
 fn poll_child_until(
     child: &mut std::process::Child,
     deadline: Instant,
-) -> Option<std::process::ExitStatus> {
+) -> std::result::Result<Option<std::process::ExitStatus>, ()> {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) | Err(_) => return None,
+            Ok(None) => return Ok(None),
+            Err(_) => return Err(()),
         }
     }
 }
@@ -1568,7 +1638,7 @@ impl SshClient {
             let _ = pipe.write_all(stdin);
             // Drop closes stdin (EOF) so the remote read loop terminates.
         }
-        map_ssh_output(child.wait_with_output())
+        map_ssh_wait_output(child.wait_with_output())
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {

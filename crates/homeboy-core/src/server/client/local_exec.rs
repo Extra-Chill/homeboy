@@ -278,6 +278,9 @@ fn run_local_command(
             timeout,
             supervision.as_mut(),
         );
+    // The child was spawned successfully. A failed wait cannot be presented as
+    // a spawn failure or a confirmed timeout/cancellation terminal result.
+    let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
     let cleanup_detail = cleanup_guard
@@ -334,15 +337,12 @@ fn run_local_command(
                 ),
             ),
             timed_out,
-            observation: if stdin_failed {
-                super::CommandObservation::StdinDeliveryFailed
-            } else if interrupted_signal.is_some() {
-                super::CommandObservation::Cancelled
-            } else if timed_out {
-                super::CommandObservation::StreamDrainTimedOut
-            } else {
-                super::CommandObservation::Complete
-            },
+            observation: post_spawn_observation(
+                transport_observation_failed,
+                stdin_failed,
+                interrupted_signal,
+                timed_out,
+            ),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
@@ -364,7 +364,7 @@ fn run_local_command(
                 interrupted_exit_code(interrupted_signal, -1),
             ),
             timed_out,
-            observation: super::CommandObservation::SpawnFailed,
+            observation: super::CommandObservation::TransportObservationFailed,
             child_resource: Some(monitor.finish()),
         },
     };
@@ -798,6 +798,25 @@ fn timed_out_exit_code(timed_out: bool, fallback: i32) -> i32 {
         124
     } else {
         fallback
+    }
+}
+
+fn post_spawn_observation(
+    transport_observation_failed: bool,
+    stdin_failed: bool,
+    interrupted_signal: Option<i32>,
+    timed_out: bool,
+) -> super::CommandObservation {
+    if transport_observation_failed {
+        super::CommandObservation::TransportObservationFailed
+    } else if stdin_failed {
+        super::CommandObservation::StdinDeliveryFailed
+    } else if interrupted_signal.is_some() {
+        super::CommandObservation::Cancelled
+    } else if timed_out {
+        super::CommandObservation::StreamDrainTimedOut
+    } else {
+        super::CommandObservation::Complete
     }
 }
 
@@ -1243,6 +1262,21 @@ mod tests {
             started,
             started + CHILD_PROGRESS_REPORT_INTERVAL
         ));
+    }
+
+    #[test]
+    fn transport_wait_failure_overrides_local_timeout_and_stdin_labels() {
+        for (stdin_failed, interrupted_signal, timed_out) in [
+            (false, None, false),
+            (false, Some(15), false),
+            (false, None, true),
+            (true, None, false),
+        ] {
+            assert_eq!(
+                post_spawn_observation(true, stdin_failed, interrupted_signal, timed_out),
+                super::super::CommandObservation::TransportObservationFailed
+            );
+        }
     }
 
     #[test]

@@ -106,6 +106,8 @@ pub(super) struct RawSshExecution {
     pub exit_code: i32,
     pub result_classification: String,
     pub observation_lost: bool,
+    pub observation: CommandObservation,
+    pub timed_out: bool,
 }
 
 impl RawSshExecution {
@@ -129,6 +131,8 @@ impl RawSshExecution {
             "exit_code": self.exit_code,
             "result_classification": self.result_classification,
             "observation_lost": self.observation_lost,
+            "observation": self.observation.code(),
+            "timed_out": self.timed_out,
         })
     }
 }
@@ -352,6 +356,8 @@ fn raw_execution_from_output(output: homeboy::core::server::CommandOutput) -> Ra
             observation_lost,
         ),
         observation_lost,
+        observation: output.observation,
+        timed_out: output.timed_out,
     }
 }
 
@@ -856,6 +862,8 @@ mod tests {
             exit_code: 0,
             result_classification: "remote_command_success".to_string(),
             observation_lost: false,
+            observation: CommandObservation::Complete,
+            timed_out: false,
         };
 
         let evidence = execution.output_file_evidence();
@@ -871,6 +879,43 @@ mod tests {
         );
         assert_eq!(evidence["stdout_truncated"], true);
         assert_eq!(evidence["exit_code"], 0);
+        assert_eq!(evidence["observation"], "complete");
+        assert_eq!(evidence["timed_out"], false);
+    }
+
+    #[test]
+    fn raw_output_file_evidence_preserves_typed_terminal_observation() {
+        for (observation, timed_out, expected) in [
+            (
+                CommandObservation::StreamDrainTimedOut,
+                true,
+                "stream_drain_timed_out",
+            ),
+            (CommandObservation::Cancelled, false, "cancelled"),
+            (
+                CommandObservation::StdinDeliveryFailed,
+                false,
+                "stdin_delivery_failed",
+            ),
+            (
+                CommandObservation::TransportObservationFailed,
+                false,
+                "transport_observation_failed",
+            ),
+        ] {
+            let evidence = raw_execution_from_output(command_output(
+                "",
+                "",
+                false,
+                -1,
+                timed_out,
+                observation,
+            ))
+            .output_file_evidence();
+
+            assert_eq!(evidence["observation"], expected);
+            assert_eq!(evidence["timed_out"], timed_out);
+        }
     }
 
     fn raw_args(command: Vec<&str>, raw: bool) -> SshArgs {
