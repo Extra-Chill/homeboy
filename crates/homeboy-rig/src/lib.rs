@@ -50,8 +50,8 @@ mod rig_test_support;
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use artifact_index::{
     for_run as artifact_index_for_run,
-    for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
-    RigRunArtifactRef, RigRunFailedStepRef,
+    for_run_with_artifacts_in_roots as artifact_index_for_run_with_artifacts_in_roots,
+    RigRunArtifactIndex, RigRunArtifactRef, RigRunFailedStepRef,
 };
 pub use capabilities::{
     evaluate_requirements, plan_requirement_checks, runner_capability_preflight,

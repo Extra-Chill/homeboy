@@ -46,17 +46,34 @@ pub fn run_summaries_with_artifact_indexes(
         .map(|run| run.id.clone())
         .collect::<Vec<_>>();
     let mut artifacts_by_run = store.list_artifacts_for_runs(&rig_run_ids)?;
+    // These indexes are rendered as operator retrieval commands, so they must
+    // name the home the records were listed from rather than whatever the
+    // environment points at (#7505).
+    let artifact_root = store
+        .roots()
+        .map(|roots| roots.artifacts().to_path_buf())
+        .or_else(|| {
+            homeboy::core::paths::PathRoots::from_environment()
+                .ok()
+                .map(|roots| roots.artifacts().to_path_buf())
+        });
     Ok(run_records
         .into_iter()
         .map(|run| {
             let artifacts = artifacts_by_run.remove(&run.id).unwrap_or_default();
-            run_summary_with_artifact_index(run, &artifacts)
+            run_summary_with_artifact_index(artifact_root.as_deref(), run, &artifacts)
         })
         .collect())
 }
 
-fn run_summary_with_artifact_index(run: RunRecord, artifacts: &[ArtifactRecord]) -> RunSummary {
-    let artifact_index = homeboy::rig::artifact_index_for_run_with_artifacts(&run, artifacts);
+fn run_summary_with_artifact_index(
+    artifact_root: Option<&std::path::Path>,
+    run: RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> RunSummary {
+    let artifact_index = artifact_root.and_then(|artifact_root| {
+        homeboy::rig::artifact_index_for_run_with_artifacts_in_roots(artifact_root, &run, artifacts)
+    });
     RunSummary {
         artifact_index,
         ..super::run_summary(run)

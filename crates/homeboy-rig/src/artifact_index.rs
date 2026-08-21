@@ -53,8 +53,19 @@ pub fn for_completed_rig_run(
     status: &str,
     pipeline: Option<&PipelineOutcome>,
 ) -> Option<RigRunArtifactIndex> {
-    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
-    for_completed_rig_run_in_roots(roots.artifacts(), store, rig, run_id, status, pipeline)
+    // The index file lands under the artifact root and its path is then
+    // recorded *into* `store`. Take the root the store was opened against so
+    // the file and the row describing it cannot name different homes; only an
+    // ambiently-opened store has no better answer than the environment (#7505).
+    let ambient;
+    let artifact_root = match store.roots() {
+        Some(roots) => roots.artifacts(),
+        None => {
+            ambient = homeboy_core::paths::PathRoots::from_environment().ok()?;
+            ambient.artifacts()
+        }
+    };
+    for_completed_rig_run_in_roots(artifact_root, store, rig, run_id, status, pipeline)
 }
 
 /// [`for_completed_rig_run`] against an explicitly injected artifact root.
@@ -103,23 +114,22 @@ pub fn for_run(store: &ObservationStore, run: &RunRecord) -> Option<RigRunArtifa
         return None;
     }
     let artifacts = store.list_artifacts(&run.id).unwrap_or_default();
-    for_run_with_artifacts(run, &artifacts)
+    // Same store, same root: the paths this renders are handed to operators as
+    // retrieval commands, so they must name the home the records came from.
+    let ambient;
+    let artifact_root = match store.roots() {
+        Some(roots) => roots.artifacts(),
+        None => {
+            ambient = homeboy_core::paths::PathRoots::from_environment().ok()?;
+            ambient.artifacts()
+        }
+    };
+    for_run_with_artifacts_in_roots(artifact_root, run, &artifacts)
 }
 
-pub fn for_run_with_artifacts(
-    run: &RunRecord,
-    artifacts: &[ArtifactRecord],
-) -> Option<RigRunArtifactIndex> {
-    // Guard before resolving. This is called once per run while rendering a
-    // run listing, and the ambient form only reached the artifact root after
-    // rejecting non-rig runs; resolving first would put three environment
-    // reads on every non-rig row.
-    if run.rig_id.is_none() || run.kind != "rig" {
-        return None;
-    }
-    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
-    for_run_with_artifacts_in_roots(roots.artifacts(), run, artifacts)
-}
+// The ambient `for_run_with_artifacts()` shim that used to sit here is gone.
+// `for_run` was its only caller and now passes the root its store was opened
+// against (#7505).
 
 /// [`for_run_with_artifacts`] against an explicitly injected artifact root.
 ///
