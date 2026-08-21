@@ -46,6 +46,18 @@ pub struct RigRunFailedStepRef {
     pub error: Option<String>,
 }
 
+/// Write the rig artifact index for a finished run, under the artifact root
+/// that `store` itself indexes against.
+///
+/// This function writes the index file under an artifact root and then records
+/// that same path *into* `store`, so the two must be the same home. It used to
+/// resolve the root from ambient process state with no reference to whichever
+/// home `store` was opened against, which meant a caller holding a non-ambient
+/// store indexed a file that store's home does not contain.
+///
+/// `ObservationStore::artifact_root` is the authority: injected roots answer
+/// directly, and an ambiently-opened store answers with the ambient root it
+/// was already using. Asking the store cannot disagree with the store (#7505).
 pub fn for_completed_rig_run(
     store: &ObservationStore,
     rig: &RigSpec,
@@ -53,30 +65,8 @@ pub fn for_completed_rig_run(
     status: &str,
     pipeline: Option<&PipelineOutcome>,
 ) -> Option<RigRunArtifactIndex> {
-    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
-    for_completed_rig_run_in_roots(roots.artifacts(), store, rig, run_id, status, pipeline)
-}
-
-/// [`for_completed_rig_run`] against an explicitly injected artifact root.
-///
-/// The injection point exists because this function writes the index file
-/// under the artifact root and then records that same path *into* `store`. The
-/// ambient form resolved the root with no reference to whichever home `store`
-/// was opened against, so a caller holding a non-ambient store would index a
-/// file that store's home does not contain. Callers that own both should pass
-/// the root the store was opened with.
-///
-/// `ObservationStore` does not expose the roots it resolved, so the ambient
-/// wrapper above is currently the only production caller; closing that half
-/// needs `homeboy-core` (#7505).
-pub fn for_completed_rig_run_in_roots(
-    artifact_root: &Path,
-    store: &ObservationStore,
-    rig: &RigSpec,
-    run_id: &str,
-    status: &str,
-    pipeline: Option<&PipelineOutcome>,
-) -> Option<RigRunArtifactIndex> {
+    let artifact_root = store.artifact_root().ok()?;
+    let artifact_root = artifact_root.as_path();
     let run_artifact_root = artifact_root.join(run_id);
     let artifact_index_path = run_artifact_root.join("rig-artifact-index.json");
     let artifacts = store.list_artifacts(run_id).unwrap_or_default();
@@ -103,32 +93,25 @@ pub fn for_run(store: &ObservationStore, run: &RunRecord) -> Option<RigRunArtifa
         return None;
     }
     let artifacts = store.list_artifacts(&run.id).unwrap_or_default();
-    for_run_with_artifacts(run, &artifacts)
+    // The store knows which home it indexes; re-resolving here is how a
+    // listing ends up naming another home's index path (#7505).
+    for_run_with_artifacts(&store.artifact_root().ok()?, run, &artifacts)
 }
 
-pub fn for_run_with_artifacts(
-    run: &RunRecord,
-    artifacts: &[ArtifactRecord],
-) -> Option<RigRunArtifactIndex> {
-    // Guard before resolving. This is called once per run while rendering a
-    // run listing, and the ambient form only reached the artifact root after
-    // rejecting non-rig runs; resolving first would put three environment
-    // reads on every non-rig row.
-    if run.rig_id.is_none() || run.kind != "rig" {
-        return None;
-    }
-    let roots = homeboy_core::paths::PathRoots::from_environment().ok()?;
-    for_run_with_artifacts_in_roots(roots.artifacts(), run, artifacts)
-}
-
-/// [`for_run_with_artifacts`] against an explicitly injected artifact root.
+/// Report where an already-recorded run's index lives, under an explicitly
+/// supplied artifact root.
+///
+/// The caller resolves once and reuses it across a listing. The ambient form
+/// this replaced guarded before resolving precisely because it was called per
+/// row; a root passed in from above removes the per-row resolution entirely
+/// rather than merely deferring it.
 ///
 /// Read-only: this reports where the index for an already-recorded run lives.
 /// It is rooted anyway because the paths it renders are handed to operators as
 /// retrieval commands, and a report naming one home's index while the records
 /// came from another is exactly the kind of quiet disagreement #7505 exists to
 /// remove.
-pub fn for_run_with_artifacts_in_roots(
+pub fn for_run_with_artifacts(
     artifact_root: &Path,
     run: &RunRecord,
     artifacts: &[ArtifactRecord],
