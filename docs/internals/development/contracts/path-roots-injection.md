@@ -126,11 +126,61 @@ boundary is also a call. Decompose instead:
   supposed to be small and non-zero.
 - **test helpers** — one per test module.
 
-For `homeboy-release`, the increment that produced this document moved ambient
-points from 7 to 3 and left 4 named boundaries. The remaining 3 all live in
-`OperationRecordStore`, whose static methods resolve per call; converting it
-wants `homeboy-cli` to thread roots first, so its callers have something to
-pass.
+`homeboy-release` is the completed reference. It took two increments:
+
+| | start | after #12746 | after store conversion |
+|---|---|---|---|
+| ambient | 7 | 3 | **0** |
+| boundaries | 2 | 4 | 3 |
+| test helpers | 1 | 4 | 8 |
+
+Boundaries *decreased* in the second increment, which is the shape to expect
+near the end: `deployment::resume_deployment` and the dry-run preflight entry
+stopped resolving and started receiving, because a caller above them had roots
+to give. A boundary is only a boundary while nothing above it can supply one.
+
+The number that actually matters is resolutions per invocation. A
+provider-staged `homeboy release` performed **eight** independent resolutions —
+seven of them inside `OperationRecordStore`, one in the orchestrator — and now
+performs exactly **one**, at `run_command_with_workspace`.
+
+## Stateful stores
+
+A store with associated (`Self::`) methods that each resolve a root is the
+worst version of this defect, because the per-call resolution is invisible at
+the call site. `OperationRecordStore::update(owner, f)` looks free; it was a
+filesystem-root rediscovery.
+
+Give the store the root at construction:
+
+```rust
+pub struct OperationRecordStore {
+    data_root: PathBuf,
+}
+
+impl OperationRecordStore {
+    pub fn in_roots(roots: &paths::PathRoots) -> Self { .. }
+    pub fn update(&self, owner_run_ref: &str, ..) -> Result<OperationRecord> { .. }
+}
+```
+
+Then hold the store — not the roots — on whatever already models the lifetime
+of the work. `ReleaseWorkspace` gained a `store` field because provisioning and
+finalization write the same record from different phases of one release; the
+struct that spans both phases is the right owner.
+
+Converting a store is mechanical but wide: 14 production call sites and 26 test
+call sites here. Two collision shapes cost time and are worth pre-empting:
+
+- **Indentation substring collisions.** A literal anchor of `        foo(` also
+  matches a `            foo(` line, because the 12-space text is a substring of
+  the 16-space line. Anchor on `\n` + indent, or on a unique neighbouring line.
+- **Same call at the same indent in production and tests.** Anchor on the
+  preceding statement, not the call itself.
+
+Assert the expected match count before writing, and write the whole file only
+after every assertion passes. Both collisions above surfaced as a failed
+assertion rather than a bad edit.
 
 ## Verifying
 
