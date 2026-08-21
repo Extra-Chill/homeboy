@@ -24,6 +24,7 @@ glob-match = "0.2"
 base64 = "0.22"
 uuid = { version = "1.11", features = ["v4"] }
 libc = "0.2"
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 # Shared hermetic test fixtures (with_isolated_home) live in homeboy-core behind

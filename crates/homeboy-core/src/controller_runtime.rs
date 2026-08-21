@@ -671,7 +671,11 @@ pub fn pin_current() -> Result<Value> {
 fn pin_current_unlocked() -> Result<Value> {
     let identity = build_identity::current();
     let executable = current_executable()?;
-    pin_executable(&executable, &identity.display)
+    pin_executable_with_source(
+        &executable,
+        &identity.display,
+        build_source_provenance(&identity),
+    )
 }
 
 /// Pin the currently executing controller while participating in the FIFO
@@ -728,11 +732,15 @@ fn current_executable() -> Result<PathBuf> {
 /// Seal a verified executable for a command-scoped controller continuation.
 /// The returned pin is content-addressed, executable, and self-identifying.
 pub fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
+    pin_executable_with_source(executable, identity, unavailable_source_provenance())
+}
+
+fn pin_executable_with_source(executable: &Path, identity: &str, source: Value) -> Result<Value> {
     let digest = controller_executable_digest(executable)?;
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
 
-    let runtime = runtime_pin(identity, executable, &pinned_path, &digest);
+    let runtime = runtime_pin(identity, executable, &pinned_path, &digest, source);
     validate_pin(&runtime)?;
     Ok(runtime)
 }
@@ -801,10 +809,24 @@ pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> 
             None,
         ));
     }
-    pin_executable(&target.target_dir().join("release/homeboy"), identity)
+    pin_executable_with_source(
+        &target.target_dir().join("release/homeboy"),
+        identity,
+        json!({
+            "repository": source,
+            "revision": commit,
+            "verification": "explicit_source_commit",
+        }),
+    )
 }
 
-fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &str) -> Value {
+fn runtime_pin(
+    identity: &str,
+    executable: &Path,
+    pinned_path: &Path,
+    digest: &str,
+    source: Value,
+) -> Value {
     json!({
         "schema": "homeboy/controller-runtime-pin/v2",
         "requested": identity,
@@ -813,7 +835,7 @@ fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &s
             "executable": executable,
             "pinned_executable": pinned_path,
             "sha256": digest,
-            "source": source_provenance(),
+            "source": source,
         },
         "current": identity,
         "executed": identity,
@@ -2849,15 +2871,22 @@ fn required_runtime_string<'a>(runtime: &'a Value, pointer: &str, label: &str) -
         })
 }
 
-fn source_provenance() -> Value {
-    let cwd = std::env::current_dir().ok();
-    let revision = cwd
-        .as_ref()
-        .and_then(|path| crate::git::output_allow_empty(path, &["rev-parse", "HEAD"]));
-    let repository = cwd.as_ref().and_then(|path| {
-        crate::git::output_allow_empty(path, &["config", "--get", "remote.origin.url"])
-    });
-    json!({ "revision": revision, "repository": repository, "verification": "observed_from_process_cwd" })
+fn build_source_provenance(identity: &build_identity::BuildIdentity) -> Value {
+    let Some(revision) = identity.git_commit.as_deref() else {
+        return unavailable_source_provenance();
+    };
+    json!({
+        "repository": env!("CARGO_PKG_REPOSITORY"),
+        "revision": revision,
+        "verification": "build_metadata",
+    })
+}
+
+fn unavailable_source_provenance() -> Value {
+    json!({
+        "state": "unavailable",
+        "reason": "executable_build_or_install_provenance_not_recorded",
+    })
 }
 
 fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<()> {
@@ -4078,6 +4107,27 @@ mod tests {
             assert_eq!(
                 executable_identity(&pinned, None).expect("fixture identity"),
                 build_identity::current().display
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicitly_pinned_executable_reports_unavailable_source_provenance() {
+        crate::test_support::with_isolated_home(|_| {
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let executable = temporary.path().join("homeboy");
+            let identity = "homeboy 0.0.0+external";
+            let digest = fake_controller(&executable, identity, "external");
+
+            let runtime = pin_executable(&executable, identity).expect("pin external executable");
+
+            assert_eq!(runtime["originating"]["sha256"], digest);
+            assert_eq!(runtime["originating"]["build_identity"], identity);
+            assert_eq!(runtime["originating"]["source"]["state"], "unavailable");
+            assert_eq!(
+                runtime["originating"]["source"]["reason"],
+                "executable_build_or_install_provenance_not_recorded"
             );
         });
     }

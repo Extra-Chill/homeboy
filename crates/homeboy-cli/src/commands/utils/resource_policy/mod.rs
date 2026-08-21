@@ -7,6 +7,7 @@ use crate::commands::agent_task;
 use crate::runner::runners::LabRunnerReadiness;
 
 use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
+use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
@@ -83,6 +84,36 @@ pub struct ResourcePolicyWarning {
     pub command: &'static str,
     pub recommendation: ResourceRecommendation,
     pub message: String,
+}
+
+const RESOURCE_ADMISSION_RECOVERY_SCHEMA: &str = "homeboy/resource-admission-recovery/v1";
+const PRESSURE_RETRY_AFTER_SECONDS: u64 = 60;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResourceAdmissionRecoveryKind {
+    Defer,
+    LocalOverride,
+    RunnerConnection,
+    RunnerAvailability,
+    RunnerRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ResourceAdmissionRecoveryChoice {
+    kind: ResourceAdmissionRecoveryKind,
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requires_operator_authorization: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ResourceAdmissionRecovery {
+    schema: &'static str,
+    run_created: bool,
+    choices: Vec<ResourceAdmissionRecoveryChoice>,
 }
 
 /// Build a structured `ResourcePolicyContext` from a `DoctorOutput`, the matched
@@ -414,11 +445,11 @@ pub fn admits_auto_local_capacity_fallback(
         && resources.rig_leases.recommendation == ResourceRecommendation::Ok
 }
 
-pub fn non_interactive_preflight_error(
+pub(crate) fn non_interactive_preflight_error(
     warning: &ResourcePolicyWarning,
     local_override: bool,
     interactive: bool,
-    local_hot_rerun_command: Option<String>,
+    recovery: Option<ResourceAdmissionRecovery>,
     runner_offload_admitted: bool,
 ) -> Option<crate::core::Error> {
     // GitHub Actions runners are ephemeral, single-purpose, and always
@@ -444,12 +475,104 @@ pub fn non_interactive_preflight_error(
         None,
         None,
     );
-    if let Some(command) = local_hot_rerun_command {
-        error.details["resume_command"] = serde_json::Value::String(command.clone());
-        error.details["rerun_command"] = serde_json::Value::String(command);
+    if let Some(recovery) = recovery {
+        if let Some(choice) = recovery
+            .choices
+            .iter()
+            .find(|choice| choice.kind == ResourceAdmissionRecoveryKind::LocalOverride)
+        {
+            error.details["rerun_command"] = serde_json::Value::String(choice.command.clone());
+        }
+        error.details["recovery"] =
+            serde_json::to_value(recovery).expect("resource admission recovery serializes");
     }
     error.details["run_created"] = serde_json::Value::Bool(false);
     Some(error)
+}
+
+pub(crate) fn admission_recovery(
+    args: &[String],
+    lab_readiness: Option<&LabRunnerReadiness>,
+) -> Option<ResourceAdmissionRecovery> {
+    let local_override = local_override_command(args)?;
+    let mut choices = vec![
+        ResourceAdmissionRecoveryChoice {
+            kind: ResourceAdmissionRecoveryKind::Defer,
+            command: "homeboy self doctor".to_string(),
+            retry_after_seconds: Some(PRESSURE_RETRY_AFTER_SECONDS),
+            requires_operator_authorization: None,
+        },
+        ResourceAdmissionRecoveryChoice {
+            kind: ResourceAdmissionRecoveryKind::LocalOverride,
+            command: local_override,
+            retry_after_seconds: None,
+            requires_operator_authorization: Some(true),
+        },
+    ];
+    // An absent inventory is intentional configuration, not a broken runner.
+    // A ready inventory also cannot justify repair. Keep recovery action kinds
+    // aligned with the observed state so repair is only advertised for stale
+    // configured runners.
+    if let Some(readiness) = lab_readiness {
+        let kind = match readiness.state {
+            crate::runner::runners::LabRunnerReadinessState::Absent
+            | crate::runner::runners::LabRunnerReadinessState::ConnectedReady => None,
+            crate::runner::runners::LabRunnerReadinessState::Disconnected => {
+                Some(ResourceAdmissionRecoveryKind::RunnerConnection)
+            }
+            crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible
+            | crate::runner::runners::LabRunnerReadinessState::CapacityBlocked => {
+                Some(ResourceAdmissionRecoveryKind::RunnerAvailability)
+            }
+            crate::runner::runners::LabRunnerReadinessState::Stale => {
+                Some(ResourceAdmissionRecoveryKind::RunnerRecovery)
+            }
+        };
+        if let Some(kind) = kind {
+            choices.extend(
+                readiness
+                    .remediation_commands
+                    .iter()
+                    .cloned()
+                    .map(|command| ResourceAdmissionRecoveryChoice {
+                        kind: kind.clone(),
+                        command,
+                        retry_after_seconds: None,
+                        requires_operator_authorization: None,
+                    }),
+            );
+        }
+    }
+    Some(ResourceAdmissionRecovery {
+        schema: RESOURCE_ADMISSION_RECOVERY_SCHEMA,
+        run_created: false,
+        choices,
+    })
+}
+
+fn local_override_command(args: &[String]) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut command = args.to_vec();
+    if let Some(index) = command
+        .iter()
+        .position(|arg| arg == "--placement" || arg.starts_with("--placement="))
+    {
+        if command[index] == "--placement" {
+            if let Some(value) = command.get_mut(index + 1) {
+                *value = "local".to_string();
+            } else {
+                command.push("local".to_string());
+            }
+        } else {
+            command[index] = "--placement=local".to_string();
+        }
+    } else {
+        command.insert(1, "--placement".to_string());
+        command.insert(2, "local".to_string());
+    }
+    Some(crate::core::engine::shell::quote_args(&command))
 }
 
 pub fn rerun_command(
@@ -1429,8 +1552,7 @@ mod tests {
         );
         let warning = evaluate(command, &resources(ResourceRecommendation::Warm))
             .expect("warm machines warn");
-        let rerun = rerun_command(
-            command,
+        let recovery = admission_recovery(
             &[
                 "homeboy".to_string(),
                 "review".to_string(),
@@ -1441,18 +1563,15 @@ mod tests {
             None,
         );
 
-        let error = non_interactive_preflight_error(&warning, false, false, rerun, false)
+        let error = non_interactive_preflight_error(&warning, false, false, recovery, false)
             .expect("non-interactive local-only hot runs should fail fast");
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
             Some("homeboy --placement local review lint --changed-since origin/main")
         );
-        assert_eq!(
-            error.details["resume_command"].as_str(),
-            Some("homeboy --placement local review lint --changed-since origin/main")
-        );
         assert_eq!(error.details["run_created"], false);
+        assert!(error.details.get("resume_command").is_none());
         assert!(error.message.contains("Lab routing is not offered"));
     }
 
@@ -1527,19 +1646,21 @@ mod tests {
             &resources(ResourceRecommendation::Warm),
         )
         .expect("warm machines warn");
-        let rerun = rerun_command(
-            lab_supported_hot("audit"),
-            &["homeboy".to_string(), "audit".to_string()],
-            None,
-        );
-        let error = non_interactive_preflight_error(&warning, false, false, rerun, false)
+        let recovery = admission_recovery(&["homeboy".to_string(), "audit".to_string()], None);
+        let error = non_interactive_preflight_error(&warning, false, false, recovery, false)
             .expect("non-interactive hot runs should fail fast");
 
-        assert!(error.details.get("rerun_command").is_none());
+        assert_eq!(
+            error.details["rerun_command"].as_str(),
+            Some("homeboy --placement local audit")
+        );
+        assert!(error.details.get("resume_command").is_none());
         assert!(error
             .message
             .contains("No Homeboy Lab runner is configured on this host"));
-        assert!(error.message.contains("connect a runner"));
+        assert!(error
+            .message
+            .contains("wait for controller pressure to fall"));
         assert!(error
             .message
             .contains("explicit, authorized `--placement local` override"));
@@ -1578,20 +1699,152 @@ mod tests {
             &warning,
             false,
             false,
-            rerun_command(
-                hot,
+            admission_recovery(
                 &["homeboy".to_string(), "fuzz".to_string(), "run".to_string()],
-                None,
+                Some(&disconnected),
             ),
             false,
         )
         .expect("disconnected Lab refuses local execution");
 
-        assert!(error.details.get("rerun_command").is_none());
+        assert_eq!(
+            error.details["rerun_command"].as_str(),
+            Some("homeboy --placement local fuzz run")
+        );
+        assert!(error.details.get("resume_command").is_none());
         assert!(error
             .message
             .contains("homeboy runner reconnect homeboy-lab"));
         assert!(error.message.contains("requires a ready Lab runner"));
+    }
+
+    #[test]
+    fn absent_lab_recovery_is_replayable_without_runner_repair() {
+        let absent = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::Absent,
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: Vec::new(),
+            // An intentionally absent Lab must ignore even stale-looking
+            // remediation supplied by an upstream inventory projection.
+            remediation_commands: vec!["homeboy runner disconnect homeboy-lab".to_string()],
+        };
+        let recovery = admission_recovery(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "fix resource admission".to_string(),
+            ],
+            Some(&absent),
+        )
+        .expect("argv produces recovery");
+
+        let value = serde_json::to_value(&recovery).expect("recovery serializes");
+        assert_eq!(value["schema"], RESOURCE_ADMISSION_RECOVERY_SCHEMA);
+        assert_eq!(value["run_created"], false);
+        assert_eq!(value["choices"][0]["kind"], "defer");
+        assert_eq!(value["choices"][0]["retry_after_seconds"], 60);
+        assert_eq!(value["choices"][1]["kind"], "local_override");
+        assert_eq!(
+            value["choices"][1]["command"],
+            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+        );
+        assert_eq!(value["choices"][1]["requires_operator_authorization"], true);
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
+
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &resources(ResourceRecommendation::Hot),
+            Some(&absent),
+        )
+        .expect("hot controller warns");
+        let error = non_interactive_preflight_error(&warning, false, false, Some(recovery), false)
+            .expect("pre-run admission refuses execution");
+        assert_eq!(error.details["run_created"], false);
+        assert_eq!(
+            error.details["rerun_command"],
+            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+        );
+        assert!(error.details.get("resume_command").is_none());
+        assert_eq!(
+            error.details["recovery"]["schema"],
+            RESOURCE_ADMISSION_RECOVERY_SCHEMA
+        );
+        assert_eq!(error.details["recovery"]["run_created"], false);
+        assert_eq!(
+            error.details["recovery"]["choices"][1]["command"],
+            error.details["rerun_command"]
+        );
+        assert!(error
+            .message
+            .contains("No configured Homeboy Lab runner is expected"));
+        assert!(!error.message.contains("Follow the listed runner recovery"));
+        assert!(error.details["recovery"]["choices"]
+            .as_array()
+            .expect("serialized recovery choices")
+            .iter()
+            .all(|choice| choice["command"] != "homeboy runner disconnect homeboy-lab"));
+        assert!(!warning
+            .message
+            .contains("homeboy runner disconnect homeboy-lab"));
+    }
+
+    #[test]
+    fn stale_configured_lab_recovery_includes_evidence_backed_runner_repair() {
+        let recovery = admission_recovery(
+            &["homeboy".to_string(), "audit".to_string()],
+            Some(&LabRunnerReadiness {
+                state: crate::runner::runners::LabRunnerReadinessState::Stale,
+                selected_runner_id: Some("homeboy-lab".to_string()),
+                available_runner_ids: Vec::new(),
+                reasons: vec!["runner daemon is stale".to_string()],
+                remediation_commands: vec!["homeboy runner refresh homeboy-lab".to_string()],
+            }),
+        )
+        .expect("argv produces recovery");
+
+        let value = serde_json::to_value(recovery).expect("recovery serializes");
+        assert_eq!(value["choices"][2]["kind"], "runner_recovery");
+        assert_eq!(
+            value["choices"][2]["command"],
+            "homeboy runner refresh homeboy-lab"
+        );
+    }
+
+    #[test]
+    fn local_override_replaces_existing_nonlocal_placement() {
+        let recovery = admission_recovery(
+            &[
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "auto".to_string(),
+                "audit".to_string(),
+            ],
+            None,
+        )
+        .expect("argv produces recovery");
+
+        let value = serde_json::to_value(recovery).expect("recovery serializes");
+        assert_eq!(
+            value["choices"][1]["command"],
+            "homeboy --placement local audit"
+        );
+    }
+
+    #[test]
+    fn ready_lab_does_not_advertise_unjustified_runner_repair() {
+        let mut readiness = ready_lab();
+        readiness.remediation_commands = vec!["homeboy runner doctor homeboy-lab".to_string()];
+        let recovery = admission_recovery(
+            &["homeboy".to_string(), "audit".to_string()],
+            Some(&readiness),
+        )
+        .expect("argv produces recovery");
+
+        let value = serde_json::to_value(recovery).expect("recovery serializes");
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
     }
 
     #[test]

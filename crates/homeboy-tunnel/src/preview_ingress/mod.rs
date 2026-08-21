@@ -18,6 +18,7 @@ mod types;
 pub use install::{render_install_plan, render_install_status_plan};
 pub use routes::{list_routes, register_route, remove_route, status, status_for_host};
 pub use serve::serve;
+pub(crate) use serve::{PREVIEW_WEBSOCKET_MAX_FRAME_BYTES, PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES};
 pub use types::{
     PreviewIngressFailure, PreviewIngressInstallCheck, PreviewIngressInstallCheckStatus,
     PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,

@@ -3,13 +3,15 @@ use homeboy_engine_primitives::content_hash;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::preview_client::PreviewIngressRequest;
+use crate::preview_client::{
+    PreviewIngressRequest, PreviewWebSocketFrame, PreviewWebSocketFrameKind, PreviewWebSocketOpen,
+};
 use homeboy_core::error::{Error, Result};
 
 use super::http::{
@@ -27,7 +29,29 @@ use super::types::{
     PreviewIngressFailure, PreviewIngressLogLine, PreviewIngressRoute,
     PreviewIngressRouteLifecycle, PreviewIngressServeSpec, PreviewNextRequest,
     PreviewRegisterRequest, PreviewRespondChunkRequest, PreviewRespondRequest,
+    PreviewWebSocketOperation, PreviewWebSocketSession,
 };
+
+mod websocket;
+
+#[cfg(test)]
+use websocket::WebSocketCleanupGuard;
+use websocket::{
+    begin_websocket_close, decoded_frame_payload_len, frame_payload_len, is_websocket_upgrade,
+    proxy_reverse_channel_websocket, route_queued_bytes, websocket_close_complete,
+    websocket_close_expired,
+};
+
+pub const PREVIEW_WEBSOCKET_MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_MAX_SESSIONS_PER_ROUTE: usize = 16;
+pub const PREVIEW_WEBSOCKET_QUEUE_DEPTH: usize = 64;
+pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION: usize = 4 * 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE: usize = 16 * 1024 * 1024;
+pub const PREVIEW_WEBSOCKET_IDLE_SECS: u64 = 60;
+pub const PREVIEW_WEBSOCKET_HANDSHAKE_SECS: u64 = 10;
+pub const PREVIEW_WEBSOCKET_CLOSE_SECS: u64 = 5;
+const PREVIEW_WEBSOCKET_WRITE_SECS: u64 = 5;
 
 pub fn serve(spec: PreviewIngressServeSpec) -> Result<super::types::PreviewIngressStatus> {
     validate_serve_spec(&spec)?;
@@ -96,6 +120,22 @@ fn handle_connection(
     auth: Arc<PreviewIngressAuth>,
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("configure ingress read timeout".to_string()),
+            )
+        })?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(PREVIEW_WEBSOCKET_WRITE_SECS)))
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("configure ingress write timeout".to_string()),
+            )
+        })?;
     let started = Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| {
@@ -151,6 +191,25 @@ fn handle_connection(
 
     if request.target.starts_with("/preview/client/") {
         return handle_client_api(&mut stream, request, &sessions, &auth, &recent_failures);
+    }
+
+    let has_live_session = sessions
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&normalize_public_host(&host))
+        .is_some_and(|session| session.active);
+    if has_live_session {
+        return proxy_reverse_channel_request(
+            &mut stream,
+            request,
+            request_id,
+            host,
+            path,
+            started,
+            sessions,
+            recent_failures,
+        );
     }
 
     let Some(route) = route_for_host(&host)? else {
@@ -341,23 +400,41 @@ fn handle_client_api(
                 );
             }
             validate_client_local_origin(&body.local_origin)?;
-            let _session_id = body.session_id.unwrap_or_else(|| public_host.clone());
+            let session_id = body.session_id.unwrap_or_else(|| public_host.clone());
+            let registered_session_id = session_id.clone();
+            let channel_id = uuid::Uuid::new_v4().to_string();
             let mut sessions_guard = sessions
                 .sessions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             sessions_guard.insert(
-                public_host,
+                public_host.clone(),
                 PreviewClientSession {
                     local_origin: body.local_origin,
+                    session_id,
+                    channel_id: channel_id.clone(),
                     pending: std::collections::VecDeque::new(),
+                    pending_websockets: std::collections::VecDeque::new(),
                     responses: std::collections::HashMap::new(),
                     response_chunks: std::collections::HashMap::new(),
+                    websockets: std::collections::HashMap::new(),
                     active: true,
                 },
             );
             sessions.changed.notify_all();
-            write_json_response(stream, 200, json!({ "registered": true }))
+            let registered_session_id = sessions_guard
+                .get(&public_host)
+                .map(|session| session.session_id.clone())
+                .unwrap_or(registered_session_id);
+            write_json_response(
+                stream,
+                200,
+                json!({
+                    "registered": true,
+                    "channel_id": channel_id,
+                    "session_id": registered_session_id,
+                }),
+            )
         }
         "/preview/client/next" => {
             let body: PreviewNextRequest = parse_json_body(&request.body, "next")?;
@@ -370,6 +447,13 @@ fn handle_client_api(
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             loop {
                 if let Some(session) = sessions_guard.get_mut(&public_host) {
+                    if !body.channel_id.is_empty() && body.channel_id != session.channel_id {
+                        return write_json_response(
+                            stream,
+                            403,
+                            json!({ "error": "route_owner_mismatch" }),
+                        );
+                    }
                     if !session.active {
                         return write_json_response(
                             stream,
@@ -378,7 +462,20 @@ fn handle_client_api(
                         );
                     }
                     if let Some(request) = session.pending.pop_front() {
-                        return write_json_response(stream, 200, json!({ "request": request }));
+                        return write_json_response(
+                            stream,
+                            200,
+                            json!({ "request": request, "websocket": null }),
+                        );
+                    }
+                    if !body.channel_id.is_empty() {
+                        if let Some(websocket) = session.pending_websockets.pop_front() {
+                            return write_json_response(
+                                stream,
+                                200,
+                                json!({ "request": null, "websocket": websocket }),
+                            );
+                        }
                     }
                 } else {
                     return write_json_response(stream, 404, json!({ "error": "missing_session" }));
@@ -386,7 +483,11 @@ fn handle_client_api(
 
                 let elapsed = started.elapsed();
                 if elapsed >= timeout {
-                    return write_json_response(stream, 200, json!({ "request": null }));
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "request": null, "websocket": null }),
+                    );
                 }
                 let wait_for = timeout - elapsed;
                 let (guard, wait) = sessions
@@ -395,7 +496,11 @@ fn handle_client_api(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 sessions_guard = guard;
                 if wait.timed_out() {
-                    return write_json_response(stream, 200, json!({ "request": null }));
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "request": null, "websocket": null }),
+                    );
                 }
             }
         }
@@ -447,6 +552,209 @@ fn handle_client_api(
             sessions.changed.notify_all();
             write_json_response(stream, 200, json!({ "closed": true }))
         }
+        "/preview/client/websocket/open" => {
+            let body: PreviewWebSocketOperation = parse_json_body(&request.body, "websocket open")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let Some(result) = body.result else {
+                return write_json_response(stream, 400, json!({ "error": "missing_open_result" }));
+            };
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let Some(websocket) = session.websockets.get_mut(&result.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            websocket.open_result = Some(result);
+            websocket.last_activity = Instant::now();
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/websocket/next" => {
+            let body: PreviewWebSocketOperation = parse_json_body(&request.body, "websocket next")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let timeout = Duration::from_millis(body.timeout_ms.clamp(1, 1000));
+            let started = Instant::now();
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                let Some(session) = guard.get_mut(&public_host) else {
+                    return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+                };
+                if session.channel_id != body.channel_id {
+                    return write_json_response(
+                        stream,
+                        403,
+                        json!({ "error": "route_owner_mismatch" }),
+                    );
+                }
+                let Some(websocket) = session.websockets.get_mut(&body.websocket_id) else {
+                    return write_json_response(
+                        stream,
+                        404,
+                        json!({ "error": "missing_websocket" }),
+                    );
+                };
+                if let Some(frame) = websocket.to_client.pop_front() {
+                    websocket.to_client_bytes = websocket
+                        .to_client_bytes
+                        .saturating_sub(frame_payload_len(&frame));
+                    if matches!(frame.kind, PreviewWebSocketFrameKind::Close) {
+                        websocket.client_close_pending_delivery = true;
+                    }
+                    websocket.last_activity = Instant::now();
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": frame, "closed": false }),
+                    );
+                }
+                if websocket_close_complete(websocket) || websocket_close_expired(websocket) {
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": null, "closed": true }),
+                    );
+                }
+                if started.elapsed() >= timeout {
+                    return write_json_response(
+                        stream,
+                        200,
+                        json!({ "frame": null, "closed": false }),
+                    );
+                }
+                let (next_guard, _) = sessions
+                    .changed
+                    .wait_timeout(guard, timeout - started.elapsed())
+                    .unwrap_or_else(|p| p.into_inner());
+                guard = next_guard;
+            }
+        }
+        "/preview/client/websocket/frame" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket frame")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let Some(frame) = body.frame else {
+                return write_json_response(stream, 400, json!({ "error": "missing_frame" }));
+            };
+            let payload_bytes = match decoded_frame_payload_len(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return write_json_response(
+                        stream,
+                        400,
+                        json!({ "error": "invalid_websocket_payload", "message": error.message }),
+                    )
+                }
+            };
+            if payload_bytes > PREVIEW_WEBSOCKET_MAX_FRAME_BYTES {
+                return write_json_response(
+                    stream,
+                    413,
+                    json!({ "error": "websocket_frame_too_large" }),
+                );
+            }
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let route_over_budget = route_queued_bytes(session, false)
+                .saturating_add(payload_bytes)
+                > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE;
+            let Some(websocket) = session.websockets.get_mut(&frame.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            if websocket.to_public.len() >= PREVIEW_WEBSOCKET_QUEUE_DEPTH
+                || websocket.to_public_bytes.saturating_add(payload_bytes)
+                    > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+                || route_over_budget
+            {
+                return write_json_response(
+                    stream,
+                    429,
+                    json!({ "error": "websocket_queue_full" }),
+                );
+            }
+            websocket.last_activity = Instant::now();
+            if matches!(frame.kind, PreviewWebSocketFrameKind::Close) {
+                websocket.client_close_received = true;
+                begin_websocket_close(websocket);
+            }
+            websocket.to_public_bytes += payload_bytes;
+            websocket.to_public.push_back(frame);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/websocket/abort" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket abort")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            if session.websockets.remove(&body.websocket_id).is_none() {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            }
+            session
+                .pending_websockets
+                .retain(|open| open.websocket_id != body.websocket_id);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "aborted": true }))
+        }
+        "/preview/client/websocket/delivered" => {
+            let body: PreviewWebSocketOperation =
+                parse_json_body(&request.body, "websocket delivery acknowledgement")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut guard = sessions.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            if session.channel_id != body.channel_id {
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({ "error": "route_owner_mismatch" }),
+                );
+            }
+            let Some(websocket) = session.websockets.get_mut(&body.websocket_id) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_websocket" }));
+            };
+            if (websocket.client_close_sent || !websocket.client_close_received)
+                && !websocket.client_close_pending_delivery
+            {
+                return write_json_response(
+                    stream,
+                    409,
+                    json!({ "error": "unexpected_websocket_delivery" }),
+                );
+            }
+            websocket.client_close_pending_delivery = false;
+            websocket.client_close_sent = true;
+            begin_websocket_close(websocket);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
         _ => write_json_response(stream, 404, json!({ "error": "not_found" })),
     }
 }
@@ -463,6 +771,18 @@ fn proxy_reverse_channel_request(
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
     let public_host = normalize_public_host(&host);
+    if is_websocket_upgrade(&request) {
+        return proxy_reverse_channel_websocket(
+            stream,
+            request,
+            request_id,
+            host,
+            path,
+            started,
+            sessions,
+            recent_failures,
+        );
+    }
     let preview_request = PreviewIngressRequest {
         request_id: request_id.clone(),
         method: request.method,
@@ -801,4 +1121,116 @@ fn upstream_url(route: &PreviewIngressRoute, target: &str) -> Result<String> {
         format!("/{target}")
     };
     Ok(format!("{base}{target}"))
+}
+
+#[cfg(test)]
+mod websocket_state_tests {
+    use super::*;
+
+    fn websocket() -> PreviewWebSocketSession {
+        PreviewWebSocketSession {
+            open_result: None,
+            to_client: std::collections::VecDeque::new(),
+            to_public: std::collections::VecDeque::new(),
+            to_client_bytes: 0,
+            to_public_bytes: 0,
+            last_activity: Instant::now(),
+            public_close_received: false,
+            public_close_sent: false,
+            client_close_received: false,
+            client_close_sent: false,
+            client_close_pending_delivery: false,
+            close_deadline: None,
+        }
+    }
+
+    fn session() -> PreviewClientSession {
+        PreviewClientSession {
+            local_origin: "http://localhost".to_string(),
+            session_id: "test".to_string(),
+            channel_id: "channel".to_string(),
+            pending: std::collections::VecDeque::new(),
+            pending_websockets: std::collections::VecDeque::new(),
+            responses: std::collections::HashMap::new(),
+            response_chunks: std::collections::HashMap::new(),
+            websockets: std::collections::HashMap::new(),
+            active: true,
+        }
+    }
+
+    #[test]
+    fn cleanup_guard_releases_slot_after_setup_error() {
+        let sessions = Arc::new(PreviewClientSessions::default());
+        sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert("host".to_string(), session());
+        sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get_mut("host")
+            .expect("session")
+            .websockets
+            .insert("socket".to_string(), websocket());
+        let cleanup = WebSocketCleanupGuard::new(
+            Arc::clone(&sessions),
+            "host".to_string(),
+            "socket".to_string(),
+        );
+        drop(cleanup);
+        assert!(sessions
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get("host")
+            .expect("session")
+            .websockets
+            .is_empty());
+    }
+
+    #[test]
+    fn close_state_waits_for_delayed_peer_acknowledgements() {
+        let mut state = websocket();
+        state.public_close_received = true;
+        state.client_close_sent = true;
+        begin_websocket_close(&mut state);
+        assert!(!websocket_close_complete(&state));
+        state.client_close_received = true;
+        state.public_close_sent = true;
+        assert!(websocket_close_complete(&state));
+    }
+
+    #[test]
+    fn route_byte_budget_sums_connections_in_each_direction() {
+        let mut state = session();
+        let mut first = websocket();
+        first.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE / 2;
+        let mut second = websocket();
+        second.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE / 2;
+        state.websockets.insert("first".to_string(), first);
+        state.websockets.insert("second".to_string(), second);
+        assert_eq!(
+            route_queued_bytes(&state, true),
+            PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE
+        );
+        assert!(
+            route_queued_bytes(&state, true).saturating_add(1)
+                > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE
+        );
+    }
+
+    #[test]
+    fn connection_byte_budget_rejects_a_frame_after_exact_budget() {
+        let mut state = websocket();
+        state.to_public_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION;
+        assert!(
+            state.to_public_bytes.saturating_add(1) > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+        );
+        state.to_client_bytes = PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION;
+        assert!(
+            state.to_client_bytes.saturating_add(1) > PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION
+        );
+    }
 }

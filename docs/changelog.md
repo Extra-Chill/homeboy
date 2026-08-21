@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.37] - 2026-08-21
+
+### Changed
+- root the reconciler and collapse three pairs
+- share one store across the foreground exec lease
+- open the store against roots the caller already resolved
+- split WebSocket ingress modules
+- Support WebSockets through preview ingress
+- Reject dirty manual-finalization preflights
+
+### Fixed
+- Fix Cook provider model resolution
+- fall back locally on late runner identity drift
+- converge foreground terminal provider failures
+- converge registered remote worktrees
+- return executable recovery choices
+- bypass runtime sealing for preview
+- make provider terminalization idempotent
+- detach Lab-routed coordinators
+- bind controller source provenance
+- consume reconciled refresh admission
+
 ## [0.350.36] - 2026-08-21
 
 ### Changed
