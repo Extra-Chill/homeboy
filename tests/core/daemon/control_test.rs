@@ -1468,10 +1468,12 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
             1,
         )
         .expect("absent child identity recovers exactly one job");
-        let events = JobStore::open_without_reconciliation(daemon_jobs_file())
-            .expect("reopen recovered store")
-            .events(job.id)
-            .expect("events");
+        let events = JobStore::open_without_reconciliation(
+            crate::paths::daemon_jobs_file().expect("jobs path"),
+        )
+        .expect("reopen recovered store")
+        .events(job.id)
+        .expect("events");
         assert_eq!(recovered.status, JobStatus::Failed);
         assert_eq!(
             events
@@ -1497,11 +1499,13 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
         assert_eq!(replay.id, recovered.id);
         assert_eq!(replay.status, recovered.status);
         assert_eq!(
-            JobStore::open_without_reconciliation(daemon_jobs_file())
-                .expect("reopen replayed store")
-                .events(job.id)
-                .expect("events")
-                .len(),
+            JobStore::open_without_reconciliation(
+                crate::paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("reopen replayed store")
+            .events(job.id)
+            .expect("events")
+            .len(),
             events.len()
         );
 
