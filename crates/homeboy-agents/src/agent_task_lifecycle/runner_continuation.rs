@@ -134,10 +134,21 @@ pub trait RunnerContinuationProvider: Send + Sync {
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
+    /// Legacy two-state runner inventory retained for external provider
+    /// compatibility. New providers should implement [`Self::runner_authority`]
+    /// so an unavailable inventory remains distinct from a removed runner.
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        false
+    }
+
     /// Authoritative configuration state for a durable runner id. Providers
     /// that cannot inspect their configuration return `Unknown` fail-closed.
-    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
-        RunnerAuthority::Unknown
+    fn runner_authority(&self, runner_id: &str) -> RunnerAuthority {
+        if self.runner_exists(runner_id) {
+            RunnerAuthority::Configured
+        } else {
+            RunnerAuthority::Unknown
+        }
     }
 
     /// Execute a continuation command on the runner, returning the exit code.

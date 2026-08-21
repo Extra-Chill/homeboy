@@ -1898,6 +1898,9 @@ fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
 fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
     with_isolated_home(|_| {
         let cook_id = "unknown-offline-cook-run";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::unknown(),
+        ));
         record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
 
         let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
@@ -2824,6 +2827,13 @@ impl RunnerAuthorityFixture {
     fn removed() -> Self {
         Self {
             authority: agent_task_lifecycle::RunnerAuthority::Removed,
+            connected: false,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            authority: agent_task_lifecycle::RunnerAuthority::Unknown,
             connected: false,
         }
     }
