@@ -2464,9 +2464,8 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The assertion is that a read left the record byte-identical, which
-/// is only meaningful if the before-read, the status and the after-read all
-/// address one record in one home.
+/// (#7505). Status may persist current admission and reconciliation projections;
+/// the invariant here is that existing terminal provider evidence is unchanged.
 ///
 /// `record_completed_run_in_store` reaches automatic artifact retention only
 /// when a task declares a workspace root that exists; `test_plan()` declares
@@ -2509,7 +2508,14 @@ fn status_preserves_existing_terminal_runtime_evidence() {
         .read_record(&record.run_id)
         .expect("record after status");
 
-    assert_eq!(before, after);
+    assert_eq!(
+        loaded.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
+    assert_eq!(
+        after.lifecycle.provider_runtime,
+        before.lifecycle.provider_runtime
+    );
     assert_eq!(
         loaded.lifecycle.provider_runtime[0].metadata["manual"],
         true
