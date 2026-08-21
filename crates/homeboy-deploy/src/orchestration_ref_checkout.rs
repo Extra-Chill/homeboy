@@ -1269,6 +1269,13 @@ mod tests {
                 fixture.remote.to_str().unwrap(),
             ],
         );
+        // `git clone` does not inherit the source repository's local config, so
+        // this checkout has no committer identity of its own. Tests that commit
+        // into it therefore passed only on machines with a global git identity
+        // and failed on CI with "Author identity unknown". Set it here, the same
+        // way the fixture repository does after `git init`.
+        git(&checkout, &["config", "user.name", "Homeboy Test"]);
+        git(&checkout, &["config", "user.email", "homeboy@example.test"]);
         checkout
     }
 
