@@ -963,44 +963,29 @@ fn runner_snapshot_rejects_conflicting_bound_lab_job_identity() {
 /// mutated — the same store the pending handoff was written into.
 #[test]
 fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    let planned = record_lab_offload_planned_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadProxyPlan {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let planned = record_lab_offload_planned(LabOffloadProxyPlan {
             run_id: "pending-runner-identity",
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
             durable_plan: None,
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("planned handoff");
+        })
+        .expect("planned handoff");
 
-    let error = record_detached_lab_run_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
+        let error = record_detached_lab_run(DetachedLabRunRecord {
             run_id: "pending-runner-identity",
             runner_id: "other-runner",
             runner_job_id: "job-other",
             remote_workspace: "/other/workspace",
             remote_command: &command,
-        },
-    )
-    .expect_err("different runner cannot accept pending handoff");
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    let stored = status_in_store(
-        &lifecycle_store,
-        "pending-runner-identity",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("pending handoff retained")
-    .record;
-    assert_eq!(stored, planned);
+        })
+        .expect_err("different runner cannot accept pending handoff");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let stored = status("pending-runner-identity").expect("pending handoff retained");
+        assert_eq!(stored, planned);
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

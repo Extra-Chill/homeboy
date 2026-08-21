@@ -58,10 +58,23 @@ is no thread-local escape hatch. (Rust made `std::env::set_var` `unsafe` in the
 One thread per test binary closes that window on the Cargo fallback. Nextest
 closes it more directly by running each test in its own process.
 
-The Cargo cap is a fallback workaround, not the primary strategy. Sharded
-nextest replay sets `rust_nextest_shard_threads = 0`, selecting nextest's
-process-per-test `num-cpus` parallelism without exposing Cargo's shared-process
-environment mutation.
+The Cargo cap is a fallback workaround for a race that is specific to sharing
+one process across threads. Sharded nextest replay does not have that race — but
+it sets `rust_nextest_shard_threads = 1` anyway, for a second and independent
+reason.
+
+Process-per-test isolates environment. It does not isolate the filesystem. The
+controller-runtime admission store and the rig registry are machine-global
+directories beneath the real `$HOME`, so concurrent test *processes* share them
+just as thoroughly as concurrent threads would. Run `32294476539` caught one
+test reading another's admission lease — the two sides of an "unchanged record"
+assertion differed only in `controller_admission.owner`, which carried a peer
+test's `request_id` — and ten `workspace::tests::prune::*` failures traced to
+shared rig-registry writes.
+
+The two settings are therefore both `1` and clear on different conditions. The
+Cargo cap lifts when `HomeGuard` stops mutating process-global environment; the
+nextest cap lifts when those stores take explicit roots. Both are #7505.
 
 Unsharded nextest runs were previously unmeasurable — they emit no
 `test result:` lines, so the cargo-test adapter matched nothing and produced no

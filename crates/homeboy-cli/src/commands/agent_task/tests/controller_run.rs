@@ -35,9 +35,9 @@ fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
 
         let (value, exit_code) = controller_run_next_with_executor(
             "loop-controller-run-next".to_string(),
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("controller action executed");
 
@@ -102,7 +102,7 @@ fn controller_cli_hook_blocks_unavailable_required_runner_without_local_fallback
 
         let (value, exit_code) = controller_run_next_with_executor(
             "loop-cli-runner-unavailable".to_string(),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
         )
         .expect("controller reports policy block");
         assert_eq!(exit_code, 1, "{value:#}");
@@ -160,9 +160,9 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
 
         let (value, exit_code) = controller_run_next_with_executor(
             "loop-controller-runtime-components".to_string(),
-            ArtifactCapturingExecutor {
+            Arc::new(ArtifactCapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("controller action executed");
 
@@ -227,7 +227,7 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
                     dispatch_provider_config: None,
                 },
             },
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("run from spec");
 
@@ -289,9 +289,9 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
                     dispatch_provider_config: Some(r#"{"runtime_version":"6.9"}"#.to_string()),
                 },
             },
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("run from spec");
 
@@ -390,9 +390,9 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                     ),
                 },
             },
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("run from spec");
 
@@ -460,7 +460,7 @@ fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
                     dispatch_provider_config: None,
                 },
             },
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
         )
         .expect_err("zero max-actions is rejected");
 
@@ -501,9 +501,9 @@ fn controller_run_from_spec_rejects_command_runtime_without_command_kind() {
                     dispatch_provider_config: None,
                 },
             },
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect_err("command-shaped runtime execution is rejected before dispatch");
 
@@ -580,7 +580,7 @@ fn controller_run_from_spec_guards_stale_state_with_actionable_diagnostics() {
         // First proof run persists base controller state.
         controller_run_from_spec_with_test_executor(
             run_from_spec_proof_args("run-from-spec-stale-guard", "Draft the brief.", false),
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("base proof run");
 
@@ -588,7 +588,7 @@ fn controller_run_from_spec_guards_stale_state_with_actionable_diagnostics() {
         // stale base controller state on a run-scoped proof run.
         let error = controller_run_from_spec_with_test_executor(
             run_from_spec_proof_args("run-from-spec-stale-guard", "Rewrite the brief.", false),
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect_err("stale state is guarded");
 
@@ -662,14 +662,14 @@ fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
         };
         controller_run_from_spec_with_test_executor(
             proof_args("Draft the brief.", false),
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("base proof run");
 
         // The one-flag safe mode resets run-scoped state automatically.
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
             proof_args("Rewrite the brief.", true),
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("reconcile-stale recovers the proof run");
 
@@ -738,7 +738,7 @@ fn controller_run_from_spec_fork_isolates_repeated_replays_from_stale_child_runs
         };
         controller_run_from_spec_with_test_executor(
             args("Draft the brief."),
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("base proof run");
 
@@ -749,12 +749,12 @@ fn controller_run_from_spec_fork_isolates_repeated_replays_from_stale_child_runs
 
         let (first, first_exit_code) = controller_run_from_spec_with_test_executor(
             first_fork_args,
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("first fork run");
         let (second, second_exit_code) = controller_run_from_spec_with_test_executor(
             second_fork_args,
-            ArtifactCapturingExecutor::default(),
+            Arc::new(ArtifactCapturingExecutor::default()),
         )
         .expect("second fork run");
 
@@ -860,7 +860,7 @@ fn controller_run_executes_requested_action_id_only() {
         let (_value, exit_code) = controller_run_action_with_executor(
             "loop-controller-run-action".to_string(),
             "action-2".to_string(),
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
         )
         .expect("specific action executed");
         let loaded = agent_task_loop_controller::load_controller("loop-controller-run-action")

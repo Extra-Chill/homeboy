@@ -647,16 +647,14 @@ impl AgentTaskScheduleSupport {
         ));
     }
 
-    pub(super) fn expire_timed_out_tasks<E>(
+    pub(super) fn expire_timed_out_tasks(
         running: &mut Vec<RunningTask>,
         quarantined: &mut Vec<QuarantinedTask>,
         outcomes: &mut Vec<AgentTaskOutcome>,
         events: &mut Vec<AgentTaskProgressEvent>,
-        executor: &E,
+        executor: &dyn AgentTaskExecutorAdapter,
         lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
-    ) where
-        E: AgentTaskExecutorAdapter,
-    {
+    ) {
         let mut index = 0;
         while index < running.len() {
             let Some(timeout_ms) = running[index].timeout_ms else {
@@ -771,7 +769,7 @@ impl AgentTaskScheduleSupport {
                             );
                             super::finalize_candidate_artifacts(&mut recovered, &task);
                         }
-                        super::engine::release_scratch(
+                        let _ = super::engine::release_scratch(
                             &task.scratch,
                             "scheduler_timeout_completion",
                             &recovered,

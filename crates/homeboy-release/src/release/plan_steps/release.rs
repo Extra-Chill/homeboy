@@ -263,8 +263,9 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         ));
     }
 
-    let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks(
+    let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks_with_extensions(
         component,
+        extensions,
         homeboy_core::engine::hooks::events::POST_RELEASE,
     )?;
     if !post_release_hooks.is_empty() {

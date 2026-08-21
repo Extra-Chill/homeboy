@@ -29,6 +29,7 @@ Run the local-only HTTP API daemon
 | `homeboy daemon reconcile-dead-lease-orphans` | Reconcile an exact PID-less job set after one proven unexpected daemon exit |
 | `homeboy daemon recover-missing-child-identity` | Recover one legacy job with exact PID and Linux start-tick evidence |
 | `homeboy daemon reconcile-leaseless-orphans` | Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner |
+| `homeboy daemon reconcile-unleased-candidates` | On Linux, preview unleased daemon candidates, or explicitly retire only proven orphan candidates and start a replacement when the durable store is idle |
 | `homeboy daemon recover-missing-lease-state` | Recover one exact lease after its daemon state record was lost |
 | `homeboy daemon serve` | Run the local daemon in the foreground |
 | `homeboy daemon stop` | Stop the background daemon recorded in the state file |
@@ -140,6 +141,20 @@ Explicitly reconcile active jobs after proving a missing-lease store has no daem
 | `--confirm-no-daemon-owner` | flag | _no help text_ |
 | `--addr` | `<ADDR>` | _no help text_ |
 | `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
+
+## `homeboy daemon reconcile-unleased-candidates`
+
+```sh
+homeboy daemon reconcile-unleased-candidates [OPTIONS]
+```
+
+On Linux, preview unleased daemon candidates, or explicitly retire only proven orphan candidates and start a replacement when the durable store is idle
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--addr` | `<ADDR>` | _no help text_ |
+| `--apply` | flag | Signal only candidates whose store, binary, startup token, and unreachable endpoint were proven by this invocation |
+| `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for this replacement operation |
 
 ## `homeboy daemon recover-missing-lease-state`
 

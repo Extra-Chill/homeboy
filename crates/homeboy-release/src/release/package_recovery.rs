@@ -10,7 +10,7 @@ use super::context::{load_component, resolve_extensions};
 use super::executor::artifacts::{
     PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
 };
-use super::executor::{run_cleanup_in_roots, run_package_in_roots, PackageRequest};
+use super::executor::{run_cleanup, run_package, PackageRequest};
 use super::types::{ReleaseArtifact, ReleaseOptions, ReleaseState, ReleaseStepResult};
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +70,7 @@ pub fn package_existing_tag(
         ..Default::default()
     };
 
-    let package_step = run_package_in_roots(
+    let package_step = run_package(
         &roots,
         &extensions,
         &mut state,
@@ -135,7 +135,7 @@ pub fn package_existing_tag(
 
     // The durable recovery directory now owns the deliverables. Remove only
     // checkout paths proven to have been created by this package invocation.
-    run_cleanup_in_roots(roots.data(), &component, &state)?;
+    run_cleanup(roots.data(), &component, &state)?;
 
     homeboy_core::log_status!(
         "release",

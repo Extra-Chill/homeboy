@@ -13,9 +13,9 @@ mod plan_projection_tests {
             "fanout/site-smoke[model=gpt-5.5,prompt=site-b]".to_string(),
             AgentTaskOutcomeStatus::Failed,
         );
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(
             RecordingExecutor::new(statuses, Duration::from_millis(0)),
-        );
+        ));
         let matrix_plan = expand_agent_task_matrix(
             "fanout/site-smoke",
             vec![
@@ -74,10 +74,10 @@ mod plan_projection_tests {
 
     #[test]
     fn static_batch_plans_remain_compatible_without_output_dependencies() {
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
-        ));
+        )));
         let plan_json = serde_json::to_string(&plan_with_tasks(2)).expect("plan json");
         let plan: AgentTaskPlan = serde_json::from_str(&plan_json).expect("static plan decodes");
 
@@ -96,10 +96,10 @@ mod plan_projection_tests {
     #[test]
     fn plan_level_component_contracts_are_preserved_on_executor_requests() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: true,
-        });
+        }));
         let raw = serde_json::json!({
             "schema": AGENT_TASK_PLAN_SCHEMA,
             "plan_id": "plan-components",
@@ -199,10 +199,10 @@ mod plan_projection_tests {
     #[test]
     fn scheduler_executes_from_projected_homeboy_plan() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: true,
-        });
+        }));
         let mut plan = AgentTaskPlan::new(
             "plan-homeboy-projection",
             vec![request("idea"), request("design")],

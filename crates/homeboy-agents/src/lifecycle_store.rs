@@ -227,6 +227,20 @@ impl AgentTaskLifecycleStore {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
     }
 
+    pub fn record_lab_offload_planned(
+        &self,
+        input: super::LabOffloadProxyPlan<'_>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lab_offload::record_lab_offload_planned_in_store(self, input)
+    }
+
+    pub fn record_detached_lab_run(
+        &self,
+        input: super::DetachedLabRunRecord<'_>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lab_offload::record_detached_lab_run_in_store(self, input)
+    }
+
     pub(crate) fn mark_running(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::mark_running_in_store(self, run_id)
     }
@@ -574,6 +588,14 @@ impl AgentTaskLifecycleStore {
         confirm_cook_notification_in_store(self, cook_id, marker)
     }
 
+    /// Release this store's own provisional terminal-notification claim.
+    ///
+    /// The claim, the confirmation, and this release are one exactly-once
+    /// protocol, so all three have to name the same installation.
+    pub fn release_cook_notification_claim(&self, cook_id: &str) -> Result<()> {
+        release_cook_notification_claim_in_store(self, cook_id)
+    }
+
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_in_store(self, run_id)
     }
@@ -695,6 +717,23 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_cook_progress_with_activity_in_store(
             self, run_id, phase, attempt, detail, activity,
         )
+    }
+
+    pub(crate) fn record_metadata_value(
+        &self,
+        run_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<()> {
+        let run_id = sanitize_run_id(run_id);
+        self.mutate_record(&run_id, |record| {
+            record
+                .ensure_metadata_object()
+                .insert(key.to_string(), value.clone());
+            record.updated_at = Some(super::now_timestamp());
+            true
+        })
+        .map(|_| ())
     }
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -1400,8 +1439,24 @@ fn confirm_cook_notification_in_store(
 /// Release a provisional claim after a non-delivery so a later terminal
 /// observer can retry it.
 pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
-    let path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-claim.json");
+    release_cook_notification_claim_in_store(&default_store()?, cook_id)
+}
+
+/// Release a provisional claim beside the injected store's own Cook index.
+///
+/// This removes the marker `claim_cook_notification_in_store` created, so it
+/// has to follow the same root. Releasing the ambient home's marker instead
+/// would leave the injected store's claim standing — permanently blocking the
+/// later observer this release exists to unblock — while deleting a claim
+/// nobody took. Neither half fails: `remove_file` treats `NotFound` as success,
+/// so the wrong-root release returns `Ok(())` having done nothing (#7505).
+fn release_cook_notification_claim_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<()> {
+    let path = store
+        .cook_index_path(&sanitize_run_id(cook_id))
+        .with_file_name("notification-claim.json");
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1501,7 +1556,7 @@ fn validate_cook_index_attempt_in_store(
 /// observation database instead of `paths::observation_db()`.
 ///
 /// The ambient `read_records()` free shim that used to sit above this is gone.
-/// Its last caller was `reconcile_active_lab_runner_handoffs`, a queue scan that
+/// Its last caller was `reconcile_active_lab_runner_handoffs_in_store`, a queue scan that
 /// mutates every row it selects — expiring, terminalizing, and reconciling them
 /// — so it now scans the store it was handed rather than deciding from one
 /// installation's queue and committing into another (#7505).
@@ -1700,10 +1755,6 @@ fn record_from_run_with_schema_policy(
         }
     }
     Ok(record)
-}
-
-fn read_mirrored_aggregate(run_id: &str) -> Result<Option<AgentTaskAggregate>> {
-    read_mirrored_aggregate_in_store(&default_store()?, run_id)
 }
 
 fn read_mirrored_aggregate_in_store(

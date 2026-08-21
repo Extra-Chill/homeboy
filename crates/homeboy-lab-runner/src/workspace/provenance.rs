@@ -1693,10 +1693,10 @@ mod tests {
                 "snapshot:outer-update-2".to_string(),
             ];
             let dispatched = Arc::new(AtomicBool::new(false));
-            let scheduler = AgentTaskScheduler::new(FilesystemSnapshotProvider {
+            let scheduler = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
                 change_workspace,
                 dispatched: Arc::clone(&dispatched),
-            })
+            }))
             .with_harvest_context(
                 HarvestExecutionContext::from_lab_transport(runtime_snapshot, lab)
                     .expect("paired Lab transport"),

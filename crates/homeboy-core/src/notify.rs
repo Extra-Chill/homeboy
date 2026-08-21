@@ -22,6 +22,52 @@ const TRANSPORT_OUTPUT_INSPECTION_LIMIT: usize = 256 * 1024;
 /// Bound on the transport diagnostic text folded into `NotifyOutcome::error`.
 const TRANSPORT_ERROR_TAIL_CHARS: usize = 800;
 
+/// Schema emitted by transports that return structured delivery results.
+pub const NOTIFICATION_TRANSPORT_RESULT_SCHEMA: &str = "homeboy/notification-transport-result/v1";
+/// Schema of an explicit terminal transport rejection.
+pub const NOTIFICATION_TRANSPORT_REJECTION_SCHEMA: &str =
+    "homeboy/notification-transport-rejection/v1";
+
+/// A transport-neutral, non-secret reason a transport declined delivery before
+/// making a delivery attempt. This is deliberately distinct from `retryable`:
+/// arbitrary transport output cannot change durable outbox state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyTerminalRejection {
+    pub schema: String,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_field: Option<String>,
+}
+
+/// Read only the explicit, versioned pre-attempt rejection envelope.
+pub fn terminal_rejection_result(
+    result: Option<&serde_json::Value>,
+) -> Option<NotifyTerminalRejection> {
+    let result = result?.as_object()?;
+    if result.get("schema")?.as_str()? != NOTIFICATION_TRANSPORT_RESULT_SCHEMA
+        || result.get("status")?.as_str()? != "rejected"
+        || result.get("attempts")?.as_u64()? != 0
+    {
+        return None;
+    }
+    let rejection: NotifyTerminalRejection =
+        serde_json::from_value(result.get("terminal_rejection")?.clone()).ok()?;
+    (rejection.schema == NOTIFICATION_TRANSPORT_REJECTION_SCHEMA
+        && !rejection.reason_code.is_empty()
+        && rejection.reason_code.len() <= 128
+        && rejection
+            .validation_code
+            .as_ref()
+            .is_none_or(|value| value.len() <= 128)
+        && rejection
+            .validation_field
+            .as_ref()
+            .is_none_or(|value| value.len() <= 128))
+    .then_some(rejection)
+}
+
 /// A lifecycle event passed to extension transports as typed argv values.
 ///
 /// Deserializable so [`crate::notify_outbox`] can persist an undelivered event

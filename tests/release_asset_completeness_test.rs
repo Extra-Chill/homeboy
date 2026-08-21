@@ -22,18 +22,39 @@ const TAG: &str = "v1.2.3";
 /// the announce strip the fixture exercises at `REQUIRE_ANNOUNCE_ASSETS=false`
 /// removed nothing and the required/allowed conflation was invisible to every
 /// test in this file.
-const ASSETS: [&str; 4] = [
+///
+/// The bootstrap assets are deliberately part of this set (#12701). cargo-dist
+/// plans `homeboy-installer.sh` and the Homebrew formula but never lists them
+/// in `sha256.sum` -- an installer cannot be meaningfully verified by a
+/// checksum served from the same release. Before #12701 this array held only
+/// payload/checksum entries, so a coverage assertion that demanded a sidecar
+/// for every non-sidecar asset was vacuously satisfiable here and
+/// unsatisfiable in production. Every release from v0.350.22 onward failed to
+/// publish and not one test in this file noticed.
+const ASSETS: [&str; 6] = [
     "payload.tar.gz",
     "payload.tar.gz.sha256",
     "sha256.sum",
+    INSTALLER_ASSET,
+    FORMULA_ASSET,
     ANNOUNCE_ASSET,
 ];
 
 /// Attached during announce; required only at the published boundary.
 const ANNOUNCE_ASSET: &str = "dist-manifest.json";
 
+/// Planned, uploaded and digest-verified, but never checksum-covered.
+const INSTALLER_ASSET: &str = "homeboy-installer.sh";
+const FORMULA_ASSET: &str = "homeboy.rb";
+
 /// What the pre-publication gate actually requires to be present and valid.
-const REQUIRED_ASSETS: [&str; 3] = ["payload.tar.gz", "payload.tar.gz.sha256", "sha256.sum"];
+const REQUIRED_ASSETS: [&str; 5] = [
+    "payload.tar.gz",
+    "payload.tar.gz.sha256",
+    "sha256.sum",
+    INSTALLER_ASSET,
+    FORMULA_ASSET,
+];
 
 fn digest(path: &Path) -> String {
     let output = Command::new("shasum")
@@ -67,7 +88,17 @@ fn write_artifacts(root: &Path) -> BTreeMap<String, String> {
     let payload_digest = digest(&payload).trim_start_matches("sha256:").to_owned();
     let checksum = format!("{payload_digest} *payload.tar.gz\n");
     fs::write(artifacts.join("payload.tar.gz.sha256"), &checksum).expect("write payload sidecar");
+    // Note what is NOT here: the aggregate sidecar covers the archive only.
+    // That mirrors cargo-dist, whose `sha256.sum` lists the platform archives
+    // and `source.tar.gz` and nothing else (#12701).
     fs::write(artifacts.join("sha256.sum"), checksum).expect("write aggregate sidecar");
+    fs::write(artifacts.join(INSTALLER_ASSET), "#!/bin/sh\necho install\n")
+        .expect("write installer");
+    fs::write(
+        artifacts.join(FORMULA_ASSET),
+        "class Homeboy < Formula\nend\n",
+    )
+    .expect("write formula");
     // `Preserve existing published asset bytes` copies every planned asset --
     // including the announce manifest -- into the recovery artifact directory.
     fs::write(
@@ -245,6 +276,76 @@ fn accepts_an_inventory_without_the_announce_asset_before_announce() {
     );
     // Never uploaded: it is not part of the rebuilt required contract.
     assert_eq!(fixture.calls(), ["view", "view"]);
+}
+
+/// Bootstrap assets are digest-verified but never checksum-covered (#12701).
+///
+/// cargo-dist plans `homeboy-installer.sh` and the Homebrew formula, and never
+/// lists either in `sha256.sum`. A coverage assertion that demanded a sidecar
+/// for every non-sidecar asset was therefore unsatisfiable in production: every
+/// release from v0.350.22 onward failed publish with "No rebuilt checksum
+/// contract covers homeboy-installer.sh" while the release itself published
+/// complete with all 14 assets.
+///
+/// Both halves matter, so both are pinned here. Narrowing the coverage rule
+/// must not narrow what gets verified: these assets still reconcile against
+/// GitHub's digest of the rebuilt local bytes.
+#[test]
+fn bootstrap_assets_are_digest_verified_without_requiring_checksum_coverage() {
+    let fixture = Fixture::new();
+    let aggregate = fs::read_to_string(fixture.artifact_dir().join("sha256.sum"))
+        .expect("read aggregate sidecar");
+    for asset in [INSTALLER_ASSET, FORMULA_ASSET] {
+        assert!(
+            !aggregate.contains(asset),
+            "{asset} must stay outside the checksum contract for this to regress"
+        );
+    }
+
+    // Half one: uncovered bootstrap assets do not block a clean reconcile.
+    let output = fixture.run(&[
+        inventory(&fixture.digests, &[]),
+        inventory(&fixture.digests, &[]),
+    ]);
+    assert!(
+        output.status.success(),
+        "assets cargo-dist never checksums must not be demanded to carry a checksum contract.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.calls(), ["view", "view"]);
+
+    // Half two: their bytes are still proven against the remote digest.
+    for asset in [INSTALLER_ASSET, FORMULA_ASSET] {
+        let fixture = Fixture::new();
+        let output = fixture.run(&[
+            inventory(
+                &fixture.digests,
+                &[(
+                    asset,
+                    "uploaded",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    1,
+                )],
+            ),
+            inventory(&fixture.digests, &[]),
+        ]);
+        assert!(
+            output.status.success(),
+            "{asset}: stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fixture.calls(),
+            vec![
+                "view".to_owned(),
+                format!("upload:{asset}"),
+                "view".to_owned()
+            ],
+            "{asset} must be replaced when the remote digest disagrees with the rebuilt bytes"
+        );
+    }
 }
 
 #[test]

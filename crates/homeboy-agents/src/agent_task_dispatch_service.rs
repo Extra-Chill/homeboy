@@ -20,8 +20,8 @@ use crate::agent_task_provider::{
     AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
-    AgentTaskRetryPolicy, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
+    AgentTaskScheduler, SharedAgentTaskExecutor,
 };
 use crate::agent_task_service::{aggregate_exit_code, terminal_run_result, AgentTaskRunResult};
 use homeboy_core::{Error, Result};
@@ -178,25 +178,19 @@ pub struct AgentTaskDispatchReport {
     pub aggregate: Option<AgentTaskAggregate>,
 }
 
-pub fn dispatch<E>(
+pub fn dispatch(
     request: AgentTaskDispatchRequest,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let catalog = AgentTaskProviderCatalog::discover();
     dispatch_with_provider_catalog(request, executor, &catalog)
 }
 
-fn dispatch_with_provider_catalog<E>(
+fn dispatch_with_provider_catalog(
     request: AgentTaskDispatchRequest,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let backend_selection = request.backend_selection.clone();
     // Credentials first: the selected backend's declared credentials are
     // knowable before a plan exists, before a workspace is resolved, and before
@@ -231,14 +225,11 @@ where
     )
 }
 
-pub fn dispatch_with_provider_requirements<E>(
+pub fn dispatch_with_provider_requirements(
     request: AgentTaskDispatchRequest,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let backend_selection = request.backend_selection.clone();
     preflight_provider_credentials_for_backend(
         AgentTaskProviderCatalog::discover().providers(),
@@ -275,16 +266,13 @@ where
 /// The only durable dispatch-to-scheduler path. Both provider-catalog entry
 /// points prepare a plan differently, then share lifecycle transitions,
 /// scheduler execution, aggregate persistence, and report construction here.
-fn run_dispatch_plan<E>(
+fn run_dispatch_plan(
     plan: AgentTaskPlan,
     requested_run_id: Option<&str>,
     queue_only: bool,
     backend_selection: Option<BackendSelection>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let submitted = lifecycle::submit_plan(&plan, requested_run_id)?;
     let run_id = submitted.run_id.clone();
 
@@ -704,25 +692,19 @@ fn resolve_dispatch_request_with_sources(
 
 /// Run a dispatch invocation end to end: resolve the request, dispatch it through
 /// the scheduler, and adapt the report into a JSON value plus process exit code.
-pub fn run_dispatch_command<E>(
+pub fn run_dispatch_command(
     command: AgentTaskDispatchCommand,
-    executor: E,
-) -> Result<(Value, i32)>
-where
-    E: AgentTaskExecutorAdapter,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<(Value, i32)> {
     let catalog = AgentTaskProviderCatalog::discover();
     run_dispatch_command_with_provider_catalog(command, executor, &catalog)
 }
 
-pub fn run_dispatch_command_with_provider_catalog<E>(
+pub fn run_dispatch_command_with_provider_catalog(
     command: AgentTaskDispatchCommand,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
-) -> Result<(Value, i32)>
-where
-    E: AgentTaskExecutorAdapter,
-{
+) -> Result<(Value, i32)> {
     let request = resolve_dispatch_request(command)?;
     let result = dispatch_with_provider_catalog(request, executor, catalog)?;
     Ok((command_json_value(result.value)?, result.exit_code))
@@ -736,7 +718,8 @@ fn command_json_value<T: Serialize>(value: T) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::agent_task::{AgentTaskOutcome, AgentTaskRequest};
-    use crate::agent_task_scheduler::AgentTaskExecutionContext;
+    use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
+    use std::sync::Arc;
 
     /// An executor that must never be reached. A credential gap is a
     /// configuration failure, so it must be reported before a provider
@@ -791,7 +774,7 @@ mod tests {
             backend_selection: None,
         };
 
-        let error = dispatch_with_provider_catalog(request, NeverRunExecutor, &catalog)
+        let error = dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
             .expect_err("a missing declared credential must fail dispatch");
 
         assert_eq!(error.details["field"], "provider_credentials");
