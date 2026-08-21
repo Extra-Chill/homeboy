@@ -658,8 +658,12 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
     child_id: &str,
     child_token: &str,
 ) -> Result<Option<RunnerExecRecoveryDiagnostic>> {
-    let store = ObservationStore::open_initialized()?;
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    // The store is opened against those roots rather than resolving its own.
+    // The doc above says the lock and the lease must not disagree about which
+    // home they arbitrate; two independent reads of the environment is exactly
+    // how they could (#7505).
+    let store = ObservationStore::open_initialized_in_roots(&roots)?;
     let Some(child) = store.get_run(child_id)? else {
         return Ok(None);
     };
