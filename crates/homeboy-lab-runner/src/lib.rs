@@ -644,22 +644,31 @@ pub fn register_runner_config_entity() {
 }
 
 pub fn load(id: &str) -> Result<Runner> {
+    load_in_roots(&homeboy_core::paths::PathRoots::from_environment()?, id)
+}
+
+/// [`load`] against an explicitly injected root.
+///
+/// The registry probe, the server-backed fallback, and the alias retry all have
+/// to describe the same installation: a runner found in one home and a server
+/// record read from another is not a runner definition, it is two (#7505).
+pub fn load_in_roots(roots: &homeboy_core::paths::PathRoots, id: &str) -> Result<Runner> {
     if id == "local" {
         return Ok(builtin_local_runner());
     }
 
-    if let Ok(runner) = config::load::<Runner>(id) {
+    if let Ok(runner) = config::load_in_root::<Runner>(roots.config(), id) {
         if runner.kind == RunnerKind::Local {
             return Ok(runner);
         }
     }
 
-    if let Ok(runner) = load_server_runner(id) {
+    if let Ok(runner) = load_server_runner_in_root(roots.config(), id) {
         return Ok(runner);
     }
 
     if let Some(runner_id) = resolve_reserved_runner_alias(id)? {
-        return load_server_runner(&runner_id);
+        return load_server_runner_in_root(roots.config(), &runner_id);
     }
 
     if let Some(runner) = execution_context_runner(id) {
@@ -1535,7 +1544,12 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
 }
 
 fn load_server_runner(id: &str) -> Result<Runner> {
-    let server = server::load(id)?;
+    load_server_runner_in_root(&homeboy_core::paths::homeboy()?, id)
+}
+
+/// [`load_server_runner`] against an already-resolved config root.
+fn load_server_runner_in_root(config_root: &std::path::Path, id: &str) -> Result<Runner> {
+    let server = server::load_in_root(config_root, id)?;
     let runner = server
         .runner
         .ok_or_else(|| Error::runner_not_found(id.to_string(), vec![]))?;
