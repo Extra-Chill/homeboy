@@ -2519,32 +2519,6 @@ pub fn clear_cook_controller_failure_in_store(
     Ok(())
 }
 
-/// Persist Cook phase together with a sample of what the provider is doing.
-///
-/// The activity sample is written into the same record as the phase so
-/// `agent-task status` answers "is this cook making progress?" from durable
-/// state, without the reader having to find the worktree and run `ps` and
-/// `git status` by hand (#11482). It is evidence, not authority: an absent
-/// sample leaves the previously recorded one in place rather than erasing it,
-/// because a single failed probe is not proof the provider stopped working.
-pub fn record_cook_progress_with_activity(
-    run_id: &str,
-    phase: &str,
-    attempt: u32,
-    detail: Option<&str>,
-    activity: Option<Value>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_progress_with_activity_in_store(
-        &lifecycle_store,
-        run_id,
-        phase,
-        attempt,
-        detail,
-        activity,
-    )
-}
-
 pub fn record_cook_progress_with_activity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
