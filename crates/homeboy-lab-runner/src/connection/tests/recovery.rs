@@ -1175,6 +1175,7 @@ fn remote_leaseless_recovery_timeout_is_actionable() {
         success: false,
         exit_code: 124,
         timed_out: true,
+        observation: Default::default(),
         child_resource: None,
     });
     assert!(message.contains("daemon status"));
@@ -2162,6 +2163,7 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
             success: false,
             exit_code: 124,
             timed_out: true,
+            observation: Default::default(),
             child_resource: None,
         },
     );
@@ -2509,6 +2511,7 @@ fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
         stderr: String::new(),
         exit_code: 0,
         timed_out: false,
+        observation: Default::default(),
         child_resource: None,
     }
     };

@@ -91,6 +91,7 @@ fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutpu
             success: out.status.success(),
             exit_code: out.status.code().unwrap_or(-1),
             timed_out: false,
+            observation: super::CommandObservation::Complete,
             child_resource: None,
         },
         Err(err) => CommandOutput {
@@ -99,6 +100,7 @@ fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutpu
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: super::CommandObservation::SpawnFailed,
             child_resource: None,
         },
     }
@@ -628,6 +630,11 @@ pub(super) fn run_command_with_stdin_source(
                     exit_code
                 },
                 timed_out: false,
+                observation: if stdin_failed {
+                    super::CommandObservation::StdinDeliveryFailed
+                } else {
+                    super::CommandObservation::Complete
+                },
                 child_resource: None,
             }
         }
@@ -637,6 +644,7 @@ pub(super) fn run_command_with_stdin_source(
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: super::CommandObservation::SpawnFailed,
             child_resource: None,
         },
     }
@@ -688,6 +696,7 @@ fn ssh_process_error(error: std::io::Error) -> CommandOutput {
         success: false,
         exit_code: -1,
         timed_out: false,
+        observation: super::CommandObservation::SpawnFailed,
         child_resource: None,
     }
 }
@@ -741,6 +750,7 @@ impl ProbeLimits {
                 success: false,
                 exit_code: 124,
                 timed_out: true,
+                observation: super::CommandObservation::StreamDrainTimedOut,
                 child_resource: None,
             };
         }
@@ -979,6 +989,7 @@ mod bounded_probe_tests {
             success: false,
             exit_code: 255,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 
@@ -1028,6 +1039,7 @@ where
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             }
         }
@@ -1167,6 +1179,15 @@ pub(super) fn bounded_probe_output(
             )
         },
         timed_out: outcome.timed_out,
+        observation: if outcome.stdin_failed {
+            super::CommandObservation::StdinDeliveryFailed
+        } else if outcome.interrupted_signal.is_some() {
+            super::CommandObservation::Cancelled
+        } else if outcome.timed_out {
+            super::CommandObservation::StreamDrainTimedOut
+        } else {
+            super::CommandObservation::Complete
+        },
         child_resource: None,
     }
 }
@@ -1339,6 +1360,7 @@ impl SshClient {
                     success: true,
                     exit_code: 0,
                     timed_out: false,
+                    observation: super::CommandObservation::Complete,
                     child_resource: None,
                 },
                 Err(err) => CommandOutput {
@@ -1350,6 +1372,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 },
             };
@@ -1364,6 +1387,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 };
             }
@@ -1382,6 +1406,7 @@ impl SshClient {
                 success: out.status.success(),
                 exit_code: out.status.code().unwrap_or(-1),
                 timed_out: false,
+                observation: super::CommandObservation::Complete,
                 child_resource: None,
             },
             Err(err) => CommandOutput {
@@ -1390,6 +1415,7 @@ impl SshClient {
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             },
         }
@@ -1433,6 +1459,7 @@ impl SshClient {
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: super::CommandObservation::SpawnFailed,
             child_resource: None,
         }
     }
@@ -1469,6 +1496,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 },
             },
@@ -1496,6 +1524,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 };
             }

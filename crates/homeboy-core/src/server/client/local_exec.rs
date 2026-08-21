@@ -182,6 +182,7 @@ fn run_local_command(
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             };
         }
@@ -198,6 +199,7 @@ fn run_local_command(
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             };
         }
@@ -222,6 +224,7 @@ fn run_local_command(
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             };
         }
@@ -331,6 +334,15 @@ fn run_local_command(
                 ),
             ),
             timed_out,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else if interrupted_signal.is_some() {
+                super::CommandObservation::Cancelled
+            } else if timed_out {
+                super::CommandObservation::StreamDrainTimedOut
+            } else {
+                super::CommandObservation::Complete
+            },
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
@@ -352,6 +364,7 @@ fn run_local_command(
                 interrupted_exit_code(interrupted_signal, -1),
             ),
             timed_out,
+            observation: super::CommandObservation::SpawnFailed,
             child_resource: Some(monitor.finish()),
         },
     };
@@ -577,6 +590,7 @@ fn stdin_source_error(error: std::io::Error) -> CommandOutput {
         success: false,
         exit_code: -1,
         timed_out: false,
+        observation: super::CommandObservation::StdinDeliveryFailed,
         child_resource: None,
     }
 }

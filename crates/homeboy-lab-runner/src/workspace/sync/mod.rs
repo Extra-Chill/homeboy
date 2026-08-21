@@ -2314,6 +2314,7 @@ mod metadata_write_tests {
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         });
 
@@ -4325,6 +4326,7 @@ mod tests {
             success,
             exit_code,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         }
     }

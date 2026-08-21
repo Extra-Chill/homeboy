@@ -19,7 +19,7 @@ use super::ssh_client::{
     run_command_with_stdin_source, wrap_command_with_secret_env_read_loop,
     wrap_timed_remote_command, SECRET_ENV_STDIN_SENTINEL,
 };
-use super::{CommandOutput, SshClient};
+use super::{CommandObservation, CommandOutput, SshClient};
 
 #[test]
 fn secret_env_values_stream_over_stdin_not_command_argv() {
@@ -354,6 +354,7 @@ fn injected_stdin_write_failure_kills_a_term_ignoring_child_without_leaking_secr
     assert!(!output.timed_out);
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(output.stderr.contains("stdin delivery failed"));
+    assert_eq!(output.observation, CommandObservation::StdinDeliveryFailed);
     assert!(!output.stdout.contains("stdin-failure-secret"));
     assert!(!output.stderr.contains("stdin-failure-secret"));
 }
@@ -409,6 +410,7 @@ fn closed_remote_stdin_cannot_report_success() {
     assert!(!output.success);
     assert_ne!(output.exit_code, 0);
     assert!(output.stderr.contains("stdin delivery failed"));
+    assert_eq!(output.observation, CommandObservation::StdinDeliveryFailed);
 }
 
 #[test]
@@ -991,6 +993,7 @@ fn managed_session_connect_reports_per_command_fallback() {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         },
     );

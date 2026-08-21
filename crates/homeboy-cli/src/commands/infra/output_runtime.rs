@@ -387,6 +387,27 @@ impl CommandRun {
         }
     }
 
+    /// Keeps raw output out of the command envelope unless an explicit output
+    /// artifact was requested.
+    pub fn from_raw_stdout_streaming(
+        command: impl Into<String>,
+        raw_stdout: homeboy::core::Result<String>,
+        exit_code: i32,
+        output_file_result: Option<homeboy::core::Result<Value>>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            operation: None,
+            stdout_result: output_file_result.clone().unwrap_or(Ok(Value::Null)),
+            exit_code,
+            output_file_result,
+            presentation: CommandPresentation::default(),
+            raw_stdout: Some(raw_stdout),
+            raw_completion_stderr: None,
+            output_file_already_written: false,
+        }
+    }
+
     pub(crate) fn output_file_result(
         &self,
         mode: CommandOutputFileMode,
@@ -507,7 +528,11 @@ pub fn run_command(
     let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
-    let run = match crate::commands::raw_output::prepare_command_run(command, plan.stdout) {
+    let run = match crate::commands::raw_output::prepare_command_run(
+        command,
+        plan.stdout,
+        !matches!(plan.output_file, CommandOutputFileMode::None),
+    ) {
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
@@ -697,6 +722,36 @@ mod tests {
 
         assert_eq!(run.raw_stdout.unwrap().unwrap(), "markdown output");
         assert_eq!(run.stdout_result.unwrap(), json!({ "artifact": true }));
+    }
+
+    #[test]
+    fn streaming_raw_output_is_not_retained_without_an_output_artifact() {
+        let large = "x".repeat(2 * 1024 * 1024);
+        let run = CommandRun::from_raw_stdout_streaming("ssh", Ok(large), 0, None);
+
+        assert!(run.output_file_result.is_none());
+        assert_eq!(run.stdout_result.unwrap(), Value::Null);
+        assert_eq!(
+            run.raw_stdout.as_ref().unwrap().as_ref().unwrap().len(),
+            2 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn streaming_raw_output_uses_only_explicit_bounded_artifact_evidence() {
+        let evidence = json!({ "stdout_tail": "tail", "stdout_truncated": true });
+        let run = CommandRun::from_raw_stdout_streaming(
+            "ssh",
+            Ok("full stream".to_string()),
+            0,
+            Some(Ok(evidence.clone())),
+        );
+
+        assert_eq!(run.stdout_result.unwrap(), evidence);
+        assert_eq!(
+            run.output_file_result.unwrap().unwrap()["stdout_tail"],
+            "tail"
+        );
     }
 
     #[test]

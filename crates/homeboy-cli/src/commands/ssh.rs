@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server};
-use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
+use homeboy::core::server::{resolve_context, CommandObservation, SshClient, SshResolveArgs};
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -117,6 +117,33 @@ impl RawSshExecution {
         };
         format!("[ssh] phase={command_phase}\n[ssh] phase=cleanup-finished\n")
     }
+
+    pub fn output_file_evidence(&self) -> serde_json::Value {
+        serde_json::json!({
+            "stdout_tail": bounded_tail(&self.stdout),
+            "stderr_tail": bounded_tail(&self.stderr),
+            "stdout_seen_bytes": self.stdout.len(),
+            "stderr_seen_bytes": self.stderr.len(),
+            "stdout_truncated": self.stdout.len() > RAW_EVIDENCE_LIMIT_BYTES,
+            "stderr_truncated": self.stderr.len() > RAW_EVIDENCE_LIMIT_BYTES,
+            "exit_code": self.exit_code,
+            "result_classification": self.result_classification,
+            "observation_lost": self.observation_lost,
+        })
+    }
+}
+
+const RAW_EVIDENCE_LIMIT_BYTES: usize = 64 * 1024;
+
+fn bounded_tail(value: &str) -> String {
+    if value.len() <= RAW_EVIDENCE_LIMIT_BYTES {
+        return value.to_string();
+    }
+    let start = value
+        .char_indices()
+        .find_map(|(index, _)| (value.len() - index <= RAW_EVIDENCE_LIMIT_BYTES).then_some(index))
+        .unwrap_or(value.len());
+    value[start..].to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -351,10 +378,12 @@ fn ssh_terminal_phase(output: &homeboy::core::server::CommandOutput) {
 }
 
 fn ssh_observation_lost(output: &homeboy::core::server::CommandOutput) -> bool {
-    output.timed_out
-        || output.exit_code < 0
-        || output.exit_code == 255
-        || output.stderr.contains("Homeboy interrupted by signal")
+    matches!(
+        output.observation,
+        CommandObservation::StdinDeliveryFailed
+            | CommandObservation::Cancelled
+            | CommandObservation::StreamDrainTimedOut
+    )
 }
 
 fn execute_non_interactive(
@@ -606,6 +635,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
         let connect = connect_output_from_execution(
@@ -658,6 +688,7 @@ mod tests {
         success: bool,
         exit_code: i32,
         timed_out: bool,
+        observation: CommandObservation,
     ) -> homeboy::core::server::CommandOutput {
         homeboy::core::server::CommandOutput {
             stdout: stdout.to_string(),
@@ -665,6 +696,7 @@ mod tests {
             success,
             exit_code,
             timed_out,
+            observation,
             child_resource: None,
         }
     }
@@ -710,16 +742,24 @@ mod tests {
             false,
             124,
             true,
+            CommandObservation::StreamDrainTimedOut,
         ));
         let interrupted = raw_execution_from_output(command_output(
             "partial",
-            "Homeboy interrupted by signal 2; terminated child process group before returning failure evidence.",
+            "remote stderr remains opaque to terminal state classification",
             false,
             130,
             false,
+            CommandObservation::Cancelled,
         ));
-        let transport =
-            raw_execution_from_output(command_output("", "connection lost", false, 255, false));
+        let transport = raw_execution_from_output(command_output(
+            "",
+            "connection lost",
+            false,
+            255,
+            false,
+            CommandObservation::StdinDeliveryFailed,
+        ));
 
         for execution in [timeout, interrupted, transport] {
             assert!(execution.observation_lost);
@@ -738,7 +778,14 @@ mod tests {
 
     #[test]
     fn structured_phases_do_not_report_command_finished_after_lost_observation() {
-        let output = command_output("", "stream drain timed out", false, 124, true);
+        let output = command_output(
+            "",
+            "stream drain timed out",
+            false,
+            124,
+            true,
+            CommandObservation::StreamDrainTimedOut,
+        );
         let phases = ssh_execution_phases(&output);
 
         assert!(phases.contains(&"command-observation-lost".to_string()));
@@ -748,7 +795,14 @@ mod tests {
 
     #[test]
     fn structured_result_classification_matches_lost_observation_phase() {
-        let output = command_output("partial", "stream drain timed out", false, 124, true);
+        let output = command_output(
+            "partial",
+            "stream drain timed out",
+            false,
+            124,
+            true,
+            CommandObservation::StreamDrainTimedOut,
+        );
         let connect = connect_output_from_execution(
             "server",
             None,
@@ -769,6 +823,52 @@ mod tests {
             .phases
             .contains(&"command-observation-lost".to_string()));
         assert!(!connect.phases.contains(&"command-finished".to_string()));
+    }
+
+    #[test]
+    fn piped_stdin_delivery_failure_is_typed_indeterminate_state() {
+        let execution = raw_execution_from_output(command_output(
+            "partial stdout",
+            "unrelated remote stderr",
+            false,
+            1,
+            false,
+            CommandObservation::StdinDeliveryFailed,
+        ));
+
+        assert!(execution.observation_lost);
+        assert_eq!(
+            execution.result_classification,
+            "remote_state_indeterminate"
+        );
+        assert!(execution
+            .completion_phase_stderr()
+            .contains("command-observation-lost"));
+    }
+
+    #[test]
+    fn raw_output_file_evidence_is_bounded_without_losing_transport_state() {
+        let execution = RawSshExecution {
+            stdout: "x".repeat(RAW_EVIDENCE_LIMIT_BYTES + 1),
+            stderr: "y".repeat(RAW_EVIDENCE_LIMIT_BYTES + 1),
+            exit_code: 0,
+            result_classification: "remote_command_success".to_string(),
+            observation_lost: false,
+        };
+
+        let evidence = execution.output_file_evidence();
+        assert_eq!(evidence["stdout_seen_bytes"], RAW_EVIDENCE_LIMIT_BYTES + 1);
+        assert_eq!(evidence["stderr_seen_bytes"], RAW_EVIDENCE_LIMIT_BYTES + 1);
+        assert_eq!(
+            evidence["stdout_tail"].as_str().unwrap().len(),
+            RAW_EVIDENCE_LIMIT_BYTES
+        );
+        assert_eq!(
+            evidence["stderr_tail"].as_str().unwrap().len(),
+            RAW_EVIDENCE_LIMIT_BYTES
+        );
+        assert_eq!(evidence["stdout_truncated"], true);
+        assert_eq!(evidence["exit_code"], 0);
     }
 
     fn raw_args(command: Vec<&str>, raw: bool) -> SshArgs {

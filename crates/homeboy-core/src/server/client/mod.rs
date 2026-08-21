@@ -48,5 +48,18 @@ pub struct CommandOutput {
     pub success: bool,
     pub exit_code: i32,
     pub timed_out: bool,
+    /// Whether Homeboy observed a complete, attributable terminal result from
+    /// the child transport. This is transport state, not parsed presentation.
+    pub observation: CommandObservation,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommandObservation {
+    #[default]
+    Complete,
+    StdinDeliveryFailed,
+    Cancelled,
+    StreamDrainTimedOut,
+    SpawnFailed,
 }
