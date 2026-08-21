@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.4] - 2026-08-21
+
+### Fixed
+- support mixed-attempt shard reruns
+
 ## [2.14.3] - 2026-08-20
 
 ### Fixed
