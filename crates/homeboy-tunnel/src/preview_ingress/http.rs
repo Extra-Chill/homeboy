@@ -9,6 +9,8 @@ use homeboy_core::error::{Error, Result};
 
 use super::types::{PreviewClientSessions, PreviewIngressFailure, PreviewIngressLogLine};
 
+pub(crate) const PREVIEW_INGRESS_RETAINED_DIAGNOSTICS: usize = 50;
+
 pub(crate) fn write_json_response(
     stream: &mut TcpStream,
     status: u16,
@@ -306,7 +308,7 @@ pub(crate) fn record_failure(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     failures.push(failure);
-    if failures.len() > 50 {
+    if failures.len() > PREVIEW_INGRESS_RETAINED_DIAGNOSTICS {
         failures.remove(0);
     }
 }
