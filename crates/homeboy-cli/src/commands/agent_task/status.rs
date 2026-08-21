@@ -7174,12 +7174,12 @@ mod tests {
         .expect("status summary");
 
         assert!(
-            rendered.contains("Status: provider_succeeded_finalization_incomplete"),
+            rendered.contains("Cook outcome: candidate_recoverable"),
             "{rendered}"
         );
         assert!(!rendered.contains("Status: succeeded"), "{rendered}");
         assert!(rendered.contains("Candidate state: promoted"), "{rendered}");
-        assert!(rendered.contains("PR finalized: no"));
+        assert!(rendered.contains("PR finalization: not_finalized"));
         assert!(rendered.contains("Pull request: https://example.test/pull/1"));
     }
 
@@ -7450,14 +7450,13 @@ mod tests {
         assert_eq!(status["execution_states"]["gate"]["state"], "failed");
         assert_eq!(status["cook"]["publication"], "blocked");
         assert_eq!(subject_exit_code(&status, true), 1);
-        // `Status:` is the subject's lifecycle state, not the status query's
-        // outcome -- see the note in
-        // `default_status_projects_durable_patch_candidate_for_rendering_and_actions`.
-        // A terminal gate failure must surface here even though the provider
-        // succeeded, which is the whole point of this test.
-        assert!(rendered.contains("Status: gate_failed"), "{rendered}");
+        // The Cook outcome leads, while the provider result is subordinate
+        // evidence. A terminal gate failure must surface even though the
+        // provider succeeded.
+        assert!(rendered.contains("Cook outcome: gate_failed"), "{rendered}");
         assert!(rendered.contains("Candidate state: promoted_gate_failed"));
-        assert!(rendered.contains("Cook: gate_failed (publication blocked)"));
+        assert!(rendered.contains("Gates: failed"));
+        assert!(rendered.contains("Publication: blocked"));
         assert!(rendered.contains("Next: homeboy agent-task diagnose cook-attempt-1 --full"));
         assert!(!rendered.contains("Next: homeboy agent-task review"));
         assert!(
