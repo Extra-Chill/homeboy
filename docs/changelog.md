@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.351.3] - 2026-08-21
+
+### Changed
+- root sync_workspace and the runner lookup under it
+- drop orphaned context_paths module
+- root the two failure recorders exec_lab_context left behind
+- cover legacy authority fallback
+
+### Fixed
+- bound fanout dry-run phases
+- preserve fanout worktree provider authority
+- report preview placement admission
+- preserve authority provider compatibility
+
 ## [0.351.2] - 2026-08-21
 
 ### Changed
