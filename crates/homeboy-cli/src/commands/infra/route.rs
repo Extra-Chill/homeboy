@@ -249,7 +249,7 @@ pub fn route_after_parse_with_provenance(
             &portable_deferred_args(&normalized_args),
             deferred_requirements.expect("review tests always resolve deferred requirements"),
         )?)?;
-        crate::commands::deferred_workload::ensure_worker()?;
+        crate::commands::deferred_workload::ensure_worker(&homeboy::core::paths::homeboy()?)?;
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({

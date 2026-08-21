@@ -50,6 +50,7 @@ fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
 }
 
 pub(super) fn run_recover(
+    roots: &homeboy_core::paths::PathRoots,
     input: &ReleaseCommandInput,
     owner_run_ref: Option<&str>,
 ) -> Result<(
@@ -57,7 +58,9 @@ pub(super) fn run_recover(
     Option<super::types::ReleaseWorkspaceOutput>,
     i32,
 )> {
-    if let Some(record) = super::workspace::reconcile_pending(&input.component_id, owner_run_ref)? {
+    if let Some(record) =
+        super::workspace::reconcile_pending(roots, &input.component_id, owner_run_ref)?
+    {
         return Ok((ReleaseCommandResult {
             component_id: input.component_id.clone(), status: if record.attributes.get("release_pushed").and_then(serde_json::Value::as_bool).unwrap_or(false) { "released" } else { "workspace_reconciled" }.to_string(),
             phase: release_execution_plan(input).phase, bump_type: "recover".to_string(), dry_run: false,
@@ -67,7 +70,7 @@ pub(super) fn run_recover(
             readiness: None,
         }, Some(super::workspace::output_from_record(&record)), 0));
     }
-    if let Some(deployment) = super::deployment::resume_deployment(&input.component_id)? {
+    if let Some(deployment) = super::deployment::resume_deployment(roots, &input.component_id)? {
         let failed = deployment.summary.failed > 0;
         return Ok((
             ReleaseCommandResult {

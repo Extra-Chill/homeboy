@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.29] - 2026-08-21
+
+### Changed
+- give OperationRecordStore its root
+- thread PathRoots from the release boundary
+
+### Fixed
+- declare a digest for every asset in the recovery manifest
+
+## [0.350.28] - 2026-08-20
+
+### Fixed
+- three root causes behind red main
+
+## [0.350.27] - 2026-08-20
+
+### Changed
+- root the Cook retry boundary
+
+### Fixed
+- scope checksum coverage to the assets cargo-dist checksums
+
 ## [0.350.26] - 2026-08-20
 
 ### Changed
