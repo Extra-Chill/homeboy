@@ -2508,6 +2508,75 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
 }
 
 #[test]
+fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownership() {
+    with_isolated_home(|_| {
+        let fixture_run_id = "concurrent-first-cook-run";
+        let mut fixture_plan = discovery_plan();
+        fixture_plan.tasks[0].executor.backend = "fixture".to_string();
+        agent_task_lifecycle::submit_plan(&fixture_plan, Some(fixture_run_id))
+            .expect("persist leaked concurrent Cook fixture");
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: fixture_run_id,
+            runner_id: "fixture-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .expect("attach fixture runner record");
+
+        let unknown_run_id = "unknown-runner-control";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(unknown_run_id))
+            .expect("persist unknown runner control");
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: unknown_run_id,
+            runner_id: "offline-unknown-runner",
+            runner_job_id: "unknown-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .expect("attach unknown runner control");
+
+        for run_id in [fixture_run_id, unknown_run_id] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                record.updated_at = None;
+            })
+            .expect("age runner record");
+        }
+
+        let discovery = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active discovery");
+        assert_eq!(discovery.total, 1);
+        assert_eq!(discovery.runs[0].run_id, unknown_run_id);
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].run_id, unknown_run_id);
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            "homeboy runner reconcile offline-unknown-runner"
+        );
+
+        let preview = agent_task_lifecycle::reconcile_record_health(true).expect("preview repair");
+        assert_eq!(preview.considered, 1);
+        assert_eq!(preview.quarantined, 0);
+        assert_eq!(preview.records[0].run_id, fixture_run_id);
+        assert_eq!(
+            preview.records[0].reason,
+            agent_task_lifecycle::AgentTaskRecordHealthReason::FixtureRunnerProvenance
+        );
+        assert_eq!(preview.records[0].action, "would-quarantine");
+
+        let repaired = agent_task_lifecycle::reconcile_record_health(false).expect("apply repair");
+        assert_eq!(repaired.quarantined, 1);
+        let health = agent_task_lifecycle::record_health_summary().expect("quarantine health");
+        assert_eq!(health.fixture, 1);
+        assert_eq!(health.quarantined, 1);
+    });
+}
+
+#[test]
 fn discovery_rejects_invalid_submitted_after_timestamps() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-invalid-timestamp-filter"))
