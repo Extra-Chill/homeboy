@@ -23,6 +23,7 @@ use super::lifecycle::{
     LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs,
     RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -187,6 +188,8 @@ pub enum AgentTaskCommand {
     FinalizePr(Box<FinalizePrArgs>),
     /// Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure.
     RecordReplacementGateProof(RecordReplacementGateProofArgs),
+    /// Run corrected gates against an already-applied failed candidate and record replacement proof.
+    VerifyReplacement(VerifyReplacementArgs),
     /// Record an independent, durable acceptance verdict for a candidate.
     Accept(AcceptArgs),
     /// Convert deterministic gate results into a cook retry or stop decision.

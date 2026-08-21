@@ -86,6 +86,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
         | agent_task::AgentTaskCommand::FinalizePr(_)
+        | agent_task::AgentTaskCommand::VerifyReplacement(_)
         | agent_task::AgentTaskCommand::Tool(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Retry(retry) if retry.run => {
             AgentTaskResourceBehavior::AdmittedWorkload

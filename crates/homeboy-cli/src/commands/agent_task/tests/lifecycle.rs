@@ -3772,6 +3772,73 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
 }
 
 #[test]
+fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "verify-replacement",
+        "cook-12788",
+        "--verify",
+        "cargo test exact::replacement",
+        "--authorize-external-proof",
+        "Chris approved corrected gate evidence",
+    ])
+    .expect("replacement verification command parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::VerifyReplacement(args) = args.command else {
+        panic!("replacement verification command");
+    };
+    assert_eq!(args.cook_or_attempt_id, "cook-12788");
+    assert_eq!(args.gates.verify, ["cargo test exact::replacement"]);
+    assert_eq!(
+        args.authorize_external_proof,
+        "Chris approved corrected gate evidence"
+    );
+}
+
+#[test]
+fn verify_replacement_file_gates_are_snapshotted_before_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let public = temp.path().join("public-gate.sh");
+    let private = temp.path().join("private-gate.sh");
+    std::fs::write(&public, "test -f Cargo.toml\n").expect("write public gate");
+    std::fs::write(&private, "test -n \"$TOKEN\"\n").expect("write private gate");
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "verify-replacement",
+        "cook-12788",
+        "--verify-file",
+        public.to_str().expect("public path"),
+        "--private-verify-file",
+        private.to_str().expect("private path"),
+        "--authorize-external-proof",
+        "Chris approved corrected gate evidence",
+    ])
+    .expect("replacement verification command parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::VerifyReplacement(mut args) = args.command else {
+        panic!("replacement verification command");
+    };
+    args.gates
+        .snapshot_file_inputs()
+        .expect("snapshot gate files");
+    std::fs::write(&public, "exit 1\n").expect("mutate public gate");
+    std::fs::write(&private, "exit 1\n").expect("mutate private gate");
+
+    assert_eq!(args.gates.verify, ["test -f Cargo.toml\n"]);
+    assert_eq!(args.gates.private_verify, ["test -n \"$TOKEN\"\n"]);
+    assert!(args.gates.verify_file.is_empty());
+    assert!(args.gates.private_verify_file.is_empty());
+    assert_eq!(args.gates.input_sources[0].source_kind, "file");
+    assert_eq!(args.gates.input_sources[1].path, None);
+}
+
+#[test]
 fn resume_command_executes_existing_run() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
