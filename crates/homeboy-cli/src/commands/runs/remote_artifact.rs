@@ -72,7 +72,13 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
     let runner = runner::load(&args.runner)?;
     validate_runner_artifact_path(&runner, &args.path)?;
 
-    let source = runner_artifact_attach::copy_runner_artifact_source(&runner, &args.path)?;
+    // The bytes land under the root this store indexes, because the path is
+    // recorded into that same store two lines below (#7505).
+    let source = runner_artifact_attach::copy_runner_artifact_source(
+        &store.artifact_root()?,
+        &runner,
+        &args.path,
+    )?;
     let metadata = runner_attach_metadata(&runner, &args.path, &source);
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
