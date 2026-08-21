@@ -901,7 +901,7 @@ pub fn select_apply_enabled_worktree_provider_from_config(
 ) -> Result<String> {
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
         Ok(resolution) => {
-            validate_lifecycle_provider(&resolution.provider_id, config)?;
+            validate_workspace_creation_provider(&resolution.provider_id, config)?;
             return Ok(resolution.provider_id);
         }
         Err(error)
@@ -913,18 +913,19 @@ pub fn select_apply_enabled_worktree_provider_from_config(
         Err(error) => return Err(error),
     }
     let mut providers = Vec::new();
+    let mut capability_errors = Vec::new();
     for (id, provider) in &config.worktree_providers {
-        if provider.enabled
-            && provider.apply_enabled
-            && provider.commands.ensure.is_some()
-            && worktree_provider_lifecycle_finalizer_argv_from_config(id, config)?.is_some()
-        {
-            providers.push(id.clone());
+        if provider.enabled && provider.apply_enabled {
+            match validate_workspace_creation_provider(id, config) {
+                Ok(()) => providers.push(id.clone()),
+                Err(error) => capability_errors.push(error),
+            }
         }
     }
     providers.sort();
     match providers.as_slice() {
         [provider] => Ok(provider.clone()),
+        [] if capability_errors.len() == 1 => Err(capability_errors.pop().expect("one capability error")),
         [] => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure, so Homeboy cannot create it", intent.handle), Some(intent.handle.clone()), Some(missing_ensure_provider_remediation(intent)))),
         _ => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, providers.join(", ")), Some(intent.handle.clone()), Some(ambiguous_ensure_provider_remediation(&providers.iter().map(String::as_str).collect::<Vec<_>>())))),
     }
@@ -941,7 +942,7 @@ pub fn plan_apply_enabled_worktree_provider_from_config(
     plan_apply_enabled_worktree_provider_from_config_with_id(intent, None, config)
 }
 
-/// Plan a purpose-owned workspace with the same lifecycle-eligible provider
+/// Plan a purpose-owned workspace with the same creation-capable provider
 /// selection that execution uses, without running its ensure command.
 pub fn plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
     intent: &WorktreeProviderCreateIntent,
@@ -1122,9 +1123,10 @@ fn ambiguous_ensure_provider_remediation(providers: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// A purpose-owned workspace needs all lifecycle phases before ownership is
-/// persisted. This prevents an unreconcilable ensure from ever being invoked.
-fn validate_lifecycle_provider(provider_id: &str, config: &HomeboyConfig) -> Result<()> {
+/// Creation needs a provider mutation and a provider-backed postcondition
+/// lookup. Terminal finalization is optional: providers that do not expose it
+/// remain authoritative for their ensure/resolve lifecycle.
+fn validate_workspace_creation_provider(provider_id: &str, config: &HomeboyConfig) -> Result<()> {
     let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
         Error::validation_invalid_argument(
             "worktree_provider",
@@ -1133,19 +1135,56 @@ fn validate_lifecycle_provider(provider_id: &str, config: &HomeboyConfig) -> Res
             None,
         )
     })?;
-    if provider.enabled
-        && provider.apply_enabled
-        && provider.commands.ensure.is_some()
-        && worktree_provider_lifecycle_finalizer_argv_from_config(provider_id, config)?.is_some()
-    {
+    let mut selected_capabilities = Vec::new();
+    if provider.enabled {
+        selected_capabilities.push("enabled");
+    }
+    if provider.apply_enabled {
+        selected_capabilities.push("apply_enabled");
+    }
+    if provider.commands.ensure.is_some() {
+        selected_capabilities.push("ensure");
+    }
+    if provider.commands.resolve.is_some() {
+        selected_capabilities.push("resolve");
+    }
+    if provider.commands.list.is_some() {
+        selected_capabilities.push("list");
+    }
+    if worktree_provider_lifecycle_finalizer_argv_from_config(provider_id, config)?.is_some() {
+        selected_capabilities.push("finalize");
+    }
+    let mut missing_required_capabilities = Vec::new();
+    if !provider.enabled {
+        missing_required_capabilities.push("enabled");
+    }
+    if !provider.apply_enabled {
+        missing_required_capabilities.push("apply_enabled");
+    }
+    if provider.commands.ensure.is_none() {
+        missing_required_capabilities.push("ensure");
+    }
+    if provider.commands.resolve.is_none() && provider.commands.list.is_none() {
+        missing_required_capabilities.push("resolve_or_list");
+    }
+    if missing_required_capabilities.is_empty() {
         return Ok(());
     }
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "worktree_provider",
-        "purpose-owned workspace provider requires enabled, apply_enabled, commands.ensure, and settings.worktree_provider_lifecycle.<provider>.finalize",
+        format!(
+            "worktree provider `{provider_id}` cannot create and resolve a fanout workspace; missing required capabilities: {}",
+            missing_required_capabilities.join(", ")
+        ),
         Some(provider_id.to_string()),
         None,
-    ))
+    );
+    error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+    error.details["worktree_provider_selected_capabilities"] =
+        serde_json::json!(selected_capabilities);
+    error.details["worktree_provider_missing_required_capabilities"] =
+        serde_json::json!(missing_required_capabilities);
+    Err(error)
 }
 
 fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
@@ -1153,8 +1192,8 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     lifecycle: Option<&WorktreeProviderLifecycleIntent>,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
-    // Lifecycle callers select once using the stricter lifecycle eligibility
-    // contract. Keep that exact identity through ensure and postcondition lookup.
+    // Purpose-owned callers select once using the creation capability contract.
+    // Keep that exact identity through ensure and postcondition lookup.
     let lifecycle_provider = lifecycle
         .map(|_| select_apply_enabled_worktree_provider_from_config(intent, config))
         .transpose()?;
@@ -3757,7 +3796,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_selection_rejects_missing_finalize_before_ensure_can_run() {
+    fn workspace_creation_selection_reports_missing_lookup_capability_before_ensure_can_run() {
         let marker = tempfile::NamedTempFile::new().expect("marker");
         std::fs::remove_file(marker.path()).expect("remove marker");
         let provider = WorktreeProviderConfig {
@@ -3786,8 +3825,12 @@ mod tests {
             },
             &config_with_provider(provider),
         )
-        .expect_err("missing finalizer must reject lifecycle ownership");
-        assert!(error.message.contains("no enabled apply-enabled provider"));
+        .expect_err("missing lookup capability must reject workspace creation");
+        assert_eq!(error.details["worktree_provider_id"], "fixture");
+        assert_eq!(
+            error.details["worktree_provider_missing_required_capabilities"],
+            serde_json::json!(["resolve_or_list"])
+        );
         assert!(!marker.path().exists(), "ensure command must not run");
     }
 
@@ -3848,10 +3891,6 @@ mod tests {
         config
             .worktree_providers
             .insert("competing".to_string(), provider(&competing, false));
-        config.settings.insert(
-            WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
-            serde_json::json!({ "selected": { "finalize": ["finalize"] } }),
-        );
         let intent = WorktreeProviderCreateIntent {
             handle: "homeboy@fix-12124".to_string(),
             repo: "homeboy".to_string(),
