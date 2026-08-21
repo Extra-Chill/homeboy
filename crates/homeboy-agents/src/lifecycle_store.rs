@@ -847,10 +847,6 @@ static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 /// keeps that crash window from permanently suppressing a detached resume.
 const COOK_NOTIFICATION_CLAIM_LEASE: Duration = Duration::from_secs(5 * 60);
 
-pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
-    write_plan_in_store(&default_store()?, run_id, plan)
-}
-
 pub(super) fn write_plan_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -1048,19 +1044,6 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
     default_store()?.write_record(record)
 }
 
-/// Persist a record while the caller owns the config lock. Terminal workspace
-/// authority is deliberately deferred because it acquires its own lock.
-pub(super) fn write_record_locked_without_terminal_projection(
-    record: &AgentTaskRunRecord,
-) -> Result<AgentTaskRunRecord> {
-    default_store()?.write_record_locked_without_terminal_projection(record)
-}
-
-/// Complete terminal projection from committed lifecycle truth after unlocking.
-pub(super) fn project_terminal_record_after_unlock(run_id: &str) -> Result<()> {
-    default_store()?.project_terminal_record_after_unlock(run_id)
-}
-
 /// Serialize a record read-modify-write so independent lifecycle projections do
 /// not replace metadata written by another controller operation.
 pub(super) fn mutate_record(
@@ -1068,16 +1051,6 @@ pub(super) fn mutate_record(
     mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
 ) -> Result<Option<AgentTaskRunRecord>> {
     default_store()?.mutate_record(run_id, mutate)
-}
-
-/// Mutate a record while the caller owns the config lock. Terminal authority is
-/// deliberately deferred to the caller's post-lock projection, matching
-/// [`write_record_locked_without_terminal_projection`].
-pub(super) fn mutate_record_locked_without_terminal_projection(
-    run_id: &str,
-    mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
-) -> Result<Option<AgentTaskRunRecord>> {
-    default_store()?.mutate_record_locked_without_terminal_projection(run_id, mutate)
 }
 
 /// Commit the controller projection and child aggregate in one observation row.
@@ -1213,23 +1186,6 @@ pub(super) fn inject_raw_record_metadata_for_corruption_test(
     store.upsert_imported_run(&run)
 }
 
-pub(super) fn write_cook_index_attempt(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    recorded_at: String,
-    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
-) -> Result<AgentTaskCookIndex> {
-    write_cook_index_attempt_in_store(
-        &default_store()?,
-        cook_id,
-        attempt,
-        run_id,
-        recorded_at,
-        candidate,
-    )
-}
-
 pub(super) fn write_cook_index_attempt_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -1248,24 +1204,6 @@ pub(super) fn write_cook_index_attempt_in_store(
             candidate,
         )
     })
-}
-
-/// Write one Cook index attempt while the caller owns the config lock.
-pub(super) fn write_cook_index_attempt_locked(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    recorded_at: String,
-    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
-) -> Result<AgentTaskCookIndex> {
-    write_cook_index_attempt_locked_in_store(
-        &default_store()?,
-        cook_id,
-        attempt,
-        run_id,
-        recorded_at,
-        candidate,
-    )
 }
 
 pub(super) fn write_cook_index_attempt_locked_in_store(
@@ -1341,18 +1279,6 @@ pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
     Ok(default_store()?.cook_index_path(cook_id).exists())
 }
 
-/// Claim the one terminal notification a Cook is allowed to deliver.
-///
-/// The claim is the creation of the marker file itself: `create_new` is
-/// `O_EXCL`, so exactly one caller — in any process, on any thread — observes
-/// `Ok(true)`. This is the cook-scoped counterpart of
-/// `ObservationStore::mark_notification_delivered`, which cannot serve here
-/// because it is keyed on a `runs` row and a Cook id is an alias with no row
-/// of its own.
-pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<bool> {
-    claim_cook_notification_in_store(&default_store()?, cook_id, marker)
-}
-
 /// Claim within one explicitly rooted store. `cook_index_path` as a free
 /// function is `default_store()?`, so the store's own method is used here: the
 /// claim marker is a bare filesystem create with no record read in front of it,
@@ -1419,12 +1345,6 @@ pub(super) fn claim_cook_notification_in_store(
     }
 }
 
-/// Commit a successful notification claim. Only a confirmed transport delivery
-/// becomes the durable exactly-once marker.
-pub(super) fn confirm_cook_notification(cook_id: &str, marker: &Value) -> Result<()> {
-    confirm_cook_notification_in_store(&default_store()?, cook_id, marker)
-}
-
 pub(super) fn confirm_cook_notification_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -1467,11 +1387,6 @@ pub(super) fn release_cook_notification_claim_in_store(
     }
 }
 
-/// Persist the latest bounded, secret-safe terminal notification outcome.
-pub(super) fn write_cook_notification_outcome(cook_id: &str, outcome: &Value) -> Result<()> {
-    write_cook_notification_outcome_in_store(&default_store()?, cook_id, outcome)
-}
-
 pub(super) fn write_cook_notification_outcome_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -1492,13 +1407,6 @@ pub(super) fn read_cook_notification_outcome(cook_id: &str) -> Result<Option<Val
     read_json(&path).map(Some)
 }
 
-pub(super) fn update_cook_index(
-    cook_id: &str,
-    mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
-) -> Result<Option<AgentTaskCookIndex>> {
-    default_store()?.update_cook_index(cook_id, mutate)
-}
-
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {
     Ok(ObservationStore::open_initialized_for_lifecycle()?
         .get_run(run_id)?
@@ -1509,10 +1417,6 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
 /// migrations, or triggering startup repair work.
 pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
     default_store()?.record_exists_readonly(run_id)
-}
-
-pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
-    validate_cook_index_attempt_in_store(&default_store()?, cook_id, attempt, run_id)
 }
 
 pub(super) fn validate_cook_index_attempt_in_store(
