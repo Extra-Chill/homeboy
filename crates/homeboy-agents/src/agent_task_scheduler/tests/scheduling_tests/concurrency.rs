@@ -93,8 +93,12 @@ pub(super) mod concurrency_tests {
         assert!(execution["post_provider_cleanup_elapsed_ms"].is_u64());
         assert!(execution["post_provider_cleanup_finished_at"].is_string());
         assert!(
-            !crate::agent_task_lifecycle::has_active_provider_execution(run_id)
-                .expect("terminal provider is inactive")
+            !crate::agent_task_lifecycle::has_active_provider_execution_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store"),
+                run_id,
+            )
+            .expect("terminal provider is inactive")
         );
     }
 
