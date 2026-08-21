@@ -121,6 +121,13 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub max_duration: Option<u64>,
     #[arg(long = "dry-run")]
     pub dry_run: bool,
+    /// Maximum wall-clock budget for each bounded static dry-run planning phase.
+    #[arg(
+        long = "dry-run-planner-timeout-seconds",
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECONDS"
+    )]
+    pub dry_run_planner_timeout_seconds: Option<u64>,
     #[arg(long = "run-plan")]
     pub run_plan: bool,
 }
