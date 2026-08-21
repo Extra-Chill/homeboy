@@ -146,7 +146,7 @@ pub struct RoutedLabAdmissionCommand {
     pub source_path: std::path::PathBuf,
 }
 
-pub fn build_routed_lab_admission_command(
+pub(crate) fn build_routed_lab_admission_command(
     input: RoutedLabAdmissionInput<'_>,
     source_path: &std::path::Path,
 ) -> RoutedLabAdmissionCommand {

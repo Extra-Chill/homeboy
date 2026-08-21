@@ -70,7 +70,9 @@ reached ten call sites through one field.
 
 ## Collapse the pair; do not keep it
 
-A crate mid-migration tends to grow ambient/rooted sibling pairs:
+A crate mid-migration tends to grow ambient/rooted sibling pairs. This is the
+shape `homeboy-release` carried before #12746, quoted as it stood then --
+neither function exists in this form today, which is the point:
 
 ```rust
 fn run_cleanup(component: &Component) -> Result<T> {                 // ambient
@@ -157,10 +159,11 @@ trivially hold, a root**:
 | depth | meaning | example | verdict |
 |---|---|---|---|
 | 0 | a carrier struct already threads through the callee | `ReleaseExecutionContext`, `ReleaseWorkspace` | ready |
-| 1 | the wrapper's caller is a command or process entry | `commands/deferred_workload.rs` | ready |
-| many | intermediate functions with no other reason to know about paths | `agent_task/fanout.rs`, below | **not ready** |
+| 1 | the wrapper's caller is a command or process entry | `crates/homeboy-cli/src/commands/deferred_workload.rs` | ready |
+| many | intermediate functions with no other reason to know about paths | `crates/homeboy-cli/src/commands/agent_task/fanout.rs`, below | **not ready** |
 
-`commands/deferred_workload.rs` was depth 1: five wrappers, one caller each, and
+`crates/homeboy-cli/src/commands/deferred_workload.rs` was depth 1: five wrappers,
+one caller each, and
 those callers were `run()` (a command entry), `cli_runtime.rs` (the process
 boundary itself), and one sibling command. All five collapsed in one pass.
 
@@ -184,7 +187,8 @@ fanout()                                  <- the only real boundary
 
 Rooting this means adding a `data_root: &Path` parameter to eight functions
 whose job has nothing to do with paths, plus a `pub(crate)` signature with an
-external caller in `commands/infra/route.rs` — to remove **one** duplicate
+external caller in `crates/homeboy-cli/src/commands/infra/route.rs` — to remove
+**one** duplicate
 resolution per command. That is the definition of adding plumbing.
 
 Leave it. Either a carrier appears as the layer above is rooted, or the

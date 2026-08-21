@@ -716,12 +716,12 @@ fn unpack_json_files_from_zip(zip_bytes: &[u8]) -> homeboy::core::Result<Vec<(St
 mod helpers {
     use super::*;
 
-    pub fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
+    pub(crate) fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
         let composite = format!("{repo}::{workflow}");
         content_hash::sha256_hex(composite.as_bytes())
     }
 
-    pub fn list_runs_cache_path(
+    pub(crate) fn list_runs_cache_path(
         config_root: &Path,
         key: &str,
         ext: &str,
@@ -737,7 +737,7 @@ mod helpers {
 
     /// Compile a `--artifact-glob` value into a matcher. Uses the existing `glob`
     /// crate's `Pattern` for shell-style matching (`*`, `?`, character classes).
-    pub fn compile_glob(raw: &str) -> homeboy::core::Result<glob::Pattern> {
+    pub(crate) fn compile_glob(raw: &str) -> homeboy::core::Result<glob::Pattern> {
         glob::Pattern::new(raw).map_err(|e| {
             Error::validation_invalid_argument(
                 "artifact_glob",
@@ -750,13 +750,13 @@ mod helpers {
 
     // ── Deterministic IDs ─────────────────────────────────────────────────────
 
-    pub fn deterministic_run_id(repo: &str, gh_run_id: u64) -> String {
+    pub(crate) fn deterministic_run_id(repo: &str, gh_run_id: u64) -> String {
         let composite = format!("{repo}#{gh_run_id}");
         let namespace = uuid::Uuid::from_bytes(*HOMEBOY_RUN_NAMESPACE);
         uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
     }
 
-    pub fn deterministic_artifact_id(
+    pub(crate) fn deterministic_artifact_id(
         homeboy_run_id: &str,
         gh_artifact_id: u64,
         file_name: &str,
@@ -766,7 +766,7 @@ mod helpers {
         uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
     }
 }
-pub use helpers::*;
+use helpers::*;
 
 #[cfg(test)]
 mod tests {

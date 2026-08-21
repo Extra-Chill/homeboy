@@ -166,13 +166,6 @@ fn placement_name(placement: Placement) -> &'static str {
 }
 
 #[cfg(test)]
-pub fn reset_captured_for_test() {
-    if let Ok(mut slot) = captured_storage().write() {
-        *slot = None;
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;

@@ -524,11 +524,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
     }
 }
 
-pub fn print_json_result(result: Result<serde_json::Value>, exit_code: i32) -> Result<()> {
-    print_json_result_for_command(result, exit_code, "unknown", None)
-}
-
-pub fn print_json_result_for_command(
+pub(crate) fn print_json_result_for_command(
     result: Result<Value>,
     exit_code: i32,
     command: &str,
@@ -554,13 +550,6 @@ pub fn print_json_result_for_identity(
         identity,
         presentation,
     ))
-}
-
-pub fn cli_response_for_json_result(
-    result: &Result<serde_json::Value>,
-    exit_code: i32,
-) -> CommandResultEnvelope<serde_json::Value> {
-    cli_response_for_json_result_for_command(result, exit_code, "unknown", None)
 }
 
 pub fn cli_response_for_json_result_for_command(
@@ -1280,7 +1269,7 @@ pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_c
     write_json_to_file_for_command(result, path, exit_code, "unknown", None);
 }
 
-pub fn write_json_to_file_for_command(
+pub(crate) fn write_json_to_file_for_command(
     result: &Result<serde_json::Value>,
     path: &str,
     exit_code: i32,

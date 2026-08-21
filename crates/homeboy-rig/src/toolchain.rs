@@ -22,7 +22,7 @@ use crate::spec::{PathDiscoverySort, PathDiscoverySpec, RigSpec, ToolchainSpec};
 /// because removing them would silently break every host that depends on
 /// today's behavior. `RigSpec::toolchain` is the migration path: move these
 /// into host/rig configuration, then shrink this default.
-pub fn builtin_default_spec() -> ToolchainSpec {
+pub(crate) fn builtin_default_spec() -> ToolchainSpec {
     ToolchainSpec {
         prepend_paths: vec![
             "~/.local/bin".to_string(),

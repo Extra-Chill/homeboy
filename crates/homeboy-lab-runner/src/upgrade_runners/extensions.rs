@@ -99,7 +99,7 @@ pub fn sync_runner_extensions(
     (synced, skipped, failed)
 }
 
-pub fn runner_supports_extension_sync(runner: &Runner, extension_id: &str) -> bool {
+pub(crate) fn runner_supports_extension_sync(runner: &Runner, extension_id: &str) -> bool {
     runner.policy.supported_extensions.is_empty()
         || runner
             .policy

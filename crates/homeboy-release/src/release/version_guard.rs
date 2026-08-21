@@ -103,7 +103,7 @@ fn manual_release_lockfile_is_allowed(component: &Component, file: &str) -> bool
         .any(|path| path == file)
 }
 
-pub fn derived_lockfiles(targets: &[VersionTarget]) -> BTreeSet<String> {
+pub(crate) fn derived_lockfiles(targets: &[VersionTarget]) -> BTreeSet<String> {
     targets
         .iter()
         .flat_map(|target| {
