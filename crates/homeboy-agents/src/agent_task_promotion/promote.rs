@@ -749,6 +749,32 @@ fn promote_with_provider_and_checkpoint_internal(
             .as_deref()
             .map(crate::agent_task_promotion::candidate_fingerprint)
             .transpose()?;
+        // An empty provider patch can be a review of a candidate that was
+        // already committed on the declared destination. Retain that immutable
+        // candidate delta so Cook can distinguish it from a base-equal no-op.
+        let verified_base = worktree_path
+            .zip(options.base_ref.as_deref())
+            .map(|(path, base)| capture_declared_base(path, Some(base)))
+            .transpose()?
+            .flatten();
+        let changed_files = verified_base
+            .as_ref()
+            .map(|base| {
+                git_output(
+                    worktree_path.expect("verified base requires a worktree path"),
+                    &["diff", "--name-only", &base.sha, "HEAD"],
+                )
+                .map(|output| {
+                    output
+                        .lines()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         return Ok(AgentTaskPromotionReport {
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -762,11 +788,11 @@ fn promote_with_provider_and_checkpoint_internal(
                 path: patch_path.display().to_string(),
                 sha256: artifact.sha256,
             },
-            changed_files: Vec::new(),
+            changed_files,
             command_evidence: Vec::new(),
             deterministic_gates: gates.deterministic_gates,
             gate_results: gates.gate_results,
-            verified_base: None,
+            verified_base,
             provenance: json!({
                 "source_schema": outcome.schema,
                 "artifact_metadata": artifact.metadata,
