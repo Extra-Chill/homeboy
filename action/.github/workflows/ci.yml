@@ -859,6 +859,12 @@ jobs:
       - name: Install cargo-nextest for Rust shard replay
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
+      - name: Resolve the candidate Test archive
+        id: test-archive-artifact
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-archive
       # Prebuilt by Plan candidate Test shards. Absent (non-Rust callers), the
       # extension falls back to compiling the workspace exactly as before.
       - name: Download the candidate Test archive
@@ -866,11 +872,16 @@ jobs:
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: actions/download-artifact@v7
         with:
-          name: homeboy-test-archive-${{ github.run_attempt }}
+          name: ${{ steps.test-archive-artifact.outputs.artifact-name }}
           path: ${{ github.workspace }}/homeboy-test-archive
+      - name: Resolve the candidate Test shard plan
+        id: test-plan-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-shard-plan
       - uses: actions/download-artifact@v7
         with:
-          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+          name: ${{ steps.test-plan-artifact.outputs.artifact-name }}
       - name: Materialize assigned Test shard
         run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
       - name: Run candidate Test shard ${{ matrix.shard_id }}
@@ -957,9 +968,14 @@ jobs:
         with:
           pattern: homeboy-test-shard-candidate-*
           path: test-shard-artifacts
+      - name: Resolve the candidate Test shard plan
+        id: test-plan-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-shard-plan
       - uses: actions/download-artifact@v7
         with:
-          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+          name: ${{ steps.test-plan-artifact.outputs.artifact-name }}
       - name: Aggregate complete candidate Test shard evidence
         env:
           TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
