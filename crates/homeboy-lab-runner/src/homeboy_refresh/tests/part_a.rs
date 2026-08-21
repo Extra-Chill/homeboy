@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::{
-    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerExecMode, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerExecMode, RunnerGenerationJobOwners,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
@@ -1886,6 +1886,86 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
 
     let ambiguous_stale = stale_daemon_admission_snapshot(0, None, None);
     assert!(refresh_execution_route(&runner, &ambiguous_stale).is_err());
+}
+
+#[test]
+fn reconcile_then_refresh_uses_the_idle_postcondition_without_counting_retained_observations() {
+    let runner = crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let reconciled = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
+    let operations = RefCell::new(Vec::new());
+
+    let admission = reconciled_refresh_admission_with(
+        "lab",
+        |_| {
+            operations.borrow_mut().push("reconcile");
+            Ok(reconciled)
+        },
+        |status| {
+            operations.borrow_mut().push("project");
+            Ok(RunnerAdmissionSnapshot::from_status_and_generations(
+                status,
+                Vec::new(),
+                vec![RunnerGenerationJobOwners {
+                    generation: "lease-current".to_string(),
+                    job_ids: vec![
+                        "retained-observation-a".to_string(),
+                        "retained-observation-b".to_string(),
+                    ],
+                }],
+            ))
+        },
+    )
+    .expect("reconciled refresh admission");
+
+    assert_eq!(operations.into_inner(), ["reconcile", "project"]);
+    assert_eq!(admission.summary.retained_durable_job_count, 2);
+    assert!(admission.summary.safe_to_rotate);
+    assert_eq!(
+        refresh_execution_route(&runner, &admission).expect("idle stale daemon routes over SSH"),
+        RefreshExecutionRoute::DiagnosticSsh
+    );
+}
+
+#[test]
+fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
+    let runner = crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let live = stale_daemon_admission_snapshot(1, Some("lease-current"), Some(1)).status;
+
+    let admission = reconciled_refresh_admission_with(
+        "lab",
+        |_| Ok(live),
+        |status| {
+            Ok(RunnerAdmissionSnapshot::from_status_and_generations(
+                status,
+                Vec::new(),
+                Vec::new(),
+            ))
+        },
+    )
+    .expect("live postcondition projects");
+
+    assert!(!admission.summary.safe_to_rotate);
+    assert!(refresh_execution_route(&runner, &admission).is_err());
 }
 
 #[test]
