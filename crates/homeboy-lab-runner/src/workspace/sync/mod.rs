@@ -3506,7 +3506,11 @@ fn liveness(state: &str, observations: Vec<String>) -> RunnerWorkspaceLivenessEv
 #[cfg(target_os = "linux")]
 fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
     const MAX_PROCESSES: usize = 4096;
-    const MAX_FDS_PER_PROCESS: usize = 1024;
+    // 1024 was below what ordinary hosts actually run (#12715). A CI runner
+    // agent, a container daemon or a language server holds thousands of
+    // descriptors as a matter of course, and every one of them tripped the
+    // bound. Bound the work at a ceiling only a pathological process reaches.
+    const MAX_FDS_PER_PROCESS: usize = 65_536;
     let target = path.to_string_lossy();
     let Ok(processes) = fs::read_dir("/proc") else {
         return liveness(
@@ -3572,9 +3576,20 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
             }
             Err(_) => return liveness("unknown", vec!["process_probe_fd_failed".to_string()]),
         };
+        // Exceeding the bound describes THIS process's descriptor table, not
+        // this workspace (#12715). Returning `unknown` here abandoned the whole
+        // probe on the first fat process on the machine and withheld every
+        // workspace from pruning -- `withheld_by_liveness_reason:
+        // process_probe_fd_limit`, on every CI run.
+        //
+        // The two strong signals for this process have already been evaluated
+        // above: its cwd is not inside the workspace and its argv does not name
+        // it. The descriptor sweep is the weak supplementary check, so stop
+        // sweeping this one and go on to the next process rather than
+        // poisoning the verdict for every workspace in the scan.
         for (index, fd) in fds.flatten().enumerate() {
             if index >= MAX_FDS_PER_PROCESS {
-                return liveness("unknown", vec!["process_probe_fd_limit".to_string()]);
+                break;
             }
             if fs::read_link(fd.path())
                 .ok()
