@@ -121,6 +121,10 @@ fn map_ssh_wait_output(output: std::io::Result<std::process::Output>) -> Command
     }
 }
 
+fn write_inline_stdin(writer: &mut impl Write, stdin: &[u8]) -> std::io::Result<()> {
+    writer.write_all(stdin)
+}
+
 impl SshClient {
     pub fn from_server(server: &Server, server_id: &str) -> Result<Self> {
         let identity_file = match &server.identity_file {
@@ -610,10 +614,12 @@ pub(super) fn run_command_with_stdin_source(
     mut cmd: Command,
     source: StdinSource,
 ) -> CommandOutput {
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => return ssh_process_error(error),
     };
+    let pid = child.id();
     let writer = child
         .stdin
         .take()
@@ -621,11 +627,24 @@ pub(super) fn run_command_with_stdin_source(
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let status = child.wait();
+    let cleanup_deadline = status.as_ref().err().map(|_| {
+        let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+        let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
+        deadline
+    });
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result: std::io::Result<()>| result.is_err());
-    let stdout = collect_stream(stdout);
-    let mut stderr = collect_stream(stderr);
+    let (stdout, mut stderr, streams_stalled) = match cleanup_deadline {
+        Some(deadline) => collect_streams_before(stdout, stderr, deadline),
+        None => (collect_stream(stdout), collect_stream(stderr), false),
+    };
+    if streams_stalled {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline after a transport observation failure.");
+    }
     if stdin_failed {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
@@ -1334,6 +1353,28 @@ mod bounded_probe_output_tests {
     }
 
     #[test]
+    fn inline_stdin_write_failures_are_observable() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            write_inline_stdin(&mut FailingWriter, b"secret")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
     fn a_healthy_probe_is_unchanged() {
         let output = bounded_probe_output(
             "ok".to_string(),
@@ -1620,6 +1661,7 @@ impl SshClient {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {
@@ -1634,8 +1676,34 @@ impl SshClient {
                 };
             }
         };
+        let pid = child.id();
         if let Some(mut pipe) = child.stdin.take() {
-            let _ = pipe.write_all(stdin);
+            if write_inline_stdin(&mut pipe, stdin).is_err() {
+                drop(pipe);
+                let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+                let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
+                let (stdout, mut stderr, streams_stalled) = collect_streams_before(
+                    child.stdout.take().map(read_stream),
+                    child.stderr.take().map(read_stream),
+                    deadline,
+                );
+                if !stderr.is_empty() && !stderr.ends_with('\n') {
+                    stderr.push('\n');
+                }
+                stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
+                if streams_stalled {
+                    stderr.push_str("\nHomeboy SSH stream drain exceeded its cleanup deadline after stdin delivery failure.");
+                }
+                return CommandOutput {
+                    stdout,
+                    stderr,
+                    success: false,
+                    exit_code: 1,
+                    timed_out: false,
+                    observation: super::CommandObservation::StdinDeliveryFailed,
+                    child_resource: None,
+                };
+            }
             // Drop closes stdin (EOF) so the remote read loop terminates.
         }
         map_ssh_wait_output(child.wait_with_output())

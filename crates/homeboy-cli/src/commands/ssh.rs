@@ -112,11 +112,7 @@ pub(super) struct RawSshExecution {
 
 impl RawSshExecution {
     pub fn completion_phase_stderr(&self) -> String {
-        let command_phase = if self.observation_lost {
-            "command-observation-lost"
-        } else {
-            "command-finished"
-        };
+        let command_phase = ssh_terminal_phase_name(self.observation, self.observation_lost);
         format!("[ssh] phase={command_phase}\n[ssh] phase=cleanup-finished\n")
     }
 
@@ -362,11 +358,7 @@ fn raw_execution_from_output(output: homeboy::core::server::CommandOutput) -> Ra
 }
 
 fn ssh_execution_phases(output: &homeboy::core::server::CommandOutput) -> Vec<String> {
-    let command_phase = if ssh_observation_lost(output) {
-        "command-observation-lost"
-    } else {
-        "command-finished"
-    };
+    let command_phase = ssh_terminal_phase_name(output.observation, ssh_observation_lost(output));
     vec![
         "target-resolved".to_string(),
         "command-started".to_string(),
@@ -376,10 +368,22 @@ fn ssh_execution_phases(output: &homeboy::core::server::CommandOutput) -> Vec<St
 }
 
 fn ssh_terminal_phase(output: &homeboy::core::server::CommandOutput) {
-    if ssh_observation_lost(output) {
-        ssh_phase("command-observation-lost");
+    ssh_phase(ssh_terminal_phase_name(
+        output.observation,
+        ssh_observation_lost(output),
+    ));
+}
+
+fn ssh_terminal_phase_name(
+    observation: CommandObservation,
+    observation_lost: bool,
+) -> &'static str {
+    if observation == CommandObservation::SpawnFailed {
+        "command-not-started"
+    } else if observation_lost {
+        "command-observation-lost"
     } else {
-        ssh_phase("command-finished");
+        "command-finished"
     }
 }
 
@@ -799,6 +803,28 @@ mod tests {
         assert!(phases.contains(&"command-observation-lost".to_string()));
         assert!(!phases.contains(&"command-finished".to_string()));
         assert_eq!(phases.last().map(String::as_str), Some("cleanup-finished"));
+    }
+
+    #[test]
+    fn spawn_failure_never_reports_a_terminal_command_phase() {
+        let output = command_output(
+            "",
+            "ssh unavailable",
+            false,
+            -1,
+            false,
+            CommandObservation::SpawnFailed,
+        );
+        let phases = ssh_execution_phases(&output);
+        let raw = raw_execution_from_output(output);
+
+        assert!(!raw.observation_lost);
+        assert!(phases.contains(&"command-not-started".to_string()));
+        assert!(!phases.contains(&"command-finished".to_string()));
+        assert!(raw
+            .completion_phase_stderr()
+            .contains("command-not-started"));
+        assert!(!raw.completion_phase_stderr().contains("command-finished"));
     }
 
     #[test]
