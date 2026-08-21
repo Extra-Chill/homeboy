@@ -1719,6 +1719,22 @@ pub fn reconstruct_adoption_options(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
+/// A historical recipe can only continue through the terminal adoption path.
+/// Other states could still dispatch or replay provider work and must retain
+/// the runtime pin.
+pub fn historical_terminal_continuation_is_eligible(
+    recipe: &AgentTaskCookRecipe,
+    state: agent_task_lifecycle::AgentTaskRunState,
+) -> bool {
+    recipe.runtime_generation != homeboy_core::build_identity::current().display
+        && matches!(
+            state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+        )
+}
+
 /// Resolve a Cook identifier to its latest durable attempt. Candidate selection
 /// is promotion authority, not continuation authority: a failed gate-feedback
 /// attempt must remain the source of the next retry.
@@ -2843,6 +2859,32 @@ mod tests {
         assert!(adoption.gates.verify.is_empty());
         assert!(adoption.no_finalize);
         assert!(adoption.attempt_dispatcher.is_none());
+    }
+
+    #[test]
+    fn historical_terminal_admission_matches_provider_replay_policy() {
+        let current = recipe();
+        assert!(!historical_terminal_continuation_is_eligible(
+            &current,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        ));
+        reconstruct_options(&current).expect("current runtime permits normal continuation");
+
+        let mut historical = current.clone();
+        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
+        assert!(historical_terminal_continuation_is_eligible(
+            &historical,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        ));
+        reconstruct_adoption_options(&historical)
+            .expect("historical terminal continuation avoids provider replay");
+
+        assert!(!historical_terminal_continuation_is_eligible(
+            &historical,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        ));
+        reconstruct_options(&historical)
+            .expect_err("historical provider replay retains runtime pin");
     }
 
     #[test]
