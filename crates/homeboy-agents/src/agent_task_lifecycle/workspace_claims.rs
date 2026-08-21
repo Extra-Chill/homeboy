@@ -63,7 +63,7 @@ pub fn resolve_terminal_workspace_authority(
 /// gate concludes "no live local workspace owner" for a workspace that is still
 /// owned — a fail-open on the exact check that is supposed to fail closed
 /// (#7505). One store now roots both reads.
-pub(crate) fn resolve_terminal_workspace_authority_in_store(
+pub fn resolve_terminal_workspace_authority_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &TaskWorktreeRecord,
 ) -> Result<TerminalWorkspaceAuthorityResolution> {

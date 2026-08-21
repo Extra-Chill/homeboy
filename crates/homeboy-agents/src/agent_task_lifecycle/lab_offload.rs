@@ -66,7 +66,7 @@ pub fn bind_accepted_lab_runner_job(
 /// written back all have to name the same installation. Rooting only the
 /// wrapper would leave the daemon's authoritative binding landing wherever the
 /// process environment happened to point (#7505).
-pub(crate) fn bind_accepted_lab_runner_job_in_store(
+pub fn bind_accepted_lab_runner_job_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     identity: &homeboy_core::lab_contract::RunnerJobIdentity,
     remote_workspace: &str,
@@ -114,7 +114,7 @@ pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<Agen
 }
 
 /// The store-rooted counterpart of [`record_lab_offload_planned`].
-pub(crate) fn record_lab_offload_planned_in_store(
+pub fn record_lab_offload_planned_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     input: LabOffloadProxyPlan<'_>,
 ) -> Result<AgentTaskRunRecord> {
@@ -189,7 +189,7 @@ pub fn record_lab_offload_phase(
 /// and the write-back are one operation. Resolving the proxy in one home and
 /// committing the phase into another would leave a run advertising a setup
 /// phase that its own record never entered (#7505).
-pub(crate) fn record_lab_offload_phase_in_store(
+pub fn record_lab_offload_phase_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     input: LabOffloadPhaseRecord<'_>,
 ) -> Result<AgentTaskRunRecord> {
@@ -257,7 +257,7 @@ pub fn record_local_lab_identity_fallback(
 }
 
 /// The store-rooted counterpart of [`record_local_lab_identity_fallback`].
-pub(crate) fn record_local_lab_identity_fallback_in_store(
+pub fn record_local_lab_identity_fallback_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
@@ -392,31 +392,9 @@ pub fn record_lab_staging_controller_job_in_store(
     Ok(record)
 }
 
-/// Name a reserved Lab admission on the durable run the moment it is taken,
-/// before any further dispatch work can fail.
-///
-/// A reservation that exists only inside the controller process is unfindable:
-/// a caller killed between reservation and runner acceptance leaves capacity
-/// held by an admission nothing can associate with a run id, which is what
-/// forced manual job-ID cancellation in #9163. The daemon's admission-lease
-/// sweep still owns automatic reclaim; this write owns *identity*, so an
-/// operator can see which run holds which reservation and when it self-expires.
-pub fn record_lab_admission_reservation(
-    run_id: &str,
-    runner_id: &str,
-    daemon_lease_id: &str,
-    reservation_job_id: &str,
-    lease_expires_at_ms: u64,
-) -> Result<AgentTaskRunRecord> {
-    record_lab_admission_reservation_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        runner_id,
-        daemon_lease_id,
-        reservation_job_id,
-        lease_expires_at_ms,
-    )
-}
+// The ambient `record_lab_admission_reservation()` shim that used to sit here
+// is gone; the lab offload inner loop was its only caller and now reserves
+// admission in the store it resolved for the whole offload (#7505).
 
 /// The store-rooted counterpart of [`record_lab_admission_reservation`].
 ///
@@ -424,7 +402,7 @@ pub fn record_lab_admission_reservation(
 /// reservation. A reservation named in one installation while the run it names
 /// lives in another is exactly the unfindable state #9163 forced manual
 /// job-id cancellation for, so the read and the write are one home (#7505).
-pub(crate) fn record_lab_admission_reservation_in_store(
+pub fn record_lab_admission_reservation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
@@ -540,7 +518,7 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
 /// an acceptance validated against one home's record and committed into
 /// another's would silently permit two different runners to own the same run,
 /// and the handoff lock would not have excluded either of them (#7505).
-pub(crate) fn record_detached_lab_run_in_store(
+pub fn record_detached_lab_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     input: DetachedLabRunRecord<'_>,
 ) -> Result<AgentTaskRunRecord> {

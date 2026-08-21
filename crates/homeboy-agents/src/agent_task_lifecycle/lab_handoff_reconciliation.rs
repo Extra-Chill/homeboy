@@ -218,7 +218,7 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
 /// The broker transport stays process-global on purpose:
 /// `with_runner_continuation` resolves the configured provider registry, which
 /// is trust material and a subprocess contract, not a lifecycle root.
-pub(crate) fn reconcile_pending_runner_submission_intent_in_store(
+pub fn reconcile_pending_runner_submission_intent_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<bool> {

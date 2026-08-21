@@ -35,7 +35,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
 /// index that names attempts the cancelled store has never heard of — and would
 /// terminate the loop on an equality between two different homes' answers
 /// (#7505).
-pub(crate) fn cancel_run_in_store(
+pub fn cancel_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: Option<&str>,

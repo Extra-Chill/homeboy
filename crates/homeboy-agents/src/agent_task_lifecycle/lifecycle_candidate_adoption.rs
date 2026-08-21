@@ -122,7 +122,7 @@ pub fn start_candidate_adoption_with_policy(
     )
 }
 
-pub(crate) fn start_candidate_adoption_with_policy_in_store(
+pub fn start_candidate_adoption_with_policy_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     candidate_sha: &str,
@@ -411,7 +411,7 @@ pub fn finish_candidate_adoption(
     finish_candidate_adoption_in_store(&lifecycle_store, run_id, error)
 }
 
-pub(crate) fn finish_candidate_adoption_in_store(
+pub fn finish_candidate_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     error: Option<String>,
@@ -447,7 +447,7 @@ pub fn record_candidate_adoption_result(run_id: &str, result: Value) -> Result<(
     record_candidate_adoption_result_in_store(&lifecycle_store, run_id, result)
 }
 
-pub(crate) fn record_candidate_adoption_result_in_store(
+pub fn record_candidate_adoption_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     result: Value,
