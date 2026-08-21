@@ -3273,7 +3273,7 @@ fn cook_selected_candidate_provenance(
 /// Build recovery coordinates from durable controller records only. Provider
 /// output, gate output, and filesystem paths stay behind `diagnose` so a failed
 /// command envelope cannot disclose private evidence.
-fn cook_failure_context(
+pub fn cook_failure_context(
     cook_id: &str,
     latest_run_id: Option<&str>,
     status: &str,
