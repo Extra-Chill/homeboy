@@ -89,12 +89,12 @@ fn write_inline_stdin(writer: &mut impl Write, stdin: &[u8]) -> std::io::Result<
 fn collect_ssh_child_output(
     child: &mut std::process::Child,
     pid: u32,
-    status: std::io::Result<std::process::ExitStatus>,
+    status: Option<std::io::Result<std::process::ExitStatus>>,
     stdin_failed: bool,
     stdout: Option<Receiver<String>>,
     stderr: Option<Receiver<String>>,
 ) -> CommandOutput {
-    let wait_failed = status.is_err();
+    let wait_failed = status.as_ref().is_some_and(|status| status.is_err());
     let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
     if wait_failed {
         let _ = terminate_process_group_with_deadline(child, pid, deadline);
@@ -113,8 +113,14 @@ fn collect_ssh_child_output(
         }
         stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
     }
+    if status.is_none() {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH cleanup outcome is indeterminate after its bounded deadline.");
+    }
     match status {
-        Ok(status) => CommandOutput {
+        Some(Ok(status)) => CommandOutput {
             stdout,
             stderr,
             success: status.success() && !stdin_failed && !streams_stalled,
@@ -135,9 +141,22 @@ fn collect_ssh_child_output(
             },
             child_resource: None,
         },
-        Err(error) => CommandOutput {
+        Some(Err(error)) => CommandOutput {
             stdout,
             stderr: format!("{stderr}\nSSH error: {error}"),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else {
+                super::CommandObservation::TransportObservationFailed
+            },
+            child_resource: None,
+        },
+        None => CommandOutput {
+            stdout,
+            stderr,
             success: false,
             exit_code: -1,
             timed_out: false,
@@ -162,7 +181,7 @@ pub(super) fn run_ssh_with_child(mut cmd: Command) -> CommandOutput {
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let status = child.wait();
-    collect_ssh_child_output(&mut child, pid, status, false, stdout, stderr)
+    collect_ssh_child_output(&mut child, pid, Some(status), false, stdout, stderr)
 }
 
 impl SshClient {
@@ -1723,14 +1742,16 @@ impl SshClient {
             if write_inline_stdin(&mut pipe, stdin).is_err() {
                 drop(pipe);
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
-                let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
-                let status = child.wait();
+                let status = terminate_process_group_with_deadline(&mut child, pid, deadline)
+                    .ok()
+                    .flatten()
+                    .map(Ok);
                 return collect_ssh_child_output(&mut child, pid, status, true, stdout, stderr);
             }
             // Drop closes stdin (EOF) so the remote read loop terminates.
         }
         let status = child.wait();
-        collect_ssh_child_output(&mut child, pid, status, false, stdout, stderr)
+        collect_ssh_child_output(&mut child, pid, Some(status), false, stdout, stderr)
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {
