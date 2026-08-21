@@ -2031,8 +2031,13 @@ pub(crate) fn validate_controller_runtime_in_store(
 /// Resolve the compatible immutable executable for a lifecycle mutation.
 /// Legacy pins are migrated atomically before returning a path for re-exec.
 pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
-    let mut record = store::read_record(&resolve_run_id(run_id)?)?;
-    migrate_record_controller_runtime(&mut record)?;
+    // One root for the whole read: resolving the run id, reading the record,
+    // and migrating its pin are one operation. Three separately resolved homes
+    // migrate a pin in a record the caller cannot read back (#7505).
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let resolved = resolve_run_id_in_store(&lifecycle_store, run_id)?;
+    let mut record = lifecycle_store.read_record(&resolved)?;
+    migrate_record_controller_runtime_in_store(&lifecycle_store, &mut record)?;
     homeboy_core::controller_runtime::pinned_executable_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
@@ -2137,10 +2142,9 @@ pub fn prune_controller_runtime_pins(
     homeboy_core::controller_runtime::prune_pins(apply, overrides)
 }
 
-fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    migrate_record_controller_runtime_in_store(&lifecycle_store, record)
-}
+// The ambient `migrate_record_controller_runtime()` shim that used to sit here
+// is gone. `pinned_runtime_for_mutation` was its only caller and now migrates
+// inside the store it read the record from (#7505).
 
 fn migrate_record_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -4323,11 +4327,9 @@ pub fn list_records_in_store(
     Ok(records)
 }
 
-pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    list_records_with_health_in_store(&lifecycle_store)
-}
+// The ambient `list_records_with_health()` shim that used to sit here is gone.
+// The controller-pin reference provider was its only caller and now lists from
+// a store it resolves once (#7505).
 
 /// [`list_records_with_health`] against explicitly injected durable lifecycle
 /// roots.
@@ -4513,10 +4515,9 @@ pub fn run_record_exists_resolved_in_store(
     lifecycle_store.record_exists(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
 
-pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    mark_resuming_in_store(&lifecycle_store, run_id)
-}
+// The ambient `mark_resuming()` shim that used to sit here is gone. The resume
+// path was its only caller and now marks inside the store it resolved for the
+// resume itself (#7505).
 
 /// Stamp the resume request and re-enter Running inside an explicitly rooted
 /// store.

@@ -309,7 +309,7 @@ pub mod lifecycle {
         exact_durable_local_read_in_store, exact_record, fail_cook_operation,
         fail_detached_cook_handoff_parent, fail_detached_cook_handoff_parent_in_store,
         has_accepted_runner_handoff, invalidate_cook_finalization_for_dependency, list_records,
-        load_controller_plan, load_plan, load_plan_in_store, logs, mark_resuming, mark_running,
+        load_controller_plan, load_plan, load_plan_in_store, logs, mark_running,
         materialize_recovered_patch_artifact, persisted_status, pin_current_controller_runtime,
         pinned_runtime_for_mutation, prune_controller_runtime_pins, quarantine_queued_run_exact,
         rearm_quarantined_run, reconcile_record_health, reconcile_terminal_artifact_projection,
