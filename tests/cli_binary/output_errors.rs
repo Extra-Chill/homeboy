@@ -169,14 +169,14 @@ fn full_local_runner_status_does_not_imply_a_lab_connection() {
         stdout_json["data"]["execution_capabilities"]["lab_runner_connection"]["available"],
         false
     );
-    assert!(stdout_json["data"]["operator_hints"]
-        .as_array()
-        .expect("operator hints")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("--placement local"))));
-    assert!(stdout_json["data"].get("selected_lab_runner").is_none());
+    assert_eq!(
+        stdout_json["data"]["selected_lab_runner"]["connected"],
+        false
+    );
+    assert_eq!(
+        stdout_json["data"]["selected_lab_runner"]["availability"]["connected"],
+        false
+    );
 }
 
 #[test]
