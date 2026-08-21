@@ -569,12 +569,6 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             })
     }
 
-    /// Return verified, runner-owned package bytes for the later execution
-    /// layer. The receipt descriptor remains the only authority it needs.
-    pub fn read_source_artifact(&self, artifact: &RunnerSourceArtifact) -> Result<Vec<u8>> {
-        read_staged_source_artifact(&self.path, artifact)
-    }
-
     fn source_artifact_path(&self, artifact: &RunnerSourceArtifact) -> Result<PathBuf> {
         artifact.validate()?;
         Ok(self

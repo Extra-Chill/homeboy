@@ -246,12 +246,6 @@ pub fn claim_in_roots(
     })
 }
 
-/// Atomically claim the next eligible record. Expired claims are returned to
-/// the queue before selection so a restarted worker can continue after a crash.
-pub fn claim_next(runner_id: &str, owner: &str) -> Result<Option<DeferredWorkload>> {
-    claim_next_at(runner_id, owner, now_ms())
-}
-
 pub fn claim_next_in_roots(
     config_root: &Path,
     runner_id: &str,
