@@ -49,9 +49,12 @@ pub fn promote_runner_exec_artifact_dirs(
     }
 
     let store = ObservationStore::open_initialized()?;
-    // Resolved once beside the store so downloaded bytes and the records that
-    // index them cannot land in two different homes (#7505).
-    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    // Taken FROM the store, not resolved beside it. Downloaded bytes land under
+    // this root and the records indexing them are written into that same store,
+    // so the two cannot be allowed to disagree. Resolving separately made them
+    // equal by coincidence -- two reads of process state that happened to
+    // agree -- rather than by construction (#7505).
+    let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
         runner::RunnerExecMode::Local => None,
         runner::RunnerExecMode::Daemon
@@ -62,7 +65,7 @@ pub fn promote_runner_exec_artifact_dirs(
     for declared_dir in artifact_dir_outputs {
         let runner_dir = resolve_runner_exec_artifact_path(&output.remote_cwd, declared_dir);
         let record_dir = if let Some(runner) = runner.as_ref() {
-            copy_runner_exec_artifact_source_in_roots(roots.artifacts(), runner, &runner_dir)?
+            copy_runner_exec_artifact_source_in_roots(&artifact_root, runner, &runner_dir)?
         } else {
             runner_dir.clone()
         };
@@ -304,9 +307,12 @@ fn promote_runner_exec_outputs(
     }
 
     let store = ObservationStore::open_initialized()?;
-    // Resolved once beside the store so downloaded bytes and the records that
-    // index them cannot land in two different homes (#7505).
-    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    // Taken FROM the store, not resolved beside it. Downloaded bytes land under
+    // this root and the records indexing them are written into that same store,
+    // so the two cannot be allowed to disagree. Resolving separately made them
+    // equal by coincidence -- two reads of process state that happened to
+    // agree -- rather than by construction (#7505).
+    let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
         runner::RunnerExecMode::Local => None,
         runner::RunnerExecMode::Daemon
@@ -328,7 +334,7 @@ fn promote_runner_exec_outputs(
                 metadata["source"] = serde_json::json!("runner_path_attach");
                 metadata["runner_id"] = serde_json::json!(runner.id.clone());
                 metadata["runner_path"] = serde_json::json!(runner_path.display().to_string());
-                copy_runner_exec_artifact_source_in_roots(roots.artifacts(), runner, &runner_path)?
+                copy_runner_exec_artifact_source_in_roots(&artifact_root, runner, &runner_path)?
             } else {
                 runner_path.clone()
             };

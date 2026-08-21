@@ -208,7 +208,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
             .expect("prune process-owned workspace");
             assert_eq!(exit_code, 0);
             assert!(output.candidates.is_empty());
-            assert_eq!(output.skipped_live_count, 1);
+            assert_eq!(output.skipped_live_count, 1, "{output:#?}");
             assert!(workspace.exists());
         }
         child.kill().expect("stop held process");
@@ -1378,7 +1378,7 @@ fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
         let evidence =
             workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
 
-        assert_eq!(evidence.state, "inactive");
+        assert_eq!(evidence.state, "inactive", "{evidence:#?}");
         assert_eq!(
             evidence.observations,
             vec!["workspace_size_measurement_unavailable"]

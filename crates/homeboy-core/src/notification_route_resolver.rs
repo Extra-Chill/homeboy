@@ -319,14 +319,14 @@ mod tests {
     #[test]
     fn malformed_and_oversized_results_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "printf not-json");
+            install_resolver("resolver-test", "cat >/dev/null; printf not-json");
             assert!(resolve_installed()
                 .unwrap_err()
                 .to_string()
                 .contains("malformed"));
         });
         crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "yes x | head -c 20000");
+            install_resolver("resolver-test", "cat >/dev/null; yes x | head -c 20000");
             assert!(resolve_installed()
                 .unwrap_err()
                 .to_string()
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn ambiguity_and_invalid_routes_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
-            let matched = "printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"route\"}'";
+            let matched = "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"route\"}'";
             install_resolver("resolver-one", matched);
             install_resolver("resolver-two", matched);
             assert!(resolve_installed()
@@ -347,7 +347,7 @@ mod tests {
                 .contains("more than one"));
         });
         crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"token=secret\"}'");
+            install_resolver("resolver-test", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"token=secret\"}'");
             assert!(resolve_installed()
                 .unwrap_err()
                 .to_string()

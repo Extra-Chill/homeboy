@@ -125,9 +125,13 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
 
 /// Refresh every linked extension sharing one Git root as one transaction.
 pub fn update_linked_group(extension_ids: &[String], force: bool) -> Result<Vec<UpdateResult>> {
+    // One resolution for the whole group. This function's contract is that the
+    // group refreshes as ONE transaction; resolving per member meant a repoint
+    // mid-loop could span two installations and still report success (#7505).
+    let config_root = paths::homeboy()?;
     let mut entries = Vec::new();
     for id in extension_ids {
-        let extension_dir = paths::extension(id)?;
+        let extension_dir = paths::extension_in_root(&config_root, id);
         let source_dir = linked_source_dir(&extension_dir)?;
         let git_root = linked_extension_git_root(id, &source_dir)?;
         entries.push((id.as_str(), extension_dir, source_dir, git_root));

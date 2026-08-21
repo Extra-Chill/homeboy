@@ -1040,15 +1040,8 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
-/// Restore an explicit plan placement decision onto a legacy run record.
-///
-/// Placement is opt-in policy evidence. A controller-local plan without a
-/// decision must remain unclassified rather than acquiring a synthetic local
-/// contract that could contradict later runner evidence.
-pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    normalize_local_execution_placement_in_store(&lifecycle_store, run_id)
-}
+// The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
+// its two normalization tests now normalize inside a store they resolve (#7505).
 
 /// Restore an explicit plan placement decision onto a legacy record inside an
 /// explicitly rooted store.
@@ -1308,12 +1301,16 @@ mod execution_placement_tests {
     #[test]
     fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            // One store for the whole test: both normalizations and the record
+            // they read must name one installation.
+            let store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
             let plan = super::super::tests::test_plan();
             let record =
                 submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
                     .expect("submit plan");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("submission stamp remains authoritative");
             let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
                 serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
@@ -1343,7 +1340,7 @@ mod execution_placement_tests {
                 .remove("execution_placement_decision");
             store::write_record(&legacy_record).expect("remove legacy record projection");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("explicit plan decision is restored");
             assert_eq!(
                 normalized.metadata["execution_placement_decision"]["decision_id"],
@@ -2031,8 +2028,13 @@ pub(crate) fn validate_controller_runtime_in_store(
 /// Resolve the compatible immutable executable for a lifecycle mutation.
 /// Legacy pins are migrated atomically before returning a path for re-exec.
 pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
-    let mut record = store::read_record(&resolve_run_id(run_id)?)?;
-    migrate_record_controller_runtime(&mut record)?;
+    // One root for the whole read: resolving the run id, reading the record,
+    // and migrating its pin are one operation. Three separately resolved homes
+    // migrate a pin in a record the caller cannot read back (#7505).
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let resolved = resolve_run_id_in_store(&lifecycle_store, run_id)?;
+    let mut record = lifecycle_store.read_record(&resolved)?;
+    migrate_record_controller_runtime_in_store(&lifecycle_store, &mut record)?;
     homeboy_core::controller_runtime::pinned_executable_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
@@ -2137,10 +2139,9 @@ pub fn prune_controller_runtime_pins(
     homeboy_core::controller_runtime::prune_pins(apply, overrides)
 }
 
-fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    migrate_record_controller_runtime_in_store(&lifecycle_store, record)
-}
+// The ambient `migrate_record_controller_runtime()` shim that used to sit here
+// is gone. `pinned_runtime_for_mutation` was its only caller and now migrates
+// inside the store it read the record from (#7505).
 
 fn migrate_record_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2813,16 +2814,8 @@ pub(crate) fn record_provider_execution_terminal_in_store(
     })
 }
 
-/// Whether this run still has a provider execution that can produce work.
-///
-/// Controller-owned artifact harvesting may continue after a provider result is
-/// terminal. Foreground liveness sampling is only meaningful while a provider
-/// boundary remains active, so callers use this durable predicate to stop
-/// sampling during that bounded cleanup phase.
-pub fn has_active_provider_execution(run_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    has_active_provider_execution_in_store(&lifecycle_store, run_id)
-}
+// The ambient `has_active_provider_execution()` shim that used to sit here is gone;
+// its one scheduler test now asks the store it resolves (#7505).
 
 /// [`has_active_provider_execution`] against explicitly injected durable
 /// lifecycle roots.
@@ -4323,11 +4316,9 @@ pub fn list_records_in_store(
     Ok(records)
 }
 
-pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    list_records_with_health_in_store(&lifecycle_store)
-}
+// The ambient `list_records_with_health()` shim that used to sit here is gone.
+// The controller-pin reference provider was its only caller and now lists from
+// a store it resolves once (#7505).
 
 /// [`list_records_with_health`] against explicitly injected durable lifecycle
 /// roots.
@@ -4513,10 +4504,9 @@ pub fn run_record_exists_resolved_in_store(
     lifecycle_store.record_exists(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
 
-pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    mark_resuming_in_store(&lifecycle_store, run_id)
-}
+// The ambient `mark_resuming()` shim that used to sit here is gone. The resume
+// path was its only caller and now marks inside the store it resolved for the
+// resume itself (#7505).
 
 /// Stamp the resume request and re-enter Running inside an explicitly rooted
 /// store.
@@ -5301,15 +5291,8 @@ pub(crate) fn record_cook_attempt_in_store(
     Ok(index)
 }
 
-/// Register a Cook attempt while the caller owns the config lock.
-pub(crate) fn record_cook_attempt_locked(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-) -> Result<CookAttemptRegistration> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_attempt_locked_in_store(&lifecycle_store, cook_id, attempt, run_id)
-}
+// The ambient `record_cook_attempt_locked()` shim that used to sit here is gone;
+// its one strict-lock test now registers inside the store it resolves (#7505).
 
 pub(crate) fn record_cook_attempt_locked_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5412,17 +5395,8 @@ impl CookAttemptRegistration {
     }
 }
 
-/// Record the controller-owned boundary that a resumed Cook must advance.
-/// Provider terminal evidence and promotion reports remain separate so a later
-/// failed attempt cannot replace the source candidate's recovery checkpoint.
-pub fn record_cook_recovery_checkpoint(
-    run_id: &str,
-    phase: &str,
-    next_command: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_recovery_checkpoint_in_store(&lifecycle_store, run_id, phase, next_command)
-}
+// The ambient `record_cook_recovery_checkpoint()` shim that used to sit here is gone;
+// the fanout resume path was its only caller and now checkpoints inside the store it resolves (#7505).
 
 pub fn record_cook_recovery_checkpoint_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

@@ -7050,8 +7050,14 @@ fn strict_locked_retry_registration_uses_the_outer_transaction() {
             .initial_plan;
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("reserve retry run");
             homeboy_core::config::with_config_lock(|| {
-                agent_task_lifecycle::record_cook_attempt_locked(cook_id, 2, run_id)
-                    .expect("register retry through outer transaction");
+                agent_task_lifecycle::record_cook_attempt_locked_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .expect("lifecycle store"),
+                    cook_id,
+                    2,
+                    run_id,
+                )
+                .expect("register retry through outer transaction");
                 Ok(())
             })
             .expect("strict lock accepts one owner");

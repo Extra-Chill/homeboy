@@ -3020,7 +3020,10 @@ where
         // a later provider attempt failed and became the cook-index latest run.
         options.initial_run_id = attempt.run_id.clone();
         options.initial_plan = attempt.plan.clone();
-        agent_task_lifecycle::record_cook_recovery_checkpoint(
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        agent_task_lifecycle::record_cook_recovery_checkpoint_in_store(
+            &lifecycle_store,
             &attempt.run_id,
             "verification_pending",
             &format!("homeboy agent-task fanout resume {batch_id}"),

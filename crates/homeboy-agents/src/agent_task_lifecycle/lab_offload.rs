@@ -113,22 +113,6 @@ pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<Agen
     )
 }
 
-impl AgentTaskLifecycleStore {
-    pub fn record_lab_offload_planned(
-        &self,
-        input: LabOffloadProxyPlan<'_>,
-    ) -> Result<AgentTaskRunRecord> {
-        record_lab_offload_planned_in_store(self, input)
-    }
-
-    pub fn record_detached_lab_run(
-        &self,
-        input: DetachedLabRunRecord<'_>,
-    ) -> Result<AgentTaskRunRecord> {
-        record_detached_lab_run_in_store(self, input)
-    }
-}
-
 /// The store-rooted counterpart of [`record_lab_offload_planned`].
 pub(crate) fn record_lab_offload_planned_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
