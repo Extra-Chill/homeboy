@@ -126,12 +126,20 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
         && record.has_expired_pending_lab_handoff(now)
 }
 
-/// Check whether a controller-owned Lab handoff remains unaccepted after its
-/// durable deadline. Terminalization rechecks this predicate under the handoff
-/// lock before mutating the record.
-pub(crate) fn has_expired_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
+// The ambient `has_expired_unaccepted_lab_handoff()` shim that used to sit here is
+// gone; the reconciler was its only caller and now asks the store it is about to act on (#7505).
+
+/// [`has_expired_unaccepted_lab_handoff`] against an explicitly injected root.
+///
+/// The reconciler decides whether to expire a handoff from this answer and then
+/// expires it; both halves must read the same installation or it expires a
+/// handoff it never observed (#7505).
+pub(crate) fn has_expired_unaccepted_lab_handoff_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     Ok(has_expired_pending_runner_submission_intent(
-        &store::read_record(&sanitize_run_id(run_id))?,
+        &lifecycle_store.read_record(&sanitize_run_id(run_id))?,
         chrono::Utc::now(),
     ))
 }
@@ -443,16 +451,8 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
     record.has_accepted_lab_handoff()
 }
 
-/// Reconstruct an authenticated pre-provider transport failure that can safely
-/// admit an externally prepared immutable candidate. Expired handoffs retain
-/// their aggregate-free legacy shape; preacceptance failures retain their
-/// canonical failure aggregate and its synthetic runtime projection.
-pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
-    expire_unaccepted_lab_handoff_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-    )
-}
+// The ambient `expire_unaccepted_lab_handoff()` shim that used to sit here is
+// gone; the reconciler was its only caller and now expires inside the store it read the handoff from (#7505).
 
 /// The store-rooted counterpart of [`expire_unaccepted_lab_handoff`].
 ///

@@ -809,10 +809,8 @@ pub fn has_expired_detached_cook_admission(
     has_pending_detached_cook_handoff(record) && !detached_cook_admission_is_live(record, now)
 }
 
-pub fn expire_detached_cook_admission(cook_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    expire_detached_cook_admission_in_store(&lifecycle_store, cook_id)
-}
+// The ambient `expire_detached_cook_admission()` shim that used to sit here is
+// gone; the reconciler was its only caller and now expires inside the store it classified the run from (#7505).
 
 /// Expire a detached Cook's admission lease inside an explicitly rooted store.
 ///
@@ -3775,19 +3773,8 @@ pub fn status_with_options(
     status_in_store(&lifecycle_store, run_id, options, false)
 }
 
-/// Reconcile one literal durable record without following a Cook alias. Scoped
-/// repair uses this when a logical Cook id has both a handoff parent and an
-/// attempt, because each record is independently authoritative evidence.
-pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    Ok(status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        true,
-    )?
-    .record)
-}
+// The ambient `exact_status()` shim that used to sit here is
+// gone; the reconciler was its only caller and now reads exactly through the store it resolved once (#7505).
 
 /// The shared, store-rooted body of [`status`], [`status_with_options`], and
 /// [`exact_status`].

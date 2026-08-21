@@ -97,7 +97,7 @@ pub fn cancel_exact_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskR
 /// Reserved handoff reconciliation needs exact-record semantics, but must not
 /// cross into another root merely because two test or controller roots use the
 /// same run ID.
-pub(super) fn cancel_exact_run_in_store(
+pub(crate) fn cancel_exact_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: Option<&str>,
