@@ -319,13 +319,6 @@ pub fn broken_extension_links_in_root(config_root: &Path) -> Vec<BrokenExtension
     broken_extension_links_at(&paths::extensions_in_root(config_root))
 }
 
-pub fn broken_extension_links() -> Vec<BrokenExtensionLink> {
-    let Ok(dir) = paths::extensions() else {
-        return Vec::new();
-    };
-    broken_extension_links_at(&dir)
-}
-
 fn broken_extension_links_at(extensions_dir: &Path) -> Vec<BrokenExtensionLink> {
     let Ok(entries) = std::fs::read_dir(extensions_dir) else {
         return Vec::new();
@@ -758,7 +751,7 @@ mod tests {
             let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
-            let broken = broken_extension_links();
+            let broken = broken_extension_links_in_root(&paths::homeboy().expect("config root"));
             assert_eq!(broken.len(), 1);
             assert_eq!(broken[0].id, "sample-runtime");
             assert_eq!(broken[0].target, target);
