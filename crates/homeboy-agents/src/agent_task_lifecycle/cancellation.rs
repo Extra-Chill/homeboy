@@ -898,6 +898,16 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
+        if runner_id.as_deref().is_some_and(|runner_id| {
+            super::runner_continuation::with_runner_continuation(|provider| {
+                provider.runner_authority(runner_id) == RunnerAuthority::Removed
+            })
+        }) {
+            // A successful registry inventory proved the original daemon
+            // authority was removed. There is no remote job left to cancel, so
+            // reclaim only the durable controller projection.
+            return Ok(LiveCancellationOutcome::NotRunning);
+        }
         if let (Some(runner_id), Some(runner_job_id)) =
             (runner_id.as_deref(), runner_job_id.as_deref())
         {

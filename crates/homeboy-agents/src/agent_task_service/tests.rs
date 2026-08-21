@@ -1787,6 +1787,9 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
     with_isolated_home(|_| {
         let cook_id = "cook-upgrade-alias";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_disconnected(),
+        ));
         agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
@@ -1822,6 +1825,99 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         );
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(admission.blockers[0].action, "homeboy runner reconcile lab");
+    });
+}
+
+#[test]
+fn upgrade_admission_recovers_an_orphaned_removed_runner_record_locally() {
+    with_isolated_home(|_| {
+        let cook_id = "concurrent-first-cook-run";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::removed(),
+        ));
+        record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        let blocker = &admission.blockers[0];
+        assert_eq!(blocker.run_id, cook_id);
+        assert_eq!(blocker.owner, "durable_agent_tasks");
+        assert_eq!(
+            blocker.recovery_command,
+            "homeboy --placement local agent-task reconcile concurrent-first-cook-run --apply"
+        );
+
+        let applied = reconcile_run(cook_id, false).expect("orphaned record reconciles locally");
+        assert_eq!(applied.reconciled, 1);
+        assert_eq!(applied.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status(cook_id).expect("reconciled record").state,
+            AgentTaskRunState::Cancelled
+        );
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        assert!(
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now())
+                .allows_controller_replacement()
+        );
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
+    with_isolated_home(|_| {
+        let cook_id = "configured-offline-cook-run";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_disconnected(),
+        ));
+        record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            "homeboy runner reconcile fixture-lab"
+        );
+        let report = reconcile_run(cook_id, false).expect("configured runner remains fail-closed");
+        assert_eq!(report.reconciled, 0);
+        assert_eq!(report.runs[0].action, "no-op");
+        assert_eq!(
+            lifecycle_status(cook_id)
+                .expect("remote record retained")
+                .state,
+            AgentTaskRunState::Running
+        );
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
+    with_isolated_home(|_| {
+        let cook_id = "unknown-offline-cook-run";
+        record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            "homeboy runner reconcile fixture-lab"
+        );
+        let report = reconcile_run(cook_id, false).expect("unknown runner remains fail-closed");
+        assert_eq!(report.reconciled, 0);
+        assert_eq!(report.runs[0].action, "no-op");
+        assert_eq!(
+            lifecycle_status(cook_id)
+                .expect("remote record retained")
+                .state,
+            AgentTaskRunState::Running
+        );
     });
 }
 
@@ -2606,7 +2702,7 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
         );
 
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
-            AbsentSubmissionProvider,
+            RunnerAuthorityFixture::configured_disconnected(),
         ));
         let terminal = lifecycle_status("controller-handoff-unaccepted")
             .expect("terminal controller record after confirmed absence");
@@ -2616,9 +2712,55 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
     });
 }
 
-struct AbsentSubmissionProvider;
+fn record_stale_accepted_lab_handoff(run_id: &str, runner_id: &str) {
+    let command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+    ];
+    agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+    agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+        run_id,
+        runner_id,
+        runner_job_id: "accepted-daemon-job",
+        remote_workspace: "/runner/workspace/homeboy",
+        remote_command: &command,
+    })
+    .expect("accepted Lab handoff");
+    agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+        record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+        record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+        record
+            .metadata
+            .as_object_mut()
+            .expect("record metadata")
+            .remove("detached_cook_handoff");
+    })
+    .expect("age accepted handoff");
+}
 
-impl agent_task_lifecycle::RunnerContinuationProvider for AbsentSubmissionProvider {
+struct RunnerAuthorityFixture {
+    authority: agent_task_lifecycle::RunnerAuthority,
+    connected: bool,
+}
+
+impl RunnerAuthorityFixture {
+    fn configured_disconnected() -> Self {
+        Self {
+            authority: agent_task_lifecycle::RunnerAuthority::Configured,
+            connected: false,
+        }
+    }
+
+    fn removed() -> Self {
+        Self {
+            authority: agent_task_lifecycle::RunnerAuthority::Removed,
+            connected: false,
+        }
+    }
+}
+
+impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture {
     fn runner_job_log_snapshot(
         &self,
         _runner_id: &str,
@@ -2630,11 +2772,11 @@ impl agent_task_lifecycle::RunnerContinuationProvider for AbsentSubmissionProvid
     }
 
     fn is_runner_connected(&self, _runner_id: &str) -> bool {
-        true
+        self.connected
     }
 
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        true
+    fn runner_authority(&self, _runner_id: &str) -> agent_task_lifecycle::RunnerAuthority {
+        self.authority
     }
 
     fn run_continuation_exec(

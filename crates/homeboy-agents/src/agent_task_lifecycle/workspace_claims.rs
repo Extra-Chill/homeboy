@@ -166,7 +166,11 @@ pub(crate) fn resolve_terminal_workspace_authority_in_store(
             });
         };
         if !with_runner_continuation(|provider| provider.supports_terminal_workspace_authority())
-            || !with_runner_continuation(|provider| provider.runner_exists(&handoff.runner_id))
+            || !with_runner_continuation(|provider| {
+                provider
+                    .runner_authority(&handoff.runner_id)
+                    .is_configured()
+            })
             || !with_runner_continuation(|provider| {
                 provider.is_runner_connected(&handoff.runner_id)
             })
@@ -263,7 +267,7 @@ fn configured_terminal_authorities() -> std::result::Result<Vec<String>, String>
         for runner_id in &ids {
             if runner_id.trim().is_empty()
                 || runner_id == "controller"
-                || !provider.runner_exists(runner_id)
+                || !provider.runner_authority(runner_id).is_configured()
                 || !provider.is_runner_connected(runner_id)
             {
                 return Err(Error::validation_invalid_argument(
@@ -1527,8 +1531,8 @@ mod tests {
             true
         }
 
-        fn runner_exists(&self, _runner_id: &str) -> bool {
-            true
+        fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+            RunnerAuthority::Configured
         }
 
         fn run_continuation_exec(
