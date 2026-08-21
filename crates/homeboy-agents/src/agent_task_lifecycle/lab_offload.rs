@@ -317,28 +317,16 @@ pub(crate) fn record_local_lab_identity_fallback_in_store(
     Ok(record)
 }
 
-/// Record child setup executions against the controller proxy. A staging job
-/// can outlive the foreground caller, so its runner IDs belong to the durable
-/// phase record rather than only transient command output.
-pub fn record_lab_offload_phase_executions(
-    run_id: &str,
-    phase: &str,
-    execution_ids: impl IntoIterator<Item = String>,
-) -> Result<AgentTaskRunRecord> {
-    record_lab_offload_phase_executions_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        phase,
-        execution_ids,
-    )
-}
+// The ambient `record_lab_offload_phase_executions()` shim that used to sit here
+// is gone; the lab workspace-exec hydration was its only caller and now records into the store it
+// resolved for the whole operation (#7505).
 
 /// The store-rooted counterpart of [`record_lab_offload_phase_executions`].
 ///
 /// The terminal guard is read from the same record the execution ids are
 /// written back onto, so a staging job cannot be recorded against a run that
 /// another installation already finished (#7505).
-pub(crate) fn record_lab_offload_phase_executions_in_store(
+pub fn record_lab_offload_phase_executions_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     phase: &str,
@@ -368,26 +356,16 @@ pub(crate) fn record_lab_offload_phase_executions_in_store(
     Ok(record)
 }
 
-/// Bind the controller-owned staging job separately from the eventual runner job.
-pub fn record_lab_staging_controller_job(
-    run_id: &str,
-    runner_id: &str,
-    controller_job_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    record_lab_staging_controller_job_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        runner_id,
-        controller_job_id,
-    )
-}
+// The ambient `record_lab_staging_controller_job()` shim that used to sit here
+// is gone; the detached staging submitter was its only caller and now records into the store it
+// resolved for the whole operation (#7505).
 
 /// The store-rooted counterpart of [`record_lab_staging_controller_job`].
 ///
 /// The staging job id is the controller's only handle on a materialization it
 /// can outlive, so the terminal guard and the binding must name one record in
 /// one installation (#7505).
-pub(crate) fn record_lab_staging_controller_job_in_store(
+pub fn record_lab_staging_controller_job_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
@@ -479,27 +457,16 @@ pub(crate) fn record_lab_admission_reservation_in_store(
     Ok(record)
 }
 
-/// Preserve the controller-stage terminal context on the durable parent after
-/// its generic controller job has failed.
-pub fn record_lab_staging_controller_failure(
-    run_id: &str,
-    phase: &str,
-    controller_job_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    record_lab_staging_controller_failure_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        phase,
-        controller_job_id,
-    )
-}
+// The ambient `record_lab_staging_controller_failure()` shim that used to sit here
+// is gone; the staging checkpoint executor was its only caller and now records into the store it
+// resolved for the whole operation (#7505).
 
 /// The store-rooted counterpart of [`record_lab_staging_controller_failure`].
 ///
 /// This is terminal-stage evidence about one run, and the retry command it
 /// publishes is only actionable in the installation the record lives in, so the
 /// read and the write name the same store (#7505).
-pub(crate) fn record_lab_staging_controller_failure_in_store(
+pub fn record_lab_staging_controller_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     phase: &str,

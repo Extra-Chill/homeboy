@@ -477,6 +477,9 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
     plan: HomeboyPlan,
     agent_task_run_id: Option<&str>,
 ) -> Result<RecordedLabDependencyHydration> {
+    // The phase executions recorded here belong to the run this hydrates (#7505).
+    let lab_lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let hydration = hydrate_for_lab_workspace_exec_internal(
         skip_deps_hydration,
         runner_id,
@@ -494,7 +497,8 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
         LabWorkspaceHydrationRecord::NotApplied { .. } => Vec::new(),
     };
     if let Some(run_id) = agent_task_run_id {
-        agent_task_lifecycle::record_lab_offload_phase_executions(
+        agent_task_lifecycle::record_lab_offload_phase_executions_in_store(
+            &lab_lifecycle_store,
             run_id,
             "hydrating",
             execution_ids.clone(),
