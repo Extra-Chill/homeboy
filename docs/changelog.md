@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.32] - 2026-08-21
+
+### Changed
+- free the deploy lifecycle round-trip from with_isolated_home
+- index artifacts against the store's own root
+- root the deploy receipt store
+
 ## [0.350.31] - 2026-08-21
 
 ### Fixed

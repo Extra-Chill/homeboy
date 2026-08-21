@@ -184,8 +184,14 @@ pub fn retain_terminal_runs(
     // The store and artifact root are resolved once for the whole sweep. Both
     // used to be re-derived inside each per-run plan call, which meant one
     // connection open plus a full migration ladder per candidate run.
+    //
+    // The artifact root comes from the store rather than from process state,
+    // so the bytes this sweep removes are the ones the rows it read actually
+    // index. `artifacts::root()` is `paths::artifact_root()`, which is exactly
+    // what an ambiently-opened store answers with, so this is identical today
+    // and correct if the store is ever opened rooted (#7505).
     let mut store = ObservationStore::open_initialized()?;
-    let artifact_root = crate::artifacts::root()?;
+    let artifact_root = store.artifact_root()?;
     let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
     let mut artifact_cleanup = Vec::new();
     let mut lifecycle_directories = Vec::new();
@@ -332,7 +338,14 @@ fn terminal_run_lifecycle_directory(
         return Ok(None);
     }
 
-    let root = crate::paths::homeboy_data()?.join("agent-task-runs");
+    // The run came out of `store`; its lifecycle directory has to be located
+    // under the same home. Resolving the data root ambiently here meant
+    // terminal retention could read a run from one installation and then
+    // report -- and remove -- a directory belonging to another (#7505).
+    let data_root = store.data_root().ok_or_else(|| {
+        Error::internal_unexpected("observation store has no resolvable data root")
+    })?;
+    let root = data_root.join("agent-task-runs");
     let path = root.join(crate::paths::sanitize_path_segment(run_id));
     let exists = path.exists();
     let size_bytes = if exists { path_size_bytes(&path)? } else { 0 };
