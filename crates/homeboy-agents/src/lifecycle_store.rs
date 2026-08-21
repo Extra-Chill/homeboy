@@ -851,7 +851,7 @@ pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> 
     write_plan_in_store(&default_store()?, run_id, plan)
 }
 
-fn write_plan_in_store(
+pub(super) fn write_plan_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -960,7 +960,7 @@ pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> R
     write_aggregate_in_store(&default_store()?, run_id, aggregate)
 }
 
-fn write_aggregate_in_store(
+pub(super) fn write_aggregate_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
     aggregate: &AgentTaskAggregate,
@@ -999,7 +999,7 @@ pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate>
     read_aggregate_bounded_in_store(&default_store()?, run_id)
 }
 
-fn read_aggregate_bounded_in_store(
+pub(super) fn read_aggregate_bounded_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskAggregate> {
@@ -1155,7 +1155,7 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     default_store()?.read_record(run_id)
 }
 
-fn read_record_in_store(
+pub(super) fn read_record_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -1177,7 +1177,7 @@ pub(super) fn read_record_bounded(run_id: &str) -> Result<AgentTaskRunRecord> {
     default_store()?.read_record_bounded(run_id)
 }
 
-fn read_record_bounded_in_store(
+pub(super) fn read_record_bounded_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -1230,7 +1230,7 @@ pub(super) fn write_cook_index_attempt(
     )
 }
 
-fn write_cook_index_attempt_in_store(
+pub(super) fn write_cook_index_attempt_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt: u32,
@@ -1268,7 +1268,7 @@ pub(super) fn write_cook_index_attempt_locked(
     )
 }
 
-fn write_cook_index_attempt_locked_in_store(
+pub(super) fn write_cook_index_attempt_locked_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt: u32,
@@ -1330,7 +1330,7 @@ pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     read_cook_index_in_store(&default_store()?, cook_id)
 }
 
-fn read_cook_index_in_store(
+pub(super) fn read_cook_index_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<AgentTaskCookIndex> {
@@ -1357,7 +1357,7 @@ pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<b
 /// function is `default_store()?`, so the store's own method is used here: the
 /// claim marker is a bare filesystem create with no record read in front of it,
 /// and an ambient reach would land the marker in another home without failing.
-fn claim_cook_notification_in_store(
+pub(super) fn claim_cook_notification_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     marker: &Value,
@@ -1425,7 +1425,7 @@ pub(super) fn confirm_cook_notification(cook_id: &str, marker: &Value) -> Result
     confirm_cook_notification_in_store(&default_store()?, cook_id, marker)
 }
 
-fn confirm_cook_notification_in_store(
+pub(super) fn confirm_cook_notification_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     marker: &Value,
@@ -1450,7 +1450,7 @@ pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
 /// later observer this release exists to unblock — while deleting a claim
 /// nobody took. Neither half fails: `remove_file` treats `NotFound` as success,
 /// so the wrong-root release returns `Ok(())` having done nothing (#7505).
-fn release_cook_notification_claim_in_store(
+pub(super) fn release_cook_notification_claim_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
@@ -1472,7 +1472,7 @@ pub(super) fn write_cook_notification_outcome(cook_id: &str, outcome: &Value) ->
     write_cook_notification_outcome_in_store(&default_store()?, cook_id, outcome)
 }
 
-fn write_cook_notification_outcome_in_store(
+pub(super) fn write_cook_notification_outcome_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     outcome: &Value,
@@ -1515,7 +1515,7 @@ pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &
     validate_cook_index_attempt_in_store(&default_store()?, cook_id, attempt, run_id)
 }
 
-fn validate_cook_index_attempt_in_store(
+pub(super) fn validate_cook_index_attempt_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt: u32,
@@ -1588,7 +1588,7 @@ pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTask
 /// callers treat "no successor" as authority to create one, so a lineage scanned
 /// in the wrong home answers "none" for a source whose successor is durable here
 /// and double-books the reservation.
-fn read_retry_successors_in_store(
+pub(super) fn read_retry_successors_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     source_run_id: &str,
 ) -> Result<Vec<AgentTaskRunRecord>> {

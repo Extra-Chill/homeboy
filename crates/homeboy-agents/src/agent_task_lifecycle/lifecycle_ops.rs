@@ -359,7 +359,7 @@ pub fn submit_plan(
 /// cancellation recorded here unseen while the controller waits on the
 /// admission lock. The controller-runtime store itself stays process-global by
 /// design; only the lifecycle read is rooted here.
-pub(crate) fn submit_plan_in_store(
+pub fn submit_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -463,7 +463,7 @@ pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
 /// refused because an unrelated parent elsewhere was cancelled. An absent or
 /// unreadable record is still an open fence — a parent that was never persisted
 /// cannot have been cancelled.
-pub(crate) fn require_detached_cook_handoff_fence_open_in_store(
+pub fn require_detached_cook_handoff_fence_open_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
@@ -589,7 +589,7 @@ pub fn reserve_detached_cook_handoff_materialization(
 
 /// Reserve a detached Cook's first attempt within its explicitly selected
 /// lifecycle roots.
-pub(crate) fn reserve_detached_cook_handoff_materialization_in_store(
+pub fn reserve_detached_cook_handoff_materialization_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt_run_id: &str,
@@ -652,7 +652,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str)
     cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(&lifecycle_store, cook_id)
 }
 
-pub(crate) fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<bool> {
@@ -1979,7 +1979,7 @@ pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
 /// config lock. Resolving the Cook alias against one home's index and
 /// migrating another home's plan file would rewrite a plan this caller never
 /// read (#7505).
-pub(crate) fn load_plan_for_execution_in_store(
+pub fn load_plan_for_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskPlan> {
@@ -2001,7 +2001,7 @@ pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// `controller_runtime::validate` consults is deliberately left process-global:
 /// it is a content-addressed executable cache shared across homes, not durable
 /// lifecycle state, so it is not one of this store's roots.
-pub(crate) fn validate_controller_runtime_in_store(
+pub fn validate_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -2187,7 +2187,7 @@ pub fn recover_controller_runtime(
 /// `validate_controller_runtime_in_store` leaves it alone: it is a
 /// content-addressed executable cache shared across homes, not durable lifecycle
 /// state, so it is not one of this store's roots.
-pub(crate) fn recover_controller_runtime_in_store(
+pub fn recover_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     artifact: Option<&std::path::Path>,
@@ -2224,7 +2224,7 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     mark_running_in_store(&lifecycle_store, run_id)
 }
 
-pub(crate) fn mark_running_in_store(
+pub fn mark_running_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -2304,7 +2304,7 @@ pub fn reserve_provider_execution(
     reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
 }
 
-pub(crate) fn reserve_provider_execution_in_store(
+pub fn reserve_provider_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     task: &AgentTaskRequest,
@@ -2761,7 +2761,7 @@ pub fn record_provider_execution_terminal(
     record_provider_execution_terminal_in_store(&lifecycle_store, run_id, task_id, attempt, state)
 }
 
-pub(crate) fn record_provider_execution_terminal_in_store(
+pub fn record_provider_execution_terminal_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     task_id: &str,
@@ -2860,7 +2860,7 @@ pub fn record_provider_execution_cleanup_elapsed(
     )
 }
 
-pub(crate) fn record_provider_execution_cleanup_elapsed_in_store(
+pub fn record_provider_execution_cleanup_elapsed_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     task_id: &str,
@@ -3459,7 +3459,7 @@ pub fn rearm_quarantined_run(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// as "not quarantined" and refuse to re-arm, while a run quarantined only in
 /// the ambient home would report success and leave this store's queue still
 /// skipping the record on every claim.
-pub(crate) fn rearm_quarantined_run_in_store(
+pub fn rearm_quarantined_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -3499,7 +3499,7 @@ pub fn quarantine_queued_run_exact(run_id: &str, reason: &str) -> Result<AgentTa
 /// store must see it. Written ambiently, the operator would be told the run is
 /// quarantined while this store's queue kept handing it out, and
 /// `rearm_quarantined_run_in_store` would then find nothing to clear.
-pub(crate) fn quarantine_queued_run_exact_in_store(
+pub fn quarantine_queued_run_exact_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: &str,
@@ -3579,7 +3579,7 @@ pub fn record_run_aggregate(
     record_run_aggregate_in_store(&lifecycle_store, run_id, plan, aggregate)
 }
 
-pub(crate) fn record_run_aggregate_in_store(
+pub fn record_run_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -5292,7 +5292,7 @@ pub fn record_cook_attempt(
     record_cook_attempt_in_store(&lifecycle_store, cook_id, attempt, run_id)
 }
 
-pub(crate) fn record_cook_attempt_in_store(
+pub fn record_cook_attempt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     attempt: u32,
@@ -6080,7 +6080,7 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
     record_promotion_in_store(&lifecycle_store, run_id, promotion)
 }
 
-pub(crate) fn record_promotion_in_store(
+pub fn record_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     promotion: Value,
@@ -6399,7 +6399,7 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
     record_cook_finalization_in_store(&lifecycle_store, run_id, finalization)
 }
 
-pub(crate) fn record_cook_finalization_in_store(
+pub fn record_cook_finalization_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     finalization: Value,
@@ -6519,7 +6519,7 @@ pub fn record_cook_moving_base_recovery(
     record_cook_moving_base_recovery_in_store(&lifecycle_store, run_id, recovery)
 }
 
-pub(crate) fn record_cook_moving_base_recovery_in_store(
+pub fn record_cook_moving_base_recovery_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     recovery: Value,

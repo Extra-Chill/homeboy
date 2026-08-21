@@ -56,7 +56,7 @@ All behavior is configurable via JSON:
 
 ### Configuration Management
 
-**Location:** `crates/homeboy-core/src/component/config.rs`
+**Location:** `crates/homeboy-core/src/config.rs`
 
 Centralized configuration system that:
 - Loads JSON configs from config directory
@@ -79,7 +79,7 @@ Config entities:
 **Location:** `crates/homeboy-engine-primitives/src/local_files.rs`
 
 File-based storage adapter used by configuration and other local persistence
-callers. `crates/homeboy-core/src/component/config.rs` owns config entity semantics and delegates actual
+callers. `crates/homeboy-core/src/config.rs` owns config entity semantics and delegates actual
 file operations through the `local_files` adapter:
 - Reads/writes JSON files in config directory
 - Handles atomic operations for safety
@@ -164,7 +164,7 @@ Git wrapper for:
 
 ### Version Management
 
-**Location:** `crates/homeboy-extension-contract/src/version.rs`
+**Location:** `crates/contracts/homeboy-extension-contract/src/version.rs`
 
 Semantic versioning:
 - Pattern-based version detection in files
@@ -183,7 +183,7 @@ Changelog operations:
 
 ### Extension System
 
-**Location:** `crates/homeboy-core/src/extension/mod.rs`
+**Location:** `crates/homeboy-extension/src/lib.rs`
 
 Extension management:
 - Install from git or local path

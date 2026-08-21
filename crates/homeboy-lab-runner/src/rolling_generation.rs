@@ -215,16 +215,6 @@ impl<E> RollingGenerations<E> {
             .or_else(|| artifact_id.and_then(|id| self.artifact_owners.get(id).map(String::as_str)))
     }
 
-    /// A drained daemon remains routable while durable run or artifact evidence
-    /// still identifies it as the producing generation.
-    pub fn has_result_owners(&self, generation: &str) -> bool {
-        self.run_owners.values().any(|owner| owner == generation)
-            || self
-                .artifact_owners
-                .values()
-                .any(|owner| owner == generation)
-    }
-
     /// Returns true if the completion retired a drained generation.
     pub fn complete(&mut self, generation: &str) -> bool {
         let Some(entry) = self.generations.get_mut(generation) else {

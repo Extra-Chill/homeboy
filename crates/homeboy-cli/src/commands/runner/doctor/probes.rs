@@ -1512,7 +1512,7 @@ pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Ve
     )
 }
 
-pub fn connected_daemon_exec_checks_with_timeout(
+pub(crate) fn connected_daemon_exec_checks_with_timeout(
     runner_id: &str,
     workspace_root: &str,
     timeout: std::time::Duration,

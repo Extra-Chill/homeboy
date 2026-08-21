@@ -95,7 +95,7 @@ pub fn claim_cook_operation(
     claim_cook_operation_in_store(&lifecycle_store, run_id, operation_key, lease)
 }
 
-pub(crate) fn claim_cook_operation_in_store(
+pub fn claim_cook_operation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,
@@ -181,7 +181,7 @@ pub fn complete_cook_operation(run_id: &str, operation_key: &str, result: Value)
     complete_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
 }
 
-pub(crate) fn complete_cook_operation_in_store(
+pub fn complete_cook_operation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,
@@ -270,7 +270,7 @@ pub fn recover_completed_cook_operation(
 /// vouches for was recovered there. Restoring the completion marker in a
 /// different home would leave the real claim un-completed while inventing a
 /// completed one beside a record nobody is retrying (#7505).
-pub(crate) fn recover_completed_cook_operation_in_store(
+pub fn recover_completed_cook_operation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,
@@ -316,7 +316,7 @@ pub fn fail_cook_operation(run_id: &str, operation_key: &str, result: Value) -> 
     fail_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
 }
 
-pub(crate) fn fail_cook_operation_in_store(
+pub fn fail_cook_operation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,
@@ -362,7 +362,7 @@ pub fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<Opera
     operation_claim_in_store(&lifecycle_store, run_id, operation_key)
 }
 
-pub(crate) fn operation_claim_in_store(
+pub fn operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,

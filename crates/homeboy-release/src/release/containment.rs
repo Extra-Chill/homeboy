@@ -66,7 +66,7 @@ pub struct ReleaseTag {
 /// Mirrors the tag naming contract in [`crate::release::component_tag_name`]:
 /// a scoped component releases as `<component>-vX.Y.Z`, a root component as
 /// `vX.Y.Z`.
-pub fn release_version_from_tag(tag: &str, tag_prefix: Option<&str>) -> Option<Version> {
+pub(crate) fn release_version_from_tag(tag: &str, tag_prefix: Option<&str>) -> Option<Version> {
     let tag = tag.trim();
     let tag = match tag_prefix {
         Some(prefix) => tag.strip_prefix(&format!("{prefix}-"))?,
@@ -96,7 +96,7 @@ fn is_exact_semver_core(version: &str) -> bool {
 ///
 /// Non-release tags are dropped. Sorting is by parsed semantic version, never
 /// lexicographic: `v0.9.0` must sort before `v0.10.0`.
-pub fn parse_release_tags(tags: &[String], tag_prefix: Option<&str>) -> Vec<ReleaseTag> {
+pub(crate) fn parse_release_tags(tags: &[String], tag_prefix: Option<&str>) -> Vec<ReleaseTag> {
     let mut parsed = tags
         .iter()
         .filter_map(|tag| {
@@ -116,7 +116,7 @@ pub fn parse_release_tags(tags: &[String], tag_prefix: Option<&str>) -> Vec<Rele
 /// `containing` is the output of `git tag --contains <sha>`. Because tags are
 /// not ordered by ancestry, the answer is the **minimum by version** over that
 /// set — see the module docs.
-pub fn earliest_containing_release(
+pub(crate) fn earliest_containing_release(
     containing: &[String],
     tag_prefix: Option<&str>,
 ) -> Option<ReleaseTag> {
@@ -126,7 +126,7 @@ pub fn earliest_containing_release(
 }
 
 /// The newest release in a namespace, by version.
-pub fn latest_release(tags: &[String], tag_prefix: Option<&str>) -> Option<ReleaseTag> {
+pub(crate) fn latest_release(tags: &[String], tag_prefix: Option<&str>) -> Option<ReleaseTag> {
     parse_release_tags(tags, tag_prefix).pop()
 }
 
@@ -148,7 +148,7 @@ pub enum ContainmentStatus {
 
 impl ContainmentStatus {
     /// True when some release provably contains the commit.
-    pub fn is_released(self) -> bool {
+    pub(crate) fn is_released(self) -> bool {
         !matches!(self, Self::NotYetReleased)
     }
 
@@ -322,7 +322,7 @@ pub struct ReleaseGapAssessment {
 }
 
 /// Pure gap assessment. `commits_behind` is filled in by the git layer.
-pub fn assess_gap(
+pub(crate) fn assess_gap(
     known_tags: &[String],
     tag_prefix: Option<&str>,
     installed_version: Option<&str>,
@@ -719,7 +719,7 @@ pub struct IssueResolution {
 /// **The only network path in this module.** Asking by issue number is the
 /// ergonomic half of this command — without it the operator has to find the sha
 /// first, which is most of the manual work the query replaces.
-pub fn resolve_issue_commit(component: &Component, issue: u64) -> Result<IssueResolution> {
+pub(crate) fn resolve_issue_commit(component: &Component, issue: u64) -> Result<IssueResolution> {
     let remote = git::release_download::detect_remote_url(Path::new(&component.local_path))
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -771,7 +771,7 @@ pub fn resolve_issue_commit(component: &Component, issue: u64) -> Result<IssueRe
 ///
 /// Split out from the `gh` invocation so the shape — including the
 /// unmerged-PR and no-PR cases — is testable without the network.
-pub fn parse_issue_resolution(raw: &str, issue: u64) -> Result<IssueResolution> {
+pub(crate) fn parse_issue_resolution(raw: &str, issue: u64) -> Result<IssueResolution> {
     #[derive(Deserialize)]
     struct Envelope {
         data: Option<Data>,

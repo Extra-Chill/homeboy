@@ -340,7 +340,7 @@ impl CommandRun {
         self
     }
 
-    pub fn with_identity(mut self, identity: &CommandIdentity) -> Self {
+    pub(crate) fn with_identity(mut self, identity: &CommandIdentity) -> Self {
         self.command = identity.command.clone();
         self.operation = identity.operation.clone();
         self
@@ -421,7 +421,7 @@ impl<'a> OutputService<'a> {
         );
     }
 
-    pub fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
+    pub(crate) fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
         if let Some(raw_stdout) = run.raw_stdout {
             match raw_stdout {

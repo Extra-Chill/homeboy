@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.351.0"
+version = "0.351.2"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -92,6 +92,10 @@ homeboy-cli = { version = "0.1.0", path = "crates/homeboy-cli", features = ["tes
 # executor double is compiled only under `homeboy-agents/test-support`, and this
 # dev-only edge is what activates it for the test build of that binary (#11118).
 homeboy-agents = { version = "0.1.0", path = "crates/homeboy-agents", features = ["test-support"] }
+# `audit_baseline_ratchet_test` calls the production baseline path validator
+# rather than restating its rule, so the test cannot drift from the gate it
+# guards.
+homeboy-code-audit = { version = "0.1.0", path = "crates/homeboy-code-audit" }
 
 [features]
 default = []

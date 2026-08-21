@@ -37,6 +37,7 @@
 //! `docs/audit/baseline-ratchet.md`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -195,4 +196,48 @@ Note: rows are NOT required to be sorted, and this suite does not check order.
 Many of the current {total} rows are out of sorted position.
 "#
     );
+}
+
+/// A baseline row naming a path that no longer exists is not merely stale — it
+/// makes `homeboy review audit` fail closed on every full-tree run.
+///
+/// `homeboy_code_audit::baseline::validate_fingerprint_paths` enforces this, but
+/// only when `requires_full_baseline_path_validation` says so, which excludes
+/// `--changed-since`. PR CI runs changed-scope, so PR CI tolerates a stale row
+/// forever. The only full-tree consumer is the weekly advisory Audit Debt
+/// sweep — a workflow whose failure nobody is paged for.
+///
+/// So a tree move that leaves a row behind lands green, and the full-tree debt
+/// discovery it silently broke stays broken until someone runs the audit by
+/// hand. This test moves that detection into PR CI, where it costs microseconds.
+///
+/// It calls the production validator instead of restating the rule, so the
+/// definition of "stale" cannot drift between the gate and its guard.
+#[test]
+fn audit_baseline_rows_reference_live_paths() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let baseline = homeboy_code_audit::baseline::load_baseline(repo_root)
+        .expect("homeboy.json carries an audit baseline");
+
+    if let Err(error) =
+        homeboy_code_audit::baseline::validate_fingerprint_paths(repo_root, &baseline)
+    {
+        panic!(
+            r#"
+audit baseline references paths that no longer exist.
+
+{error}
+
+A full-tree `homeboy review audit` FAILS on this — it does not merely warn.
+`--changed-since` runs skip the check, so PR CI and rolling releases stay green
+while the weekly Audit Debt sweep is dead.
+
+Fix: repoint the row at the file's new path if the finding still applies, or
+prune it with `homeboy audit --prune-baseline <fingerprint>` if it does not.
+Do it in the same PR as the move.
+
+See docs/audit/baseline-ratchet.md
+"#
+        );
+    }
 }

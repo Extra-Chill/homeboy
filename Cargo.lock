@@ -701,13 +701,14 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.351.0"
+version = "0.351.2"
 dependencies = [
  "base64",
  "chrono",
  "clap",
  "homeboy-agents",
  "homeboy-cli",
+ "homeboy-code-audit",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",

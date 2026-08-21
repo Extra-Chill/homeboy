@@ -33,7 +33,7 @@ const STORE_SCHEMA: &str = "homeboy/remote-runner-staging-store/v1";
 /// Read the verified source package named by a staging receipt. Execution code
 /// uses this before extracting its own workspace; it never receives controller
 /// paths or the transfer's inline content.
-pub fn read_staged_source_artifact(
+pub(crate) fn read_staged_source_artifact(
     store_path: impl AsRef<Path>,
     artifact: &RunnerSourceArtifact,
 ) -> Result<Vec<u8>> {
@@ -386,7 +386,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         self.stage_durable_with_job_id(envelope, format!("staging-{}", envelope.handoff.run_id))
     }
 
-    pub fn stage_durable_with_job_id(
+    pub(crate) fn stage_durable_with_job_id(
         &mut self,
         envelope: &RemoteRunnerStagingEnvelope,
         runner_job_id: impl Into<String>,
@@ -397,7 +397,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
 
     /// Lock-held admission state machine: intent -> source_ready -> job_submitted
     /// -> receipt. `submit` must use the handoff idempotency key.
-    pub fn stage_durable_with_submit(
+    pub(crate) fn stage_durable_with_submit(
         &mut self,
         envelope: &RemoteRunnerStagingEnvelope,
         submit: impl FnOnce(&RemoteRunnerStagingEnvelope) -> Result<String>,
@@ -567,12 +567,6 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                     Some(format!("sync {}", parent.display())),
                 )
             })
-    }
-
-    /// Return verified, runner-owned package bytes for the later execution
-    /// layer. The receipt descriptor remains the only authority it needs.
-    pub fn read_source_artifact(&self, artifact: &RunnerSourceArtifact) -> Result<Vec<u8>> {
-        read_staged_source_artifact(&self.path, artifact)
     }
 
     fn source_artifact_path(&self, artifact: &RunnerSourceArtifact) -> Result<PathBuf> {

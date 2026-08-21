@@ -1747,7 +1747,7 @@ impl DurableLabWorkspaceStage {
 }
 
 impl LabStagingRecipeRef {
-    pub fn from_authority(
+    pub(crate) fn from_authority(
         attachment_digest: String,
         plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
     ) -> Result<Self> {

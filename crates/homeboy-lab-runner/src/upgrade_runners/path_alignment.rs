@@ -487,7 +487,7 @@ pub fn is_homeboy_source_build_path(homeboy_path: &str) -> bool {
     })
 }
 
-pub fn is_versioned_homeboy_path(homeboy_path: &str) -> bool {
+pub(crate) fn is_versioned_homeboy_path(homeboy_path: &str) -> bool {
     let Some(file_name) = Path::new(homeboy_path)
         .file_name()
         .and_then(|name| name.to_str())

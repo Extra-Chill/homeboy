@@ -48,7 +48,7 @@ pub fn read_responsiveness_summary(
     summarize_responsiveness_pings(&content, missed_ping_window_ms(), observed_elapsed_ms).map(Some)
 }
 
-pub fn summarize_responsiveness_pings(
+pub(crate) fn summarize_responsiveness_pings(
     raw: &str,
     missed_ping_window_ms: u64,
     observed_elapsed_ms: Option<u128>,

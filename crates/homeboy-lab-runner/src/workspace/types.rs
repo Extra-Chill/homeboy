@@ -169,7 +169,7 @@ pub struct RunnerWorkspaceOutputPaths {
 }
 
 impl RunnerWorkspaceOutputPaths {
-    pub fn for_remote_path(workspace_root: &str, remote_path: &str) -> Self {
+    pub(crate) fn for_remote_path(workspace_root: &str, remote_path: &str) -> Self {
         let workspace_root = workspace_root.trim_end_matches('/').to_string();
         Self {
             lab_workspaces_root: format!("{workspace_root}/_lab_workspaces"),

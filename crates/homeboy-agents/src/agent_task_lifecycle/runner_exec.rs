@@ -27,7 +27,7 @@ pub fn record_runner_job_identity(
 ///
 /// The read and the write are one operation — the record read back is the one
 /// returned to the caller — so they must name the same installation (#7505).
-pub(crate) fn record_runner_job_identity_in_store(
+pub fn record_runner_job_identity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
@@ -71,7 +71,7 @@ pub fn accepted_lab_runner_job_identity(
 /// verified against another's record would report "not accepted" for a run that
 /// is already bound — the mirror image of the double-acceptance the write side
 /// refuses — so both halves have to name the same store (#7505).
-pub(crate) fn accepted_lab_runner_job_identity_in_store(
+pub fn accepted_lab_runner_job_identity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
@@ -700,7 +700,7 @@ pub fn project_terminal_runner_exec_result(
 /// artifact-promotion checkpoint. Rooting it through the maintenance-deferring
 /// lifecycle opener would have changed behaviour rather than just its home
 /// (#7505).
-pub(crate) fn project_terminal_runner_exec_result_in_store(
+pub fn project_terminal_runner_exec_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
@@ -1034,13 +1034,31 @@ pub fn record_lab_offload_submission_intent(
     remote_command: &[String],
     secret_env_names: &[String],
 ) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_submission_intent_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        remote_workspace,
+        remote_command,
+        secret_env_names,
+    )
+}
+
+/// [`record_lab_offload_submission_intent`] against an explicitly injected root.
+///
+/// The body already took one store for the advisory lock and every record touch
+/// under it; this lets a caller that owns roots supply that store instead of
+/// having a second one resolved behind it (#7505).
+pub fn record_lab_offload_submission_intent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+    secret_env_names: &[String],
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    // One store for the lock and for every record touch below it. This is an
-    // ambient entry point, so it resolves a root; what it must not do is
-    // resolve one root for the lock and let each `store::` shim resolve its own
-    // (#7505).
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let mut record = lifecycle_store.read_record(&run_id)?;
     let submission_key = format!("agent-task:v1:{runner_id}:{run_id}");
     if let Some(handoff) = record.lab_handoff.as_mut() {

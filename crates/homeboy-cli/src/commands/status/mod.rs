@@ -3,7 +3,6 @@
 //! This module is split into focused submodules:
 //! - [`types`] — CLI args and serialized output shapes.
 //! - [`git_cache`] — per-component git caching and probes.
-//! - [`context_paths`] — registered-context detection for the default view.
 //! - [`dashboard_table`] — human-readable dashboard rendering.
 //!
 //! The orchestration entry points (`run`, dashboard/summary builders) live
@@ -30,7 +29,6 @@ use std::time::Duration;
 
 use super::CmdResult;
 
-mod context_paths;
 mod dashboard_table;
 mod git_cache;
 mod types;

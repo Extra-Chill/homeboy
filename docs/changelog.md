@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.351.2] - 2026-08-21
+
+### Changed
+- root exec_lab_context
+
+## [0.351.1] - 2026-08-21
+
+### Changed
+- narrow 51 exports the audit found unreferenced across files
+- delete six exports the newly-unblocked audit found dead
+- give every rooted sibling its ambient twin's visibility
+- root three staging and hydration callers
+- collapse the last two test-only wrapper pairs
+
+### Fixed
+- prune the stale baseline row blocking every audit run
+- repoint stale baseline row and guard it in PR CI
+- preserve recovery placement
+- report Cook publication outcome
+- quarantine leaked fixture records
+- prioritize blocking daemon evidence
+- preserve unknown runner ownership
+- recover orphaned runner generations
+
 ## [0.351.0] - 2026-08-21
 
 ### Added

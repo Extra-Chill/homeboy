@@ -27,7 +27,7 @@ mod types {
     }
 
     impl CiFailureTriageRequest {
-        pub fn effective_max_runs(&self) -> usize {
+        pub(crate) fn effective_max_runs(&self) -> usize {
             if self.max_runs == 0 {
                 DEFAULT_MAX_RUNS
             } else {
@@ -35,7 +35,7 @@ mod types {
             }
         }
 
-        pub fn effective_max_snippets_per_job(&self) -> usize {
+        pub(crate) fn effective_max_snippets_per_job(&self) -> usize {
             if self.max_snippets_per_job == 0 {
                 DEFAULT_MAX_SNIPPETS_PER_JOB
             } else {
@@ -43,7 +43,7 @@ mod types {
             }
         }
 
-        pub fn effective_context_lines(&self) -> usize {
+        pub(crate) fn effective_context_lines(&self) -> usize {
             if self.context_lines == 0 {
                 DEFAULT_CONTEXT_LINES
             } else {
@@ -258,7 +258,7 @@ mod engine {
         })
     }
 
-    pub fn parse_pr_reference(raw: &str) -> Result<ParsedCiPrReference> {
+    pub(crate) fn parse_pr_reference(raw: &str) -> Result<ParsedCiPrReference> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -390,7 +390,7 @@ mod engine {
         names
     }
 
-    pub fn extract_relevant_snippets(
+    pub(crate) fn extract_relevant_snippets(
         log: &str,
         failed_steps: &[String],
         max_snippets: usize,
@@ -466,7 +466,7 @@ mod engine {
         stripped.chars().take(MAX_SNIPPET_LINE_CHARS).collect()
     }
 
-    pub fn classify_failure(evidence: &str) -> CiFailureCategory {
+    pub(crate) fn classify_failure(evidence: &str) -> CiFailureCategory {
         let lower = evidence.to_ascii_lowercase();
         if lower.contains("baseline")
             || lower.contains("changed-since")
@@ -511,7 +511,7 @@ mod engine {
         CiFailureCategory::Unknown
     }
 
-    pub fn classify_origin(evidence: &str) -> CiFailureOrigin {
+    pub(crate) fn classify_origin(evidence: &str) -> CiFailureOrigin {
         let lower = evidence.to_ascii_lowercase();
         if lower.contains("baseline")
             || lower.contains("base branch")

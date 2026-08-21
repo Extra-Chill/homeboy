@@ -200,7 +200,7 @@ fn validate_fanout_run_batch(fanout_id: &str, children: &[FanoutRunBatchChild]) 
     Ok(())
 }
 
-fn persist_fanout_run_batch_in_store(
+pub fn persist_fanout_run_batch_in_store(
     store: &AgentTaskBatchStore,
     fanout_id: &str,
     plan_id: &str,
@@ -257,7 +257,7 @@ pub fn claim_fanout_run_batch(batch_id: &str) -> Result<Option<String>> {
     AgentTaskBatchStore::from_current_data_root()?.claim_fanout_run_batch(batch_id)
 }
 
-fn claim_fanout_run_batch_in_store(
+pub fn claim_fanout_run_batch_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
 ) -> Result<Option<String>> {
@@ -301,7 +301,7 @@ pub fn heartbeat_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> 
     AgentTaskBatchStore::from_current_data_root()?.heartbeat_fanout_run_batch(batch_id, claim_id)
 }
 
-fn heartbeat_fanout_run_batch_in_store(
+pub fn heartbeat_fanout_run_batch_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     claim_id: &str,
@@ -346,7 +346,7 @@ pub fn record_fanout_run_batch_failure(
         .record_fanout_run_batch_failure(batch_id, claim_id, stage, failure)
 }
 
-fn record_fanout_run_batch_failure_in_store(
+pub fn record_fanout_run_batch_failure_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     claim_id: &str,
@@ -394,7 +394,7 @@ pub fn record_fanout_run_batch_failed_admissions<'a>(
         .record_fanout_run_batch_failed_admissions(batch_id, failed_run_ids)
 }
 
-fn record_fanout_run_batch_failed_admissions_in_store<'a>(
+pub fn record_fanout_run_batch_failed_admissions_in_store<'a>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     failed_run_ids: impl IntoIterator<Item = &'a str>,
@@ -460,7 +460,7 @@ pub fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
 /// id could report a started child and hold a genuinely stranded coordinator in
 /// `admitting` forever, or report no child and terminalize a wave that is
 /// running somewhere else (#7505, #12619).
-fn expire_stalled_fanout_admission_in_store(
+pub fn expire_stalled_fanout_admission_in_store(
     store: &AgentTaskBatchStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     batch_id: &str,
@@ -715,7 +715,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses(
         .fanout_dependency_graph_with_finalization_statuses(batch_id, statuses)
 }
 
-fn fanout_dependency_graph_with_finalization_statuses_in_store(
+pub fn fanout_dependency_graph_with_finalization_statuses_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     statuses: &BTreeMap<String, String>,
@@ -872,7 +872,7 @@ pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<Strin
     AgentTaskBatchStore::from_current_data_root()?.fanout_ready_child_run_ids(batch_id)
 }
 
-fn fanout_ready_child_run_ids_in_store(
+pub fn fanout_ready_child_run_ids_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
 ) -> Result<Option<HashSet<String>>> {
@@ -904,7 +904,7 @@ pub fn owned_child_run_ids(batch_id: &str) -> Result<HashSet<String>> {
     AgentTaskBatchStore::from_current_data_root()?.owned_child_run_ids(batch_id)
 }
 
-fn owned_child_run_ids_in_store(
+pub fn owned_child_run_ids_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
 ) -> Result<HashSet<String>> {
@@ -1501,7 +1501,7 @@ pub fn read_batch_record(batch_id: &str) -> Result<AgentTaskBatchRecord> {
     AgentTaskBatchStore::from_current_data_root()?.read_batch_record(batch_id)
 }
 
-fn read_batch_record_in_store(
+pub fn read_batch_record_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
 ) -> Result<AgentTaskBatchRecord> {
@@ -1524,7 +1524,7 @@ pub fn record_child_finalization(
     )
 }
 
-fn record_child_finalization_in_store(
+pub fn record_child_finalization_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     child_run_id: &str,
@@ -1573,7 +1573,7 @@ pub fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<(
     AgentTaskBatchStore::from_current_data_root()?.record_coordinator_cancellation(batch_id, reason)
 }
 
-fn record_coordinator_cancellation_in_store(
+pub fn record_coordinator_cancellation_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     reason: &str,
@@ -1611,7 +1611,7 @@ pub fn coordinator_is_cancelled(batch_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn coordinator_is_cancelled_in_store(store: &AgentTaskBatchStore, batch_id: &str) -> bool {
+pub fn coordinator_is_cancelled_in_store(store: &AgentTaskBatchStore, batch_id: &str) -> bool {
     store
         .read_batch(batch_id)
         .ok()
@@ -1625,7 +1625,7 @@ pub fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Val
     AgentTaskBatchStore::from_current_data_root()?.dependency_action_receipt(batch_id, key)
 }
 
-fn dependency_action_receipt_in_store(
+pub fn dependency_action_receipt_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     key: &str,
@@ -1641,7 +1641,7 @@ pub fn record_dependency_action_receipt(batch_id: &str, key: &str, receipt: Valu
         .record_dependency_action_receipt(batch_id, key, receipt)
 }
 
-fn record_dependency_action_receipt_in_store(
+pub fn record_dependency_action_receipt_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     key: &str,

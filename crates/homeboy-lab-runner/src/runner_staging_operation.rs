@@ -649,7 +649,7 @@ pub struct SourcePackageSymlinkVerdict {
 /// Applies the producing platform's separator contract before the v2 lexical
 /// containment policy. Unix keeps backslashes literal; Windows serializes
 /// separators as `/`. V1 packages do not admit symlinks.
-pub fn source_package_symlink_verdict(
+pub(crate) fn source_package_symlink_verdict(
     link_path: &str,
     target: &str,
 ) -> Result<SourcePackageSymlinkVerdict> {
