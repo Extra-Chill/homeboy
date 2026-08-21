@@ -318,9 +318,9 @@ mod audit_coverage_tests {
 
     /// The config root of the isolated home each test below installs.
     ///
-    /// The ambient `cleanup_invocation_children` / `cleanup_stale_child_records`
-    /// wrappers existed only to serve these two assertions. The test is its own
-    /// boundary, so it resolves here and calls the rooted form directly (#7505).
+    /// These tests are their own boundary: the child-record cleanup entry points
+    /// take a config root, so the test resolves once here and calls them
+    /// directly rather than through the process environment (#7505).
     fn test_config_root() -> std::path::PathBuf {
         paths::homeboy().expect("config root")
     }

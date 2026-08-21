@@ -1333,7 +1333,8 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
 /// Discovery in metadata-only mode: no `ready_check` is spawned.
 ///
 /// The extension-provided command surface comes from each installed manifest's
-/// `cli` block, and broken-link health comes from `broken_extension_links()`.
+/// `cli` block, and broken-link health comes from
+/// `broken_extension_links_in_root()`.
 /// Neither reads readiness, so the rendered `--help` surface and the augmented
 /// parser are byte-identical either way (#10616).
 fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
