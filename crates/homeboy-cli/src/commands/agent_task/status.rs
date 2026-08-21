@@ -1817,8 +1817,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
-    let mut nested_reasons = persisted_cook_failure_diagnostic(&record)
+    // The current promotion lifecycle denial is the active blocker. Older
+    // controller failures remain in the diagnostic chain as causal history.
+    let current_lifecycle_diagnostic = current_lifecycle_diagnostic(&record);
+    let mut nested_reasons = current_lifecycle_diagnostic
+        .clone()
         .into_iter()
+        .chain(persisted_cook_failure_diagnostic(&record))
         .collect::<Vec<_>>();
     let runner_cancellation = runner_cancellation_diagnostic(&record);
     let causal_phase = runner_cancellation
@@ -1889,8 +1894,12 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
     let retry = retry_replay_action(&record);
-    let next_commands =
-        diagnose_next_commands(&record, retry.action.as_ref(), retry.continuation.as_ref());
+    let next_commands = diagnose_next_commands(
+        &record,
+        retry.action.as_ref(),
+        retry.continuation.as_ref(),
+        current_lifecycle_diagnostic.is_some(),
+    );
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -1937,6 +1946,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
         runner_cancellation.is_some(),
+        current_lifecycle_diagnostic.is_some(),
     );
     preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
@@ -2045,6 +2055,7 @@ fn attach_diagnose_actionable(
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
     runner_cancellation: bool,
+    current_lifecycle_denial: bool,
 ) {
     let run_id = record.run_id.as_str();
     let candidate_payload = candidate_result_payload(
@@ -2055,7 +2066,12 @@ fn attach_diagnose_actionable(
         .state()
         .is_available();
     let failures = aggregate.map(diagnosed_failures).unwrap_or_default();
-    let (next_actions, basis) = if let Some(continuation) = continuation_action {
+    let (next_actions, basis) = if current_lifecycle_denial {
+        (
+            current_lifecycle_next_actions(record),
+            DIAGNOSE_ACTION_BASIS_DIAGNOSIS,
+        )
+    } else if let Some(continuation) = continuation_action {
         (vec![continuation.clone()], DIAGNOSE_ACTION_BASIS_CANDIDATE)
     } else if candidate_recoverable {
         (
@@ -2403,6 +2419,51 @@ fn generic_diagnose_next_actions(
             .with_kind(CommandNextActionKind::Show),
     ];
     actions.extend(retry_action.cloned());
+    actions
+}
+
+/// Read-only handoff commands remain legal for every persisted promotion, gate,
+/// or finalization denial. A retry of an earlier provider attempt is not current
+/// recovery guidance after a later lifecycle denial.
+fn current_lifecycle_next_actions(record: &AgentTaskRunRecord) -> Vec<CommandNextAction> {
+    let run_id = &record.run_id;
+    let run = quote_arg(run_id);
+    let mut actions = vec![
+        CommandNextAction::new(
+            "show the current promotion, gate, or finalization denial",
+            format!("homeboy agent-task status {run} --full"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            "review the promoted candidate and its gate proof",
+            format!("homeboy agent-task review {run}"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+    ];
+    let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
+        return actions;
+    };
+    let Some(status) = current_lifecycle_status(record) else {
+        return actions;
+    };
+    let Some(recovery) =
+        agent_task_service_direct::cook_failure_context(cook_id, Some(run_id), status)
+    else {
+        return actions;
+    };
+    for action in recovery.next_actions {
+        if action.action == "status" || action.action == "diagnose" {
+            continue;
+        }
+        push_unique_next_action(
+            &mut actions,
+            CommandNextAction::new(
+                format!("{} through the Cook recovery handoff", action.action),
+                action.command,
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
     actions
 }
 
@@ -4355,7 +4416,9 @@ struct CollectedDiagnostic {
 fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
-    let priority = if is_policy_denial(&class, &text) {
+    let priority = if item.source == "current_lifecycle" {
+        0
+    } else if is_policy_denial(&class, &text) {
         0
     } else if is_required_output_diagnostic(&class) {
         1
@@ -5010,7 +5073,7 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
         .get("cook_operation_claims")
         .and_then(Value::as_array)
         .and_then(|claims| {
-            claims.iter().find(|claim| {
+            claims.iter().rev().find(|claim| {
                 claim.get("state").and_then(Value::as_str) == Some("failed")
                     && claim
                         .get("operation_key")
@@ -5054,6 +5117,86 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             })
         }),
     })
+}
+
+fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
+    let promotion = record.metadata.get("latest_promotion")?;
+    let promotion_status = promotion.get("status").and_then(Value::as_str);
+    if matches!(
+        promotion_status,
+        Some("gate_failed" | "no_changes_gate_failed")
+    ) {
+        let gate = promotion
+            .get("deterministic_gates")
+            .or_else(|| promotion.get("gate_results"))
+            .and_then(Value::as_array)
+            .and_then(|gates| {
+                gates.iter().find(|gate| {
+                    matches!(
+                        gate.get("status").and_then(Value::as_str),
+                        Some("failed" | "failure")
+                    )
+                })
+            });
+        let gate_name = gate
+            .and_then(|gate| gate.get("name").or_else(|| gate.get("command")))
+            .and_then(Value::as_str)
+            .unwrap_or("deterministic gate");
+        return Some(CollectedDiagnostic {
+            task_id: "promotion".to_string(),
+            class: "agent_task.promotion_gate_failed".to_string(),
+            message: gate
+                .and_then(|gate| gate.get("message").and_then(Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Deterministic promotion gate failed: {gate_name}")),
+            source: "current_lifecycle".to_string(),
+            data: promotion.clone(),
+        });
+    }
+    let finalization = record.metadata.get("cook_finalization")?;
+    if !matches!(
+        finalization.get("status").and_then(Value::as_str),
+        Some("failed" | "finalization_failed")
+    ) {
+        return None;
+    }
+    Some(CollectedDiagnostic {
+        task_id: "finalization".to_string(),
+        class: finalization
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("agent_task.finalization_failed")
+            .to_string(),
+        message: finalization
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Cook finalization failed after promotion.")
+            .to_string(),
+        source: "current_lifecycle".to_string(),
+        data: finalization.clone(),
+    })
+}
+
+fn current_lifecycle_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
+    match record
+        .metadata
+        .pointer("/latest_promotion/status")
+        .and_then(Value::as_str)
+    {
+        Some("gate_failed") => Some("gate_failed"),
+        Some("no_changes_gate_failed" | "no_op_gate_failed") => Some("no_op_gate_failed"),
+        _ if matches!(
+            record
+                .metadata
+                .pointer("/cook_finalization/status")
+                .and_then(Value::as_str),
+            Some("failed" | "finalization_failed")
+        ) =>
+        {
+            Some("finalization_failed")
+        }
+        _ => None,
+    }
 }
 
 /// Cancellation is controller-owned lifecycle evidence, even when the runner
@@ -6354,12 +6497,19 @@ fn diagnose_next_commands(
     record: &AgentTaskRunRecord,
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
+    current_lifecycle_denial: bool,
 ) -> Vec<String> {
     let owner = record
         .runner_id()
         .map(|runner| format!("--runner {runner}"))
         .unwrap_or_else(|| "--placement local".to_string());
     let run_id = &record.run_id;
+    if current_lifecycle_denial {
+        return current_lifecycle_next_actions(record)
+            .into_iter()
+            .map(|action| action.command)
+            .collect();
+    }
     let mut commands = vec![
         format!("homeboy {owner} agent-task status {run_id} --full"),
         format!("homeboy {owner} agent-task artifacts {run_id}"),
@@ -6613,7 +6763,7 @@ mod tests {
         }))
         .expect("minimal durable record");
 
-        let commands = diagnose_next_commands(&record, None, None);
+        let commands = diagnose_next_commands(&record, None, None, false);
 
         assert!(commands
             .iter()
@@ -6681,8 +6831,12 @@ mod tests {
             ),
         };
 
-        let commands =
-            diagnose_next_commands(&record, retry.action.as_ref(), retry.continuation.as_ref());
+        let commands = diagnose_next_commands(
+            &record,
+            retry.action.as_ref(),
+            retry.continuation.as_ref(),
+            false,
+        );
 
         assert_eq!(retry.projection()["readiness"], "unavailable");
         assert!(retry.projection()["action"].is_null());
