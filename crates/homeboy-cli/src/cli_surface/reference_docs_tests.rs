@@ -70,11 +70,29 @@ fn generated_reference_covers_every_visible_top_level_command() {
 /// fail in CI before it can drift into `self doctor`.
 #[test]
 fn generated_command_docs_match_the_live_clap_tree() {
+    let checked_in = generated_reference_docs();
+    let live = live_generated_reference_docs();
     assert_eq!(
-        generated_reference_docs(),
-        live_generated_reference_docs(),
-        "docs/reference/cli/command-surface.json is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+        checked_in.keys().collect::<Vec<_>>(),
+        live.keys().collect::<Vec<_>>(),
+        "the checked-in CLI reference document set is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
     );
+    for (path, expected) in &checked_in {
+        let actual = &live[path];
+        if expected != actual {
+            let line = expected
+                .lines()
+                .zip(actual.lines())
+                .position(|(expected, actual)| expected != actual)
+                .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
+            panic!(
+                "{path} is stale at line {}\nchecked in: {:?}\nlive: {:?}\nrun cargo run -p homeboy-cli --bin generate-cli-reference",
+                line + 1,
+                expected.lines().nth(line),
+                actual.lines().nth(line),
+            );
+        }
+    }
     assert_eq!(
         CliReference::new(live_generated_reference_docs()),
         homeboy_command_contract::cli_reference::checked_in_cli_reference(),
