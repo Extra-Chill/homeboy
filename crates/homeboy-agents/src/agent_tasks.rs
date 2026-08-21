@@ -489,7 +489,7 @@ pub mod service {
         offloaded_status_remediation, persist_initial_recipe, persist_manual_finalization_intent,
         persist_provider_boundary_replay_evidence, persisted_status,
         preflight_cook_continuation_admission, prepare_manual_finalization_identity,
-        promotion_is_resumable, promotion_source, read_plan, rearm_failed_terminal_continuation,
+        promotion_is_resumable, promotion_source, read_plan,
         reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,
         reconstruct_adoption_options_with_dispatcher, reconstruct_options_with_dispatcher,
         record_replacement_gate_proof, recover_cook_pr, recover_terminal_transport_proxy_evidence,

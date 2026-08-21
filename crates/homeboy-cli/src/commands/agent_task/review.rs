@@ -3291,7 +3291,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_preflight_continuation_dispatches_once_and_is_idempotent() {
+    fn manual_preflight_rejects_dirty_candidates_and_recovers_committed_candidates_idempotently() {
         homeboy::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("fixture root");
             let remote = root.path().join("origin.git");
@@ -3336,6 +3336,66 @@ mod tests {
             let base_sha = git_output(&checkout, &["rev-parse", "HEAD"]);
             run_git(&checkout, &["checkout", "-b", "feature"]);
             std::fs::write(checkout.join("feature.txt"), "feature\n").expect("write feature");
+            run_git(
+                &checkout,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:example/manual-finalization.git",
+                ],
+            );
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-cli-dirty-12706",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Dirty manual preflight",
+                "--commit-message",
+                "fixture",
+                "--gate-result",
+                "fixture=passed",
+                "--changed-file",
+                "feature.txt",
+                "--targeted-check-run",
+                "cargo test fixture",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI dirty preflight coverage",
+            ]);
+            assert!(
+                error
+                    .message
+                    .contains("recoverable manual preflight requires a committed candidate"),
+                "unexpected error: {error:?}"
+            );
+            assert!(error.message.contains("without --preflight"));
+            assert!(agent_task_lifecycle::status("manual-cli-dirty-12706")
+                .expect("manual identity was reserved")
+                .metadata["manual_finalization_intent"]
+                .is_null());
+            run_git(
+                &checkout,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    remote.to_str().expect("remote path"),
+                ],
+            );
             run_git(&checkout, &["add", "."]);
             run_git(&checkout, &["commit", "-m", "feature"]);
             run_git(&checkout, &["push", "-u", "origin", "feature"]);

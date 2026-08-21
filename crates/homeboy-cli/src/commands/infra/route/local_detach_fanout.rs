@@ -3,11 +3,11 @@
 //! `--detach-after-handoff` is a global flag, and it is advertised on
 //! `fanout cook-batch` and `fanout run-plan`. It did not work there. Every gate
 //! that acted on it tested for Cook specifically — `detached_cook_can_queue`,
-//! `is_local_detached_cook` — and locally-placed fanout returned from
-//! `run_split_placement_fanout` before any detach handling. So
-//! `fanout cook-batch --detach-after-handoff --placement local` accepted a flag
-//! promising the caller could disconnect, then blocked that caller for hours and
-//! died with its terminal, orphaning every in-flight child.
+//! `is_local_detached_cook` — and fanout returned from
+//! `run_split_placement_fanout` before any detach handling. So a Lab-routed
+//! `fanout cook-batch --detach-after-handoff` accepted a flag promising the
+//! caller could disconnect, then blocked that caller for hours and died with its
+//! terminal, orphaning every in-flight child.
 //!
 //! This module makes the flag mean what it says, on the same terms as the Cook
 //! launcher next door: re-execute the coordinator in its own session, hand
@@ -80,13 +80,16 @@ pub(super) struct DetachableFanout {
     pin_fanout_id: bool,
 }
 
-/// Whether this invocation is a locally-placed fanout wave asking to detach,
+/// Whether this invocation is a controller-owned fanout wave asking to detach,
 /// and the coordinator it would detach.
 ///
 /// `Ok(None)` means "not this interceptor's business". `Err` means the request
 /// was addressed to this interceptor and cannot be honoured.
 fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<DetachableFanout>> {
-    if !cli.detach_after_handoff || cli.placement != homeboy::cli_surface::Placement::Local {
+    // Placement belongs to each provider attempt. The coordinator is always
+    // controller-owned, so detach it before Lab selection and preserve the
+    // request on the child argv for split-placement routing.
+    if !cli.detach_after_handoff {
         return Ok(None);
     }
     let Commands::AgentTask(AgentTaskArgs {
@@ -205,9 +208,10 @@ fn runner_side_detach_error() -> Error {
     )
 }
 
-/// Serve `--placement local --detach-after-handoff` for a fanout wave by
+/// Serve `--detach-after-handoff` for a controller-owned fanout wave by
 /// re-executing its coordinator in its own session and returning a bounded
-/// handoff.
+/// handoff. The child retains its requested placement and routes provider
+/// attempts through the normal split-placement path.
 ///
 /// `runner_side` is true when this process is a Lab offload subprocess, a
 /// managed-runner placement, or a runner-resident execution. There the request
@@ -807,25 +811,29 @@ mod tests {
         assert!(error.message.contains("owns no long-running coordinator"));
     }
 
-    /// Non-local placement already threads detachment into each child attempt
-    /// dispatcher, and a wave that did not ask to detach is nobody's business
-    /// here. Neither must be captured by this interceptor.
+    /// The coordinator is controller-owned at every placement. The detached
+    /// child preserves the placement so its provider attempts reconcile through
+    /// the normal local-or-Lab split-placement route.
     #[test]
-    fn only_a_local_wave_that_asked_to_detach_is_intercepted() {
-        let lab = cli(&[
-            "--placement",
-            "lab",
-            "--detach-after-handoff",
-            "agent-task",
-            "fanout",
-            "run-plan",
-            "--input",
-            "@plan.json",
-        ]);
-        assert_eq!(
-            detachable_local_fanout(&lab).expect("lab is not ours"),
-            None
-        );
+    fn every_controller_placement_with_detach_is_intercepted() {
+        for placement in ["auto", "lab", "local", "lab-or-local"] {
+            let wave = cli(&[
+                "--placement",
+                placement,
+                "--detach-after-handoff",
+                "agent-task",
+                "fanout",
+                "run-plan",
+                "--input",
+                "@plan.json",
+            ]);
+            assert!(
+                detachable_local_fanout(&wave)
+                    .unwrap_or_else(|error| panic!("{placement}: {error}"))
+                    .is_some(),
+                "{placement} must hand off its controller"
+            );
+        }
 
         let attached = cli(&[
             "--placement",
@@ -1078,5 +1086,38 @@ mod tests {
         assert!(log.contains("\"event\":\"coordinator_started\""), "{log}");
         assert!(log.contains("\"phase\":\"launching\""), "{log}");
         assert!(log.contains("fanout status wave-log"), "{log}");
+    }
+
+    #[test]
+    fn detached_fanout_keeps_lab_provider_placement_on_the_controller_child() {
+        let args = [
+            "homeboy",
+            "--placement",
+            "lab",
+            "--detach-after-handoff",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "--verify",
+            "true",
+            "--run-plan",
+            "https://github.com/example/fixture/issues/1",
+            "https://github.com/example/fixture/issues/2",
+        ];
+        let cli = Cli::parse_from(args);
+        let target = detachable_local_fanout(&cli)
+            .expect("parse detachable fanout")
+            .expect("Lab provider placement retains a controller handoff");
+
+        let normalized = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+        let child =
+            detached_fanout_child_args(&normalized, &target.fanout_id, target.pin_fanout_id);
+
+        assert_eq!(cli.placement, homeboy::cli_surface::Placement::Lab);
+        assert!(child.iter().any(|arg| arg == "--placement"));
+        assert!(child.iter().any(|arg| arg == "lab"));
+        assert!(!child.iter().any(|arg| arg == "--detach-after-handoff"));
     }
 }

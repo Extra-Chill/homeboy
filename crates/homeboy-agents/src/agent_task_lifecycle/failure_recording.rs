@@ -474,8 +474,11 @@ pub fn record_remote_dispatch_failure(
             .and_then(Value::as_str)
             .map(ToString::to_string);
         let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
-        let mut record = submit_plan(&plan, Some(&run_id))?;
-        record_aggregate(&mut record, &plan, &aggregate)?;
+        // One store for both: the record this submits and the aggregate written
+        // against it are one durable outcome (#7505).
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+        let mut record = submit_plan_in_store(&lifecycle_store, &plan, Some(&run_id))?;
+        record_aggregate_in_store(&lifecycle_store, &mut record, &plan, &aggregate)?;
         (
             record,
             remote_run_id,
@@ -645,14 +648,9 @@ fn synthetic_remote_dispatch_plan(
     plan
 }
 
-pub(crate) fn record_aggregate(
-    record: &mut AgentTaskRunRecord,
-    plan: &AgentTaskPlan,
-    aggregate: &AgentTaskAggregate,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_aggregate_in_store(&lifecycle_store, record, plan, aggregate)
-}
+// The ambient `record_aggregate()` shim that used to sit here is gone; the
+// remote-dispatch failure recorder was its only caller and now writes the
+// aggregate into the same store it submitted the record to (#7505).
 
 pub(crate) fn record_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
