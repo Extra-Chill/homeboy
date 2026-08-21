@@ -471,7 +471,9 @@ impl CliRuntime {
         if command_capability == CommandCapability::Mutation
             && normalized.get(1).map(String::as_str) != Some("deferred-workload")
         {
-            let _ = crate::commands::deferred_workload::restart_worker_if_pending();
+            if let Ok(config_root) = crate::core::paths::homeboy() {
+                let _ = crate::commands::deferred_workload::restart_worker_if_pending(&config_root);
+            }
         }
 
         if is_top_level_version_request(&normalized) {
@@ -822,6 +824,11 @@ impl CliRuntime {
 }
 
 fn schedule_runner_exec_recovery() {
+    // Unit tests execute this code inside the libtest binary. Re-executing
+    // current_exe there recursively launches the complete test harness.
+    if cfg!(test) {
+        return;
+    }
     let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery() else {
         return;
     };
@@ -892,6 +899,11 @@ fn spawn_runner_exec_recovery_child(
 }
 
 fn schedule_controller_fallback_reconciliation() {
+    // The production binary can safely re-exec itself; the unit-test binary
+    // would recursively launch the complete test harness and escape nextest.
+    if cfg!(test) {
+        return;
+    }
     let Ok(executable) = std::env::current_exe() else {
         return;
     };

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use crate::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskOutputDependencies, AgentTaskPlan,
-    AgentTaskScheduleOptions, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskScheduleOptions,
+    AgentTaskScheduler, SharedAgentTaskExecutor,
 };
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
@@ -61,8 +61,8 @@ pub struct AgentTaskFanoutAggregate {
     pub metadata: Value,
 }
 
-pub struct AgentTaskFanoutScheduler<E> {
-    scheduler: AgentTaskScheduler<E>,
+pub struct AgentTaskFanoutScheduler {
+    scheduler: AgentTaskScheduler,
 }
 
 impl AgentTaskFanoutPlan {
@@ -297,11 +297,8 @@ impl AgentTaskFanoutAggregate {
     }
 }
 
-impl<E> AgentTaskFanoutScheduler<E>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    pub fn new(executor: E) -> Self {
+impl AgentTaskFanoutScheduler {
+    pub fn new(executor: SharedAgentTaskExecutor) -> Self {
         Self {
             scheduler: AgentTaskScheduler::new_controller(executor),
         }
@@ -349,13 +346,15 @@ mod tests {
         AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
         AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskOutputBinding};
+    use crate::agent_task_scheduler::{
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskOutputBinding,
+    };
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
     #[test]
     fn isolated_fanout_stamps_plan_metadata_and_aggregates_reconciliation() {
-        let scheduler = AgentTaskFanoutScheduler::new(RecordingExecutor::default());
+        let scheduler = AgentTaskFanoutScheduler::new(Arc::new(RecordingExecutor::default()));
         let mut plan = AgentTaskFanoutPlan::new(
             "fanout/audit-batch",
             AgentTaskFanoutPlane::IsolatedTasks,
@@ -384,9 +383,9 @@ mod tests {
     #[test]
     fn workflow_fanout_preserves_output_dependencies_inside_one_plane() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskFanoutScheduler::new(RecordingExecutor {
+        let scheduler = AgentTaskFanoutScheduler::new(Arc::new(RecordingExecutor {
             observed: Arc::clone(&observed),
-        });
+        }));
         let mut plan = AgentTaskFanoutPlan::new(
             "fanout/site-workflow",
             AgentTaskFanoutPlane::Workflow,
@@ -499,7 +498,7 @@ mod tests {
 
     #[test]
     fn fanout_aggregate_exposes_child_run_and_artifact_bindings() {
-        let scheduler = AgentTaskFanoutScheduler::new(GenericChildRunExecutor);
+        let scheduler = AgentTaskFanoutScheduler::new(Arc::new(GenericChildRunExecutor));
         let plan = AgentTaskFanoutPlan::new(
             "fuzz/campaign-1",
             AgentTaskFanoutPlane::IsolatedTasks,

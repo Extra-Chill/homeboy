@@ -785,12 +785,6 @@ pub fn validate<T: ConfigEntity>(entity: &T) -> Result<()> {
     entity.validate_in_root(&paths::homeboy()?)
 }
 
-/// Ambient sibling of [`ConfigEntity::dependents_in_root`]. Free function for
-/// the same reason as [`validate`].
-pub fn dependents<T: ConfigEntity>(id: &str) -> Result<Vec<String>> {
-    T::dependents_in_root(&paths::homeboy()?, id)
-}
-
 /// Validate and write an entity below an already-resolved config root.
 ///
 /// Every root-sensitive step — the cross-entity ID/alias collision guard, the

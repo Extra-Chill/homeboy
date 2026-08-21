@@ -60,6 +60,12 @@ struct DeferredWorkloadStatusOutput {
 }
 
 pub fn run(args: DeferredWorkloadArgs) -> CmdResult<serde_json::Value> {
+    // One resolution for the whole command. `status` reads the worker status
+    // file and the record store; `reconcile` walks that same store and may
+    // spawn against it. Both address one Homeboy installation, and resolving
+    // per subcommand — as `reconcile` did, a second time below `run` — is how
+    // a single invocation ends up describing two of them (#7505).
+    let config_root = homeboy::core::paths::homeboy()?;
     match args.command {
         DeferredWorkloadCommand::Worker { startup_token } => {
             run_worker(&startup_token)?;
@@ -69,11 +75,6 @@ pub fn run(args: DeferredWorkloadArgs) -> CmdResult<serde_json::Value> {
             ))
         }
         DeferredWorkloadCommand::Status => {
-            // One resolution for the whole command: the worker status file and
-            // the record store are two files under the same root, and reading
-            // them from two independently resolved roots is how a status report
-            // ends up describing two different Homeboy installations.
-            let config_root = homeboy::core::paths::homeboy()?;
             let output = DeferredWorkloadStatusOutput {
                 schema: "homeboy/deferred-workload-status/v1",
                 worker: deferred_workload::worker_status_in_roots(&config_root)?,
@@ -93,7 +94,7 @@ pub fn run(args: DeferredWorkloadArgs) -> CmdResult<serde_json::Value> {
             ))
         }
         DeferredWorkloadCommand::Reconcile { dry_run } => Ok((
-            serde_json::to_value(reconcile_workers(dry_run)?)
+            serde_json::to_value(reconcile_workers(&config_root, dry_run)?)
                 .expect("deferred workload reconciliation serializes"),
             0,
         )),
@@ -129,11 +130,7 @@ struct DeferredWorkloadOrphan {
 /// decided by the durable record store and the startup token the process can
 /// prove from its own environment, so a foreign process that happens to share
 /// the command name is never signaled on that basis (#12081).
-fn reconcile_workers(dry_run: bool) -> homeboy::core::Result<DeferredWorkloadReconcileOutput> {
-    reconcile_workers_in_roots(&homeboy::core::paths::homeboy()?, dry_run)
-}
-
-fn reconcile_workers_in_roots(
+fn reconcile_workers(
     config_root: &Path,
     dry_run: bool,
 ) -> homeboy::core::Result<DeferredWorkloadReconcileOutput> {
@@ -237,10 +234,6 @@ fn reconcile_workers_in_roots(
     })
 }
 
-pub fn ensure_worker() -> homeboy::core::Result<()> {
-    ensure_worker_in_roots(&homeboy::core::paths::homeboy()?)
-}
-
 /// Spawn the singleton worker against an already-resolved config root.
 ///
 /// The start lock, the liveness probe, the worker's working directory, the
@@ -248,7 +241,7 @@ pub fn ensure_worker() -> homeboy::core::Result<()> {
 /// Homeboy installation. Resolving them independently let a five-second poll
 /// re-resolve the root up to 250 times, and left the spawned worker free to
 /// disagree with the probe that was waiting on it.
-fn ensure_worker_in_roots(config_root: &Path) -> homeboy::core::Result<()> {
+pub fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
     let _start_lock = deferred_workload::acquire_worker_start_lock_in_roots(config_root)?;
     ensure_worker_with(
         config_root,
@@ -333,17 +326,13 @@ fn ensure_worker_in_roots(config_root: &Path) -> homeboy::core::Result<()> {
     )
 }
 
-pub fn restart_worker_if_pending() -> homeboy::core::Result<()> {
-    restart_worker_if_pending_in_roots(&homeboy::core::paths::homeboy()?)
-}
-
-fn restart_worker_if_pending_in_roots(config_root: &Path) -> homeboy::core::Result<()> {
-    restart_worker_if_pending_with_in_roots(
+pub fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
+    restart_worker_if_pending_with(
         config_root,
         |status: &deferred_workload::DeferredWorkloadWorkerStatus| {
             deferred_workload::worker_is_live_in_roots(config_root, status)
         },
-        || ensure_worker_in_roots(config_root),
+        || ensure_worker(config_root),
     )
 }
 
@@ -362,13 +351,6 @@ fn ensure_worker_with(
 }
 
 fn restart_worker_if_pending_with(
-    is_live: impl Fn(&deferred_workload::DeferredWorkloadWorkerStatus) -> bool,
-    spawn: impl FnOnce() -> homeboy::core::Result<()>,
-) -> homeboy::core::Result<()> {
-    restart_worker_if_pending_with_in_roots(&homeboy::core::paths::homeboy()?, is_live, spawn)
-}
-
-fn restart_worker_if_pending_with_in_roots(
     config_root: &Path,
     is_live: impl Fn(&deferred_workload::DeferredWorkloadWorkerStatus) -> bool,
     spawn: impl FnOnce() -> homeboy::core::Result<()>,
@@ -499,34 +481,10 @@ fn run_worker_while_holding_lock(
     now: impl Fn() -> u64,
     sleep: impl FnMut(Duration),
 ) -> homeboy::core::Result<()> {
-    run_worker_with_in_roots(config_root, owner, readiness, dispatch, now, sleep)
+    run_worker_with(config_root, owner, readiness, dispatch, now, sleep)
 }
 
-/// Ambient entry point for the worker loop, retained for callers that own no
-/// resolved root (the hermetic tests). Production runs
-/// [`run_worker_with_in_roots`] from the single resolution `run_worker` makes.
 pub(crate) fn run_worker_with(
-    owner: &str,
-    readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
-    dispatch: impl FnMut(
-        &deferred_workload::DeferredWorkload,
-        &str,
-        &str,
-    ) -> homeboy::core::Result<bool>,
-    now: impl Fn() -> u64,
-    sleep: impl FnMut(Duration),
-) -> homeboy::core::Result<()> {
-    run_worker_with_in_roots(
-        &homeboy::core::paths::homeboy()?,
-        owner,
-        readiness,
-        dispatch,
-        now,
-        sleep,
-    )
-}
-
-pub(crate) fn run_worker_with_in_roots(
     config_root: &Path,
     owner: &str,
     mut readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
@@ -830,6 +788,15 @@ fn redact_settings_args(args: &mut [serde_json::Value]) {
 
 #[cfg(test)]
 mod tests {
+    /// The config root of the isolated home each test below installs.
+    ///
+    /// These tests are their own boundary: the worker loop now takes a root,
+    /// so the test resolves once exactly where `run`/`run_worker` resolve once
+    /// in production (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy::core::paths::homeboy().expect("config root")
+    }
+
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -958,6 +925,7 @@ mod tests {
             let dispatched_by_worker = dispatched.clone();
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 || Ok(ready.get().then(|| inventory("compatible-runner"))),
                 move |record, runner_id, _| {
@@ -1000,6 +968,7 @@ mod tests {
             let ready_after_wait = ready.clone();
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 || Ok(ready.get().then(|| inventory("compatible-runner"))),
                 move |record, runner_id, _| {
@@ -1043,6 +1012,7 @@ mod tests {
             let dispatch_count = dispatches.clone();
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 move || {
                     calls.set(calls.get() + 1);
@@ -1081,6 +1051,7 @@ mod tests {
             let dispatches = Cell::new(0);
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 || {
                     Ok(Some(RunnerCapabilityInventory {
@@ -1157,6 +1128,7 @@ mod tests {
             let dispatch_count = dispatched.clone();
 
             run_worker_with(
+                &test_config_root(),
                 "restarted-worker",
                 || Ok(Some(inventory("recovery-runner"))),
                 move |record, runner_id, owner| {
@@ -1185,6 +1157,7 @@ mod tests {
             deferred_workload::defer(input()).expect("defer workload");
             let spawned = Cell::new(0);
             restart_worker_if_pending_with(
+                &test_config_root(),
                 |_| false,
                 || {
                     spawned.set(spawned.get() + 1);
@@ -1207,6 +1180,7 @@ mod tests {
             let deferred = deferred_workload::defer(input).expect("defer workload");
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 || Ok(Some(inventory("compatible-runner"))),
                 |_, _, _| panic!("a deleted source worktree must not be dispatched"),
@@ -1238,6 +1212,7 @@ mod tests {
             let dispatched_by_worker = dispatched.clone();
 
             run_worker_with(
+                &test_config_root(),
                 "worker-a",
                 || Ok(Some(inventory("compatible-runner"))),
                 move |record, _, _| {
@@ -1297,7 +1272,7 @@ mod tests {
     #[test]
     fn a_dry_run_reconciliation_signals_nothing_and_retains_nothing() {
         crate::test_support::with_isolated_home(|_| {
-            let outcome = reconcile_workers(true).expect("reconcile");
+            let outcome = reconcile_workers(&test_config_root(), true).expect("reconcile");
 
             assert_eq!(outcome.schema, "homeboy/deferred-workload-reconcile/v1");
             assert!(outcome.dry_run);

@@ -310,6 +310,23 @@ fn tunnel_process_identity_matches(
 ) -> bool {
     match (pid, expected) {
         (Some(pid), Some(expected)) => {
+            // An exited process that has not been reaped keeps its `/proc`
+            // entry and its start time, so comparing start identities alone
+            // reports a dead tunnel as live. Homeboy spawns the tunnel itself,
+            // which makes an unreaped zombie the ordinary shape of "the tunnel
+            // died" rather than an edge case: the durability window then failed
+            // as `Unreachable` on the health endpoint instead of the
+            // authoritative `TunnelExited`, and a session whose tunnel was
+            // already gone could be published as live.
+            //
+            // `process_identity_state` reads the state field and reports `Z` as
+            // `Dead`, which is the question actually being asked here.
+            if matches!(
+                homeboy_core::process::process_identity_state(pid, None),
+                homeboy_core::process::ProcessIdentityState::Dead
+            ) {
+                return false;
+            }
             super::capture_tunnel_process_start_identity(Some(pid))
                 .ok()
                 .flatten()
@@ -1349,10 +1366,10 @@ mod tests {
         let Err(failure) = result else {
             panic!("exited tunnel must fail the durability window");
         };
-        assert!(matches!(
-            failure,
-            DaemonHealthProbeFailure::TunnelExited { .. }
-        ));
+        assert!(
+            matches!(failure, DaemonHealthProbeFailure::TunnelExited { .. }),
+            "{failure:?}"
+        );
         assert_eq!(failure_stage(&failure), "tunnel_durability");
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1414,10 +1431,10 @@ mod tests {
             Some(&identity),
         )
         .expect_err("exited tunnel after durability health failure is terminal");
-        assert!(matches!(
-            failure,
-            DaemonHealthProbeFailure::TunnelExited { .. }
-        ));
+        assert!(
+            matches!(failure, DaemonHealthProbeFailure::TunnelExited { .. }),
+            "{failure:?}"
+        );
         assert_eq!(failure_stage(&failure), "tunnel_durability");
         assert!(child.wait().expect("reap tunnel child").success());
         server.join().expect("server");

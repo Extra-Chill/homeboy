@@ -163,11 +163,15 @@ fn test_cleanup_stale_child_records() {
         let pid = child.id();
         write_test_child_record("inv-stale", 999_999, pid, Some(pid as i32));
 
-        let cleaned = cleanup_stale_child_records().expect("cleanup stale records");
+        // The test is its own boundary: resolve once, then use the rooted
+        // form for both the cleanup and the assertion below, so they cannot
+        // disagree about which home was cleaned (#7505).
+        let config_root = crate::paths::homeboy().expect("config root");
+        let cleaned =
+            cleanup_stale_child_records_in_root(&config_root).expect("cleanup stale records");
 
         assert_eq!(cleaned, 1);
         assert_child_exits(&mut child);
-        let config_root = crate::paths::homeboy().expect("config root");
         assert!(
             !InvocationChildRecord::record_path_in_root(&config_root, "inv-stale", pid).exists()
         );
@@ -185,13 +189,15 @@ fn test_cleanup_invocation_children() {
         write_test_child_record("inv-first", 999_999, first_pid, Some(first_pid as i32));
         write_test_child_record("inv-second", 999_999, second_pid, Some(second_pid as i32));
 
-        let cleaned = cleanup_invocation_children("inv-first").expect("cleanup first invocation");
+        let config_root = crate::paths::homeboy().expect("config root");
+        let cleaned = cleanup_invocation_children_in_root(&config_root, "inv-first")
+            .expect("cleanup first invocation");
 
         assert_eq!(cleaned, 1);
         assert_child_exits(&mut first);
         assert!(pid_is_alive(second_pid as libc::pid_t));
 
-        let _ = cleanup_invocation_children("inv-second");
+        let _ = cleanup_invocation_children_in_root(&config_root, "inv-second");
         assert_child_exits(&mut second);
     });
 }

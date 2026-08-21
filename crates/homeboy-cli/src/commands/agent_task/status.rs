@@ -51,6 +51,8 @@ const COMPACT_PROMOTION_FILE_BYTE_LIMIT: usize = 256;
 const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 const COMPACT_MANDATORY_SCALAR_BYTE_LIMIT: usize = 512;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
+const STATUS_WATCH_BYTE_LIMIT: usize = 32 * 1024;
+const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
 /// attempt readers, even when a newer Cook attempt produced no patch.
@@ -59,6 +61,7 @@ pub(super) struct CookReaderTarget {
     pub(super) selection: Option<Value>,
     pub(super) cook_alias: Option<Value>,
     pub(super) exact: bool,
+    resolution: &'static str,
 }
 
 pub(super) fn resolve_cook_reader_target(
@@ -80,14 +83,30 @@ pub(super) fn resolve_cook_reader_target(
             selection: None,
             cook_alias,
             exact: true,
+            resolution: "exact_record",
         });
     }
     if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
+        if let Some(materializing) =
+            agent_task_lifecycle::resolve_detached_cook_materializing_attempt(run_or_cook_id)?
+        {
+            return Ok(CookReaderTarget {
+                run_id: materializing.run_id.clone(),
+                selection: None,
+                cook_alias: Some(json!({
+                    "cook_id": materializing.cook_id,
+                    "materializing_attempt_run_id": materializing.run_id,
+                })),
+                exact: false,
+                resolution: "detached_materializing_attempt",
+            });
+        }
         return Ok(CookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
             cook_alias: None,
             exact: false,
+            resolution: "default",
         });
     }
     let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
@@ -107,6 +126,7 @@ pub(super) fn resolve_cook_reader_target(
         })),
         selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
         exact: false,
+        resolution: "default",
     })
 }
 
@@ -138,12 +158,18 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     }
 
     let run_id = &target.run_id;
+    // One store for the whole status read. The record and the plan compatibility
+    // check below are two halves of one answer: reading the record from one
+    // installation and the plan from another reports a run whose budget version
+    // was never checked, and reports it as if it had been (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Terminal inspection is a durable-local read. Reconciliation has its own
     // explicit command so an unavailable runner cannot hold status hostage.
     let durable_read = match if target.exact {
-        agent_task_lifecycle::exact_durable_local_read(run_id)
+        agent_task_lifecycle::exact_durable_local_read_in_store(&lifecycle_store, run_id)
     } else {
-        agent_task_lifecycle::durable_local_read(run_id)
+        agent_task_lifecycle::durable_local_read_in_store(&lifecycle_store, run_id)
     } {
         Ok(read) => read,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
@@ -162,7 +188,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         },
     ));
     // A future durable budget is incompatible, not an absent optional preview.
-    if let Err(error) = agent_task_lifecycle::load_plan(run_id) {
+    if let Err(error) = agent_task_lifecycle::load_plan_in_store(&lifecycle_store, run_id) {
         if error
             .message
             .contains("unsupported agent-task execution budget version")
@@ -229,6 +255,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement(&mut value, run_id);
+        if args.bounded {
+            value = bounded_full_status(value, run_id);
+        }
         let exit_code = subject_exit_code(&value, args.strict_subject_exit);
         return Ok((value, exit_code));
     }
@@ -388,6 +417,30 @@ fn watch_status_output(
         args.interval,
         args.timeout
     );
+    let total_changes = progress
+        .changes
+        .len()
+        .saturating_add(progress.omitted as usize);
+    let (changes, budget) = budget_json_values(
+        progress.changes,
+        total_changes,
+        OutputBudget {
+            max_items: STATUS_WATCH_CHANGE_LIMIT,
+            max_bytes: STATUS_WATCH_BYTE_LIMIT,
+            max_events: None,
+            max_seconds: None,
+        },
+        continuation.clone(),
+        format!(
+            "homeboy agent-task status {} --full --output <path>",
+            quote_arg(&args.run_id)
+        ),
+    );
+    let latest = if serialized_len(&latest) <= COMPACT_STATUS_BYTE_LIMIT {
+        latest
+    } else {
+        enforce_compact_status_budget(compact_status_summary(&latest, &args.run_id))
+    };
     let output = json!({
         "schema": "homeboy/agent-task-status-watch/v1",
         "command": "agent-task.status.watch",
@@ -396,10 +449,11 @@ fn watch_status_output(
         "timed_out": timed_out,
         "poll_count": result.poll_count,
         "waited_secs": result.waited.as_secs(),
-        "changes": progress.changes,
-        "changes_omitted": progress.omitted,
+        "changes": changes,
+        "changes_omitted": budget.omitted_items,
         "latest": latest,
         "continuation_command": continuation,
+        "output_budget": budget,
     });
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
@@ -476,7 +530,7 @@ fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &Co
         let mut identity = json!({
             "requested_run_id": requested_run_id,
             "resolved_run_id": target.run_id,
-            "resolution": if target.exact { "exact_record" } else { "default" },
+            "resolution": target.resolution,
         });
         if let Some(cook_alias) = &target.cook_alias {
             identity["cook_alias"] = cook_alias.clone();
@@ -505,19 +559,32 @@ fn attach_cook_notification_delivery(
         return;
     };
     if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
-        outcome["retry_command"] = Value::String(agent_task_service_direct::cook_continue_command(
+        let resend_command = Value::String(agent_task_service_direct::cook_continue_command(
             None, cook_id, false, None,
         ));
+        outcome["resend_command"] = resend_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["retry_command"] = resend_command;
+        outcome["inspect_command"] =
+            Value::String(format!("homeboy agent-task status {cook_id} --full"));
     }
-    if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
-        outcome["configuration_command"] = Value::String(
-            "homeboy config set /notifications/default_transport '<installed-transport-id>'"
-                .to_string(),
-        );
+    if let Some(configuration_command) = notification_repair_command(&outcome) {
+        let configuration_command = Value::String(configuration_command);
+        outcome["repair_command"] = configuration_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["configuration_command"] = configuration_command;
     }
     if let Value::Object(fields) = value {
         fields.insert("notification_delivery".to_string(), outcome);
     }
+}
+
+fn notification_repair_command(outcome: &Value) -> Option<String> {
+    (outcome.get("status").and_then(Value::as_str) == Some("not_configured")
+        && outcome.get("route_classification").and_then(Value::as_str) != Some("explicit"))
+    .then(|| {
+        "homeboy config set /notifications/default_transport '<installed-transport-id>'".to_string()
+    })
 }
 
 /// A Cook owns the provider attempt's publication lifecycle. Once it records a
@@ -782,6 +849,147 @@ fn attach_full_status_candidate(
             canonical_candidate_projection(canonical),
         );
         fields.insert("liveness".to_string(), liveness);
+    }
+}
+
+/// A finite presentation of the established full record. It intentionally uses
+/// only sections the agent-task evidence resolver can hydrate; raw `--full`
+/// remains the machine-readable export contract.
+fn bounded_full_status(value: Value, run_id: &str) -> Value {
+    let run_ref = homeboy::core::execution_contract::encode_uri_component(run_id);
+    let status_ref = format!("homeboy://agent-task/run/{run_ref}/status");
+    let aggregate_ref = format!("homeboy://agent-task/run/{run_ref}/aggregate");
+    let artifacts_ref = format!("homeboy://agent-task/run/{run_ref}/artifacts");
+    let artifact_count = value
+        .get("artifact_refs")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let evidence_count = value
+        .pointer("/aggregate/outcomes")
+        .and_then(Value::as_array)
+        .map(|outcomes| {
+            outcomes
+                .iter()
+                .map(|outcome| {
+                    outcome
+                        .get("evidence_refs")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                })
+                .sum::<usize>()
+        })
+        .unwrap_or_default();
+    let retention = value
+        .pointer("/metadata/automatic_artifact_retention")
+        .map(|retention| {
+            json!({
+                "status": bounded_value(retention.get("status").unwrap_or(&Value::Null)),
+                "worktree_count": retention.get("worktree_count"),
+                "candidate_count": retention.get("candidate_count"),
+                "skipped_count": retention.get("skipped_count"),
+                "applied_count": retention.get("applied_count"),
+                "failed_count": retention.get("failure_count").or_else(|| retention.get("failed_count")),
+                "details_omitted": true,
+                "ref": status_ref,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let output = json!({
+        "schema": "homeboy/agent-task-status-bounded/v1",
+        "presentation": "bounded_outcome_first",
+        "outcome": {
+            "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
+            "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
+            "terminal_status": bounded_value(value.get("terminal_status").unwrap_or(&Value::Null)),
+            "stop_reason": bounded_value(value.pointer("/metadata/stop_reason").unwrap_or(&Value::Null)),
+            "candidate_state": bounded_value(value.pointer("/canonical_candidate/state").unwrap_or(&Value::Null)),
+            "notification_state": bounded_value(value.pointer("/notification_delivery/status").unwrap_or(&Value::Null)),
+            "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")).map(|action| json!({
+                "kind": bounded_value(action.get("kind").unwrap_or(&Value::Null)),
+                "command": bounded_value(action.get("command").unwrap_or(&Value::Null)),
+                "label": bounded_value(action.get("label").unwrap_or(&Value::Null)),
+            })),
+        },
+        "details": {
+            "status": { "ref": status_ref, "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)) },
+            "aggregate": { "ref": aggregate_ref, "available": value.get("aggregate").is_some() },
+            "artifacts": {
+                "ref": artifacts_ref,
+                "total_items": artifact_count,
+                "returned_items": 0,
+                "omitted_items": artifact_count,
+                "truncated": artifact_count > 0,
+                "command": format!("homeboy agent-task artifacts {} --full", quote_arg(run_id)),
+                "export_command": format!("homeboy agent-task artifacts {} --full --output <path>", quote_arg(run_id)),
+            },
+            "evidence": {
+                "total_items": evidence_count,
+                "returned_items": 0,
+                "omitted_items": evidence_count,
+                "truncated": evidence_count > 0,
+                "command": format!("homeboy agent-task evidence {} --full", quote_arg(run_id)),
+                "export_command": format!("homeboy agent-task evidence {} --full --output <path>", quote_arg(run_id)),
+            },
+            "automatic_artifact_retention": retention,
+        },
+        "output_budget": {
+            "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
+            "max_items": 0,
+            "lossless_command": format!("homeboy agent-task status {} --full", quote_arg(run_id)),
+            "truncated": true,
+        },
+    });
+    // All scalar projections are bounded; this guard protects the contract if a
+    // future field is added without using `bounded_value`.
+    if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
+        output
+    } else {
+        json!({
+            "schema": "homeboy/agent-task-status-bounded/v1",
+            "presentation": "bounded_outcome_first",
+            "outcome": {
+                "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
+                "terminal_status": bounded_value(value.get("terminal_status").unwrap_or(&Value::Null)),
+            },
+            "output_budget": {
+                "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
+                "truncated": true,
+                "lossless_command": bounded_value(&Value::String(format!("homeboy agent-task status {} --full", quote_arg(run_id)))),
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod bounded_full_status_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_full_status_has_a_hard_byte_bound_for_large_scalars() {
+        let value = json!({
+            "run_id": "run-1",
+            "state": "failed",
+            "terminal_status": "repair_required",
+            "metadata": {
+                "stop_reason": "x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2),
+                "automatic_artifact_retention": { "worktrees": ["x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT)] },
+            },
+            "artifact_refs": (0..100).map(|index| json!({ "id": index })).collect::<Vec<_>>(),
+        });
+
+        let bounded = bounded_full_status(value, "run-1");
+
+        assert!(serialized_len(&bounded) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(bounded["outcome"]["state"], "failed");
+        assert_eq!(bounded["details"]["artifacts"]["omitted_items"], 100);
+
+        let oversized_id = "r".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2);
+        let bounded = bounded_full_status(
+            json!({ "run_id": oversized_id, "state": "failed" }),
+            &oversized_id,
+        );
+        assert!(serialized_len(&bounded) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(bounded["outcome"]["state"], "failed");
     }
 }
 
@@ -1137,22 +1345,33 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("retry_command"))
+        .and_then(|delivery| delivery.get("inspect_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("retry terminal notification", command)
+            CommandNextAction::new("inspect terminal notification", command)
+                .with_kind(CommandNextActionKind::Show),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("resend_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("resend terminal notification", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("configuration_command"))
+        .and_then(|delivery| delivery.get("repair_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("configure terminal notifications", command)
+            CommandNextAction::new("repair terminal notifications", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
@@ -2208,6 +2427,7 @@ mod watch_tests {
             bridge: false,
             since_cursor: None,
             full: false,
+            bounded: false,
             strict_subject_exit: false,
             no_runner_probe: false,
             watch: true,
@@ -2306,6 +2526,32 @@ mod watch_tests {
         assert_eq!(overflow["retained_limit_reached"], true);
         assert_eq!(overflow["state"], "succeeded");
         assert_eq!(overflow["poll"], terminal_poll);
+    }
+
+    #[test]
+    fn watch_result_has_a_total_byte_budget() {
+        let oversized = json!({
+            "run_id": "run-1",
+            "state": "running",
+            "diagnostics": "x".repeat(STATUS_WATCH_BYTE_LIMIT * 2),
+        });
+        let (output, _) = watch_status_output(
+            &args(),
+            WatchResult {
+                item: (oversized.clone(), 0),
+                conclusion: WatchConclusion::TimedOut,
+                poll_count: 1,
+                waited: Duration::from_secs(1),
+            },
+            StatusWatchProgress {
+                changes: vec![json!({ "poll": 1, "status": oversized })],
+                ..Default::default()
+            },
+        );
+
+        assert!(serialized_len(&output) < STATUS_WATCH_BYTE_LIMIT + COMPACT_STATUS_BYTE_LIMIT);
+        assert_eq!(output["output_budget"]["truncated"], true);
+        assert_eq!(output["latest"]["state"], "running");
     }
 
     struct ScriptedStatusPoller {
@@ -4356,6 +4602,11 @@ fn compact_status_summary_with_aggregate(
                 "status",
                 "error_class",
                 "transport_result",
+                "rejection_reason",
+                "validation_context",
+                "inspect_command",
+                "repair_command",
+                "resend_command",
                 "retry_command",
                 "configuration_command",
             ],
@@ -6840,7 +7091,7 @@ mod tests {
                     "route_classification": "explicit",
                     "status": "failed",
                     "error_class": "transport_spawn_failed",
-                    "retry_command": "homeboy agent-task cook-continue cook-1",
+                    "resend_command": "homeboy agent-task cook-continue cook-1",
                     "raw_destination": "must-not-appear"
                 }
             }),
@@ -6849,12 +7100,26 @@ mod tests {
 
         assert_eq!(summary["notification_delivery"]["status"], "failed");
         assert_eq!(
-            summary["notification_delivery"]["retry_command"],
+            summary["notification_delivery"]["resend_command"],
             "homeboy agent-task cook-continue cook-1"
         );
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn explicit_notification_routes_do_not_suggest_changing_the_default_transport() {
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "explicit"
+        }))
+        .is_none());
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "default"
+        }))
+        .is_some());
     }
 
     #[test]
