@@ -19,7 +19,7 @@ use super::super::cook_promotion::{
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
     prepare_manual_finalization_identity, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
     refreshed_moving_base_recovery, selected_candidate_task_id_in_store, CookReportInput,
     MovingBaseCookRecovery,
 };
@@ -2674,7 +2674,13 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         let rebased_promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         let rebased_recovery =
             moving_base_recovery_from_promotion("moving-base-real-git", run_id, rebased_promotion);
-        let error = recover_moving_base_cook_candidate(&options, &rebased_recovery).unwrap_err();
+        let error = recover_moving_base_cook_candidate_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            &options,
+            &rebased_recovery,
+        )
+        .unwrap_err();
         assert!(error
             .message
             .contains("differs from the exact promoted candidate"));

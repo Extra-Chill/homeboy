@@ -259,30 +259,12 @@ fn resume_transport_proxy_on_runner_in_store(
     }))
 }
 
-/// The ambient half of the pair, kept so the existing test call sites need no
-/// edit while they migrate onto the rooted sibling.
-///
-/// It is `#[cfg(test)]` because that is now literally what it is: rerouting
-/// `recover_transport_proxy_in_store` onto
-/// [`reconcile_transport_proxy_snapshot_in_store`] removed its last production
-/// caller, and a `pub(crate)` function reachable only from `#[cfg(test)] mod
-/// tests` is a `dead_code` error under `-D warnings`. Gating it says so
-/// honestly instead of keeping a production-looking entry point alive for the
-/// benefit of a lint.
-#[cfg(test)]
-pub(crate) fn reconcile_transport_proxy_snapshot(
-    record: &mut AgentTaskRunRecord,
-    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
-) -> Result<()> {
-    reconcile_transport_proxy_snapshot_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        record,
-        snapshot,
-    )
-}
+// The ambient `reconcile_transport_proxy_snapshot()` shim that used to sit here
+// is gone. It was already `#[cfg(test)]` — its last production caller had moved
+// to the rooted sibling — and the one test still calling it now resolves its
+// own store, so the pair collapses to the rooted form alone (#7505).
 
-/// The store-rooted counterpart of `reconcile_transport_proxy_snapshot`, and
-/// the only form compiled into a production build.
+/// Reconcile a transport-proxy snapshot against an explicitly injected root.
 ///
 /// This is a pure alias for the transport-proxy entry into the one reconcile
 /// owner, so the store is passed straight through: the binding write, the
