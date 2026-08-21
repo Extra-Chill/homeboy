@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.34] - 2026-08-21
+
+### Changed
+- take the artifact root from the store the records land in
+
 ## [0.350.33] - 2026-08-21
 
 ### Changed
