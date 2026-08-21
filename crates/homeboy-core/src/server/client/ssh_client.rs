@@ -82,47 +82,87 @@ pub(crate) fn build_secret_env_stdin_block(secret_env: &BTreeMap<String, String>
     block.into_bytes()
 }
 
-/// Map a finished `ssh` invocation's captured output into a [`CommandOutput`].
-fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutput {
-    match output {
-        Ok(out) => CommandOutput {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            success: out.status.success(),
-            exit_code: out.status.code().unwrap_or(-1),
-            timed_out: false,
-            observation: super::CommandObservation::Complete,
-            child_resource: None,
-        },
-        Err(err) => CommandOutput {
-            stdout: String::new(),
-            stderr: format!("SSH error: {}", err),
-            success: false,
-            exit_code: -1,
-            timed_out: false,
-            observation: super::CommandObservation::SpawnFailed,
-            child_resource: None,
-        },
-    }
-}
-
-fn map_ssh_wait_output(output: std::io::Result<std::process::Output>) -> CommandOutput {
-    match output {
-        Ok(output) => map_ssh_output(Ok(output)),
-        Err(error) => CommandOutput {
-            stdout: String::new(),
-            stderr: format!("SSH error: {error}"),
-            success: false,
-            exit_code: -1,
-            timed_out: false,
-            observation: super::CommandObservation::TransportObservationFailed,
-            child_resource: None,
-        },
-    }
-}
-
 fn write_inline_stdin(writer: &mut impl Write, stdin: &[u8]) -> std::io::Result<()> {
     writer.write_all(stdin)
+}
+
+fn collect_ssh_child_output(
+    child: &mut std::process::Child,
+    pid: u32,
+    status: std::io::Result<std::process::ExitStatus>,
+    stdin_failed: bool,
+    stdout: Option<Receiver<String>>,
+    stderr: Option<Receiver<String>>,
+) -> CommandOutput {
+    let wait_failed = status.is_err();
+    let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+    if wait_failed {
+        let _ = terminate_process_group_with_deadline(child, pid, deadline);
+    }
+    let (stdout, mut stderr, streams_stalled) = collect_streams_before(stdout, stderr, deadline);
+    if streams_stalled {
+        terminate_unreaped_process_group(pid);
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline.");
+    }
+    if stdin_failed {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
+    }
+    match status {
+        Ok(status) => CommandOutput {
+            stdout,
+            stderr,
+            success: status.success() && !stdin_failed && !streams_stalled,
+            exit_code: if streams_stalled {
+                124
+            } else if stdin_failed && status.code().unwrap_or(-1) == 0 {
+                1
+            } else {
+                status.code().unwrap_or(-1)
+            },
+            timed_out: streams_stalled,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else if streams_stalled {
+                super::CommandObservation::StreamDrainTimedOut
+            } else {
+                super::CommandObservation::Complete
+            },
+            child_resource: None,
+        },
+        Err(error) => CommandOutput {
+            stdout,
+            stderr: format!("{stderr}\nSSH error: {error}"),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else {
+                super::CommandObservation::TransportObservationFailed
+            },
+            child_resource: None,
+        },
+    }
+}
+
+pub(super) fn run_ssh_with_child(mut cmd: Command) -> CommandOutput {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return ssh_process_error(error),
+    };
+    let pid = child.id();
+    let stdout = child.stdout.take().map(read_stream);
+    let stderr = child.stderr.take().map(read_stream);
+    let status = child.wait();
+    collect_ssh_child_output(&mut child, pid, status, false, stdout, stderr)
 }
 
 impl SshClient {
@@ -1634,7 +1674,7 @@ impl SshClient {
             SshStdin::File(stdin_file_path) => match std::fs::File::open(stdin_file_path) {
                 Ok(file) => {
                     cmd.stdin(file);
-                    map_ssh_output(cmd.output())
+                    run_ssh_with_child(cmd)
                 }
                 Err(err) => CommandOutput {
                     stdout: String::new(),
@@ -1647,7 +1687,7 @@ impl SshClient {
                 },
             },
             SshStdin::Inline(bytes) => self.run_ssh_with_inline_stdin(cmd, bytes),
-            SshStdin::None => map_ssh_output(cmd.output()),
+            SshStdin::None => run_ssh_with_child(cmd),
         }
     }
 
@@ -1656,7 +1696,7 @@ impl SshClient {
     /// Used for the secret-env block: the bytes carry `NAME=VALUE` secret pairs
     /// the remote read loop imports, so they stay off the `ssh` argv. The block
     /// is small (a handful of tokens) and fits the OS pipe buffer, so writing it
-    /// before `wait_with_output` never deadlocks against captured stdout/stderr.
+    /// before collecting the child cannot deadlock against captured stdout/stderr.
     fn run_ssh_with_inline_stdin(&self, mut cmd: Command, stdin: &[u8]) -> CommandOutput {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1677,36 +1717,20 @@ impl SshClient {
             }
         };
         let pid = child.id();
+        let stdout = child.stdout.take().map(read_stream);
+        let stderr = child.stderr.take().map(read_stream);
         if let Some(mut pipe) = child.stdin.take() {
             if write_inline_stdin(&mut pipe, stdin).is_err() {
                 drop(pipe);
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
                 let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
-                let (stdout, mut stderr, streams_stalled) = collect_streams_before(
-                    child.stdout.take().map(read_stream),
-                    child.stderr.take().map(read_stream),
-                    deadline,
-                );
-                if !stderr.is_empty() && !stderr.ends_with('\n') {
-                    stderr.push('\n');
-                }
-                stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
-                if streams_stalled {
-                    stderr.push_str("\nHomeboy SSH stream drain exceeded its cleanup deadline after stdin delivery failure.");
-                }
-                return CommandOutput {
-                    stdout,
-                    stderr,
-                    success: false,
-                    exit_code: 1,
-                    timed_out: false,
-                    observation: super::CommandObservation::StdinDeliveryFailed,
-                    child_resource: None,
-                };
+                let status = child.wait();
+                return collect_ssh_child_output(&mut child, pid, status, true, stdout, stderr);
             }
             // Drop closes stdin (EOF) so the remote read loop terminates.
         }
-        map_ssh_wait_output(child.wait_with_output())
+        let status = child.wait();
+        collect_ssh_child_output(&mut child, pid, status, false, stdout, stderr)
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {
