@@ -235,9 +235,22 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
+    // One store for the whole handoff. The parent record, the child record, the
+    // supervisor projection, and every compensating failure below are one
+    // transaction: a parent opened in one installation and failed in another
+    // leaves the first one's fence standing open forever, so the detached Cook
+    // reads as live while nothing owns it — and the compensation that was
+    // supposed to release it reports success having touched a different home
+    // (#7505).
+    //
+    // Resolved here rather than at the top of the function so it stays on the
+    // same side of the early returns as the first durable write, and fails in
+    // the same place `record_detached_cook_handoff_parent` used to.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Make the returned Cook ID resolvable before a child exists. If this fails,
     // nothing has been spawned and no detached work can leak.
-    agent_task_lifecycle::record_detached_cook_handoff_parent(&cook_id)?;
+    agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle_store, &cook_id)?;
     // Daemon startup can run reconciliation. Announce the durable admission
     // handle before that potentially slow boundary so a disconnected caller can
     // inspect or cancel it safely.
@@ -257,7 +270,8 @@ pub(super) fn intercept_local_detached_cook(
                 return Ok(None);
             }
             Err(error) => {
-                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                    &lifecycle_store,
                     &cook_id,
                     "durable controller ownership could not be established",
                 );
@@ -270,7 +284,8 @@ pub(super) fn intercept_local_detached_cook(
     {
         Ok(child) => child,
         Err(error) => {
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &lifecycle_store,
                 &cook_id,
                 "detached Cook could not be spawned",
             );
@@ -282,14 +297,16 @@ pub(super) fn intercept_local_detached_cook(
         Ok(identity) => identity,
         Err(error) => {
             terminate_and_reap_detached_child(&mut child);
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &lifecycle_store,
                 &cook_id,
                 "detached Cook child start identity could not be captured",
             );
             return Err(error);
         }
     };
-    let handoff_parent = match agent_task_lifecycle::record_detached_cook_handoff_child(
+    let handoff_parent = match agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+        &lifecycle_store,
         &cook_id,
         pid,
         start_identity.clone(),
@@ -297,7 +314,8 @@ pub(super) fn intercept_local_detached_cook(
         Ok(record) => record,
         Err(error) => {
             terminate_and_reap_detached_child(&mut child);
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &lifecycle_store,
                 &cook_id,
                 "detached Cook child identity could not be persisted",
             );
@@ -322,7 +340,8 @@ pub(super) fn intercept_local_detached_cook(
             Ok(job) => job,
             Err(error) => {
                 terminate_and_reap_detached_child(&mut child);
-                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                    &lifecycle_store,
                     &cook_id,
                     "durable controller ownership could not be established",
                 );
@@ -330,7 +349,11 @@ pub(super) fn intercept_local_detached_cook(
             }
         };
     project_supervisor_or_compensate(
-        agent_task_lifecycle::record_detached_cook_supervisor(&cook_id, controller_job.job_id()),
+        agent_task_lifecycle::record_detached_cook_supervisor_in_store(
+            &lifecycle_store,
+            &cook_id,
+            controller_job.job_id(),
+        ),
         || {
             compensate_supervisor_projection_failure(
                 &controller_client,
@@ -374,7 +397,8 @@ pub(super) fn intercept_local_detached_cook(
                     controller_job.job_id(),
                     "detached Cook handoff output could not be written",
                 );
-                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                    &lifecycle_store,
                     &cook_id,
                     "detached Cook handoff output could not be written",
                 );

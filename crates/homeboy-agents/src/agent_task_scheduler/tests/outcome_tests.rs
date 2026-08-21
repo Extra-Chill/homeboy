@@ -38,7 +38,7 @@ fn provider_reported_model_is_retained_separately_from_requested_and_resolved_mo
 
 #[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
-    let scheduler = AgentTaskScheduler::new(NestedFailedStatusExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusExecutor));
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
@@ -62,7 +62,7 @@ fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
 
 #[test]
 fn nested_terminal_state_failure_fails_succeeded_wrapper_outcome() {
-    let scheduler = AgentTaskScheduler::new(NestedTerminalStateFailedExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(NestedTerminalStateFailedExecutor));
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
@@ -94,7 +94,7 @@ fn nested_terminal_state_failure_fails_succeeded_wrapper_outcome() {
 
 #[test]
 fn nested_agent_result_failure_fails_succeeded_wrapper_outcome() {
-    let scheduler = AgentTaskScheduler::new(NestedAgentResultFailedExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(NestedAgentResultFailedExecutor));
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
@@ -114,7 +114,7 @@ fn nested_agent_result_failure_fails_succeeded_wrapper_outcome() {
 
 #[test]
 fn missing_required_typed_artifacts_fails_succeeded_outcome() {
-    let scheduler = AgentTaskScheduler::new(SuccessMissingRequiredArtifactsExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(SuccessMissingRequiredArtifactsExecutor));
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&[
         "import_validation_result",
@@ -141,7 +141,7 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
 
 #[test]
 fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
-    let scheduler = AgentTaskScheduler::new(NestedFailedStatusMissingArtifactsExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusMissingArtifactsExecutor));
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&[
         "patch",
@@ -193,11 +193,11 @@ fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let patch_path = temp.path().join("patch.diff");
     fs::write(&patch_path, "").expect("empty patch");
-    let scheduler = AgentTaskScheduler::new(SuccessEmptyRequiredTypedArtifactExecutor {
+    let scheduler = AgentTaskScheduler::new(Arc::new(SuccessEmptyRequiredTypedArtifactExecutor {
         artifact_path: patch_path.clone(),
         artifact_name: "patch",
         artifact_kind: "patch",
-    });
+    }));
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
 
@@ -218,11 +218,11 @@ fn empty_required_non_patch_typed_artifact_fails_with_operator_pointer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let report_path = temp.path().join("report.json");
     fs::write(&report_path, "").expect("empty report");
-    let scheduler = AgentTaskScheduler::new(SuccessEmptyRequiredTypedArtifactExecutor {
+    let scheduler = AgentTaskScheduler::new(Arc::new(SuccessEmptyRequiredTypedArtifactExecutor {
         artifact_path: report_path.clone(),
         artifact_name: "agent_result",
         artifact_kind: "json",
-    });
+    }));
 
     let plan = plan_with_required_artifacts(&["agent_result"]);
     assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
@@ -327,7 +327,7 @@ fn nested_terminal_status_detection_only_flags_failure_values() {
 fn incomplete_empty_executor_result_is_retryable_provider_failure() {
     let executor = EmptyIncompleteThenSuccessExecutor::default();
     let attempts = Arc::clone(&executor.attempts);
-    let scheduler = AgentTaskScheduler::new(executor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(executor));
     let mut plan = plan_with_tasks(1);
     plan.options.retry.max_attempts = 2;
     plan.options.execution_budget.max_provider_executions = 2;
@@ -349,7 +349,7 @@ fn incomplete_empty_executor_result_is_retryable_provider_failure() {
 
 #[test]
 fn incomplete_empty_executor_result_fails_when_retries_are_unavailable() {
-    let scheduler = AgentTaskScheduler::new(EmptyIncompleteExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(EmptyIncompleteExecutor));
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
@@ -511,7 +511,7 @@ fn flat_incomplete_provider_result_is_still_detected() {
 
 #[test]
 fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable() {
-    let scheduler = AgentTaskScheduler::new(NestedOutputsIncompleteExecutor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(NestedOutputsIncompleteExecutor));
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 

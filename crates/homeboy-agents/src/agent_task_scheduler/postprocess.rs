@@ -2064,7 +2064,7 @@ mod tests {
                     }
                 }
             }
-            let aggregate = AgentTaskScheduler::new(Executor(Arc::clone(&calls)))
+            let aggregate = AgentTaskScheduler::new(Arc::new(Executor(Arc::clone(&calls))))
                 .with_run_id("restart-run")
                 .run(plan);
             assert_eq!(

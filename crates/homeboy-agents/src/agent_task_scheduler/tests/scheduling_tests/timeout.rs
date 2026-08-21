@@ -8,10 +8,10 @@ mod timeout_tests {
 
     #[test]
     fn normalizes_slow_task_to_timeout() {
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(25),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
 
@@ -36,7 +36,7 @@ mod timeout_tests {
     fn expired_execution_deadline_skips_materialization_and_provider_dispatch() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::ZERO);
         let started = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget.deadline_unix_ms =
             Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1));
@@ -60,10 +60,10 @@ mod timeout_tests {
     #[test]
     fn execution_deadline_is_propagated_to_the_executor_request() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
             observed: Arc::clone(&observed),
             emit_concept_packet: false,
-        });
+        }));
         let mut plan = plan_with_tasks(1);
         let deadline = crate::agent_task_timeout::now_unix_ms().saturating_add(60_000);
         plan.options.execution_budget.deadline_unix_ms = Some(deadline);
@@ -130,10 +130,10 @@ mod timeout_tests {
         )
         .expect("agent result");
 
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(25),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
         plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
@@ -221,7 +221,7 @@ mod timeout_tests {
                 .expect("submit run");
             crate::agent_task_service::run_submitted(
                 "timeout-patch-run".to_string(),
-                PatchThenTimeout,
+                Arc::new(PatchThenTimeout),
             )
             .expect("run timed-out provider");
             let aggregate = crate::agent_task_lifecycle::read_aggregate("timeout-patch-run")
@@ -303,10 +303,10 @@ mod timeout_tests {
         )
         .expect("agent result");
 
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(25),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
         plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });

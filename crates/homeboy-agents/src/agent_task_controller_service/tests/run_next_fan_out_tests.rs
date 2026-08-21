@@ -13,7 +13,7 @@ fn run_next_returns_unclaimed_when_no_pending_actions() {
 
         let result = run_next(
             "loop-service-noop",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("controller polled");
@@ -51,7 +51,7 @@ fn run_next_executes_spawn_task_action_and_records_lineage() {
         );
         controller::write_controller(&record).expect("controller written");
 
-        let executor = CapturingExecutor::default();
+        let executor = Arc::new(CapturingExecutor::default());
         let result = run_next("loop-service-spawn", executor.clone(), &NoopDispatchHook)
             .expect("controller action executed");
 
@@ -120,7 +120,7 @@ fn run_next_indexes_spawn_task_evidence_into_lineage_and_entity_outputs() {
 
         let result = run_next(
             "loop-service-spawn-evidence",
-            EvidenceExecutor,
+            Arc::new(EvidenceExecutor),
             &NoopDispatchHook,
         )
         .expect("controller action executed");
@@ -184,7 +184,7 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
 
         let result = run_next(
             "loop-service-empty-fanout",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("fan-out action executed");
@@ -267,7 +267,7 @@ fn run_next_expands_dynamic_artifact_fan_out_groups() {
         let dispatch = CapturingDispatchHook::default();
         let result = run_next(
             "loop-service-dynamic-fanout",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
         )
         .expect("dynamic fan-out action executed");
@@ -327,7 +327,7 @@ fn fan_out_stops_after_max_items() {
         let dispatch = CapturingDispatchHook::default();
         let result = run_next(
             "loop-service-fanout-max-items",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
         )
         .expect("fan-out action executed");
@@ -383,7 +383,7 @@ fn fan_out_fail_fast_stops_after_first_failure() {
         let dispatch = CountingFailingDispatchHook::default();
         let result = run_next(
             "loop-service-fanout-fail-fast",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
         )
         .expect("fan-out action executed");
@@ -439,7 +439,7 @@ fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
 
         let result = run_next(
             "loop-service-fanout-evidence",
-            EvidenceExecutor,
+            Arc::new(EvidenceExecutor),
             &NoopDispatchHook,
         )
         .expect("fan-out action executed");

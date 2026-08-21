@@ -308,6 +308,30 @@ fn transport_rejection_and_spawn_failure_are_classified_without_transport_output
 }
 
 #[test]
+fn rejected_before_attempt_records_safe_context_and_remains_resendable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport(
+            "test.reject-before-attempt",
+            vec!["sh", "-c", "printf '%s\\n' '{\"schema\":\"homeboy/notification-transport-result/v1\",\"status\":\"rejected\",\"attempts\":0,\"terminal_rejection\":{\"schema\":\"homeboy/notification-transport-rejection/v1\",\"reason_code\":\"invalid_route\",\"validation_field\":\"route\"}}'; exit 1"],
+        );
+        set_default_transport("test.reject-before-attempt");
+
+        cook_terminal(&report("durable_failure", None), None, 1);
+        let rejected = latest_delivery("cook-abc");
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["error_class"], "transport_rejected");
+        assert_eq!(rejected["rejection_reason"], "invalid_route");
+        assert_eq!(rejected["validation_context"]["validation_field"], "route");
+        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
+        assert_eq!(homeboy_core::notify_outbox::dead_letter_entries().len(), 1);
+        assert!(
+            crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
+                .unwrap()
+        );
+    });
+}
+
+#[test]
 fn a_terminal_outcome_survives_a_transport_outage() {
     // The whole point of W3-6. A cook that ran for hours must not lose its
     // outcome because the chat transport was down for a minute.

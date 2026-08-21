@@ -17,10 +17,10 @@ mod artifact_binding_tests {
         fs::write(&patch_path, "diff --git a/a.txt b/a.txt\n").expect("patch");
         fs::write(&transcript_path, "{\"events\":[]}").expect("transcript");
 
-        let scheduler = AgentTaskScheduler::new(RuntimeBundleOutcomeExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(RuntimeBundleOutcomeExecutor {
             patch_path: patch_path.clone(),
             transcript_path: transcript_path.clone(),
-        });
+        }));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].expected_artifacts = vec![
             "patch".to_string(),
@@ -66,10 +66,10 @@ mod artifact_binding_tests {
     #[test]
     fn templates_prior_output_into_downstream_task_request() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: true,
-        });
+        }));
         let mut plan =
             AgentTaskPlan::new("plan-output-dag", vec![request("idea"), request("design")]);
         plan.options.max_concurrency = 2;
@@ -131,10 +131,10 @@ mod artifact_binding_tests {
     #[test]
     fn binds_typed_artifact_payload_into_downstream_task_request() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: true,
-        });
+        }));
         let mut plan = AgentTaskPlan::new(
             "plan-artifact-dag",
             vec![request("idea"), request("design")],
@@ -194,10 +194,10 @@ mod artifact_binding_tests {
     fn required_concept_packet_binding_uses_canonical_typed_artifact() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler =
-            crate::agent_task_scheduler::AgentTaskScheduler::new(ConceptPacketExecutor {
+            crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
                 observed: Arc::clone(&observed),
                 emit_concept_packet: true,
-            });
+            }));
         let mut plan = AgentTaskPlan::new(
             "plan-concept-packet-typed-artifact",
             vec![request("idea"), request("build")],
@@ -243,10 +243,10 @@ mod artifact_binding_tests {
     fn required_concept_packet_binding_fails_without_canonical_typed_artifact() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler =
-            crate::agent_task_scheduler::AgentTaskScheduler::new(ConceptPacketExecutor {
+            crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
                 observed: Arc::clone(&observed),
                 emit_concept_packet: false,
-            });
+            }));
         let mut plan = AgentTaskPlan::new(
             "plan-concept-packet-missing-typed-artifact",
             vec![request("idea"), request("build")],
@@ -315,7 +315,7 @@ mod artifact_binding_tests {
 
     #[test]
     fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
-        let scheduler = AgentTaskScheduler::new(GenericChildRunExecutor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(GenericChildRunExecutor));
         let mut plan = AgentTaskPlan::new(
             "fuzz/campaign-1",
             vec![request("case-a"), request("case-b")],
@@ -348,10 +348,10 @@ mod artifact_binding_tests {
     #[test]
     fn skips_required_typed_artifact_binding_when_artifact_is_missing() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: false,
-        });
+        }));
         let mut plan = AgentTaskPlan::new(
             "plan-artifact-skip",
             vec![request("idea"), request("design")],
@@ -400,10 +400,10 @@ mod artifact_binding_tests {
     #[test]
     fn optional_typed_artifact_binding_uses_default() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: false,
-        });
+        }));
         let mut plan = AgentTaskPlan::new(
             "plan-artifact-default",
             vec![request("idea"), request("design")],
@@ -448,10 +448,10 @@ mod artifact_binding_tests {
     #[test]
     fn skips_downstream_task_when_required_output_is_missing() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
             observed: Arc::clone(&observed),
             include_issue_number: false,
-        });
+        }));
         let mut plan =
             AgentTaskPlan::new("plan-output-skip", vec![request("idea"), request("design")]);
         plan.options.max_concurrency = 2;

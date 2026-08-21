@@ -21,16 +21,24 @@ use homeboy_core::worktree_providers::WorktreeProviderTerminalDisposition;
 /// Runs the executable preflight validations, rebuilds the full release plan
 /// after those preflights, then walks the planned release steps in order.
 pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
-    run_with_plan(component_id, options).map(|(_plan, run, _workspace)| run)
+    // The public convenience entry: callers without roots of their own get one
+    // resolution here, which `run_with_plan` then threads through the release.
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    run_with_plan(&roots, component_id, options).map(|(_plan, run, _workspace)| run)
 }
 
 /// Execute a release and return the plan that drove it alongside the run.
 pub(crate) fn run_with_plan(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<(ReleasePlan, ReleaseRun, Option<ReleaseWorkspaceOutput>)> {
+    // Roots arrive from the caller and cover the entire release: workspace
+    // provisioning and its finalization record, both plan phases, packaging,
+    // cleanup, and the deploy checkpoint. A release therefore cannot package
+    // into one home and then record its state against another (#7505).
     let component = super::context::load_component(component_id, options)?;
-    let mut workspace = super::workspace::ReleaseWorkspace::select(&component)?;
+    let mut workspace = super::workspace::ReleaseWorkspace::select(roots, &component)?;
     let mut workspace_options = options.clone();
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
@@ -38,6 +46,7 @@ pub(crate) fn run_with_plan(
 
     let staging_source_sha = workspace.source_sha();
     match run_with_plan_inner(
+        roots,
         component_id,
         &workspace_options,
         checkout_guard.as_ref(),
@@ -94,6 +103,7 @@ pub(crate) fn run_with_plan(
 }
 
 fn run_with_plan_inner(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
@@ -106,6 +116,7 @@ fn run_with_plan_inner(
     let mut timer = PhaseTimer::new();
     let initial_stop = timer.time("package_preflight", || {
         super::execution_plan::execute_plan_steps_at_source(
+            roots,
             &initial_plan.plan.steps,
             component_id,
             options,
@@ -142,6 +153,7 @@ fn run_with_plan_inner(
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
+            roots,
             &release_plan.plan.steps,
             component_id,
             options,
