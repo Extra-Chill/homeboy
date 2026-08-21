@@ -1509,7 +1509,7 @@ fn finalize_provider_worktrees(
     plan: &BatchCookFanoutPlan,
     report: &agent_task_service::AgentTaskCookBatchReport,
 ) -> Result<()> {
-    if !configured_provider_lifecycle()? {
+    if !configured_provider_workspace_creation()? {
         return Ok(());
     }
     let config = homeboy::core::defaults::load_config();
@@ -1530,6 +1530,14 @@ fn finalize_provider_worktrees(
                 &config,
                 None,
             )?;
+        if homeboy::core::worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
+            &resolution.provider_id,
+            &config,
+        )?
+        .is_none()
+        {
+            continue;
+        }
         let disposition = if cell.exit_code == 0 {
             homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
         } else {
@@ -2403,7 +2411,7 @@ fn queue_or_reuse_worktrees(
     args: &AgentTaskFanoutCookBatchArgs,
     plan: &BatchCookFanoutPlan,
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
-    let provider_lifecycle = configured_provider_lifecycle()?;
+    let provider_workspace_creation = configured_provider_workspace_creation()?;
     let queue_create = |cooks: Vec<&BatchCookSpec>, dry_run: bool| {
         worktree::queue_create(worktree::WorktreeQueueCreateOptions {
             repo: args.repo.clone(),
@@ -2412,7 +2420,7 @@ fn queue_or_reuse_worktrees(
                 task_url: cook.task_url.clone(),
                 task_ref: cook.task_url.clone(),
                 run_id: Some(cook.run_id()),
-                provider_lifecycle: provider_lifecycle.then(|| {
+                provider_lifecycle: provider_workspace_creation.then(|| {
                     homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
                         purpose: "agent_task_cook".to_string(),
                         owner_run_ref: cook.run_id(),
@@ -2434,7 +2442,9 @@ fn queue_or_reuse_worktrees(
     let mut to_create = Vec::new();
     for cook in &plan.cooks {
         let branch = cook.head.as_ref().expect("generated cooks have heads");
-        match (!provider_lifecycle).then(|| active_registered_worktree_path(&cook.to_worktree)) {
+        match (!provider_workspace_creation)
+            .then(|| active_registered_worktree_path(&cook.to_worktree))
+        {
             Some(Some(path)) => {
                 reused.push(worktree::WorktreeQueueCreateRow {
                     branch: branch.clone(),
@@ -2510,7 +2520,7 @@ fn with_workspace_owner_repair_commands(
     plan: &BatchCookFanoutPlan,
     mut worktrees: worktree::WorktreeQueueCreateOutput,
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
-    if !configured_provider_lifecycle()? {
+    if !configured_provider_workspace_creation()? {
         return Ok(worktrees);
     }
 
@@ -2632,7 +2642,11 @@ fn plan_provider_worktrees_dry_run(
 }
 
 fn configured_provider_workspace_creation() -> Result<bool> {
-    configured_provider_lifecycle()
+    let config = homeboy::core::defaults::load_config();
+    Ok(config
+        .worktree_providers
+        .values()
+        .any(|provider| provider.enabled && provider.apply_enabled))
 }
 
 /// Dry-run observes existing managed worktrees but only plans creation for
@@ -2709,20 +2723,6 @@ fn active_registered_worktree_path(handle: &str) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn configured_provider_lifecycle() -> Result<bool> {
-    let config = homeboy::core::defaults::load_config();
-    for (id, provider) in &config.worktree_providers {
-        if provider.enabled
-            && provider.apply_enabled
-            && provider.commands.ensure.is_some()
-            && homeboy::core::worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(id, &config)?.is_some()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn preflight_batch_cook_recipes(
@@ -6156,6 +6156,130 @@ fi
                 .expect("planned cooks")
                 .iter()
                 .all(|cook| cook["workspace"].is_string()));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fanout_uses_an_ensure_resolve_provider_without_a_finalizer_for_creation_binding_and_repair()
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|_| {
+            let fixture = tempfile::tempdir().expect("provider fixture");
+            let workspace_root = fixture.path().join("worktrees");
+            let ensured = fixture.path().join("ensured");
+            let provider = fixture.path().join("provider");
+            std::fs::create_dir(&workspace_root).expect("provider worktree directory");
+            std::fs::write(
+                &provider,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  path='{}/'$2\n  if [ -d \"$path\" ]; then\n    branch=$(git -C \"$path\" branch --show-current)\n    printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"%s\",\"branch\":\"%s\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\" \"$path\" \"$branch\"\n  else\n    exit 1\n  fi\n  ;;\nensure)\n  path='{}/'$2\n  git init --quiet -b \"$5\" \"$path\"\n  printf '%s|%s|%s|%s\\n' \"$2\" \"$8\" \"$9\" \"${{10}}\" >> '{}'\n  ;;\nesac\n",
+                    workspace_root.display(),
+                    workspace_root.display(),
+                    ensured.display(),
+                ),
+            )
+            .expect("write provider");
+            let mut permissions = std::fs::metadata(&provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "fixture".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        resolve: Some(vec![
+                            provider.display().to_string(),
+                            "resolve".to_string(),
+                            "{handle}".to_string(),
+                        ]),
+                        resolve_not_found_exit_codes: vec![1],
+                        ensure: Some(vec![
+                            provider.display().to_string(),
+                            "ensure".to_string(),
+                            "{handle}".to_string(),
+                            "{repo}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                            task_url: None,
+                        },
+                    ),
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let mut args = cook_batch_args();
+            args.dry_run = false;
+            let mut plan = build_cook_batch_plan(&args).expect("fanout plan");
+            let worktrees =
+                queue_or_reuse_worktrees(&args, &plan).expect("provider worktree queue");
+
+            assert!(worktrees.rows.iter().all(|row| {
+                row.status == worktree::WorktreeQueueCreateStatus::Created
+                    && row.path.as_deref().is_some_and(|path| {
+                        path.starts_with(workspace_root.to_string_lossy().as_ref())
+                    })
+            }));
+            assert!(std::fs::read_to_string(&ensured)
+                .expect("provider ensure records")
+                .contains("agent_task_cook"));
+            assert!(worktrees.rows.iter().all(|row| {
+                row.command.first() == Some(&provider.display().to_string())
+                    && !row
+                        .command
+                        .windows(3)
+                        .any(|argv| argv == ["homeboy", "worktree", "create"])
+            }));
+
+            bind_materialized_worktree_paths(&mut plan, &worktrees);
+            assert!(plan.cooks.iter().all(|cook| cook.workspace.is_some()));
+
+            let mut blocked = worktrees.clone();
+            blocked.rows[0].status = worktree::WorktreeQueueCreateStatus::Failed;
+            let actions = cook_batch_next_actions(
+                &args,
+                &plan.fanout_id,
+                "blocked",
+                true,
+                false,
+                &blocked,
+                false,
+                None,
+            );
+            let repair_commands = action_commands(&actions);
+            assert!(repair_commands
+                .iter()
+                .any(|command| command.contains(&provider.display().to_string())));
+            assert!(!repair_commands
+                .iter()
+                .any(|command| command.contains("homeboy worktree create")));
         });
     }
 
