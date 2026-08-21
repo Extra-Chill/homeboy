@@ -16,13 +16,22 @@ pub fn update_all(force: bool) -> UpdateAllResult {
     let mut skipped_details = Vec::new();
     let mut repaired_source_metadata = Vec::new();
     let mut linked_groups: HashMap<String, Vec<String>> = HashMap::new();
+    // One resolution for the whole sweep. Grouping asks whether several
+    // extensions share a Git root, which is only a meaningful question if every
+    // member was resolved against the same installation (#7505).
+    //
+    // An unresolvable config root yields no groups, exactly as the per-item
+    // form did when its `paths::extension` call failed.
+    let config_root = homeboy_core::paths::homeboy().ok();
     for id in &extension_ids {
-        if homeboy_core::extension_store::is_extension_linked(id) {
-            if let Ok(path) = homeboy_core::paths::extension(id) {
-                if let Ok(source) = std::fs::canonicalize(path) {
-                    if let Ok(root) = homeboy_core::git::get_git_root(&source.to_string_lossy()) {
-                        linked_groups.entry(root).or_default().push(id.clone());
-                    }
+        let Some(config_root) = config_root.as_deref() else {
+            break;
+        };
+        if homeboy_core::extension_store::is_extension_linked_in_root(config_root, id) {
+            let path = homeboy_core::paths::extension_in_root(config_root, id);
+            if let Ok(source) = std::fs::canonicalize(path) {
+                if let Ok(root) = homeboy_core::git::get_git_root(&source.to_string_lossy()) {
+                    linked_groups.entry(root).or_default().push(id.clone());
                 }
             }
         }
