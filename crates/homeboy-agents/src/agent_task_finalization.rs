@@ -48,7 +48,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, true, None)
 }
 
-pub(crate) fn finalize_pr_with_backend_in_store<B: AgentTaskPrFinalizationBackend>(
+pub fn finalize_pr_with_backend_in_store<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,

@@ -67,7 +67,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 /// `with_runner_continuation` is deliberately still process-global: the runner
 /// continuation registry is configured trust material and a subprocess
 /// contract, not a durable lifecycle root (#12618).
-pub(crate) fn recover_transport_proxy_in_store(
+pub fn recover_transport_proxy_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<TransportProxyRecovery>> {

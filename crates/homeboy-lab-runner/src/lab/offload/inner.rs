@@ -1324,6 +1324,12 @@ pub(crate) fn run_lab_offload_inner(
     mut overhead: LabOffloadOverhead,
     prepared_runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
+    // One store for the whole offload. Every phase record, plan read,
+    // admission reservation and pre-execution failure below describes one
+    // run; separately resolved homes let a phase land beside a record that
+    // does not have it (#7505).
+    let lab_lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let runner_id = &selection.runner_id;
     let mut runner = load(runner_id)?;
     let mut runner_status = status_for_admission(runner_id)?;
@@ -1395,7 +1401,8 @@ pub(crate) fn run_lab_offload_inner(
             Ok(submission) => submission,
             Err(error) => {
                 if error.retryable != Some(true) {
-                    let _ = agent_task_lifecycle::record_pre_execution_failure(
+                    let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
+                        &lab_lifecycle_store,
                         run_id,
                         durable_plan,
                         "lab_staging_submission",
@@ -1577,23 +1584,29 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(homeboy_core::defaults::load_config().agent_task.rotation)
             .unwrap_or(serde_json::Value::Null);
     if let Some(run_id) = pre_acceptance_run_id.as_deref() {
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "validation",
-            None,
-            Some(&source_checkout),
-            Some(&provider_rotation),
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "validation",
+                remote_workspace: None,
+                source_checkout: Some(&source_checkout),
+                provider_rotation: Some(&provider_rotation),
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "materializing",
-            None,
-            Some(&source_checkout),
-            Some(&provider_rotation),
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "materializing",
+                remote_workspace: None,
+                source_checkout: Some(&source_checkout),
+                provider_rotation: Some(&provider_rotation),
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
     }
     let homeboy_path = final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?;
@@ -1883,7 +1896,8 @@ pub(crate) fn run_lab_offload_inner(
                 // controller idempotency key instead of contradicting live work.
                 if error.retryable != Some(true) {
                     if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
-                        let _ = agent_task_lifecycle::record_pre_execution_failure(
+                        let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
+                            &lab_lifecycle_store,
                             run_id,
                             durable_plan,
                             "lab_staging_submission",
@@ -1938,10 +1952,13 @@ pub(crate) fn run_lab_offload_inner(
                 error
             };
             if let Some(run_id) = pre_acceptance_run_id.as_deref() {
-                if let Ok(plan) = agent_task_lifecycle::load_plan(run_id) {
+                if let Ok(plan) =
+                    agent_task_lifecycle::load_plan_in_store(&lab_lifecycle_store, run_id)
+                {
                     // Staging is still controller-side. Make a failed handoff
                     // actionable instead of retaining an unclaimed proxy.
-                    let _ = agent_task_lifecycle::record_pre_execution_failure(
+                    let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
+                        &lab_lifecycle_store,
                         run_id,
                         &plan,
                         "lab_workspace_stage",
@@ -2051,14 +2068,17 @@ pub(crate) fn run_lab_offload_inner(
     command = runtime.command;
     remote_command = runtime.remote_command;
     if let Some(run_id) = agent_task_run_id.as_deref() {
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "hydrating",
-            Some(&remote_cwd),
-            Some(&source_checkout),
-            Some(&provider_rotation),
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "hydrating",
+                remote_workspace: Some(&remote_cwd),
+                source_checkout: Some(&source_checkout),
+                provider_rotation: Some(&provider_rotation),
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
     }
 
@@ -2075,14 +2095,17 @@ pub(crate) fn run_lab_offload_inner(
     let dependency_hydration = recorded_dependency_hydration.hydration;
     plan = dependency_hydration.plan;
     if let Some(run_id) = agent_task_run_id.as_deref() {
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "dispatching",
-            Some(&remote_cwd),
-            Some(&source_checkout),
-            Some(&provider_rotation),
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "dispatching",
+                remote_workspace: Some(&remote_cwd),
+                source_checkout: Some(&source_checkout),
+                provider_rotation: Some(&provider_rotation),
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
     }
 
@@ -2338,7 +2361,8 @@ pub(crate) fn run_lab_offload_inner(
     // run id in the meantime (#9163).
     if let (Some(run_id), Some(reservation)) = (agent_task_run_id.as_deref(), admission.as_ref()) {
         let authority = reservation.authority();
-        agent_task_lifecycle::record_lab_admission_reservation(
+        agent_task_lifecycle::record_lab_admission_reservation_in_store(
+            &lab_lifecycle_store,
             run_id,
             runner_id,
             authority.daemon_lease_id(),

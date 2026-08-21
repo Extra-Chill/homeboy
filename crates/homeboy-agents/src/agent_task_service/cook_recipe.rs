@@ -45,9 +45,9 @@ pub struct CookRecipeStore {
 ///
 /// `created` is elected by the exclusive recipe write, not by a caller's
 /// observation of the store before it starts materializing an attempt.
-pub(crate) struct InitialRecipeMaterialization {
-    pub(crate) recipe: AgentTaskCookRecipe,
-    pub(crate) created: bool,
+pub struct InitialRecipeMaterialization {
+    pub recipe: AgentTaskCookRecipe,
+    pub created: bool,
 }
 
 impl InitialRecipeMaterialization {
@@ -354,7 +354,7 @@ pub fn persist_initial_recipe(
     default_store()?.persist_initial_recipe(options)
 }
 
-fn persist_initial_recipe_in_store(
+pub fn persist_initial_recipe_in_store(
     store: &CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
 ) -> Result<InitialRecipeMaterialization> {
@@ -520,7 +520,7 @@ pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptio
     default_store()?.validate_initial_recipe_compatibility(options)
 }
 
-fn validate_initial_recipe_compatibility_in_store(
+pub fn validate_initial_recipe_compatibility_in_store(
     store: &CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
@@ -988,7 +988,7 @@ pub fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
-fn record_recipe_attempt_in_store(
+pub fn record_recipe_attempt_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
     attempt: u32,
@@ -1059,7 +1059,7 @@ pub fn record_recipe_attempt_replacement(
     default_store()?.record_recipe_attempt_replacement(cook_id, replaced_run_id, replacement_run_id)
 }
 
-fn record_recipe_attempt_replacement_in_store(
+pub fn record_recipe_attempt_replacement_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
     replaced_run_id: &str,
@@ -1518,7 +1518,7 @@ pub fn continuation_state(cook_id: &str, run_id: &str) -> Result<CookContinuatio
 
 /// [`continuation_state`] against an explicitly injected recipe store. Every
 /// path this reads hangs off that store's own queue root.
-fn continuation_state_in_store(
+pub fn continuation_state_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
     run_id: &str,
@@ -1565,7 +1565,7 @@ pub fn claim_continuation_for_recovery(
 /// The recipe membership check and the atomic failed-to-claimed rename are one
 /// decision: a run authorized by one home's recipe must never be able to claim
 /// another home's queue entry.
-fn claim_continuation_for_recovery_in_store(
+pub fn claim_continuation_for_recovery_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
     run_id: &str,
@@ -1747,7 +1747,7 @@ pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<Stri
 /// another home would select an attempt this recipe has never declared — which
 /// is exactly the mismatch the guard below reports, only sourced from the wrong
 /// installation (#7505).
-fn resolve_cook_continuation_run_id_in_store(
+pub fn resolve_cook_continuation_run_id_in_store(
     store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_or_attempt_id: &str,

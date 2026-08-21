@@ -27,7 +27,7 @@ pub fn record_runner_job_identity(
 ///
 /// The read and the write are one operation — the record read back is the one
 /// returned to the caller — so they must name the same installation (#7505).
-pub(crate) fn record_runner_job_identity_in_store(
+pub fn record_runner_job_identity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
@@ -71,7 +71,7 @@ pub fn accepted_lab_runner_job_identity(
 /// verified against another's record would report "not accepted" for a run that
 /// is already bound — the mirror image of the double-acceptance the write side
 /// refuses — so both halves have to name the same store (#7505).
-pub(crate) fn accepted_lab_runner_job_identity_in_store(
+pub fn accepted_lab_runner_job_identity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
@@ -700,7 +700,7 @@ pub fn project_terminal_runner_exec_result(
 /// artifact-promotion checkpoint. Rooting it through the maintenance-deferring
 /// lifecycle opener would have changed behaviour rather than just its home
 /// (#7505).
-pub(crate) fn project_terminal_runner_exec_result_in_store(
+pub fn project_terminal_runner_exec_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,

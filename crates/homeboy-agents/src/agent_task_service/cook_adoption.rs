@@ -1027,7 +1027,7 @@ pub(crate) fn candidate_adoption_source(
     candidate_adoption_source_in_store(&lifecycle_store, record, source_request)
 }
 
-fn candidate_adoption_source_in_store(
+pub(crate) fn candidate_adoption_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     source_request: &AgentTaskRequest,

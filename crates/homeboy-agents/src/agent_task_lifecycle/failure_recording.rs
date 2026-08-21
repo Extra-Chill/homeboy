@@ -13,7 +13,7 @@ pub fn record_pre_execution_failure(
     record_pre_execution_failure_in_store(&lifecycle_store, run_id, plan, phase, error)
 }
 
-pub(crate) fn record_pre_execution_failure_in_store(
+pub fn record_pre_execution_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -1809,7 +1809,7 @@ pub fn verified_controller_artifact_projection_path(
     verified_controller_artifact_projection_path_in_store(&store, run_id, task_id, artifact)
 }
 
-pub(crate) fn verified_controller_artifact_projection_path_in_store(
+pub fn verified_controller_artifact_projection_path_in_store(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
     task_id: &str,
@@ -1935,7 +1935,7 @@ pub fn verified_controller_artifact_projection(
     )
 }
 
-pub(crate) fn verified_controller_artifact_projection_in_store(
+pub fn verified_controller_artifact_projection_in_store(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
     task_id: &str,

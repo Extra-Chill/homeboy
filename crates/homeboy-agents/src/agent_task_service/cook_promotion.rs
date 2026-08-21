@@ -156,7 +156,7 @@ pub(crate) fn canonical_cook_patch_artifact_id(
     canonical_cook_patch_artifact_id_in_store(&lifecycle_store, options, run_id)
 }
 
-fn canonical_cook_patch_artifact_id_in_store(
+pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
     run_id: &str,
