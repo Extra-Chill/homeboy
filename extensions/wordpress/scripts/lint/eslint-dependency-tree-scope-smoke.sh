@@ -17,7 +17,7 @@ component_dir="${TMPDIR}/component"
 eslint_log="${TMPDIR}/eslint-args.txt"
 
 mkdir -p "${EXTENSION_PATH}/node_modules/.bin"
-touch "${EXTENSION_PATH}/eslint.config.mjs"
+touch "${EXTENSION_PATH}/eslint.runner.config.mjs"
 
 cat > "${EXTENSION_PATH}/node_modules/.bin/eslint" <<'SH'
 #!/usr/bin/env bash

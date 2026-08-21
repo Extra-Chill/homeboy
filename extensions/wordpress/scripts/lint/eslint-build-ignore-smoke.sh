@@ -21,14 +21,7 @@ for index in $(seq 1 1500); do
     printf 'const = generated%s;\n' "$index" > "${component_dir}/nested/build/generated-${index}.js"
 done
 
-cat > "${component_dir}/eslint.config.mjs" <<JS
-/**
- * External dependencies
- */
-import config from '${EXTENSION_PATH}/eslint.config.mjs';
-
-export default config;
-JS
+printf '%s\n' 'export default [];' > "${component_dir}/eslint.config.mjs"
 
 run_eslint() {
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
@@ -41,7 +34,8 @@ run_eslint() {
 run_package_eslint() {
     (
         cd "$component_dir"
-        "${EXTENSION_PATH}/node_modules/.bin/eslint" .
+        "${EXTENSION_PATH}/node_modules/.bin/eslint" \
+            --config "${EXTENSION_PATH}/eslint.config.mjs" .
     )
 }
 

@@ -39,7 +39,7 @@ assert_not_contains() {
 component_dir="${TMPDIR}/component"
 findings_file="${TMPDIR}/eslint-findings.json"
 mkdir -p "${component_dir}/inc" "${component_dir}/assets" "${EXTENSION_PATH}/node_modules/.bin"
-touch "${EXTENSION_PATH}/eslint.config.mjs"
+touch "${EXTENSION_PATH}/eslint.runner.config.mjs"
 printf '%s\n' '<?php' > "${component_dir}/inc/Thing.php"
 printf '%s\n' 'const answer = 42;' > "${component_dir}/assets/app.js"
 

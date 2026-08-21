@@ -83,6 +83,7 @@
     "lint:js": "eslint",
     "test:eslint-build-ignore": "bash scripts/lint/eslint-build-ignore-smoke.sh",
     "test:eslint-dependency-tree-scope": "bash scripts/lint/eslint-dependency-tree-scope-smoke.sh",
+    "test:eslint-provider-config": "bash tests/eslint-provider-config-smoke.sh",
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:admin-page-fuzz-surfaces": "node tests/admin-page-fuzz-surfaces-smoke.js",
     "test:wordpress-admin-form-action-surfaces": "node tests/wordpress-admin-form-action-surfaces-smoke.js",
@@ -207,7 +208,8 @@
   },
   "devDependencies": {
     "@wordpress/eslint-plugin": "^25.3.0",
-    "eslint": "^9.39.4"
+    "eslint": "^9.39.4",
+    "jiti": "^2.7.0"
   },
   "overrides": {
     "minimatch@>=9.0.0 <9.0.6": "^10.0.1"

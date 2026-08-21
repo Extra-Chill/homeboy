@@ -18,6 +18,9 @@ export default [
       'tests/',
     ],
   },
+  {
+    files: [ '**/*.{js,jsx,ts,tsx}' ],
+  },
   ...wordpress.configs.recommended,
   {
     languageOptions: {

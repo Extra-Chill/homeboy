@@ -156,7 +156,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
-ESLINT_CONFIG="${EXTENSION_PATH}/eslint.config.mjs"
+ESLINT_CONFIG="${EXTENSION_PATH}/eslint.runner.config.mjs"
 
 # Validate tools exist
 if [ ! -f "$ESLINT_BIN" ]; then
@@ -165,7 +165,7 @@ if [ ! -f "$ESLINT_BIN" ]; then
 fi
 
 if [ ! -f "$ESLINT_CONFIG" ]; then
-    echo "Warning: eslint.config.mjs not found at $ESLINT_CONFIG, skipping JavaScript linting"
+    echo "Warning: ESLint runner config not found at $ESLINT_CONFIG, skipping JavaScript linting"
     exit 0
 fi
 
@@ -180,8 +180,9 @@ if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
-# Build base ESLint arguments. Keep config anchored to this extension so
-# worktree targets do not also load a primary-checkout config.
+# Build base ESLint arguments. The provider config composes a standard flat
+# config only from this resolved component path, never from a primary checkout.
+export HOMEBOY_ESLINT_COMPONENT_PATH="$PLUGIN_PATH"
 eslint_base_args=(--config "$ESLINT_CONFIG")
 
 if [ -n "$TEXT_DOMAIN" ]; then

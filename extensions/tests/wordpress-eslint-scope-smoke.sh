@@ -75,6 +75,10 @@ cat > "$FAKE_EXTENSION/eslint.config.mjs" <<'JS'
 export default [];
 JS
 
+cat > "$FAKE_EXTENSION/eslint.runner.config.mjs" <<'JS'
+export default [];
+JS
+
 cat > "$SIDECAR_WRITER" <<'SH'
 homeboy_sidecar_merge_json_array() {
     local target="$1"
@@ -167,7 +171,7 @@ HOMEBOY_LINT_FILE='assets/admin.js' \
 assert_contains "$TMP_DIR/js-success.out" "Linting single file: assets/admin.js"
 assert_contains "$TMP_DIR/js-success.out" "ESLint linting passed"
 assert_contains "$ESLINT_ARGS_FILE" "--config"
-assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION/eslint.config.mjs"
+assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION/eslint.runner.config.mjs"
 assert_contains "$ESLINT_ARGS_FILE" "assets/admin.js"
 
 set +e
