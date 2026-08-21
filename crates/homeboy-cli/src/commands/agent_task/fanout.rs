@@ -82,49 +82,132 @@ type CookAttemptDispatcherFactory = dyn Fn(
 
 const FANOUT_COORDINATOR_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
-const DRY_RUN_PLANNER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Each static dependency gets an independent budget. Bounded inputs make this
+/// a per-phase cost ceiling rather than one workspace-size-dependent deadline.
+const DRY_RUN_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRY_RUN_MAX_ISSUES: usize = 128;
 const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
 const DRY_RUN_MAX_GATE_BYTES: usize = 8 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static STATIC_WORKTREE_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Dry-run is a static preview, not a smaller execution. Keep its budget
 /// separate from Cook's execution deadline and report only planning phases so
 /// #10019 remains the owner of foreground execution progress.
 struct DryRunPlanner {
-    deadline: Instant,
     phase: &'static str,
+    phase_started_at: Instant,
+    phase_timeout: Duration,
     replay_command: String,
 }
 
 impl DryRunPlanner {
     fn new(args: &AgentTaskFanoutCookBatchArgs) -> Self {
         Self {
-            deadline: Instant::now() + DRY_RUN_PLANNER_TIMEOUT,
             phase: "initializing",
+            phase_started_at: Instant::now(),
+            phase_timeout: Duration::from_secs(
+                args.dry_run_planner_timeout_seconds
+                    .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs()),
+            ),
             replay_command: dry_run_replay_command(args),
         }
     }
 
-    fn advance(&mut self, phase: &'static str, unresolved_dependency: &'static str) -> Result<()> {
-        if Instant::now() >= self.deadline {
-            return Err(Error::new(
-                ErrorCode::ValidationInvalidArgument,
-                "fanout dry-run planner deadline exceeded",
-                serde_json::json!({
-                    "reason": "planner_deadline_exceeded",
-                    "planner_timeout_seconds": DRY_RUN_PLANNER_TIMEOUT.as_secs(),
-                    "phase": self.phase,
-                    "unresolved_dependency": unresolved_dependency,
-                    "replay_command": self.replay_command,
-                }),
-            ));
-        }
+    fn begin(&mut self, phase: &'static str) {
         self.phase = phase;
+        self.phase_started_at = Instant::now();
         eprintln!(
             "{{\"event\":\"dry_run_planning_progress\",\"phase\":{}}}",
             serde_json::to_string(phase).expect("phase serializes"),
         );
+    }
+
+    fn run<T>(
+        &mut self,
+        phase: &'static str,
+        unresolved_dependency: &'static str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.begin(phase);
+        let result = operation();
+        self.finish(unresolved_dependency)?;
+        result.map_err(|error| self.failure(error, unresolved_dependency))
+    }
+
+    /// Static planning workers own cloned inputs and have no mutation authority.
+    /// A slow local registry or contract read therefore cannot hold the caller
+    /// past this phase's budget; dropping the join handle is safe because the
+    /// worker has no durable or repository side effects.
+    fn run_bounded<T: Send + 'static>(
+        &mut self,
+        phase: &'static str,
+        unresolved_dependency: &'static str,
+        operation: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.begin(phase);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name(format!("homeboy-dry-run-{phase}"))
+            .spawn(move || {
+                let _ = sender.send(operation());
+            })
+            .map_err(|error| {
+                self.failure(
+                    Error::internal_unexpected(format!("start dry-run planner worker: {error}")),
+                    unresolved_dependency,
+                )
+            })?;
+        let result = match receiver.recv_timeout(self.phase_timeout) {
+            Ok(result) => {
+                worker.join().map_err(|_| {
+                    self.failure(
+                        Error::internal_unexpected("dry-run planner worker panicked"),
+                        unresolved_dependency,
+                    )
+                })?;
+                result
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(
+                    self.timeout_error(unresolved_dependency, self.phase_started_at.elapsed())
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                return Err(self.failure(
+                    Error::internal_unexpected("dry-run planner worker exited without a result"),
+                    unresolved_dependency,
+                ));
+            }
+        };
+        result.map_err(|error| self.failure(error, unresolved_dependency))
+    }
+
+    fn finish(&self, unresolved_dependency: &'static str) -> Result<()> {
+        let elapsed = self.phase_started_at.elapsed();
+        if elapsed > self.phase_timeout {
+            return Err(self.timeout_error(unresolved_dependency, elapsed));
+        }
         Ok(())
+    }
+
+    fn timeout_error(&self, unresolved_dependency: &'static str, elapsed: Duration) -> Error {
+        Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            "fanout dry-run planner phase deadline exceeded",
+            serde_json::json!({
+                "reason": "planner_deadline_exceeded",
+                "planner_timeout_seconds": self.phase_timeout.as_secs(),
+                "phase": self.phase,
+                "phase_elapsed_ms": elapsed.as_millis(),
+                "unresolved_dependency": unresolved_dependency,
+                "replay_command": self.replay_command,
+            }),
+        )
     }
 
     fn defer(&self, phase: &'static str, unresolved_dependency: &'static str) -> Error {
@@ -142,6 +225,8 @@ impl DryRunPlanner {
 
     fn failure(&self, mut error: Error, unresolved_dependency: &'static str) -> Error {
         error.details["phase"] = Value::String(self.phase.to_string());
+        error.details["phase_elapsed_ms"] =
+            Value::Number((self.phase_started_at.elapsed().as_millis() as u64).into());
         error.details["unresolved_dependency"] = Value::String(unresolved_dependency.to_string());
         error.details["replay_command"] = Value::String(self.replay_command.clone());
         error
@@ -1979,7 +2064,7 @@ fn cook_batch_inner(
 /// dependency.
 fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
     let mut planner = DryRunPlanner::new(&args);
-    planner.advance("gate_inputs", "declared gate inputs")?;
+    planner.begin("gate_inputs");
     if args.issues.len() > DRY_RUN_MAX_ISSUES {
         return Err(planner.defer("gate_inputs", "bounded issue list"));
     }
@@ -2024,33 +2109,56 @@ fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value
     {
         return Err(planner.defer("gate_inputs", "file-backed verification profiles"));
     }
-    planner.advance("repository", "supplied repository identifier")?;
-    normalize_static_cook_batch_repo(&mut args)
-        .map_err(|error| planner.failure(error, "registered primary repository"))?;
+    planner.finish("declared gate inputs")?;
+    let mut normalized_args = args.clone();
+    normalized_args =
+        planner.run_bounded("repository", "registered primary repository", move || {
+            normalize_static_cook_batch_repo(&mut normalized_args)?;
+            Ok(normalized_args)
+        })?;
+    args = normalized_args;
     // Profile/default resolution is part of the effective child identity. It is
     // local catalog/config projection only; readiness and provider execution
     // remain deferred to the replayed run.
-    apply_provider_profile(&mut args);
-    resolve_and_validate_effective_backend(&mut args)
-        .map_err(|error| planner.failure(error, "static provider selection"))?;
-    planner.advance(
+    let mut selected_args = args.clone();
+    selected_args = planner.run_bounded(
+        "provider_selection",
+        "static provider selection",
+        move || {
+            apply_provider_profile(&mut selected_args);
+            resolve_and_validate_effective_backend(&mut selected_args)?;
+            Ok(selected_args)
+        },
+    )?;
+    args = selected_args;
+    let static_args = args.clone();
+    let plan = planner.run_bounded(
         "issues_and_gates",
         "supplied issue URLs and gate declarations",
+        move || build_static_cook_batch_plan(&static_args),
     )?;
-    let plan = build_static_cook_batch_plan(&args)
-        .map_err(|error| planner.failure(error, "supplied issue URLs and gate declarations"))?;
-    planner.advance("gate_contracts", "static deterministic gate declarations")?;
-    let workspace = batch_gate_workspace(&args)
-        .map_err(|error| planner.failure(error, "authoritative registered workspace"))?;
-    validate_batch_cook_gates(&plan, workspace)
-        .map_err(|error| planner.failure(error, "static deterministic gate declarations"))?;
-    planner.advance("worktrees", "static worktree projection")?;
-    let worktrees = static_worktrees_dry_run(&args, &plan);
-    planner.advance("recipe_declarations", "immutable cook declarations")?;
-    let plan_has_private_gates = plan
-        .cooks
-        .iter()
-        .any(|cook| !cook.private_verify.is_empty());
+    let workspace_args = args.clone();
+    let workspace = planner.run_bounded(
+        "gate_workspace",
+        "authoritative registered workspace",
+        move || batch_gate_workspace(&workspace_args),
+    )?;
+    let gate_plan = plan.clone();
+    planner.run_bounded(
+        "gate_contracts",
+        "static deterministic gate declarations",
+        move || validate_batch_cook_gates(&gate_plan, workspace),
+    )?;
+    let worktrees = planner.run("worktrees", "static worktree projection", || {
+        Ok(static_worktrees_dry_run(&args, &plan))
+    })?;
+    let plan_has_private_gates =
+        planner.run("recipe_declarations", "immutable cook declarations", || {
+            Ok(plan
+                .cooks
+                .iter()
+                .any(|cook| !cook.private_verify.is_empty()))
+        })?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch/v1",
@@ -2067,7 +2175,7 @@ fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value
             "plan": public_batch_cook_plan(&plan),
             "run_result": Value::Null,
             "commands": cook_batch_commands(&args, plan_has_private_gates, None),
-            "next_actions": cook_batch_next_actions(&args, &plan.fanout_id, "ready", false, false, &static_worktrees_dry_run(&args, &plan), plan_has_private_gates, None),
+            "next_actions": cook_batch_next_actions(&args, &plan.fanout_id, "ready", false, false, &worktrees, plan_has_private_gates, None),
         }),
         0,
     ))
@@ -2327,6 +2435,12 @@ fn cook_batch_argv(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
     if let Some(value) = args.max_duration {
         command.extend(["--max-duration".to_string(), value.to_string()]);
     }
+    if let Some(value) = args.dry_run_planner_timeout_seconds {
+        command.extend([
+            "--dry-run-planner-timeout-seconds".to_string(),
+            value.to_string(),
+        ]);
+    }
     if args.dry_run {
         command.push("--dry-run".to_string());
     }
@@ -2493,6 +2607,8 @@ fn static_worktrees_dry_run(
     args: &AgentTaskFanoutCookBatchArgs,
     plan: &BatchCookFanoutPlan,
 ) -> worktree::WorktreeQueueCreateOutput {
+    #[cfg(test)]
+    STATIC_WORKTREE_PROJECTIONS.with(|count| count.set(count.get() + 1));
     worktree::WorktreeQueueCreateOutput {
         schema: "homeboy/worktree-queue-create/v1",
         repo: args.repo.clone(),
@@ -5936,6 +6052,7 @@ fi
             max_concurrency: None,
             max_duration: None,
             dry_run: true,
+            dry_run_planner_timeout_seconds: None,
             run_plan: false,
         }
     }
@@ -7038,6 +7155,22 @@ fi
     }
 
     #[test]
+    fn dry_run_projects_static_worktrees_once_for_output_and_next_actions() {
+        with_materialized_cook_batch_worktrees(|| {
+            STATIC_WORKTREE_PROJECTIONS.with(|count| count.set(0));
+
+            let (value, exit_code) = cook_batch(cook_batch_args()).expect("cook batch dry run");
+
+            assert_eq!(exit_code, 0, "{value}");
+            assert_eq!(
+                STATIC_WORKTREE_PROJECTIONS.with(|count| count.get()),
+                1,
+                "next actions must reuse the response worktree projection"
+            );
+        });
+    }
+
+    #[test]
     fn dry_run_plans_absent_worktrees_without_creating_them() {
         with_isolated_home(|home| {
             let parent = home.path().join("Developer");
@@ -7102,19 +7235,26 @@ fi
     }
 
     #[test]
-    fn dry_run_planner_timeout_names_the_unresolved_dependency_and_replay() {
+    fn dry_run_planner_enforces_the_slow_worktree_phase_budget() {
         let args = cook_batch_args();
-        let mut planner = DryRunPlanner {
-            deadline: Instant::now(),
-            phase: "issues_and_gates",
-            replay_command: cook_batch_plan_command(&args),
-        };
+        let mut planner = DryRunPlanner::new(&args);
+        planner.phase_timeout = Duration::from_millis(20);
 
+        let started = Instant::now();
         let error = planner
-            .advance("worktrees", "static worktree projection")
-            .expect_err("expired planner deadline");
+            .run_bounded("worktrees", "static worktree projection", || {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            })
+            .expect_err("slow static worktree phase must be bounded");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "planner must return at its phase budget: {error}"
+        );
         assert_eq!(error.details["reason"], "planner_deadline_exceeded");
-        assert_eq!(error.details["phase"], "issues_and_gates");
+        assert_eq!(error.details["phase"], "worktrees");
+        assert!(error.details["phase_elapsed_ms"].as_u64().unwrap() >= 20);
         assert_eq!(
             error.details["unresolved_dependency"],
             "static worktree projection"
@@ -7123,6 +7263,16 @@ fi
             .as_str()
             .expect("replay command")
             .contains("--dry-run"));
+    }
+
+    #[test]
+    fn dry_run_planner_timeout_is_configurable_and_replayable() {
+        let mut args = cook_batch_args();
+        args.dry_run_planner_timeout_seconds = Some(42);
+        let planner = DryRunPlanner::new(&args);
+
+        assert_eq!(planner.phase_timeout, Duration::from_secs(42));
+        assert!(dry_run_replay_command(&args).contains("--dry-run-planner-timeout-seconds 42"));
     }
 
     #[test]
