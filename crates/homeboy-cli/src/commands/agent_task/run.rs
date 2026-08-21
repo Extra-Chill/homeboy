@@ -222,8 +222,9 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     let (args, provision) = resolve_cook_preview_destination(args)?;
+    let replay = cook_preview_replay_argv(&args);
+    let placement = preview_placement_policy_with_admission(&replay.argv);
     if provision["action"] == "materialization_required" {
-        let replay = cook_preview_replay_argv(&args);
         return Ok((
             serde_json::json!({
                 "schema": "homeboy/agent-task-cook-preview/v1",
@@ -233,7 +234,7 @@ pub(crate) fn preview_cook(
                     "worktree": args.to_worktree,
                     "base": args.base,
                     "head": args.head,
-                    "placement": preview_placement_policy(),
+                    "placement": placement,
                     "materialization": provision,
                 },
                 "replay_argv": replay.argv,
@@ -305,7 +306,6 @@ pub(crate) fn preview_cook(
         .first()
         .map(|task| serde_json::to_value(&task.executor).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
-    let replay = cook_preview_replay_argv(&args);
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-preview/v1",
@@ -315,7 +315,7 @@ pub(crate) fn preview_cook(
                 "worktree": args.to_worktree,
                 "base": args.base,
                 "head": args.head,
-                "placement": preview_placement_policy(),
+                "placement": placement,
                 "provider": executor,
                 "gates": {
                     "public": args.gates.verify.len(),
@@ -520,6 +520,58 @@ fn preview_placement_policy() -> Value {
     preview_placement_policy_from_argv(&argv)
 }
 
+fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
+    let mut policy = preview_placement_policy();
+    let placement = match policy["requested"].as_str() {
+        Some("local") => crate::cli_surface::Placement::Local,
+        Some("lab") => crate::cli_surface::Placement::Lab,
+        Some("lab-or-local") => crate::cli_surface::Placement::LabOrLocal,
+        _ => crate::cli_surface::Placement::Auto,
+    };
+    let runner = policy["runner"].as_str();
+    let detach_after_handoff = policy["detach_after_handoff"].as_bool().unwrap_or(false);
+    let admission = match crate::commands::resources::run_preflight() {
+        Ok((resources, _)) => {
+            let readiness = (!placement.is_explicit_local_override())
+                .then(crate::runner::lab_runner_readiness)
+                .transpose()
+                .ok()
+                .flatten();
+            crate::commands::utils::resource_policy::cook_preview_placement_admission(
+                crate::commands::utils::resource_policy::HotCommand {
+                    label: "agent-task cook/run-plan/retry --run",
+                    lab_offload_supported: true,
+                    lab_offload_unsupported_reason: None,
+                    allows_warm_runner_coordination: true,
+                    offload_only_when_hot: false,
+                },
+                &resources,
+                placement,
+                runner,
+                detach_after_handoff,
+                readiness.as_ref(),
+                replay_args,
+            )
+        }
+        Err(error) => crate::commands::utils::resource_policy::CookPreviewPlacementAdmission {
+            schema: "homeboy/cook-preview-placement-admission/v1",
+            state: crate::commands::utils::resource_policy::CookPreviewPlacementAdmissionState::Indeterminate,
+            revalidate_before_execution: true,
+            blockers: vec![
+                crate::commands::utils::resource_policy::CookPreviewPlacementBlocker {
+                    id: "controller_resource_snapshot_unavailable".to_string(),
+                    detail: error.message,
+                },
+            ],
+            deferred_to: Some("controller_resource_snapshot".to_string()),
+            recovery: None,
+        },
+    };
+    policy["admission"] =
+        serde_json::to_value(admission).expect("Cook preview placement admission serializes");
+    policy
+}
+
 fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
     let argv = crate::command_capability::homeboy_owned_args(argv);
     let placement = argv
@@ -546,7 +598,12 @@ fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
                     .flatten()
             })
     });
-    serde_json::json!({ "requested": placement, "runner": runner, "route_executed": false })
+    serde_json::json!({
+        "requested": placement,
+        "runner": runner,
+        "detach_after_handoff": argv.iter().any(|value| value == "--detach-after-handoff"),
+        "route_executed": false,
+    })
 }
 
 #[cfg(test)]
@@ -859,6 +916,7 @@ mod preview_tests {
         let policy = preview_placement_policy_from_argv(&[
             "homeboy".to_string(),
             "--placement=lab-or-local".to_string(),
+            "--detach-after-handoff".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--".to_string(),
@@ -867,7 +925,60 @@ mod preview_tests {
         ]);
         assert_eq!(policy["requested"], "lab-or-local");
         assert_eq!(policy["runner"], Value::Null);
+        assert_eq!(policy["detach_after_handoff"], true);
         assert_eq!(policy["route_executed"], false);
+    }
+
+    #[test]
+    fn compiled_plan_preview_emits_placement_admission_schema() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace root")
+                .display()
+                .to_string();
+            let cli = Cli::try_parse_from([
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--prompt".to_string(),
+                "inspect the task".to_string(),
+                "--to-worktree".to_string(),
+                workspace,
+                "--no-finalize".to_string(),
+                "--verify".to_string(),
+                "true".to_string(),
+            ])
+            .expect("parse preview");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook command");
+            };
+            let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
+            assert_eq!(preview["mutates"], false);
+            assert!(preview["resolved"]["provider"].is_object());
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["schema"],
+                "homeboy/cook-preview-placement-admission/v1"
+            );
+            assert!(matches!(
+                preview["resolved"]["placement"]["admission"]["state"].as_str(),
+                Some("admissible" | "blocked" | "indeterminate")
+            ));
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["revalidate_before_execution"],
+                true
+            );
+        });
     }
 
     #[test]
@@ -994,6 +1105,20 @@ mod preview_tests {
             )
             .expect("registered remote workspace returns a preview requirement");
             assert_eq!(exit_code, 0);
+            assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
+            assert_eq!(preview["mutates"], false);
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["schema"],
+                "homeboy/cook-preview-placement-admission/v1"
+            );
+            assert!(matches!(
+                preview["resolved"]["placement"]["admission"]["state"].as_str(),
+                Some("admissible" | "blocked" | "indeterminate")
+            ));
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["revalidate_before_execution"],
+                true
+            );
             assert_eq!(
                 preview["resolved"]["materialization"]["action"],
                 "materialization_required"
