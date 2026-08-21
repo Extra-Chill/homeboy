@@ -789,35 +789,6 @@ pub(crate) fn record_replacement_operation_replay(
     })
 }
 
-/// Bind a mutation receipt exactly once. Candidate reconciliation includes its
-/// endpoint and operation ID in the command, so changing this record would turn
-/// response-loss recovery into a different destructive operation.
-pub(crate) fn record_immutable_replacement_operation_replay(
-    runner_id: &str,
-    kind: &str,
-    command: &str,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
-        let mut operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if let Some(existing) = operation.replay_command.as_deref() {
-            if operation.kind.as_deref() != Some(kind) || existing != command {
-                return Err(Error::internal_unexpected(
-                    "replacement operation is already bound to different immutable recovery coordinates",
-                ));
-            }
-            return Ok(());
-        }
-        operation.kind = Some(kind.to_string());
-        operation.replay_command = Some(command.to_string());
-        write_durable_json(&path, &operation)
-    })
-}
-
 /// Bind candidate reconciliation to the current replacement identity. An
 /// explicit operator recovery may supersede only `ensure-running`: that command
 /// can create one of the candidates reconciliation is responsible for, and
@@ -1845,22 +1816,6 @@ pub(crate) fn record_reconnected_job_owner(
     })
 }
 
-/// Persist a daemon that has already passed the authenticated connection and
-/// endpoint identity checks as the admission owner. This survives controller
-/// session-file drift, while retaining older generations for any work pinned
-/// to them.
-pub(crate) fn record_authenticated_admission(
-    runner_id: &str,
-    session: &RunnerSession,
-) -> Result<()> {
-    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-        Error::internal_unexpected("authenticated daemon session has no lease ID")
-    })?;
-    with_registry_lock(runner_id, || {
-        record_authenticated_admission_locked(runner_id, session, generation)
-    })
-}
-
 /// Promote B only after `connect_remote_daemon` has authenticated its lease,
 /// PID, version, and build identity. Keeping the pending record until this
 /// locked transaction commits makes every interruption retry B first.
@@ -2361,31 +2316,6 @@ mod tests {
             assert_eq!(evidence["operation_id"], operation_id);
             assert_eq!(evidence["previous_kind"], "ensure-running");
             assert_eq!(evidence["replacement_kind"], "unleased-candidates");
-        });
-    }
-
-    #[test]
-    fn failed_unleased_reconciliation_clears_the_replay_before_a_later_connect() {
-        test_support::with_isolated_home(|_| {
-            let first_operation = replacement_operation("runner-a").expect("operation");
-            record_immutable_replacement_operation_replay(
-                "runner-a",
-                "unleased-candidates",
-                "homeboy daemon reconcile-unleased-candidates --apply",
-            )
-            .expect("immutable reconciliation journal");
-
-            terminalize_unleased_candidate_reconciliation("runner-a")
-                .expect("acknowledged failed reconciliation is terminal");
-
-            assert!(replacement_operation_replay("runner-a")
-                .expect("read replay")
-                .is_none());
-            assert_ne!(
-                replacement_operation("runner-a").expect("later connect operation"),
-                first_operation,
-                "a later connect must use a new operation identity rather than replay"
-            );
         });
     }
 
@@ -2904,13 +2834,6 @@ mod tests {
         let fresh = session("lease-fresh", "daemon-fresh", Some(202));
         record_job("runner-a", &fresh, "accepted-during-reconcile")
             .expect("record job accepted during reconciliation");
-    }
-
-    #[test]
-    #[ignore = "invoked by process_isolated_authenticated_admission_preserves_concurrent_job_admission"]
-    fn process_record_authenticated_admission() {
-        let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-        record_authenticated_admission("runner-a", &fresh).expect("record authenticated admission");
     }
 
     #[test]

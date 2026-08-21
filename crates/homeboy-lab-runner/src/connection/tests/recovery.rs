@@ -676,24 +676,6 @@ fn stale_generation_reconciliation_refuses_active_jobs_changed_lease_or_unproven
 }
 
 #[test]
-fn stale_generation_reconciliation_refuses_a_lease_change_after_stop() {
-    let stopped = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        0,
-        "lease-stale",
-        4444,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-    let changed = remote_daemon_status_for_test(true, true, 0, "lease-raced", 5555);
-
-    assert!(authoritative_lease_stop_confirmed(&stopped, "lease-stale").is_ok());
-    assert!(authoritative_lease_stop_confirmed(&changed, "lease-stale")
-        .expect_err("a new lease during recovery is not the stopped lease")
-        .contains("ownership changed"));
-}
-
-#[test]
 fn authoritative_dead_lease_allows_stale_generation_tombstoning() {
     let dead = remote_daemon_status_for_test_with_reason(
         false,

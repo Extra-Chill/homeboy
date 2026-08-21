@@ -771,27 +771,6 @@ pub(super) fn authoritative_stale_generations_are_dead(
     }
 }
 
-/// A stop is complete only when the remote state is absent or explicitly proves
-/// the exact stopped lease is dead. A new lease is a recovery race, not success.
-pub(super) fn authoritative_lease_stop_confirmed(
-    status: &RemoteDaemonStatus,
-    expected_lease_id: &str,
-) -> std::result::Result<(), String> {
-    match status.daemon.as_ref() {
-        None => Ok(()),
-        Some(daemon)
-            if daemon.lease_id.as_deref() == Some(expected_lease_id)
-                && status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) =>
-        {
-            Ok(())
-        }
-        Some(daemon) => Err(format!(
-            "authoritative daemon ownership changed during reconciliation (expected lease `{expected_lease_id}`, observed lease `{}`); stale generations were retained",
-            daemon.lease_id.as_deref().unwrap_or("unavailable")
-        )),
-    }
-}
-
 impl RemoteDaemonWorkEvidence {
     fn from_unresolved_count(count: usize) -> Self {
         if count == 0 {
@@ -2193,14 +2172,6 @@ pub(super) fn remote_daemon_ensure_running_command(
         replacement_operation_id
             .map(|id| format!("--replacement-operation-id {}", shell::quote_arg(id)))
             .unwrap_or_default(),
-    )
-}
-
-pub(in crate::connection) fn generation_daemon_ensure_command(homeboy: &str, home: &str) -> String {
-    format!(
-        "mkdir -p {home}/data && XDG_DATA_HOME={home}/data {} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy),
-        home = shell::quote_arg(home),
     )
 }
 

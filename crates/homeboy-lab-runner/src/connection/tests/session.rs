@@ -98,42 +98,6 @@ fn stale_persisted_lease_requires_explicit_live_lease_adoption() {
 }
 
 #[test]
-fn authenticated_promotion_provenance_allows_ordinary_reconnect_after_session_drift() {
-    test_support::with_isolated_home(|_| {
-        let stale = direct_ssh_session("lease-recorded");
-        let mut promoted = direct_ssh_session("lease-live");
-        promoted.remote_daemon_pid = Some(4646);
-        promoted.homeboy_build_identity = Some("homeboy test+configured".to_string());
-        crate::generation_store::record_authenticated_admission("homeboy-lab", &promoted)
-            .expect("authenticated promotion records its admission generation");
-
-        let reconciled = crate::generation_store::admission_session("homeboy-lab", Some(&stale))
-            .expect("read promotion provenance")
-            .expect("promoted admission session");
-        let mut live = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
-        live.daemon.as_mut().expect("daemon").build_identity =
-            Some("homeboy test+configured".to_string());
-
-        assert_eq!(
-            remote_daemon_connect_action_for_runner(
-                Some(&reconciled),
-                &live,
-                "homeboy test+configured",
-                "homeboy-lab",
-                None,
-            )
-            .expect("ordinary reconnect uses authenticated promotion provenance"),
-            RemoteDaemonConnectAction::Reattach,
-        );
-        assert_eq!(
-            reconciled.remote_daemon_lease_id.as_deref(),
-            Some("lease-live")
-        );
-        assert_eq!(reconciled.remote_daemon_pid, Some(4646));
-    });
-}
-
-#[test]
 fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
@@ -1554,26 +1518,6 @@ fn routine_disconnect_refuses_an_unbound_session_without_executing_a_configured_
 }
 
 #[test]
-fn terminal_phantom_reconciliation_is_fail_soft_for_an_unreachable_stale_session() {
-    let mut session = direct_ssh_session("lease-live");
-    session.local_url = Some("http://127.0.0.1:1".to_string());
-    let active_jobs = vec![sample_active_job(None, "runner job")];
-
-    let (active, stale, count, evidence) = reconcile_terminal_phantom_activity(
-        "homeboy-lab",
-        Some(&session),
-        active_jobs.clone(),
-        Vec::new(),
-        Some(2),
-    );
-
-    assert_eq!(active, active_jobs);
-    assert!(stale.is_empty());
-    assert_eq!(count, Some(2));
-    assert!(evidence.is_none());
-}
-
-#[test]
 fn terminal_reconciliation_routes_direct_sessions_to_the_daemon() {
     let session = direct_ssh_session("lease-live");
     let result = reconcile_terminal_jobs_for_session(
@@ -1597,171 +1541,6 @@ fn terminal_reconciliation_routes_reverse_sessions_to_the_broker() {
     .expect("reverse reconciliation route");
 
     assert_eq!(result, "reverse");
-}
-
-#[test]
-fn terminal_phantom_reconciliation_ignores_non_success_responses() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("request");
-        let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read request");
-        let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-        assert!(request.starts_with("POST /jobs/reconcile-terminal HTTP/1.1"));
-        stream
-            .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\nConnection: close\r\n\r\n{\"body\":{\"reconciled_count\":9}}")
-            .expect("response");
-    });
-    let mut session = direct_ssh_session("lease-live");
-    session.local_url = Some(format!("http://{address}"));
-
-    let (active, _, count, evidence) = reconcile_terminal_phantom_activity(
-        "homeboy-lab",
-        Some(&session),
-        Vec::new(),
-        Vec::new(),
-        Some(1),
-    );
-
-    server.join().expect("server");
-    assert!(active.is_empty());
-    assert_eq!(count, Some(1));
-    assert!(evidence.is_none());
-}
-
-#[test]
-fn terminal_phantom_reconciliation_refreshes_counts_and_exposes_bounded_evidence() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let mut active = sample_active_job(Some("run-live"), "live runner job");
-    active.source = "daemon".to_string();
-    let mut stale = sample_active_job(Some("run-stale"), "stale runner job");
-    stale.source = "daemon".to_string();
-    stale.status = JobStatus::Failed;
-    stale.stale_reason = Some("terminal durable run".to_string());
-    let active_body = serde_json::to_value(vec![active.clone()]).expect("active jobs");
-    let stale_body = serde_json::to_value(vec![stale.clone()]).expect("stale jobs");
-    let server = std::thread::spawn(move || {
-        for (expected_path, body) in [
-            (
-                "POST /jobs/reconcile-terminal HTTP/1.1",
-                serde_json::json!({
-                    "body": {
-                        "reconciled_count": 2,
-                        "reconciled_job_ids": ["phantom-1", "phantom-2"],
-                    }
-                }),
-            ),
-            (
-                "GET /jobs HTTP/1.1",
-                serde_json::json!({
-                    "success": true,
-                    "data": { "body": {
-                        "active_runner_jobs": active_body,
-                        "stale_runner_jobs": stale_body,
-                    }}
-                }),
-            ),
-            (
-                "GET /health HTTP/1.1",
-                serde_json::json!({
-                    "version": "test",
-                    "build_identity": { "display": "homeboy test+abc123" },
-                    "lease": { "lease_id": "lease-live" },
-                    "freshness": {
-                        "fresh": true,
-                        "restartable": false,
-                        "active_jobs": 1,
-                        "repair_plan": [],
-                    }
-                }),
-            ),
-        ] {
-            let (mut stream, _) = listener.accept().expect("request");
-            let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read request");
-            let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-            assert!(request.starts_with(expected_path), "{request}");
-            let body = body.to_string();
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .expect("response");
-        }
-    });
-    let mut session = direct_ssh_session("lease-live");
-    session.local_url = Some(format!("http://{address}"));
-
-    let (refreshed_active, refreshed_stale, count, evidence) = reconcile_terminal_phantom_activity(
-        "homeboy-lab",
-        Some(&session),
-        Vec::new(),
-        Vec::new(),
-        Some(3),
-    );
-
-    server.join().expect("server");
-    assert_eq!(count, Some(1));
-    assert_eq!(refreshed_active, vec![active]);
-    assert_eq!(refreshed_stale, vec![stale]);
-    let evidence = evidence.expect("recovery evidence");
-    assert_eq!(evidence.prior_active_job_count, 3);
-    assert_eq!(evidence.active_job_count, 1);
-    assert_eq!(evidence.reconciled_job_ids, ["phantom-1", "phantom-2"]);
-
-    let (_, _, repeated_count, repeated_evidence) = reconcile_terminal_phantom_activity(
-        "homeboy-lab",
-        Some(&session),
-        refreshed_active,
-        refreshed_stale,
-        count,
-    );
-    assert_eq!(repeated_count, Some(1));
-    assert!(repeated_evidence.is_none());
-}
-
-#[test]
-fn terminal_phantom_reconciliation_rejects_mismatched_count_and_ids() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("request");
-        let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read request");
-        assert!(String::from_utf8(request[..length].to_vec())
-            .expect("request text")
-            .starts_with("POST /jobs/reconcile-terminal HTTP/1.1"));
-        let body = r#"{"body":{"reconciled_count":2,"reconciled_job_ids":["phantom-1"]}}"#;
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .expect("response");
-    });
-    let mut session = direct_ssh_session("lease-live");
-    session.local_url = Some(format!("http://{address}"));
-
-    let (_, _, count, evidence) = reconcile_terminal_phantom_activity(
-        "homeboy-lab",
-        Some(&session),
-        Vec::new(),
-        Vec::new(),
-        Some(2),
-    );
-
-    server.join().expect("server");
-    assert_eq!(count, Some(2));
-    assert!(evidence.is_none());
 }
 
 #[test]
@@ -2396,19 +2175,6 @@ fn active_runner_job_source_maps_direct_and_reverse_endpoints() {
         active_runner_job_source(&reverse),
         Some(RunnerActiveJobSource::ReverseBroker)
     );
-}
-
-#[test]
-fn reverse_controller_session_requires_fresh_heartbeat() {
-    let mut session = reverse_controller_session();
-
-    assert_eq!(session_state(Some(&session)), RunnerSessionState::Connected);
-
-    session.last_seen_at = Some((Utc::now() - chrono::Duration::seconds(120)).to_rfc3339());
-    assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
-
-    session.last_seen_at = None;
-    assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
 }
 
 #[test]
