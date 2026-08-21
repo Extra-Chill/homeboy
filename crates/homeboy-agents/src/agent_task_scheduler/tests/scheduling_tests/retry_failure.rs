@@ -10,8 +10,10 @@ mod retry_failure_tests {
     fn preserves_partial_failure_evidence() {
         let mut statuses = HashMap::new();
         statuses.insert("task-2".to_string(), AgentTaskOutcomeStatus::Failed);
-        let scheduler =
-            AgentTaskScheduler::new(RecordingExecutor::new(statuses, Duration::from_millis(0)));
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
+            statuses,
+            Duration::from_millis(0),
+        )));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
 
@@ -36,8 +38,10 @@ mod retry_failure_tests {
     fn failed_single_task_is_not_also_counted_as_queued() {
         let mut statuses = HashMap::new();
         statuses.insert("task-1".to_string(), AgentTaskOutcomeStatus::Failed);
-        let scheduler =
-            AgentTaskScheduler::new(RecordingExecutor::new(statuses, Duration::from_millis(0)));
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
+            statuses,
+            Duration::from_millis(0),
+        )));
 
         let aggregate = scheduler.run(plan_with_tasks(1));
 
@@ -54,7 +58,7 @@ mod retry_failure_tests {
     fn retries_failed_tasks_until_success() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget.max_provider_executions = 2;
         plan.options.execution_budget.max_same_provider_retries = 1;
@@ -73,7 +77,7 @@ mod retry_failure_tests {
     fn default_unbounded_budget_does_not_retry_without_a_retry_policy() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let plan = AgentTaskPlan::new("default-no-retry", vec![request("task-1")]);
 
         let aggregate = scheduler.run(plan);
@@ -86,7 +90,7 @@ mod retry_failure_tests {
     fn legacy_retry_policy_retries_with_the_legacy_unbounded_budget() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = AgentTaskPlan::new("legacy-retry", vec![request("task-1")]);
         plan.options.retry.max_attempts = 2;
 
@@ -100,7 +104,7 @@ mod retry_failure_tests {
     fn lower_retry_cap_wins_over_execution_budget() {
         let executor = RetryTwiceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.retry.max_attempts = 2;
         plan.options.execution_budget.max_provider_executions = 3;
@@ -116,7 +120,7 @@ mod retry_failure_tests {
     fn lower_execution_budget_wins_over_retry_cap() {
         let executor = RetryTwiceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.retry.max_attempts = 3;
         plan.options.execution_budget.max_provider_executions = 2;

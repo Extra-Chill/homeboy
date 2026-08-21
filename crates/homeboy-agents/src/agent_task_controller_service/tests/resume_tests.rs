@@ -55,7 +55,7 @@ fn resume_fails_required_workflow_artifact_handoff_before_downstream_action() {
 
         let result = resume(
             "loop-service-required-handoff",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &CapturingDispatchHook::default(),
         )
         .expect("controller resumed");
@@ -122,7 +122,7 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
 
         let result = resume(
             "loop-service-failure-summary",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &FailingDispatchHook,
         )
         .expect("controller resumed");
@@ -232,7 +232,7 @@ fn resume_with_options_stops_at_max_actions_with_pending_work_remaining() {
 
         let result = resume_with_options(
             "loop-service-bounded-resume",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
             ControllerResumeOptions {
                 max_actions: 2,
@@ -294,7 +294,7 @@ fn resume_with_options_stops_after_terminal_state() {
 
         let result = resume_with_options(
             "loop-service-terminal-resume",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
             ControllerResumeOptions {
                 max_actions: 10,
@@ -377,7 +377,7 @@ fn completed_typed_artifacts_are_carried_to_later_required_workflow_artifacts() 
         let dispatch = TypedArtifactHandoffDispatchHook::default();
         let result = resume(
             "loop-service-typed-artifact-handoff",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
         )
         .expect("controller resumed");
@@ -461,7 +461,7 @@ fn resume_recovers_running_action_with_stale_child_run() {
 
         let result = resume(
             "loop-service-stale-child",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("controller resumed");
@@ -516,7 +516,7 @@ fn resume_stops_when_wait_action_blocks_controller() {
 
         let result = resume(
             "loop-service-wait-stop",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("controller resumed");
@@ -572,7 +572,7 @@ fn wait_for_controller_resumes_after_child_terminal_state() {
 
         let result = resume(
             "loop-service-parent",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("controller resumed");
@@ -720,7 +720,7 @@ fn from_spec_resume_drives_workflow_lineage_then_blocks_on_pending_manual_gate()
         let dispatch = ArtifactDispatchHook::default();
         let result = resume(
             "repo-loop-generic-execution",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &dispatch,
         )
         .expect("controller resumed");

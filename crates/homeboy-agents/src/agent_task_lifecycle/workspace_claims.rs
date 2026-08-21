@@ -1256,39 +1256,15 @@ fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-/// Inventory is local-controller evidence only. Runner authority composition is
-/// deliberately delegated to `RunnerContinuationProvider` in a later layer.
-pub fn local_workspace_authority_inventory() -> Result<Vec<AgentTaskRunRecord>> {
-    local_workspace_authority_inventory_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-    )
-}
-
-/// The store-rooted counterpart of [`local_workspace_authority_inventory`].
-///
-/// The records and the owner leases that qualify them must come from one
-/// installation. Reading records from the ambient lifecycle store and then
-/// validating each lease against a separately resolved claim store degrades to
-/// an empty inventory rather than an error, and callers treat an empty
-/// inventory as "no live authority" — the composite acquisition gate clears a
-/// token-free intent marker on exactly that answer (#7505).
-pub(crate) fn local_workspace_authority_inventory_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-) -> Result<Vec<AgentTaskRunRecord>> {
-    let claim_store = lifecycle_store.workspace_claim_store();
-    lifecycle_store.read_records().map(|records| {
-        records
-            .into_iter()
-            .filter(|record| {
-                !record.state.is_terminal()
-                    && record.workspace_owner_lease.as_ref().is_some_and(|lease| {
-                        validate_local_workspace_owner_in_store(&claim_store, lease)
-                            .unwrap_or(false)
-                    })
-            })
-            .collect()
-    })
-}
+// `local_workspace_authority_inventory` and its
+// `local_workspace_authority_inventory_in_store` sibling lived here. The pair
+// was dead end to end: the ambient half had no callers, and the rooted half had
+// exactly one — the ambient half. Inventory was local-controller evidence only,
+// and runner authority composition is already delegated to
+// `RunnerContinuationProvider` in a later layer, so nothing was left to read it.
+// Deleting the ambient half removed a resolution point that existed for nobody;
+// the rooted half went with it rather than being left behind as a rooted body
+// no caller reaches (#7505).
 
 pub fn acquire_local_workspace_claim(
     workspace: WorkspaceIdentity,

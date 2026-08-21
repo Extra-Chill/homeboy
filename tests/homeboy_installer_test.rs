@@ -71,7 +71,15 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
     let mut command = Command::new("tar");
     command.args(["-cJf"]).arg(destination).arg("-C").arg(root);
     if let Some(transform) = transform {
-        command.arg("-s").arg(transform);
+        let gnu_tar = Command::new("tar")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("GNU tar"));
+        if gnu_tar {
+            command.arg(format!("--transform=s{transform}"));
+        } else {
+            command.arg("-s").arg(transform);
+        }
     }
     command.args(entries);
     assert!(command.status().expect("create archive").success());

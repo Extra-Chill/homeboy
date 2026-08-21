@@ -263,6 +263,49 @@ pub fn release_attempt(
     })
 }
 
+/// Persist a terminal record that authorizes destructive attempt compaction.
+/// Unlike ordinary release replay, an already-finalized lease is accepted only
+/// when it contains byte-for-byte the same evidence. A different earlier
+/// terminal record cannot accidentally authorize a later force removal.
+pub fn release_attempt_with_compaction_authorization(
+    allocation: &ControllerScratchAllocation,
+    reason: &str,
+    evidence: serde_json::Value,
+) -> Result<()> {
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        let Some(resource) = index.resources.iter_mut().find(|resource| {
+            resource.lease_id == allocation.lease_id
+                && Path::new(&resource.path) == allocation.path.as_path()
+        }) else {
+            return Err(Error::validation_invalid_argument(
+                "controller_scratch.lease_id",
+                "allocated scratch lease is not registered",
+                Some(allocation.lease_id.clone()),
+                None,
+            ));
+        };
+        if resource.finalized_at.is_none() {
+            resource.lifecycle_state = "released".to_string();
+            resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
+            resource.terminal_reason = Some(reason.to_string());
+            resource.terminal_evidence = Some(evidence);
+            return write_index_at_unlocked(&allocation.index_path, &index);
+        }
+        if resource.terminal_reason.as_deref() == Some(reason)
+            && resource.terminal_evidence.as_ref() == Some(&evidence)
+        {
+            return Ok(());
+        }
+        Err(Error::validation_invalid_argument(
+            "controller_scratch.compaction_authorization",
+            "lease already has different terminal evidence and cannot authorize compaction",
+            Some(allocation.lease_id.clone()),
+            None,
+        ))
+    })
+}
+
 /// Mark a controller-owned allocation as disposable temporary state. This is
 /// intentionally separate from ordinary attempt scratch: an interrupted
 /// detached checkout has no upstream by design, so the normal unpushed-Git
@@ -1389,6 +1432,7 @@ fn cleanup_block_reason_with_observation(
     if !resource.ephemeral {
         match git_safety_path(resource, path) {
             Some(path) if recovered_workspace_matches(resource, &path) => {}
+            Some(path) if terminal_evidence_attempt_workspace_matches(resource, &path) => {}
             Some(path) if promoted_attempt_workspace_matches(resource, &path) => {}
             Some(path) if git_dirty_or_unpushed(&path) => {
                 return Ok(Some("git checkout has dirty or unpushed state".to_string()));
@@ -1668,7 +1712,94 @@ fn promoted_attempt_workspace_matches(
     workspace_matches_staged_patch(workspace, base, &patch)
 }
 
-fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
+/// A scheduler may stop after persisting authorization but before it can call
+/// `git worktree remove --force`. The release record is then the only durable
+/// authority for compaction; revalidate both the recorded artifact and the
+/// current checkout before allowing ordinary scratch cleanup to converge.
+fn terminal_evidence_attempt_workspace_matches(
+    resource: &ControllerScratchResource,
+    workspace: &Path,
+) -> bool {
+    let Some(evidence) = resource.terminal_evidence.as_ref() else {
+        return false;
+    };
+    let Some(authorization) = evidence.get("compaction_authorization") else {
+        return false;
+    };
+    if authorization
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        != Some("authorized")
+        || !matches!(
+            authorization
+                .get("reason")
+                .and_then(serde_json::Value::as_str),
+            Some("timeout") | Some("provider_rotation")
+        )
+    {
+        return false;
+    }
+    let Some(id) = authorization
+        .get("patch_artifact_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(expected_sha256) = authorization
+        .get("patch_sha256")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(base) = authorization
+        .get("base_ref")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(artifact) = evidence
+        .pointer("/outcome/artifacts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|artifacts| {
+            artifacts.iter().find(|artifact| {
+                artifact.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                    && artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
+                    && artifact.get("sha256").and_then(serde_json::Value::as_str)
+                        == Some(expected_sha256)
+                    && artifact
+                        .pointer("/metadata/run_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(resource.run_id.as_str())
+                    && artifact
+                        .pointer("/metadata/task_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(resource.task_id.as_str())
+                    && artifact
+                        .pointer("/metadata/producer_attempt")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(resource.attempt as u64)
+                    && artifact
+                        .pointer("/metadata/base_ref")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(base)
+            })
+        })
+    else {
+        return false;
+    };
+    let Some(path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Ok(patch) = fs::read(path) else {
+        return false;
+    };
+    sha256(&patch) == expected_sha256 && workspace_matches_staged_patch(workspace, base, &patch)
+}
+
+/// Verify that a checkout contains only the supplied staged patch against its
+/// immutable base. Scheduler compaction reuses this promotion proof rather
+/// than treating a persisted patch as sufficient evidence on its own.
+pub(crate) fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
     let Ok(head) = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD") else {
         return false;
     };
@@ -1677,7 +1808,15 @@ fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) ->
     }
     let Ok(status) = git::run_git(
         workspace,
-        &["status", "--porcelain=v1", "--ignored"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--ignored",
+            "--",
+            ".",
+            ":(exclude).homeboy/runner-workspace.json",
+            ":(exclude).homeboy/lab-at-files/**",
+        ],
         "git status",
     ) else {
         return false;
@@ -1700,6 +1839,8 @@ fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) ->
             "HEAD",
             "--",
             ".",
+            ":(exclude).homeboy/runner-workspace.json",
+            ":(exclude).homeboy/lab-at-files/**",
         ],
         "git diff cached",
     )
@@ -3684,6 +3825,14 @@ mod tests {
             "the harvested staged candidate must match exactly"
         );
 
+        fs::create_dir_all(worktree.join(".homeboy/lab-at-files")).expect("runner metadata");
+        fs::write(worktree.join(".homeboy/runner-workspace.json"), "{}").expect("runner metadata");
+        fs::write(worktree.join(".homeboy/lab-at-files/plan.json"), "{}").expect("runner metadata");
+        assert!(
+            workspace_matches_staged_patch(&worktree, &base, &patch),
+            "Homeboy runner metadata excluded from harvest must not block compaction"
+        );
+
         fs::write(worktree.join("untracked.txt"), "not in the patch\n").expect("extra file");
         assert!(
             !workspace_matches_staged_patch(&worktree, &base, &patch),
@@ -3703,6 +3852,66 @@ mod tests {
         assert!(
             !workspace_matches_staged_patch(&worktree, &base, &patch),
             "a provider commit must remain recoverable even when its diff matches"
+        );
+    }
+
+    #[test]
+    fn terminal_compaction_authorization_converges_after_scheduler_stops() {
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (_source, worktree) = attempt_worktree(root.path(), &lease);
+        let base = git::run_git(&worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")
+            .expect("base")
+            .trim()
+            .to_string();
+        fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
+        run_git(&worktree, &["add", "candidate.txt"]);
+        let patch = git::run_git(
+            &worktree,
+            &[
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--find-renames",
+                "HEAD",
+                "--",
+                ".",
+            ],
+            "git diff cached",
+        )
+        .expect("patch");
+        let patch_path = root.path().join("candidate.patch");
+        fs::write(&patch_path, &patch).expect("persisted patch");
+        let mut resource = resource(&lease, root.path());
+        resource.attempt = 1;
+        resource.terminal_evidence = Some(serde_json::json!({
+            "outcome": {
+                "artifacts": [{
+                    "id": "candidate",
+                    "kind": "patch",
+                    "path": patch_path,
+                    "sha256": sha256(patch.as_bytes()),
+                    "metadata": {
+                        "run_id": resource.run_id.clone(),
+                        "task_id": resource.task_id.clone(),
+                        "producer_attempt": 1,
+                        "base_ref": base.clone(),
+                    },
+                }],
+            },
+            "compaction_authorization": {
+                "outcome": "authorized",
+                "reason": "provider_rotation",
+                "patch_artifact_id": "candidate",
+                "patch_sha256": sha256(patch.as_bytes()),
+                "base_ref": base.clone(),
+            },
+        }));
+
+        assert!(
+            terminal_evidence_attempt_workspace_matches(&resource, &worktree),
+            "durable authorization must allow cleanup to converge after an interrupted scheduler"
         );
     }
 

@@ -239,7 +239,9 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             if progress.is_some() {
                 run::run_cook_with_executor_and_dispatcher_with_progress(
                     *cook_args,
-                    homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    std::sync::Arc::new(
+                        homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    ),
                     None,
                     progress,
                     provenance,

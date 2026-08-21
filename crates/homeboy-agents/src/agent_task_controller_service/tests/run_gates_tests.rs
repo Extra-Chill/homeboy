@@ -26,7 +26,7 @@ fn run_gates_records_generic_terminal_outcomes() {
 
         let passed_result = run_next(
             "loop-service-gate-passed",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("gate action executed");
@@ -65,7 +65,7 @@ fn run_gates_records_generic_terminal_outcomes() {
 
         let blocked_result = run_next(
             "loop-service-gate-blocked",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("gate action executed");
@@ -110,7 +110,7 @@ fn run_gates_blocks_on_pending_manual_check() {
         // A manual-only bundle must NOT auto-pass as an acceptable warning.
         let result = run_next(
             "loop-service-gate-manual",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("gate action executed");
@@ -174,7 +174,7 @@ fn run_gates_executes_command_bundle_and_records_result() {
 
         let result = run_next(
             "loop-service-gates",
-            CapturingExecutor::default(),
+            Arc::new(CapturingExecutor::default()),
             &NoopDispatchHook,
         )
         .expect("gates executed");
