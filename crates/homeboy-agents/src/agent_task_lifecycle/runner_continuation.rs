@@ -29,6 +29,22 @@ pub enum RunnerJobReconciliation {
     UnconfirmedAbsence,
 }
 
+/// What the current runner provider can authoritatively establish about a
+/// durable runner id. Unknown must retain runner ownership: unavailable
+/// provider/configuration evidence cannot prove a removed authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerAuthority {
+    Configured,
+    Removed,
+    Unknown,
+}
+
+impl RunnerAuthority {
+    pub fn is_configured(self) -> bool {
+        matches!(self, Self::Configured)
+    }
+}
+
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
@@ -118,8 +134,11 @@ pub trait RunnerContinuationProvider: Send + Sync {
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
-    /// Whether a runner with this id is configured/registered.
-    fn runner_exists(&self, runner_id: &str) -> bool;
+    /// Authoritative configuration state for a durable runner id. Providers
+    /// that cannot inspect their configuration return `Unknown` fail-closed.
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Unknown
+    }
 
     /// Execute a continuation command on the runner, returning the exit code.
     fn run_continuation_exec(
@@ -167,10 +186,6 @@ impl RunnerContinuationProvider for NoopProvider {
         false
     }
 
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        false
-    }
-
     fn run_continuation_exec(
         &self,
         _runner_id: &str,
@@ -205,11 +220,10 @@ homeboy_engine_primitives::provider_registry! {
     with: pub(crate) fn with_runner_continuation,
 }
 
-/// Whether the current runner provider has a configured authority for this id.
-/// A missing configuration proves the durable runner projection is orphaned;
-/// connection state alone does not.
-pub fn runner_exists(runner_id: &str) -> bool {
-    with_runner_continuation(|provider| provider.runner_exists(runner_id))
+/// Resolve the current provider's authoritative configuration state for a
+/// durable runner id. A missing provider remains unknown, not removed.
+pub fn runner_authority(runner_id: &str) -> RunnerAuthority {
+    with_runner_continuation(|provider| provider.runner_authority(runner_id))
 }
 
 /// Clear any registered runner-continuation provider so a fresh test starts from

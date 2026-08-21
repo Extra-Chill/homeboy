@@ -232,7 +232,9 @@ fn resume_transport_proxy_on_runner_in_store(
         }));
     };
 
-    if !super::runner_continuation::with_runner_continuation(|p| p.runner_exists(&runner_id)) {
+    if !super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_authority(&runner_id).is_configured()
+    }) {
         lifecycle_store.write_record(&record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,

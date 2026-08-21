@@ -78,8 +78,8 @@ impl RunnerContinuationProvider for IntentReplayProvider {
     fn is_runner_connected(&self, _runner_id: &str) -> bool {
         true
     }
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        true
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Configured
     }
 
     fn run_continuation_exec(
@@ -176,8 +176,8 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
         true
     }
 
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        true
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Configured
     }
 
     fn run_continuation_exec(

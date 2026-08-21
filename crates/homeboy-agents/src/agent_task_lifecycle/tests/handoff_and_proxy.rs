@@ -59,8 +59,8 @@ impl RunnerContinuationProvider for ReconciliationProvider {
         true
     }
 
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        true
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Configured
     }
 
     fn run_continuation_exec(

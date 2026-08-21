@@ -86,8 +86,8 @@ pub use runner_continuation::{
     clear_runner_continuation_provider_for_test, RunnerContinuationTestGuard,
 };
 pub use runner_continuation::{
-    register_runner_continuation_provider, runner_exists, RunnerContinuationProvider,
-    RunnerJobReconciliation,
+    register_runner_continuation_provider, runner_authority, RunnerAuthority,
+    RunnerContinuationProvider, RunnerJobReconciliation,
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;

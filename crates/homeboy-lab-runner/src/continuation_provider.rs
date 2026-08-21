@@ -5,7 +5,9 @@
 //! behavior directly. This adapter delegates to the runner connection,
 //! execution, and evidence functions.
 
-use homeboy_agents::agent_task_lifecycle::{RunnerContinuationProvider, RunnerJobReconciliation};
+use homeboy_agents::agent_task_lifecycle::{
+    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation,
+};
 use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use std::time::Duration;
 
@@ -185,8 +187,19 @@ impl RunnerContinuationProvider for RunnerContinuation {
             .unwrap_or(true)
     }
 
-    fn runner_exists(&self, runner_id: &str) -> bool {
-        super::exists(runner_id)
+    fn runner_authority(&self, runner_id: &str) -> RunnerAuthority {
+        // `list` failing means the registry cannot establish absence. Only a
+        // successful inventory that omits this id proves a removed authority.
+        let Ok(runners) = super::list() else {
+            return RunnerAuthority::Unknown;
+        };
+        if runners.iter().any(|runner| runner.id == runner_id)
+            || (runner_id.eq_ignore_ascii_case("lab") && super::load(runner_id).is_ok())
+        {
+            RunnerAuthority::Configured
+        } else {
+            RunnerAuthority::Removed
+        }
     }
 
     fn run_continuation_exec(

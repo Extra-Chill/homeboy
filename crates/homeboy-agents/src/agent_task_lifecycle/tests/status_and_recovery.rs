@@ -3018,9 +3018,9 @@ impl RunnerContinuationProvider for CountingRunnerProvider {
         true
     }
 
-    fn runner_exists(&self, _runner_id: &str) -> bool {
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
         self.record();
-        true
+        RunnerAuthority::Configured
     }
 
     fn run_continuation_exec(

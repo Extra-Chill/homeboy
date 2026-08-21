@@ -521,19 +521,20 @@ pub(crate) fn controller_upgrade_admission_for_records(
                 let recovery_command = if invalid_handoff_parents.contains(record.run_id.as_str()) {
                     "homeboy agent-task reconcile-records --dry-run".to_string()
                 } else {
-                    record
-                        .runner_id()
-                        .filter(|runner| agent_task_lifecycle::runner_exists(runner))
-                        .map(|runner| format!("homeboy runner reconcile {runner}"))
-                        .unwrap_or_else(|| {
-                            if liveness == AgentTaskLiveness::Active {
-                                format!("homeboy agent-task cancel {group_run_id}")
-                            } else {
-                                format!(
-                                    "homeboy --placement local agent-task reconcile {group_run_id} --apply"
-                                )
-                            }
-                        })
+                    match record.runner_id() {
+                        Some(runner)
+                            if agent_task_lifecycle::runner_authority(runner)
+                                != agent_task_lifecycle::RunnerAuthority::Removed =>
+                        {
+                            format!("homeboy runner reconcile {runner}")
+                        }
+                        _ if liveness == AgentTaskLiveness::Active => {
+                            format!("homeboy agent-task cancel {group_run_id}")
+                        }
+                        _ => format!(
+                            "homeboy --placement local agent-task reconcile {group_run_id} --apply"
+                        ),
+                    }
                 };
                 let (owner, scope, postcondition) = if recovery_command
                     .starts_with("homeboy runner reconcile ")

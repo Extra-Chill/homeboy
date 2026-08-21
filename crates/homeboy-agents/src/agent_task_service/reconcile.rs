@@ -322,6 +322,24 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         action: "no-op",
                         error: None,
                     });
+                } else if refreshed.runner_id().is_some()
+                    && refreshed.runner_job_id().is_some()
+                    && refreshed.runner_id().is_some_and(|runner_id| {
+                        agent_task_lifecycle::runner_authority(runner_id)
+                            != agent_task_lifecycle::RunnerAuthority::Removed
+                    })
+                {
+                    // An accepted remote handoff remains runner-owned unless its
+                    // provider authoritatively confirms the runner was removed.
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: resolved_run_id.clone(),
+                        liveness,
+                        source: run.source,
+                        authoritative_state: refreshed.state,
+                        stale_reason: run.stale_reason,
+                        action: "no-op",
+                        error: None,
+                    });
                 } else if dry_run {
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
@@ -333,6 +351,25 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         error: None,
                     });
                 } else {
+                    if let Some(runner_id) = refreshed.runner_id() {
+                        if agent_task_lifecycle::runner_authority(runner_id)
+                            != agent_task_lifecycle::RunnerAuthority::Removed
+                        {
+                            failed += 1;
+                            runs.push(AgentTaskReconcileRun {
+                                run_id: resolved_run_id.clone(),
+                                liveness,
+                                source: run.source,
+                                authoritative_state: refreshed.state,
+                                stale_reason: run.stale_reason,
+                                action: "failed",
+                                error: Some(format!(
+                                    "runner `{runner_id}` ownership is not authoritatively removed; reconcile it through homeboy runner reconcile {runner_id}"
+                                )),
+                            });
+                            continue;
+                        }
+                    }
                     let expired_detached_admission =
                         agent_task_lifecycle::has_expired_detached_cook_admission(
                             &refreshed,
