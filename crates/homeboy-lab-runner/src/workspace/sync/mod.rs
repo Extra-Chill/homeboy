@@ -22,7 +22,8 @@ use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
 use super::super::{
-    load, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
+    load, load_in_roots, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner,
+    RunnerWorkspaceLease,
 };
 use super::git::{
     git_snapshot, materialize_git, materialize_git_from_controller_bundle,
@@ -83,7 +84,25 @@ pub fn sync_workspace(
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    let runner = load(runner_id)?;
+    sync_workspace_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+    )
+}
+
+/// [`sync_workspace`] against explicitly injected roots.
+///
+/// The runner definition this syncs and the filesystem reservation the snapshot
+/// modes take are the same installation's state. Resolving the runner from the
+/// ambient config root while reserving space under an injected data root would
+/// sync one home's runner into another home's disk budget (#7505).
+pub fn sync_workspace_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    let runner = load_in_roots(roots, runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -153,11 +172,8 @@ pub fn sync_workspace(
                 &excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
-            // Resolved at the point of use rather than at the top of the
-            // function: only the snapshot modes take a filesystem reservation,
-            // so the other sync modes keep resolving nothing they do not use.
             let admission = require_snapshot_filesystem_admission(
-                homeboy_core::paths::PathRoots::from_environment()?.data(),
+                roots.data(),
                 &runner,
                 &local_path,
                 &remote_path,
