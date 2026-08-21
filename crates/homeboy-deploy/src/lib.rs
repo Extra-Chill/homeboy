@@ -132,10 +132,15 @@ use uuid::Uuid;
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
     let mut release_artifacts =
         homeboy_core::git::release_download::ReleaseArtifactStore::default();
-    run_with_release_artifacts(project_id, config, &mut release_artifacts)
+    // One resolution for the whole deployment. `run_multi` resolves its own for
+    // the same reason and passes it in below, so a receipt and the lifecycle
+    // checkpoint that describes it can no longer land in different homes.
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    run_with_release_artifacts(roots.data(), project_id, config, &mut release_artifacts)
 }
 
 fn run_with_release_artifacts(
+    data_root: &std::path::Path,
     project_id: &str,
     config: &DeployConfig,
     release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
@@ -186,6 +191,7 @@ fn run_with_release_artifacts(
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)
         .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     let mut result = orchestration::deploy_components(
+        data_root,
         config,
         &project,
         &ctx,
@@ -516,7 +522,12 @@ pub fn run_multi(
         }
         let mut timer = PhaseTimer::new();
         let result = timer.time("resolve_source", || {
-            run_with_release_artifacts(project_id, &project_config, &mut release_artifacts)
+            run_with_release_artifacts(
+                roots.data(),
+                project_id,
+                &project_config,
+                &mut release_artifacts,
+            )
         });
         let timings = timer.into_report();
 

@@ -20,6 +20,7 @@ use super::super::types::{
 
 /// Check mode: return component status without building or deploying.
 pub(super) struct CheckModeInput<'a> {
+    pub(super) data_root: &'a std::path::Path,
     pub(super) components: &'a [Component],
     pub(super) local_versions: &'a HashMap<String, String>,
     pub(super) remote_versions: &'a HashMap<String, String>,
@@ -34,6 +35,7 @@ pub(super) struct CheckModeInput<'a> {
 
 pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationResult {
     let CheckModeInput {
+        data_root,
         components,
         local_versions,
         remote_versions,
@@ -90,6 +92,7 @@ pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationRe
             } else {
                 let version = local_versions.get(&c.id).map(String::as_str).unwrap_or_default();
                 match super::super::receipt::load(
+                    data_root,
                     project,
                     &c.id,
                     &target,
@@ -697,7 +700,9 @@ mod tests {
             resume_run_id: None,
         };
 
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let checked = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: std::slice::from_ref(&component),
             local_versions: &local_versions,
             remote_versions: &remote_versions,
@@ -776,7 +781,9 @@ mod tests {
         let config = DeployConfig::check_all_no_pull_head();
         let packages = HashMap::from([("plugin".to_string(), package)]);
 
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let clean = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -806,7 +813,9 @@ mod tests {
         );
 
         std::fs::write(remote.join("plugin.php"), "modified").expect("drift");
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let drift = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -824,7 +833,9 @@ mod tests {
         );
 
         std::fs::write(&packages["plugin"].path, "mutated after lease").expect("mutate package");
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let mutated = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -903,7 +914,9 @@ mod tests {
             tag: "v1.0.0".to_string(),
             source_commit: "prepared-commit".to_string(),
         });
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let result = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -961,7 +974,9 @@ mod tests {
         };
         let local_versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let remote_versions = HashMap::from([("plugin".to_string(), "2.0.0".to_string())]);
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let result = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: &[component],
             local_versions: &local_versions,
             remote_versions: &remote_versions,
@@ -996,7 +1011,9 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let result = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -1056,7 +1073,9 @@ mod tests {
             },
         ] {
             config.check = true;
+            let receipt_root = tempfile::tempdir().expect("receipt data root");
             let result = run_check_mode(CheckModeInput {
+                data_root: receipt_root.path(),
                 components: std::slice::from_ref(&component),
                 local_versions: &versions,
                 remote_versions: &versions,
@@ -1093,7 +1112,9 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let result = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -1124,7 +1145,9 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let receipt_root = tempfile::tempdir().expect("receipt data root");
         let result = run_check_mode(CheckModeInput {
+            data_root: receipt_root.path(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,

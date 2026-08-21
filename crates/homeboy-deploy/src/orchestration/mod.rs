@@ -42,6 +42,7 @@ use smoke_check::run_post_deploy_smoke;
 /// Main deploy orchestration entry point.
 /// Handles component selection, building, and deployment.
 pub(super) fn deploy_components(
+    data_root: &std::path::Path,
     config: &DeployConfig,
     project: &Project,
     ctx: &RemoteProjectContext,
@@ -236,6 +237,7 @@ pub(super) fn deploy_components(
     // Check and dry-run modes return early without building or deploying
     if config.check {
         let mut result = run_check_mode(CheckModeInput {
+            data_root,
             components: &components,
             local_versions: &local_versions,
             remote_versions: &remote_versions,
@@ -486,9 +488,13 @@ pub(super) fn deploy_components(
         let component = &prepared.component;
         if prepared.package_manifest.is_some() {
             let version = prepared.local_version.as_deref().unwrap_or_default();
-            if let Err(error) =
-                super::receipt::invalidate(&project, &component.id, &prepared.install_dir, version)
-            {
+            if let Err(error) = super::receipt::invalidate(
+                data_root,
+                &project,
+                &component.id,
+                &prepared.install_dir,
+                version,
+            ) {
                 failed += 1;
                 results.push(ComponentDeployResult::failed(
                     component,
@@ -587,6 +593,7 @@ pub(super) fn deploy_components(
                 let exclusions = resolve_component_scope(component, ScopeCommand::Deploy).exclude;
                 let version = prepared.local_version.as_deref().unwrap_or_default();
                 if let Err(error) = super::receipt::write(super::receipt::ReceiptWrite {
+                    data_root,
                     project: &project,
                     component_id: &component.id,
                     target: &prepared.install_dir,
