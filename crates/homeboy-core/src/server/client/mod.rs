@@ -61,5 +61,6 @@ pub enum CommandObservation {
     StdinDeliveryFailed,
     Cancelled,
     StreamDrainTimedOut,
+    TransportObservationFailed,
     SpawnFailed,
 }

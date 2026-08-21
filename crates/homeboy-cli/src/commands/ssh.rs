@@ -383,6 +383,7 @@ fn ssh_observation_lost(output: &homeboy::core::server::CommandOutput) -> bool {
         CommandObservation::StdinDeliveryFailed
             | CommandObservation::Cancelled
             | CommandObservation::StreamDrainTimedOut
+            | CommandObservation::TransportObservationFailed
     )
 }
 
@@ -758,8 +759,9 @@ mod tests {
             false,
             255,
             false,
-            CommandObservation::StdinDeliveryFailed,
+            CommandObservation::TransportObservationFailed,
         ));
+        assert_eq!(transport.stderr, "connection lost");
 
         for execution in [timeout, interrupted, transport] {
             assert!(execution.observation_lost);
@@ -780,11 +782,11 @@ mod tests {
     fn structured_phases_do_not_report_command_finished_after_lost_observation() {
         let output = command_output(
             "",
-            "stream drain timed out",
+            "transport observation failed",
             false,
-            124,
-            true,
-            CommandObservation::StreamDrainTimedOut,
+            -1,
+            false,
+            CommandObservation::TransportObservationFailed,
         );
         let phases = ssh_execution_phases(&output);
 

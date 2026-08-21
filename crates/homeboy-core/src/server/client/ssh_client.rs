@@ -848,6 +848,7 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
+    let mut transport_observation_failed = false;
     let mut interrupted_signal = None;
     let mut cleanup_deadline = None;
     let status = loop {
@@ -866,7 +867,10 @@ pub(super) fn execute_command_with_stdin_source_timeout(
                 cleanup_deadline = Some(deadline);
                 break terminate_process_group_with_deadline(&mut child, pid, deadline);
             }
-            Err(_) => break None,
+            Err(_) => {
+                transport_observation_failed = true;
+                break None;
+            }
         }
     };
     let stdin_failed = writer
@@ -893,6 +897,7 @@ pub(super) fn execute_command_with_stdin_source_timeout(
             succeeded: status.is_some_and(|status| status.success()),
             timed_out,
             stdin_failed,
+            transport_observation_failed,
             interrupted_signal,
         },
         timeout,
@@ -1050,6 +1055,7 @@ where
     let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
     let mut stdin_failed = false;
+    let mut transport_observation_failed = false;
     let mut interrupted_signal = None;
     let mut status = None;
     let mut cleanup_deadline = None;
@@ -1087,7 +1093,10 @@ where
                 status = terminate_process_group_with_deadline(&mut child, pid, deadline);
                 break;
             }
-            Err(_) => break,
+            Err(_) => {
+                transport_observation_failed = true;
+                break;
+            }
         }
     }
     if let Some(writer) = writer {
@@ -1114,6 +1123,7 @@ where
             succeeded: status.is_some_and(|status| status.success()),
             timed_out,
             stdin_failed,
+            transport_observation_failed,
             interrupted_signal,
         },
         timeout,
@@ -1129,6 +1139,7 @@ pub(super) struct BoundedProbeOutcome {
     pub(super) succeeded: bool,
     pub(super) timed_out: bool,
     pub(super) stdin_failed: bool,
+    pub(super) transport_observation_failed: bool,
     pub(super) interrupted_signal: Option<i32>,
 }
 
@@ -1168,6 +1179,7 @@ pub(super) fn bounded_probe_output(
         stderr,
         success: !outcome.timed_out
             && !outcome.stdin_failed
+            && !outcome.transport_observation_failed
             && outcome.interrupted_signal.is_none()
             && outcome.succeeded,
         exit_code: if outcome.timed_out {
@@ -1179,7 +1191,9 @@ pub(super) fn bounded_probe_output(
             )
         },
         timed_out: outcome.timed_out,
-        observation: if outcome.stdin_failed {
+        observation: if outcome.transport_observation_failed {
+            super::CommandObservation::TransportObservationFailed
+        } else if outcome.stdin_failed {
             super::CommandObservation::StdinDeliveryFailed
         } else if outcome.interrupted_signal.is_some() {
             super::CommandObservation::Cancelled
@@ -1233,6 +1247,27 @@ mod bounded_probe_output_tests {
         assert!(output.timed_out);
         assert_eq!(output.exit_code, 124);
         assert!(output.stderr.contains("timed out after 15000ms"));
+    }
+
+    #[test]
+    fn a_lost_transport_wait_is_indeterminate_without_rewriting_stderr() {
+        let output = bounded_probe_output(
+            "partial".to_string(),
+            "remote stderr".to_string(),
+            BoundedProbeOutcome {
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+            Duration::from_secs(15),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, -1);
+        assert_eq!(output.stderr, "remote stderr");
+        assert_eq!(
+            output.observation,
+            super::super::CommandObservation::TransportObservationFailed
+        );
     }
 
     #[test]
