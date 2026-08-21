@@ -25,13 +25,12 @@ use homeboy_core::server::{self, Server, SshClient};
 
 use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobRecoveryEvidence,
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot,
-    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerProxyForward,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
-    REVERSE_UNVERIFIED_REASON,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerActiveJobsSnapshot, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
+    RunnerLeaselessRecoveryEvidence, RunnerProxyForward, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, REVERSE_UNVERIFIED_REASON,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -2963,17 +2962,6 @@ pub(crate) fn probe_verified_direct_daemon_health(
     )
 }
 
-pub(crate) fn tunnel_process_is_owned(
-    pid: u32,
-    identity: &RunnerTunnelProcessStartIdentity,
-) -> bool {
-    session_store::tunnel_process_is_owned(
-        pid,
-        Some(identity),
-        homeboy_core::process::process_start_identity,
-    )
-}
-
 pub(crate) fn tunnel_process_ownership(
     pid: u32,
     identity: &RunnerTunnelProcessStartIdentity,
@@ -3099,16 +3087,6 @@ fn child_run_has_active_job(run: &RunSummary, active_jobs: &[ActiveRunnerJobSumm
         job.durable_run_id.as_deref() == Some(run.id.as_str())
             || job.command.contains(run.id.as_str())
     })
-}
-
-fn runner_running_runs(session: &RunnerSession) -> Result<Vec<RunSummary>> {
-    if session.local_url.is_none() {
-        return Ok(Vec::new());
-    }
-    runner_running_runs_until(
-        session,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn runner_running_runs_until(
@@ -3690,19 +3668,6 @@ fn tunnel_verification_gap(
             runner.id, runner.id,
         ),
     ))
-}
-
-fn stale_daemon_warning(
-    runner: &Runner,
-    session: Option<&RunnerSession>,
-    connected: bool,
-) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
-    stale_daemon_warning_until(
-        runner,
-        session,
-        connected,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn stale_daemon_warning_until(

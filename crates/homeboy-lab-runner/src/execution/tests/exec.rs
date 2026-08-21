@@ -261,8 +261,10 @@ fn read_only_artifact_retrieval_is_not_blocked_by_a_stale_admission_daemon() {
     // behind a stale admission daemon. A read-only retrieval routes to that
     // owner and never rotates the shared tunnel, so it must not be refused
     // (Extra-Chill/homeboy#9420).
-    let read_only =
-        RunnerExecOptions::raw_command(vec!["node".to_string()]).read_only_artifact_access();
+    let read_only = RunnerExecOptions {
+        read_only_artifact_access: true,
+        ..RunnerExecOptions::raw_command(vec!["node".to_string()])
+    };
 
     assert!(!refuses_nonfresh_daemon_execution(
         &read_only,

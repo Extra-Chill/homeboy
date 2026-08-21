@@ -763,78 +763,9 @@ pub(super) fn remote_lease_bound_daemon_stop_command(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Barrier,
-    };
+    use std::net::TcpListener;
+    use std::sync::{atomic::Ordering, Arc};
     use std::thread;
-
-    struct FixtureDaemon {
-        address: std::net::SocketAddr,
-        running: Arc<AtomicBool>,
-        thread: Option<thread::JoinHandle<()>>,
-    }
-
-    impl FixtureDaemon {
-        fn new(lease_id: &str, pid: u32) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
-            let address = listener.local_addr().expect("fixture address");
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
-            let running = Arc::new(AtomicBool::new(true));
-            let server_running = Arc::clone(&running);
-            let health = format!(
-                r#"{{"freshness":{{"fresh":true,"stale_reason_code":null,"restartable":true,"lease_id":"{lease_id}","pid":{pid},"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]}},"pid":{pid}}}"#
-            );
-            let thread = thread::spawn(move || {
-                while server_running.load(Ordering::SeqCst) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-                            let mut request = [0; 1024];
-                            let length = stream.read(&mut request).unwrap_or(0);
-                            if String::from_utf8_lossy(&request[..length]).contains("GET /health ")
-                            {
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                    health.len(),
-                                    health
-                                );
-                                let _ = stream.write_all(response.as_bytes());
-                            }
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("fixture listener failed: {error}"),
-                    }
-                }
-            });
-            Self {
-                address,
-                running,
-                thread: Some(thread),
-            }
-        }
-
-        fn url(&self) -> String {
-            format!("http://{}", self.address)
-        }
-    }
-
-    impl Drop for FixtureDaemon {
-        fn drop(&mut self) {
-            self.running.store(false, Ordering::SeqCst);
-            let _ = TcpStream::connect(self.address);
-            self.thread
-                .take()
-                .expect("fixture thread")
-                .join()
-                .expect("fixture shutdown");
-        }
-    }
 
     fn direct_ssh_session(lease_id: &str) -> RunnerSession {
         RunnerSession {
@@ -887,35 +818,6 @@ mod tests {
             endpoint_probe_error: None,
             termination_evidence: None,
             daemon_freshness: None,
-        }
-    }
-
-    fn fixture_session(controller_id: &str, local_url: String) -> RunnerSession {
-        RunnerSession {
-            runner_id: "fixture-lab".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some("fixture-server".to_string()),
-            controller_id: Some(controller_id.to_string()),
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
-            local_port: local_url
-                .rsplit(':')
-                .next()
-                .and_then(|port| port.parse().ok()),
-            local_url: Some(local_url),
-            tunnel_pid: None,
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(4242),
-            remote_daemon_lease_id: Some("lease-fixture".to_string()),
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some("homeboy test+fixture".to_string()),
-            connected_at: Utc::now().to_rfc3339(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
         }
     }
 

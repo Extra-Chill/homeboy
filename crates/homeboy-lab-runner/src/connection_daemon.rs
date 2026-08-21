@@ -884,7 +884,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
         DaemonHealthReport {

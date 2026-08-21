@@ -3350,6 +3350,15 @@ pub(crate) enum RunAuthority {
 
 pub(crate) enum ActiveResourceLifecycleLiveness {
     NotActive,
+    /// The payload carries the run id whose terminal state released the lease.
+    /// Production matches `Terminal(_)`, so nothing reads it at runtime — but
+    /// `workspace/tests/prune.rs` asserts `owner == "run-terminal"` to pin that
+    /// the right run was credited. Suppressed per-item rather than at module
+    /// scope so the next unused field in this file still fails the build.
+    #[allow(
+        dead_code,
+        reason = "Owning run id is asserted by workspace/tests/prune.rs; production branches on the variant only."
+    )]
     Terminal(String),
     Live,
     Unknown(&'static str),

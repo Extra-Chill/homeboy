@@ -1955,24 +1955,6 @@ fn retire_result_owner(
     reconcile(runner_id, legacy).map(|_| ())
 }
 
-/// Reconcile a bounded page of authoritative retained result ids. This repairs
-/// stale registry claims after controller restart without guessing retention.
-pub(crate) fn reconcile_result_owners(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-    retained_run_ids: &std::collections::BTreeSet<String>,
-    retained_artifact_ids: &std::collections::BTreeSet<String>,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, legacy)? else {
-            return Ok(());
-        };
-        generations.reconcile_result_owners(retained_run_ids, retained_artifact_ids);
-        write(runner_id, &generations)
-    })?;
-    reconcile(runner_id, legacy).map(|_| ())
-}
-
 pub(crate) fn activate(
     runner_id: &str,
     current: &RunnerSession,

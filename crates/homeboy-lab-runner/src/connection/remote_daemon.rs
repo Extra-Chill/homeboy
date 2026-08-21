@@ -48,31 +48,6 @@ pub(super) fn remote_homeboy_version(
     ))
 }
 
-/// Read the remote Homeboy version under a hard wall-clock bound (#10418).
-///
-/// Reachable from read-only inspection (`runner status`, `runs list`,
-/// `agent-task status`), which used to run this probe with no bound at all — so
-/// a wedged Lab made the whole diagnostic surface hang. On timeout the SSH
-/// child process group is killed and the degradation is recorded.
-pub(super) fn bounded_remote_homeboy_version(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: Option<&str>,
-) -> std::result::Result<String, String> {
-    let command = remote_homeboy_version_command(homeboy);
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
-    let started = std::time::Instant::now();
-    let output = client.execute_with_timeout(&command, timeout);
-    crate::readonly_probe::record_probe_outcome(
-        "runner_homeboy_version",
-        runner_id,
-        started,
-        timeout,
-        &output,
-    );
-    parse_remote_homeboy_version(&output)
-}
-
 fn remote_homeboy_version_command(homeboy: &str) -> String {
     format!("{} --version", shell::quote_arg(homeboy))
 }

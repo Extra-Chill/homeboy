@@ -2188,13 +2188,6 @@ impl RunnerStaleDaemonWarning {
         self
     }
 
-    pub(crate) fn recovery_ref(&self) -> Option<String> {
-        recovery_ref(
-            self.current_homeboy_build_identity.as_deref(),
-            &homeboy_product_identity::build_identity(),
-        )
-    }
-
     pub fn with_identity_unverifiable(
         mut self,
         runner_id: &str,
