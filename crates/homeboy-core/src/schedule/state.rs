@@ -93,29 +93,41 @@ impl ScheduleState {
     }
 }
 
-fn state_path(id: &str) -> Result<std::path::PathBuf> {
+/// A schedule's runtime state file below an explicitly injected data root.
+fn state_path_in_root(data_root: &std::path::Path, id: &str) -> std::path::PathBuf {
     let segment = paths::sanitize_path_segment(id);
-    Ok(paths::homeboy_data()?
-        .join("schedules")
-        .join(segment)
-        .join("state.json"))
+    data_root.join("schedules").join(segment).join("state.json")
 }
 
 /// Read a schedule's runtime state, treating absent or unreadable state as
 /// "never run" rather than an error — a missing record must not stop a
 /// schedule from running for the first time.
 pub fn load_state(id: &str) -> ScheduleState {
-    let Ok(path) = state_path(id) else {
+    let Ok(data_root) = paths::homeboy_data() else {
         return ScheduleState::default();
     };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    load_state_in_root(&data_root, id)
+}
+
+/// [`load_state`] against an explicitly injected data root.
+pub fn load_state_in_root(data_root: &std::path::Path, id: &str) -> ScheduleState {
+    let Ok(raw) = std::fs::read_to_string(state_path_in_root(data_root, id)) else {
         return ScheduleState::default();
     };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
 pub fn save_state(id: &str, state: &ScheduleState) -> Result<()> {
-    let path = state_path(id)?;
+    save_state_in_root(&paths::homeboy_data()?, id, state)
+}
+
+/// [`save_state`] against an explicitly injected data root.
+pub fn save_state_in_root(
+    data_root: &std::path::Path,
+    id: &str,
+    state: &ScheduleState,
+) -> Result<()> {
+    let path = state_path_in_root(data_root, id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             crate::error::Error::internal_io(
@@ -141,10 +153,16 @@ pub fn save_state(id: &str, state: &ScheduleState) -> Result<()> {
 /// Drop a schedule's runtime state. Best effort: removing a schedule must not
 /// fail because its state was already gone.
 pub fn remove_state(id: &str) {
-    if let Ok(path) = state_path(id) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::remove_dir_all(parent);
-        }
+    if let Ok(data_root) = paths::homeboy_data() {
+        remove_state_in_root(&data_root, id);
+    }
+}
+
+/// [`remove_state`] against an explicitly injected data root.
+pub fn remove_state_in_root(data_root: &std::path::Path, id: &str) {
+    let path = state_path_in_root(data_root, id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::remove_dir_all(parent);
     }
 }
 

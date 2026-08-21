@@ -10,7 +10,7 @@ mod resource_budget_tests {
     fn resource_budget_limits_concurrent_task_cost() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(4);
         plan.options.max_concurrency = 4;
         plan.options.resource_budget.max_active_units = Some(2);
@@ -30,10 +30,10 @@ mod resource_budget_tests {
 
     #[test]
     fn resource_budget_blocks_task_that_cannot_fit() {
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
-        ));
+        )));
         let mut plan = plan_with_tasks(1);
         plan.options.resource_budget.max_active_units = Some(2);
         plan.options.resource_budget.default_task_units = 3;
@@ -57,7 +57,7 @@ mod resource_budget_tests {
     fn retry_budget_and_failure_classifications_gate_retries() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.retry.max_attempts = 3;
         plan.options.retry.max_retries_total = Some(0);

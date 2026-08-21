@@ -250,12 +250,42 @@ for asset in "${REQUIRED[@]}"; do
   LOCAL_DIGESTS["${asset}"]="sha256:$(sha256sum "${path}" | cut -d' ' -f1)"
 done
 
+# Which assets must a PUBLISHED checksum sidecar cover? (#12701)
+#
+# Not "everything that is not a sidecar". cargo-dist checksums the distributable
+# archives -- the bytes `homeboy upgrade` and the installer download and then
+# verify before executing. It does not checksum the bootstrap assets:
+# `homeboy-installer.sh`, the Homebrew formula and `dist-manifest.json` are
+# fetched over HTTPS from the release itself, and a checksum served from the
+# same origin as the artifact it describes proves nothing a consumer could not
+# already trust.
+#
+# Defining the covered set as "not a sidecar" made this loop unsatisfiable by
+# construction: `sha256.sum` has only ever listed the four platform archives and
+# `source.tar.gz`, so every release from v0.350.22 onward failed publish with
+# "No rebuilt checksum contract covers homeboy-installer.sh" while the release
+# itself published complete with all 14 assets.
+#
+# This narrows which assets additionally require a published sidecar. It does
+# not narrow what gets verified: the final `remote_valid` sweep below still
+# proves every REQUIRED asset -- bootstrap assets included -- against GitHub's
+# digest of the rebuilt local bytes.
+requires_checksum_contract() {
+  case "$1" in
+    *.sha256|sha256.sum) return 1 ;;
+    *-installer.sh|*.rb|dist-manifest.json) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 payload_count=0
 for asset in "${REQUIRED[@]}"; do
-  case "${asset}" in *.sha256|sha256.sum) continue ;; esac
+  requires_checksum_contract "${asset}" || continue
   payload_count=$((payload_count + 1))
 done
-[ "${payload_count}" -gt 0 ] || fail "The rebuilt asset contract has no payloads"
+# Fail closed if the contract narrowed to nothing. If cargo-dist ever stops
+# planning archives, this fires rather than vacuously passing an empty sweep.
+[ "${payload_count}" -gt 0 ] || fail "The rebuilt asset contract has no checksum-covered payloads"
 
 for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
@@ -288,7 +318,7 @@ for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256) [ "${references}" -eq 1 ] && [ "${sidecar%.sha256}" = "${sidecar_payload}" ] || fail "Checksum contract ${sidecar} is incomplete" ;; esac
 done
 for asset in "${REQUIRED[@]}"; do
-  case "${asset}" in *.sha256|sha256.sum) continue ;; esac
+  requires_checksum_contract "${asset}" || continue
   [ -n "${CONTRACT_DIGESTS[${asset}]:-}" ] || fail "No rebuilt checksum contract covers ${asset}"
 done
 

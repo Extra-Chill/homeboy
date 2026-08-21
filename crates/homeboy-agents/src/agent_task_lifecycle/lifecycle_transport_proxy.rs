@@ -49,7 +49,29 @@ impl TransportProxyRecovery {
 /// Reconnect a transport-owned proxy through its durable runner execution
 /// record. `None` means the run is a normal scheduler-owned plan.
 pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    recover_transport_proxy_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`recover_transport_proxy`].
+///
+/// Recovery is a read-modify-write over one durable proxy record: it reads the
+/// record, reconciles a runner snapshot onto it, and commits the result. All
+/// three have to land in the same installation. A recovery that read one home's
+/// record and committed the reconnect annotation into another would leave the
+/// caller's own proxy permanently unrecovered while reporting success — the
+/// cross-home write class #7505 exists to remove.
+///
+/// `with_runner_continuation` is deliberately still process-global: the runner
+/// continuation registry is configured trust material and a subprocess
+/// contract, not a durable lifecycle root (#12618).
+pub(crate) fn recover_transport_proxy_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<TransportProxyRecovery>> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
@@ -68,7 +90,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
     metadata.insert("runner_id".to_string(), json!(&runner_id));
 
     let Some(runner_job_id) = runner_job_id else {
-        return resume_transport_proxy_on_runner(record, runner_id);
+        return resume_transport_proxy_on_runner_in_store(lifecycle_store, record, runner_id);
     };
 
     metadata.insert("runner_job_id".to_string(), json!(&runner_job_id));
@@ -77,8 +99,8 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
         p.runner_job_log_snapshot(&runner_id, &runner_job_id)
     }) {
         Ok(snapshot) => {
-            reconcile_transport_proxy_snapshot(&mut record, &snapshot)?;
-            store::write_record(&record)?;
+            reconcile_transport_proxy_snapshot_in_store(lifecycle_store, &mut record, &snapshot)?;
+            lifecycle_store.write_record(&record)?;
             Ok(Some(TransportProxyRecovery::Reconciled {
                 record,
                 next_action: format!(
@@ -88,7 +110,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
         }
         Err(_) => {
             record.annotate_runner_disconnected();
-            store::write_record(&record)?;
+            lifecycle_store.write_record(&record)?;
             Ok(Some(TransportProxyRecovery::ReconnectRequired {
                 record,
                 next_action: format!("homeboy runner connect {runner_id}"),
@@ -100,6 +122,18 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 /// Replays already-persisted terminal runner evidence into an incomplete
 /// controller projection. It is intentionally limited to an existing terminal
 /// job snapshot and cannot dispatch or resume provider work.
+///
+/// This is deliberately still ambient (#7505). Rooting it is a one-hop edit —
+/// every sibling it needs (`project_persisted_terminal_runner_events_in_store`,
+/// `reconcile_runner_job_snapshot_in_store`, and the store's own record and
+/// aggregate accessors) already exists — but it is *not* a self-contained one.
+/// These two calls are the last non-test callers of the ambient
+/// `project_persisted_terminal_runner_events` and `reconcile_runner_job_snapshot`
+/// wrappers in `lifecycle_runner_projection`. Both are `pub(crate)`, so
+/// rerouting them here leaves those wrappers reachable only from `#[cfg(test)]`
+/// code, which is a `dead_code` error under `-D warnings`. Closing this slice
+/// therefore has to gate or delete those two wrappers in the same commit, in
+/// the file that owns them.
 pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     let runtime = record
@@ -155,7 +189,14 @@ fn is_authenticated_transport_recovery_record(record: &AgentTaskRunRecord) -> bo
 /// Resume an unbound proxy where the controller never learned the runner job
 /// identity. The persisted command and workspace belong to the runner, so this
 /// must execute through the runner rather than through the local scheduler.
-fn resume_transport_proxy_on_runner(
+///
+/// There is deliberately no ambient wrapper: the only caller,
+/// [`recover_transport_proxy_in_store`], is rooted and already holds the store
+/// whose record it is resuming. Every early-return branch below commits the
+/// annotated record, and the post-continuation re-read reloads whatever the
+/// runner persisted — all of which must be the caller's own home (#7505).
+fn resume_transport_proxy_on_runner_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     mut record: AgentTaskRunRecord,
     runner_id: String,
 ) -> Result<Option<TransportProxyRecovery>> {
@@ -165,7 +206,7 @@ fn resume_transport_proxy_on_runner(
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
     else {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),
@@ -184,7 +225,7 @@ fn resume_transport_proxy_on_runner(
         })
         .filter(|command| !command.is_empty())
     else {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),
@@ -192,7 +233,7 @@ fn resume_transport_proxy_on_runner(
     };
 
     if !super::runner_continuation::with_runner_continuation(|p| p.runner_exists(&runner_id)) {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),
@@ -211,20 +252,51 @@ fn resume_transport_proxy_on_runner(
         )));
     }
 
-    record = store::read_record(&record.run_id)?;
+    record = lifecycle_store.read_record(&record.run_id)?;
     Ok(Some(TransportProxyRecovery::Resumed {
         next_action: format!("homeboy agent-task status {} --full", record.run_id),
         record,
     }))
 }
 
+/// The ambient half of the pair, kept so the existing test call sites need no
+/// edit while they migrate onto the rooted sibling.
+///
+/// It is `#[cfg(test)]` because that is now literally what it is: rerouting
+/// `recover_transport_proxy_in_store` onto
+/// [`reconcile_transport_proxy_snapshot_in_store`] removed its last production
+/// caller, and a `pub(crate)` function reachable only from `#[cfg(test)] mod
+/// tests` is a `dead_code` error under `-D warnings`. Gating it says so
+/// honestly instead of keeping a production-looking entry point alive for the
+/// benefit of a lint.
+#[cfg(test)]
 pub(crate) fn reconcile_transport_proxy_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
+    reconcile_transport_proxy_snapshot_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        record,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of `reconcile_transport_proxy_snapshot`, and
+/// the only form compiled into a production build.
+///
+/// This is a pure alias for the transport-proxy entry into the one reconcile
+/// owner, so the store is passed straight through: the binding write, the
+/// aggregate idempotence read, and the terminal commit all belong to
+/// `reconcile_runner_job_snapshot_in_store` and are already rooted there.
+pub(crate) fn reconcile_transport_proxy_snapshot_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<()> {
     // Binding and the queued -> running transition now live at the top of
-    // `reconcile_runner_job_snapshot` so every reconcile path shares one owner.
-    reconcile_runner_job_snapshot(record, snapshot)
+    // `reconcile_runner_job_snapshot_in_store` so every reconcile path shares
+    // one owner.
+    reconcile_runner_job_snapshot_in_store(lifecycle_store, record, snapshot)
 }
 
 /// A runner snapshot from the expected Lab is durable acceptance evidence when
@@ -240,7 +312,19 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
 /// once claimed, so a snapshot polled before the claim legitimately has no
 /// target. Accept an absent target (the expected-Lab handoff is authority) and
 /// only reject a target that names a *different* runner.
-pub(crate) fn bind_pending_lab_handoff_snapshot(
+///
+/// Binding is a durable write — it replaces `record` with whatever acceptance
+/// persisted — so the installation it commits into has to be the one its caller
+/// is reconciling. A binding written to another home would leave the caller's
+/// own record permanently unbound while snapshot validation kept rejecting a
+/// perfectly valid runner job (#7505).
+///
+/// There is deliberately no ambient wrapper any more. Both callers —
+/// `reconcile_runner_job_snapshot_in_store` and
+/// `project_terminal_runner_result_in_store` — are rooted and already hold the
+/// store whose record they are binding.
+pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
@@ -296,17 +380,24 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
         // The runner can finish and mirror its aggregate before the controller
         // projects the daemon snapshot. Preserve that terminal outcome while
         // attaching the authoritative job identity needed for validation.
-        *record =
-            record_runner_job_identity(&record.run_id, &runner_id, &snapshot.job.id.to_string())?;
+        *record = record_runner_job_identity_in_store(
+            lifecycle_store,
+            &record.run_id,
+            &runner_id,
+            &snapshot.job.id.to_string(),
+        )?;
         return Ok(());
     }
-    *record = record_detached_lab_run(DetachedLabRunRecord {
-        run_id: &record.run_id,
-        runner_id: &runner_id,
-        runner_job_id: &snapshot.job.id.to_string(),
-        remote_workspace: &remote_workspace,
-        remote_command: &remote_command,
-    })?;
+    *record = record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &record.run_id,
+            runner_id: &runner_id,
+            runner_job_id: &snapshot.job.id.to_string(),
+            remote_workspace: &remote_workspace,
+            remote_command: &remote_command,
+        },
+    )?;
     Ok(())
 }
 
@@ -314,7 +405,8 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
 /// record when it has a planned (pre-acceptance) execution intent but no
 /// accepted runner job yet.
 ///
-/// This is the recovery-safe fallback for [`bind_pending_lab_handoff_snapshot`]:
+/// This is the recovery-safe fallback for
+/// [`bind_pending_lab_handoff_snapshot_in_store`]:
 /// it only yields a runner when the execution record is *planned* (not yet
 /// bound to a job id) and names this exact run, so binding a replacement job
 /// cannot latch onto a terminal or mismatched execution record.

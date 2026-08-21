@@ -47,6 +47,26 @@ pub enum TerminalWorkspaceAuthorityResolution {
 pub fn resolve_terminal_workspace_authority(
     record: &TaskWorktreeRecord,
 ) -> Result<TerminalWorkspaceAuthorityResolution> {
+    resolve_terminal_workspace_authority_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        record,
+    )
+}
+
+/// The store-rooted counterpart of [`resolve_terminal_workspace_authority`].
+///
+/// This is a permission gate over destroying a retained workspace, and it used
+/// to consult two independently resolved data roots: the durable controller run
+/// came from the ambient lifecycle store, the owner lease from a claim store
+/// built out of a second `paths::homeboy_data()` read. When those two disagree
+/// the lease lookup finds no file, `validate_owner` answers `Ok(false)`, and the
+/// gate concludes "no live local workspace owner" for a workspace that is still
+/// owned — a fail-open on the exact check that is supposed to fail closed
+/// (#7505). One store now roots both reads.
+pub(crate) fn resolve_terminal_workspace_authority_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &TaskWorktreeRecord,
+) -> Result<TerminalWorkspaceAuthorityResolution> {
     let workspace = record.effective_workspace_identity()?;
     let authority_set = match configured_terminal_authorities() {
         Ok(authorities) => authorities,
@@ -80,7 +100,7 @@ pub fn resolve_terminal_workspace_authority(
             observations: Vec::new(),
         });
     };
-    let controller = match store::read_record(run_id) {
+    let controller = match lifecycle_store.read_record(run_id) {
         Ok(record) => record,
         Err(_) => {
             return Ok(TerminalWorkspaceAuthorityResolution::Refused {
@@ -108,7 +128,10 @@ pub fn resolve_terminal_workspace_authority(
     if controller
         .workspace_owner_lease
         .as_ref()
-        .is_some_and(|lease| validate_local_workspace_owner(lease).unwrap_or(true))
+        .is_some_and(|lease| {
+            validate_local_workspace_owner_in_store(&lifecycle_store.workspace_claim_store(), lease)
+                .unwrap_or(true)
+        })
     {
         return Ok(TerminalWorkspaceAuthorityResolution::Refused {
             reason: "controller still has a live local workspace owner lease".into(),
@@ -1233,22 +1256,15 @@ fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-/// Inventory is local-controller evidence only. Runner authority composition is
-/// deliberately delegated to `RunnerContinuationProvider` in a later layer.
-pub fn local_workspace_authority_inventory() -> Result<Vec<AgentTaskRunRecord>> {
-    store::read_records().map(|records| {
-        records
-            .into_iter()
-            .filter(|record| {
-                !record.state.is_terminal()
-                    && record
-                        .workspace_owner_lease
-                        .as_ref()
-                        .is_some_and(|lease| validate_local_workspace_owner(lease).unwrap_or(false))
-            })
-            .collect()
-    })
-}
+// `local_workspace_authority_inventory` and its
+// `local_workspace_authority_inventory_in_store` sibling lived here. The pair
+// was dead end to end: the ambient half had no callers, and the rooted half had
+// exactly one — the ambient half. Inventory was local-controller evidence only,
+// and runner authority composition is already delegated to
+// `RunnerContinuationProvider` in a later layer, so nothing was left to read it.
+// Deleting the ambient half removed a resolution point that existed for nobody;
+// the rooted half went with it rather than being left behind as a rooted body
+// no caller reaches (#7505).
 
 pub fn acquire_local_workspace_claim(
     workspace: WorkspaceIdentity,
@@ -1263,18 +1279,6 @@ pub fn validate_local_workspace_claim(claim: &WorkspaceClaim) -> Result<bool> {
 
 pub fn release_local_workspace_claim(claim: &WorkspaceClaim) -> Result<()> {
     store()?.release(claim, now_ms())
-}
-
-pub(crate) fn register_local_workspace_owner(
-    workspace: WorkspaceIdentity,
-    run_id: &str,
-) -> Result<WorkspaceOwnerLease> {
-    store()?.register_owner(
-        workspace,
-        run_id,
-        LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS,
-        now_ms(),
-    )
 }
 
 pub(crate) fn register_local_workspace_owner_in_store(
@@ -1296,10 +1300,6 @@ pub(crate) fn renew_local_workspace_owner(
     store()?.renew_owner(lease, LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS, now_ms())
 }
 
-pub(crate) fn validate_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Result<bool> {
-    store()?.validate_owner(lease, now_ms())
-}
-
 pub(crate) fn validate_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     lease: &WorkspaceOwnerLease,
@@ -1307,19 +1307,11 @@ pub(crate) fn validate_local_workspace_owner_in_store(
     store.validate_owner(lease, now_ms())
 }
 
-pub(crate) fn release_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Result<()> {
-    store()?.release_owner(lease, now_ms())
-}
-
 pub(crate) fn release_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     lease: &WorkspaceOwnerLease,
 ) -> Result<()> {
     store.release_owner(lease, now_ms())
-}
-
-pub(crate) fn renew_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
-    renew_record_workspace_owner_in_store(&store()?, record)
 }
 
 pub(crate) fn renew_record_workspace_owner_in_store(
@@ -1339,6 +1331,20 @@ pub(crate) fn renew_record_workspace_owner_in_store(
 }
 
 pub(crate) fn ensure_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
+    ensure_record_workspace_owner_in_store(&store()?, record)
+}
+
+/// The store-rooted counterpart of [`ensure_record_workspace_owner`].
+///
+/// Validating an existing lease and registering its replacement are one
+/// decision: "is this record still the owner, and if not, make it one." The
+/// ambient form resolved a claim store for each half, so a repoint between them
+/// could reject a live lease in one home and register its successor in another,
+/// leaving two installations each believing they own the workspace (#7505).
+pub(crate) fn ensure_record_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     let Some(identity) = record.workspace_identity.clone() else {
         return Ok(());
     };
@@ -1347,12 +1353,16 @@ pub(crate) fn ensure_record_workspace_owner(record: &mut AgentTaskRunRecord) -> 
         if lease.workspace == identity
             && lease.owner_id == record.run_id
             && lease.lifecycle_revision == record.workspace_lifecycle_revision
-            && validate_local_workspace_owner(lease)?
+            && validate_local_workspace_owner_in_store(store, lease)?
         {
             return Ok(());
         }
     }
-    record.workspace_owner_lease = Some(register_local_workspace_owner(identity, &record.run_id)?);
+    record.workspace_owner_lease = Some(register_local_workspace_owner_in_store(
+        store,
+        identity,
+        &record.run_id,
+    )?);
     record.workspace_lifecycle_revision = record
         .workspace_owner_lease
         .as_ref()
@@ -1394,10 +1404,6 @@ pub(crate) fn require_record_workspace_owner_in_store(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn release_terminal_record_workspace_owner(record: &AgentTaskRunRecord) -> Result<()> {
-    release_terminal_record_workspace_owner_in_store(&store()?, record)
 }
 
 pub(crate) fn release_terminal_record_workspace_owner_in_store(

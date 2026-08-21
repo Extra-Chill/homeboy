@@ -38,9 +38,9 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
         }],
         ..Default::default()
     });
-    let aggregate = AgentTaskScheduler::new(RotationThenSuccess {
+    let aggregate = AgentTaskScheduler::new(Arc::new(RotationThenSuccess {
         calls: Arc::clone(&calls),
-    })
+    }))
     .run(plan);
 
     let usage = execution_budget_usage(&aggregate);
@@ -344,8 +344,12 @@ fn cook_retry_intent_rejects_explicitly_disabled_gate_remediation() {
 #[test]
 fn service_run_loaded_plan_persists_durable_lifecycle() {
     with_isolated_home(|_| {
-        let result = run_loaded_plan(test_plan(), Some("service-run"), SucceedingExecutor)
-            .expect("service run completed");
+        let result = run_loaded_plan(
+            test_plan(),
+            Some("service-run"),
+            Arc::new(SucceedingExecutor),
+        )
+        .expect("service run completed");
         let record = lifecycle_status("service-run").expect("status persisted");
 
         assert_eq!(result.exit_code, 0);
@@ -384,9 +388,9 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
             agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved
         );
         let calls = Arc::new(AtomicUsize::new(0));
-        AgentTaskScheduler::new(CountingExecutor {
+        AgentTaskScheduler::new(Arc::new(CountingExecutor {
             calls: Arc::clone(&calls),
-        })
+        }))
         .with_run_id("provider-reservation")
         .run(plan.clone());
         assert_eq!(
@@ -453,10 +457,10 @@ fn local_provider_execution_observes_its_durable_running_boundary() {
         run_loaded_plan(
             test_plan(),
             Some("local-provider-boundary"),
-            LocalBoundaryExecutor {
+            Arc::new(LocalBoundaryExecutor {
                 run_id: "local-provider-boundary".to_string(),
                 observed: Arc::clone(&observed),
-            },
+            }),
         )
         .expect("local provider run completes");
 
@@ -482,7 +486,7 @@ fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
             let barrier = Arc::clone(&barrier);
             threads.push(std::thread::spawn(move || {
                 barrier.wait();
-                AgentTaskScheduler::new(CountingExecutor { calls })
+                AgentTaskScheduler::new(Arc::new(CountingExecutor { calls }))
                     .with_run_id("concurrent-provider-reservation")
                     .run(plan)
             }));
@@ -532,7 +536,7 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
         let result = run_loaded_plan(
             test_plan(),
             Some("lab-handoff-run-plan"),
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
         )
         .expect("runner-local provider execution starts without a nested daemon connection");
         assert_eq!(
@@ -574,7 +578,7 @@ fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
         let error = run_loaded_plan(
             plan,
             Some("controller-proxy-interrupted-lab-runner-handoff"),
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
         )
         .expect_err("runner preparation fails after receiving the durable plan");
         let record = lifecycle_status("controller-proxy-interrupted-lab-runner-handoff")
@@ -583,7 +587,7 @@ fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
             .expect("runner-scoped logs resolve from its materialized record");
         let recovery = run_submitted(
             "controller-proxy-interrupted-lab-runner-handoff".to_string(),
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
         )
         .expect("runner-scoped run resolves the materialized terminal record");
 
@@ -613,7 +617,7 @@ fn runner_exec_materializes_the_run_before_incomplete_harvest_transport_failure(
         let error = run_loaded_plan(
             test_plan(),
             Some("runner-exec-incomplete-harvest-transport"),
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
         )
         .expect_err("runner exec source metadata requires paired Lab transport");
 
@@ -643,19 +647,19 @@ fn submitted_terminal_runs_reuse_durable_evidence_without_reexecution() {
     with_isolated_home(|_| {
         for (run_id, expected_exit_code) in [("terminal-succeeded", 0), ("terminal-failed", 1)] {
             if run_id == "terminal-succeeded" {
-                run_loaded_plan(test_plan(), Some(run_id), SucceedingExecutor)
+                run_loaded_plan(test_plan(), Some(run_id), Arc::new(SucceedingExecutor))
                     .expect("succeeded run completed");
             } else {
-                run_loaded_plan(test_plan(), Some(run_id), TimeoutExecutor)
+                run_loaded_plan(test_plan(), Some(run_id), Arc::new(TimeoutExecutor))
                     .expect("failed run completed");
             }
 
             let observed_request = Arc::new(Mutex::new(None));
             let result = run_submitted(
                 run_id.to_string(),
-                CapturingExecutor {
+                Arc::new(CapturingExecutor {
                     observed_request: Arc::clone(&observed_request),
-                },
+                }),
             )
             .expect("terminal run returns its durable aggregate");
 
@@ -676,9 +680,9 @@ fn cancelled_terminal_run_is_not_reexecuted_without_durable_aggregate() {
         let observed_request = Arc::new(Mutex::new(None));
         let error = run_submitted(
             "terminal-cancelled".to_string(),
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect_err("cancelled run has no aggregate to reuse");
 
@@ -697,9 +701,9 @@ fn submitted_incomplete_run_still_executes_for_recovery() {
         let observed_request = Arc::new(Mutex::new(None));
         let result = run_submitted(
             "incomplete-queued".to_string(),
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("queued run recovers through normal execution");
 
@@ -715,8 +719,12 @@ fn submitted_incomplete_run_still_executes_for_recovery() {
 #[test]
 fn service_persists_timed_out_run_record_and_evidence_refs() {
     with_isolated_home(|_| {
-        let result = run_loaded_plan(test_plan(), Some("service-timeout"), TimeoutExecutor)
-            .expect("timeout run completed");
+        let result = run_loaded_plan(
+            test_plan(),
+            Some("service-timeout"),
+            Arc::new(TimeoutExecutor),
+        )
+        .expect("timeout run completed");
         let record = lifecycle_status("service-timeout").expect("status persisted");
         let artifacts = artifacts("service-timeout").expect("artifacts persisted");
 
@@ -791,9 +799,9 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
         let result = run_loaded_plan(
             plan,
             Some("service-materialized-worktree"),
-            CapturingExecutor {
+            Arc::new(CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
-            },
+            }),
         )
         .expect("run-plan completed");
         let observed = observed_request
@@ -865,7 +873,7 @@ fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_w
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-b-eligible"))
             .expect("eligible work submitted");
 
-        let result = run_next(SucceedingExecutor).expect("eligible work runs");
+        let result = run_next(Arc::new(SucceedingExecutor)).expect("eligible work runs");
         let record =
             lifecycle_status("run-next-a-missing-secret").expect("quarantined record persisted");
 
@@ -932,9 +940,9 @@ fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record(
             .expect("eligible record submitted");
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let result = run_next(CountingExecutor {
+        let result = run_next(Arc::new(CountingExecutor {
             calls: Arc::clone(&calls),
-        })
+        }))
         .expect("next eligible record executes");
         let quarantined = agent_task_lifecycle::exact_record("run-next-test-detached")
             .expect("quarantined record");
@@ -978,7 +986,7 @@ fn run_next_bounds_stale_global_admission_and_reports_progress() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("bounded-ready"))
             .expect("ready work submitted");
 
-        let first = run_next(SucceedingExecutor).expect("bounded claim returns");
+        let first = run_next(Arc::new(SucceedingExecutor)).expect("bounded claim returns");
         assert!(first.value.is_none());
         assert_eq!(
             first.queue_admission.inspected,
@@ -990,7 +998,8 @@ fn run_next_bounds_stale_global_admission_and_reports_progress() {
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
         );
 
-        let second = run_next(SucceedingExecutor).expect("next claim progresses to ready work");
+        let second =
+            run_next(Arc::new(SucceedingExecutor)).expect("next claim progresses to ready work");
         assert_eq!(
             second.value.expect("ready aggregate").plan_id,
             "service-plan"
@@ -1020,7 +1029,8 @@ fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("continuation-ready"))
             .expect("ready work submitted");
 
-        let first = run_next(SucceedingExecutor).expect("bounded continuation scan returns");
+        let first =
+            run_next(Arc::new(SucceedingExecutor)).expect("bounded continuation scan returns");
         assert!(first.value.is_none());
         assert_eq!(
             first.queue_admission.inspected,
@@ -1039,7 +1049,7 @@ fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
         );
 
-        let second = run_next(SucceedingExecutor).expect("later ready work progresses");
+        let second = run_next(Arc::new(SucceedingExecutor)).expect("later ready work progresses");
         assert_eq!(
             second.value.expect("ready aggregate").plan_id,
             "service-plan"
@@ -1073,7 +1083,7 @@ fn run_next_shares_admission_budget_between_continuations_and_queued_records() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("shared-ready"))
             .expect("ready submitted");
 
-        let first = run_next(SucceedingExecutor).expect("shared budget returns");
+        let first = run_next(Arc::new(SucceedingExecutor)).expect("shared budget returns");
         assert!(first.value.is_none());
         assert_eq!(
             first.queue_admission.inspected,
@@ -1081,7 +1091,8 @@ fn run_next_shares_admission_budget_between_continuations_and_queued_records() {
         );
         assert!(first.queue_admission.limit_reached);
 
-        let second = run_next(SucceedingExecutor).expect("ready work progresses next invocation");
+        let second =
+            run_next(Arc::new(SucceedingExecutor)).expect("ready work progresses next invocation");
         assert_eq!(
             second.value.expect("ready aggregate").plan_id,
             "service-plan"
@@ -1102,7 +1113,7 @@ fn run_next_quarantines_stale_cook_identity_and_runs_later_work() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("identity-ready"))
             .expect("ready work submitted");
 
-        let result = run_next(SucceedingExecutor).expect("ready work runs");
+        let result = run_next(Arc::new(SucceedingExecutor)).expect("ready work runs");
         let stale = agent_task_lifecycle::exact_record("stale-identity").expect("stale record");
 
         assert_eq!(
@@ -1170,7 +1181,7 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             .expect("eligible run submitted");
 
         let result = run_next_with_cook_dispatcher_and_queue_preflight(
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
             |_| Ok(None),
             None,
             |_, plan| {
@@ -1234,9 +1245,9 @@ fn run_submitted_selects_an_exact_run_id_without_claiming_older_queued_work() {
 
         let result = run_submitted(
             "run-exact-target".to_string(),
-            CountingExecutor {
+            Arc::new(CountingExecutor {
                 calls: Arc::clone(&calls),
-            },
+            }),
         )
         .expect("exact run executes");
 
@@ -1432,7 +1443,7 @@ fn discovery_active_filters_to_queued_and_running_runs() {
         run_loaded_plan(
             discovery_plan(),
             Some("run-active-complete"),
-            SucceedingExecutor,
+            Arc::new(SucceedingExecutor),
         )
         .expect("completed");
 

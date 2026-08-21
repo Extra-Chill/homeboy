@@ -132,10 +132,14 @@ use uuid::Uuid;
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
     let mut release_artifacts =
         homeboy_core::git::release_download::ReleaseArtifactStore::default();
-    run_with_release_artifacts(project_id, config, &mut release_artifacts)
+    // Single-project deploy is its own unit of work: resolve once here so the
+    // receipt read, write, and invalidation below all address one home (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    run_with_release_artifacts(roots.data(), project_id, config, &mut release_artifacts)
 }
 
 fn run_with_release_artifacts(
+    data_root: &std::path::Path,
     project_id: &str,
     config: &DeployConfig,
     release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
@@ -186,6 +190,7 @@ fn run_with_release_artifacts(
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)
         .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     let mut result = orchestration::deploy_components(
+        data_root,
         config,
         &project,
         &ctx,
@@ -400,17 +405,23 @@ pub fn run_multi(
         }
     );
 
+    // One resolution for the whole run. Every checkpoint read and write below
+    // addresses this data root, so a resumed run cannot read its checkpoint
+    // from one home and then record target outcomes into another (#7505). The
+    // observation store admitted alongside it still resolves its own roots
+    // inside `homeboy-core`, which is not reachable from here.
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let identity = lifecycle_identity(project_ids, component_ids, config);
     let mut lifecycle_run = if config.dry_run || config.check {
         None
     } else if let Some(id) = config.resume_run_id.as_deref() {
-        let mut run = lifecycle::load(id)?;
+        let mut run = lifecycle::load_in_roots(roots.data(), id)?;
         run.resume(&identity)?;
-        lifecycle::save(&run)?;
+        lifecycle::save_in_roots(roots.data(), &run)?;
         Some(run)
     } else {
         let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity.clone());
-        lifecycle::save(&run)?;
+        lifecycle::save_in_roots(roots.data(), &run)?;
         Some(run)
     };
     let checkpoint_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
@@ -506,11 +517,16 @@ pub fn run_multi(
                 None,
                 None,
             );
-            lifecycle::save(run)?;
+            lifecycle::save_in_roots(roots.data(), run)?;
         }
         let mut timer = PhaseTimer::new();
         let result = timer.time("resolve_source", || {
-            run_with_release_artifacts(project_id, &project_config, &mut release_artifacts)
+            run_with_release_artifacts(
+                roots.data(),
+                project_id,
+                &project_config,
+                &mut release_artifacts,
+            )
         });
         let timings = timer.into_report();
 
@@ -549,7 +565,7 @@ pub fn run_multi(
                             project_results.last().and_then(|entry| entry.error.clone()),
                             Some(timings.clone()),
                         );
-                        lifecycle::save(run)?;
+                        lifecycle::save_in_roots(roots.data(), run)?;
                     }
                     failed += 1;
                 } else if is_planned {
@@ -580,7 +596,7 @@ pub fn run_multi(
                             None,
                             Some(timings.clone()),
                         );
-                        lifecycle::save(run)?;
+                        lifecycle::save_in_roots(roots.data(), run)?;
                     }
                     succeeded += 1;
                 }
@@ -618,7 +634,7 @@ pub fn run_multi(
                         Some(e.to_string()),
                         Some(timings),
                     );
-                    lifecycle::save(run)?;
+                    lifecycle::save_in_roots(roots.data(), run)?;
                 }
                 failed += 1;
             }

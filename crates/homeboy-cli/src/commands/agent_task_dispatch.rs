@@ -253,6 +253,7 @@ mod tests {
         AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
     };
     use serde_json::Value;
+    use std::sync::Arc;
 
     #[test]
     fn dispatch_adapter_preserves_queue_only_envelope_shape() {
@@ -271,7 +272,7 @@ mod tests {
                     ..DispatchArgOverrides::default()
                 })
                 .into(),
-                NoopExecutor,
+                Arc::new(NoopExecutor),
             )
             .expect("dispatch queued");
 
@@ -304,7 +305,7 @@ mod tests {
                     ..DispatchArgOverrides::default()
                 })
                 .into(),
-                NoopExecutor,
+                Arc::new(NoopExecutor),
             )
             .expect("dispatch queued");
 

@@ -22,14 +22,17 @@ mod types;
 pub use component::{
     apply_component_overrides, attach_component_path, attach_component_path_report,
     attach_component_paths_report, attach_discovered_component_path,
-    bind_materialized_component_to_project, clear_component_attachments, clear_components,
-    has_component, list_components, project_component_ids, rebase_monorepo_component_paths,
-    remove_components, remove_components_report, resolve_project_component,
-    resolve_project_component_with_standalone_snapshot, resolve_project_components,
-    set_component_attachments, set_components, BatchComponentAttachmentFailurePolicy,
-    BatchComponentAttachmentInput, BatchComponentAttachmentWorktreePolicy,
-    MonorepoComponentPathChange, MonorepoComponentPathStatus, ProjectComponentsOutput,
-    StandaloneComponentConfigSnapshot,
+    bind_materialized_component_at_path, bind_materialized_component_at_path_in_root,
+    bind_materialized_component_to_project, bind_materialized_component_to_project_in_root,
+    clear_component_attachments, clear_components, has_component, list_components,
+    project_component_ids, rebase_monorepo_component_paths, remove_components,
+    remove_components_report, resolve_project_component, resolve_project_component_in_root,
+    resolve_project_component_with_standalone_snapshot,
+    resolve_project_component_with_standalone_snapshot_in_root, resolve_project_components,
+    resolve_project_components_in_root, set_component_attachments, set_components,
+    BatchComponentAttachmentFailurePolicy, BatchComponentAttachmentInput,
+    BatchComponentAttachmentWorktreePolicy, MonorepoComponentPathChange,
+    MonorepoComponentPathStatus, ProjectComponentsOutput, StandaloneComponentConfigSnapshot,
 };
 pub use effective_remote_path::{
     component_remote_path, project_with_detected_path_roots, resolve_effective_remote_path,
@@ -193,18 +196,24 @@ impl ConfigEntity for Project {
         Error::project_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::project_config(id)
+    /// Projects are directory-backed: `{config_root}/projects/{id}/{id}.json`.
+    fn config_path_in_root(config_root: &Path, id: &str) -> PathBuf {
+        paths::project_config_in_root(config_root, id)
     }
 
     fn supports_flat_config_entries() -> bool {
         false
     }
 
-    fn validate(&self) -> Result<()> {
+    /// The referenced server is probed in the *same* root the project is being
+    /// written to. Probing the process root instead would let a project be
+    /// accepted into one installation on the strength of a server that only
+    /// exists in another.
+    fn validate_in_root(&self, config_root: &Path) -> Result<()> {
         if let Some(ref sid) = self.server_id {
-            if !server::exists(sid) {
-                let suggestions = config::find_similar_ids::<server::Server>(sid);
+            if !server::exists_in_root(config_root, sid) {
+                let suggestions =
+                    config::find_similar_ids_in_root::<server::Server>(config_root, sid);
                 return Err(Error::server_not_found(sid.clone(), suggestions));
             }
         }

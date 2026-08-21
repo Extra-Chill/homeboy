@@ -53,13 +53,14 @@ impl DeployedPackageReceipt {
 }
 
 pub(super) fn load(
+    data_root: &Path,
     project: &Project,
     component_id: &str,
     target: &str,
     version: &str,
     exclusions: &[String],
 ) -> Result<Option<DeployedPackageReceipt>, Error> {
-    let path = path(project, component_id, target, version)?;
+    let path = path_in_roots(data_root, project, component_id, target, version);
     if !path.exists() {
         return Ok(None);
     }
@@ -88,7 +89,7 @@ pub(super) struct ReceiptWrite<'a> {
     pub(super) exclusions: Vec<String>,
 }
 
-pub(super) fn write(input: ReceiptWrite<'_>) -> Result<(), Error> {
+pub(super) fn write(data_root: &Path, input: ReceiptWrite<'_>) -> Result<(), Error> {
     let ReceiptWrite {
         project,
         component_id,
@@ -99,7 +100,7 @@ pub(super) fn write(input: ReceiptWrite<'_>) -> Result<(), Error> {
         build_provenance,
         exclusions,
     } = input;
-    let path = path(project, component_id, target, version)?;
+    let path = path_in_roots(data_root, project, component_id, target, version);
     let parent = path.parent().expect("receipt path has a parent");
     fs::create_dir_all(parent)
         .map_err(|error| receipt_io_error(&error, "create deploy receipt directory", parent))?;
@@ -186,12 +187,13 @@ impl DeployedPackageReceipt {
 }
 
 pub(super) fn invalidate(
+    data_root: &Path,
     project: &Project,
     component_id: &str,
     target: &str,
     version: &str,
 ) -> Result<(), Error> {
-    let path = path(project, component_id, target, version)?;
+    let path = path_in_roots(data_root, project, component_id, target, version);
     match fs::remove_file(&path) {
         Ok(()) => sync_directory(path.parent().expect("receipt path has a parent")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -249,22 +251,28 @@ fn sync_directory(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn path(
+/// The receipt path for one deployment identity, below an explicitly injected
+/// data root.
+///
+/// Infallible now that the root is supplied: resolution was the only fallible
+/// step. The `homeboy_data` error it used to propagate is raised once by the
+/// caller's `PathRoots::from_environment`, which reports the same coded error
+/// rather than flattening a missing or unwritable data root into a sentence.
+fn path_in_roots(
+    data_root: &Path,
     project: &Project,
     component_id: &str,
     target: &str,
     version: &str,
-) -> Result<PathBuf, Error> {
+) -> PathBuf {
     let mut hash = Sha256::new();
     for value in [&project.id, component_id, target, version] {
         hash.update(value.as_bytes());
         hash.update([0]);
     }
-    // `homeboy_data` already reports a coded error; propagate it rather than
-    // flattening a missing/unwritable data root into a sentence.
-    Ok(homeboy_paths::homeboy_data()?
+    data_root
         .join("deploy-receipts")
-        .join(format!("{:x}.json", hash.finalize())))
+        .join(format!("{:x}.json", hash.finalize()))
 }
 
 #[cfg(test)]

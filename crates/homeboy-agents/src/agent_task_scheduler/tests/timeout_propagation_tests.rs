@@ -12,7 +12,7 @@ fn plan_timeout_reaches_each_rotated_provider_attempt() {
         Some(AgentTaskFailureClassification::Provider),
     )]);
     let observed = Arc::clone(&executor.observed);
-    let scheduler = AgentTaskScheduler::new(executor);
+    let scheduler = AgentTaskScheduler::new(Arc::new(executor));
     let mut plan = plan_with_tasks(1);
     plan.options.timeout_ms = Some(2_700_000);
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {

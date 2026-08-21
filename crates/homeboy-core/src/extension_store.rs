@@ -33,23 +33,79 @@ pub enum DiscoveredExtension {
     Invalid(ExtensionManifestFailure),
 }
 
-pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
-    if let Some(link) = broken_extension_link(id) {
+/// Load one installed extension manifest below an already-resolved config root.
+///
+/// This is the rooted primitive [`load_extension`] delegates to (#7505). Both
+/// the broken-link probe and the manifest read resolve from the SAME root, so a
+/// caller reading an injected home can never pair an injected manifest with an
+/// ambient link diagnosis.
+pub fn load_extension_in_root(config_root: &Path, id: &str) -> Result<ExtensionManifest> {
+    if let Some(link) = broken_extension_link_in_root(config_root, id) {
         return Err(broken_extension_error(&link));
     }
 
-    let extension_dir = paths::extension(id)?;
+    let extension_dir = paths::extension_in_root(config_root, id);
     load_extension_at(id, &extension_dir).map_err(|failure| manifest_failure_error(&failure))
 }
 
-pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
-    Ok(discover_extensions()
+/// Ambient sibling of [`load_extension_in_root`]: resolves the process config
+/// root once and delegates.
+pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
+    load_extension_in_root(&paths::homeboy()?, id)
+}
+
+/// Load a manifest from an injected config root when one is supplied, and from
+/// the ambient process root otherwise.
+///
+/// `None` means "this whole resolution is ambient"; `Some(root)` means "this
+/// whole resolution is rooted". It exists so a resolver that reads several
+/// manifests carries ONE boundary decision for all of them instead of
+/// interleaving rooted and ambient reads — the half-injected split #7505 exists
+/// to prevent. It is never a per-read choice.
+pub(crate) fn load_extension_in_optional_root(
+    config_root: Option<&Path>,
+    id: &str,
+) -> Result<ExtensionManifest> {
+    match config_root {
+        Some(config_root) => load_extension_in_root(config_root, id),
+        None => load_extension(id),
+    }
+}
+
+/// Valid manifests only, from an already-produced discovery result.
+///
+/// Shared by the ambient and rooted list loaders so the two cannot drift in
+/// which discovery outcomes they consider loadable.
+fn valid_manifests(discovered: Vec<DiscoveredExtension>) -> Vec<ExtensionManifest> {
+    discovered
         .into_iter()
         .filter_map(|extension| match extension {
             DiscoveredExtension::Valid(manifest) => Some(*manifest),
             DiscoveredExtension::Invalid(_) => None,
         })
-        .collect())
+        .collect()
+}
+
+/// Every loadable installed extension below an already-resolved config root.
+pub fn load_all_extensions_in_root(config_root: &Path) -> Result<Vec<ExtensionManifest>> {
+    Ok(valid_manifests(discover_extensions_in_root(config_root)))
+}
+
+/// Ambient sibling of [`load_all_extensions_in_root`].
+///
+/// Deliberately routed through the ambient [`discover_extensions`] rather than
+/// resolving the root with `?`: an unresolvable config root has always yielded
+/// an empty extension list here, not an error, and several callers depend on
+/// that degrade.
+pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
+    Ok(valid_manifests(discover_extensions()))
+}
+
+/// Discover every installed extension directory below an already-resolved
+/// config root, including manifests that are malformed or incompatible with
+/// this Homeboy version.
+pub fn discover_extensions_in_root(config_root: &Path) -> Vec<DiscoveredExtension> {
+    discover_extensions_at(&paths::extensions_in_root(config_root))
 }
 
 /// Discover every installed extension directory, including manifests that are
@@ -58,7 +114,13 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
     let Ok(extensions_dir) = paths::extensions() else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
+    discover_extensions_at(&extensions_dir)
+}
+
+/// Discovery over an already-resolved extensions directory. The one place the
+/// directory walk lives, so ambient and rooted discovery cannot diverge.
+fn discover_extensions_at(extensions_dir: &Path) -> Vec<DiscoveredExtension> {
+    let Ok(entries) = std::fs::read_dir(extensions_dir) else {
         return Vec::new();
     };
 
@@ -252,11 +314,13 @@ fn manifest_failure_error(failure: &ExtensionManifestFailure) -> Error {
     ))
 }
 
-pub fn broken_extension_links() -> Vec<BrokenExtensionLink> {
-    let Ok(dir) = paths::extensions() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
+/// Broken extension links below an already-resolved config root.
+pub fn broken_extension_links_in_root(config_root: &Path) -> Vec<BrokenExtensionLink> {
+    broken_extension_links_at(&paths::extensions_in_root(config_root))
+}
+
+fn broken_extension_links_at(extensions_dir: &Path) -> Vec<BrokenExtensionLink> {
+    let Ok(entries) = std::fs::read_dir(extensions_dir) else {
         return Vec::new();
     };
 
@@ -264,33 +328,38 @@ pub fn broken_extension_links() -> Vec<BrokenExtensionLink> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path).ok()?;
-            if !metadata.file_type().is_symlink() || path.exists() {
-                return None;
-            }
-
-            Some(BrokenExtensionLink {
-                id: path.file_name()?.to_string_lossy().to_string(),
-                target: std::fs::read_link(&path).ok()?,
-                path,
-            })
+            let id = path.file_name()?.to_string_lossy().to_string();
+            broken_extension_link_at(&path, &id)
         })
         .collect();
     links.sort_by(|a, b| a.id.cmp(&b.id));
     links
 }
 
+fn broken_extension_link_in_root(config_root: &Path, id: &str) -> Option<BrokenExtensionLink> {
+    broken_extension_link_at(&paths::extension_in_root(config_root, id), id)
+}
+
+/// Ambient sibling of [`broken_extension_link_in_root`], used only by this
+/// module's tests. `#[cfg(test)]` for the same reason as
+/// `load_standalone_components`: its one remaining caller is a test, so a lib
+/// build sees dead code under `-D warnings` (#7505).
+#[cfg(test)]
 fn broken_extension_link(id: &str) -> Option<BrokenExtensionLink> {
-    let path = paths::extension(id).ok()?;
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    broken_extension_link_at(&paths::extension(id).ok()?, id)
+}
+
+/// The link diagnosis for an already-resolved extension directory path.
+fn broken_extension_link_at(path: &Path, id: &str) -> Option<BrokenExtensionLink> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_symlink() || path.exists() {
         return None;
     }
 
     Some(BrokenExtensionLink {
         id: id.to_string(),
-        target: std::fs::read_link(&path).ok()?,
-        path,
+        target: std::fs::read_link(path).ok()?,
+        path: path.to_path_buf(),
     })
 }
 
@@ -314,12 +383,24 @@ fn broken_extension_error(link: &BrokenExtensionLink) -> Error {
     ))
 }
 
+/// Whether an extension exposes `tool` as its CLI entrypoint.
+fn provides_tool(manifest: &ExtensionManifest, tool: &str) -> bool {
+    manifest.cli.as_ref().is_some_and(|c| c.tool == tool)
+}
+
+/// Find an extension by CLI tool below an already-resolved config root.
+pub fn find_extension_by_tool_in_root(config_root: &Path, tool: &str) -> Option<ExtensionManifest> {
+    load_all_extensions_in_root(config_root)
+        .ok()?
+        .into_iter()
+        .find(|m| provides_tool(m, tool))
+}
+
 pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
-    load_all_extensions().ok().and_then(|extensions| {
-        extensions
-            .into_iter()
-            .find(|m| m.cli.as_ref().is_some_and(|c| c.tool == tool))
-    })
+    load_all_extensions()
+        .ok()?
+        .into_iter()
+        .find(|m| provides_tool(m, tool))
 }
 
 /// Find a extension that handles a given file extension and has a specific capability script.
@@ -349,23 +430,51 @@ pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
 /// the contested file extensions, so the capability filter below eliminates
 /// `nodejs` before ordering matters.
 pub fn find_extension_for_file_ext(ext: &str, capability: &str) -> Option<ExtensionManifest> {
-    load_all_extensions().ok().and_then(|extensions| {
-        extensions.into_iter().find(|m| {
-            if !m.handles_file_extension(ext) {
-                return false;
-            }
-            match capability {
-                "fingerprint" => m.fingerprint_script().is_some(),
-                "refactor" => m.refactor_script().is_some(),
-                "audit" => m.test_mapping().is_some(),
-                _ => false,
-            }
-        })
-    })
+    load_all_extensions()
+        .ok()?
+        .into_iter()
+        .find(|m| handles_file_ext_with_capability(m, ext, capability))
+}
+
+/// Find a capability-providing extension for a file extension below an
+/// already-resolved config root. See [`find_extension_for_file_ext`] for the
+/// ordering caveat (#11119), which is unchanged by rooting.
+pub fn find_extension_for_file_ext_in_root(
+    config_root: &Path,
+    ext: &str,
+    capability: &str,
+) -> Option<ExtensionManifest> {
+    load_all_extensions_in_root(config_root)
+        .ok()?
+        .into_iter()
+        .find(|m| handles_file_ext_with_capability(m, ext, capability))
+}
+
+/// The capability filter shared by the ambient and rooted file-extension
+/// finders, so neither can drift on which capabilities count.
+fn handles_file_ext_with_capability(
+    manifest: &ExtensionManifest,
+    ext: &str,
+    capability: &str,
+) -> bool {
+    if !manifest.handles_file_extension(ext) {
+        return false;
+    }
+    match capability {
+        "fingerprint" => manifest.fingerprint_script().is_some(),
+        "refactor" => manifest.refactor_script().is_some(),
+        "audit" => manifest.test_mapping().is_some(),
+        _ => false,
+    }
 }
 
 pub fn extension_path(id: &str) -> PathBuf {
     paths::extension(id).unwrap_or_else(|_| PathBuf::from(id))
+}
+
+/// Installed extension ids below an already-resolved config root.
+pub fn available_extension_ids_in_root(config_root: &Path) -> Vec<String> {
+    config::list_ids_in_root::<ExtensionManifest>(config_root).unwrap_or_default()
 }
 
 pub fn available_extension_ids() -> Vec<String> {
@@ -380,11 +489,21 @@ pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Re
     config::merge::<ExtensionManifest>(id, json_spec, replace_fields)
 }
 
+/// Check if a extension is a symlink (linked, not installed) below an
+/// already-resolved config root.
+pub fn is_extension_linked_in_root(config_root: &Path, extension_id: &str) -> bool {
+    path_is_symlink(&paths::extension_in_root(config_root, extension_id))
+}
+
 /// Check if a extension is a symlink (linked, not installed).
 pub fn is_extension_linked(extension_id: &str) -> bool {
     paths::extension(extension_id)
-        .map(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+        .map(|path| path_is_symlink(&path))
         .unwrap_or(false)
+}
+
+fn path_is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 #[cfg(test)]
@@ -632,7 +751,7 @@ mod tests {
             let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
-            let broken = broken_extension_links();
+            let broken = broken_extension_links_in_root(&paths::homeboy().expect("config root"));
             assert_eq!(broken.len(), 1);
             assert_eq!(broken[0].id, "sample-runtime");
             assert_eq!(broken[0].target, target);
@@ -675,7 +794,8 @@ impl crate::config::ConfigEntity for ExtensionManifest {
         crate::Error::extension_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> crate::Result<std::path::PathBuf> {
-        crate::paths::extension_manifest(id)
+    /// Extensions are directory-backed: `{config_root}/extensions/{id}/{id}.json`.
+    fn config_path_in_root(config_root: &std::path::Path, id: &str) -> std::path::PathBuf {
+        crate::paths::extension_manifest_in_root(config_root, id)
     }
 }

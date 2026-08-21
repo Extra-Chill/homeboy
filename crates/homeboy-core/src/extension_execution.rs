@@ -3,12 +3,10 @@
 
 use crate::component::Component;
 use crate::error::{Error, ErrorCode, Result};
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
-use crate::extension_store::{extension_path, load_extension};
+use crate::extension_store::{extension_path, load_extension, load_extension_in_root};
 use homeboy_extension_contract::ExtensionCapability;
 
 pub fn stderr_tail(stderr: &str) -> String {
@@ -436,6 +434,17 @@ pub(crate) fn disambiguate_capability_owner(
     resolve_owner(component, capability.label(), candidates)
 }
 
+/// [`disambiguate_capability_owner`] against an already-resolved config root
+/// (#7505).
+pub(crate) fn disambiguate_capability_owner_in_root(
+    config_root: &Path,
+    component: &Component,
+    capability: ExtensionCapability,
+    candidates: &[String],
+) -> Result<String> {
+    resolve_owner_in_root(config_root, component, capability.label(), candidates)
+}
+
 /// Pick the owning extension for an arbitrary contested *surface*.
 ///
 /// This is [`disambiguate_capability_owner`] with the seven-variant
@@ -477,34 +486,96 @@ pub fn resolve_owner(
     Err(ownership_ambiguous_error(component, surface, candidates))
 }
 
+/// [`resolve_owner`] against an already-resolved config root (#7505).
+///
+/// Only the composition-primacy rung reads manifests, so only that rung is
+/// rooted; the explicit `capability_extensions` rung and the ambiguity error are
+/// pure functions of the component and candidate list. A caller that resolves
+/// components from an injected home reaches this so the primacy answer comes
+/// from the same home the component did, instead of whichever extensions happen
+/// to be installed in the ambient one.
+pub fn resolve_owner_in_root(
+    config_root: &Path,
+    component: &Component,
+    surface: &str,
+    candidates: &[String],
+) -> Result<String> {
+    if let Some(explicit) = explicit_surface_extension(component, surface) {
+        if let Some(selected) = candidates.iter().find(|id| id.as_str() == explicit) {
+            return Ok(selected.clone());
+        }
+    }
+
+    if let Some(primary) = composition_primary_extension_in_root(config_root, candidates)? {
+        return Ok(primary);
+    }
+
+    Err(ownership_ambiguous_error(component, surface, candidates))
+}
+
 /// If exactly one of the ambiguous extensions composes all of the others via its
 /// `composition.includes`, return it as the primary owner. Returns `None` when
 /// no single extension includes every other (leaving the ambiguity unresolved).
 fn composition_primary_extension(matching: &[String]) -> Result<Option<String>> {
-    let mut primary: Option<String> = None;
-    for candidate in matching {
+    let declarations = matching
+        .iter()
         // A candidate that will not load cannot claim primacy, but it must not
         // take the other candidates' claims down with it either (#11122).
-        let Ok(manifest) = load_extension(candidate) else {
-            continue;
-        };
-        let Some(composition) = manifest.composition.as_ref() else {
-            continue;
-        };
+        .filter_map(|candidate| {
+            let manifest = load_extension(candidate).ok()?;
+            let composition = manifest.composition.as_ref()?;
+            Some((candidate.clone(), composition.includes.clone()))
+        })
+        .collect::<Vec<_>>();
+    Ok(composition_primary_from_declarations(
+        matching,
+        &declarations,
+    ))
+}
+
+/// [`composition_primary_extension`] against an already-resolved config root.
+fn composition_primary_extension_in_root(
+    config_root: &Path,
+    matching: &[String],
+) -> Result<Option<String>> {
+    let declarations = matching
+        .iter()
+        .filter_map(|candidate| {
+            let manifest = load_extension_in_root(config_root, candidate).ok()?;
+            let composition = manifest.composition.as_ref()?;
+            Some((candidate.clone(), composition.includes.clone()))
+        })
+        .collect::<Vec<_>>();
+    Ok(composition_primary_from_declarations(
+        matching,
+        &declarations,
+    ))
+}
+
+/// The primacy rule itself, over already-read `composition.includes` lists.
+///
+/// Kept separate from manifest loading so the ambient and rooted resolvers share
+/// one rule and can only differ in which home they read manifests from.
+fn composition_primary_from_declarations(
+    matching: &[String],
+    declarations: &[(String, Vec<String>)],
+) -> Option<String> {
+    let mut primary: Option<String> = None;
+    for (candidate, includes) in declarations {
         let includes_all_others = matching
             .iter()
             .filter(|other| *other != candidate)
-            .all(|other| composition.includes.iter().any(|inc| inc == other));
+            .all(|other| includes.iter().any(|inc| inc == other));
         if includes_all_others {
             if primary.is_some() {
                 // More than one extension claims to include the others; the
                 // composition is not unambiguous, so do not guess.
-                return Ok(None);
+                return None;
             }
             primary = Some(candidate.clone());
         }
     }
-    Ok(primary)
+    primary
 }
 
 /// Whether a linked extension can provide a capability without requiring one.

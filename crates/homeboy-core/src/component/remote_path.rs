@@ -7,12 +7,14 @@
 //! `&Component` / `&mut Component`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use homeboy_component_contract::model::render_remote_path_template;
 use homeboy_component_contract::Component;
 
 use crate::error::Result;
-use crate::extension_execution::{resolve_owner, REMOTE_PATH_SURFACE};
+use crate::extension_execution::{resolve_owner, resolve_owner_in_root, REMOTE_PATH_SURFACE};
+use crate::extension_store::load_extension_in_optional_root;
 
 /// Auto-resolve `remote_path` from linked extension deploy rules when not
 /// explicitly set.
@@ -37,6 +39,16 @@ use crate::extension_execution::{resolve_owner, REMOTE_PATH_SURFACE};
 /// hard error instead of an empty path.
 pub fn auto_resolve_remote_path(component: &Component) -> Option<String> {
     try_auto_resolve_remote_path(component).ok().flatten()
+}
+
+/// [`auto_resolve_remote_path`] against an already-resolved config root (#7505).
+pub fn auto_resolve_remote_path_in_root(
+    config_root: &Path,
+    component: &Component,
+) -> Option<String> {
+    try_auto_resolve_remote_path_in_root(config_root, component)
+        .ok()
+        .flatten()
 }
 
 /// Auto-resolve `remote_path`, surfacing genuine multi-extension ownership
@@ -64,12 +76,40 @@ pub fn auto_resolve_remote_path(component: &Component) -> Option<String> {
 /// - conflicting paths *within the single owning extension* → hard error, since
 ///   extension-level ownership cannot break a tie its own rules created
 pub fn try_auto_resolve_remote_path(component: &Component) -> Result<Option<String>> {
+    try_auto_resolve_remote_path_core(None, component)
+}
+
+/// [`try_auto_resolve_remote_path`] against an already-resolved config root
+/// (#7505).
+///
+/// Both halves of the answer — which extensions declare a matching inference
+/// rule, and which extension owns a contested one — come from `config_root`. A
+/// caller that resolved the component from an injected home therefore cannot
+/// have its `remote_path` decided by whichever extensions happen to be installed
+/// in the ambient one.
+pub fn try_auto_resolve_remote_path_in_root(
+    config_root: &Path,
+    component: &Component,
+) -> Result<Option<String>> {
+    try_auto_resolve_remote_path_core(Some(config_root), component)
+}
+
+/// The one implementation, parameterized by the path boundary.
+///
+/// `config_root` is `None` for the ambient entry point and `Some(_)` for the
+/// rooted one, and it governs BOTH manifest reads and ownership resolution.
+/// There is deliberately no path through this function that roots one and not
+/// the other.
+fn try_auto_resolve_remote_path_core(
+    config_root: Option<&Path>,
+    component: &Component,
+) -> Result<Option<String>> {
     // File components cannot auto-resolve — they must have explicit remote_path.
-    if std::path::Path::new(&component.local_path).is_file() {
+    if Path::new(&component.local_path).is_file() {
         return Ok(None);
     }
 
-    let local = std::path::Path::new(&component.local_path);
+    let local = Path::new(&component.local_path);
 
     // Use the directory basename as the remote directory name.
     let Some(dir_name) = local.file_name().and_then(|name| name.to_str()) else {
@@ -82,7 +122,7 @@ pub fn try_auto_resolve_remote_path(component: &Component) -> Result<Option<Stri
 
     let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for extension_id in extensions.keys() {
-        let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
+        let Ok(extension) = load_extension_in_optional_root(config_root, extension_id) else {
             continue;
         };
 
@@ -106,7 +146,12 @@ pub fn try_auto_resolve_remote_path(component: &Component) -> Result<Option<Stri
         1 => Ok(distinct.into_iter().next().map(ToOwned::to_owned)),
         _ => {
             let candidates: Vec<String> = providers.keys().cloned().collect();
-            let owner = resolve_owner(component, REMOTE_PATH_SURFACE, &candidates)?;
+            let owner = match config_root {
+                Some(config_root) => {
+                    resolve_owner_in_root(config_root, component, REMOTE_PATH_SURFACE, &candidates)?
+                }
+                None => resolve_owner(component, REMOTE_PATH_SURFACE, &candidates)?,
+            };
             let owned = providers.get(&owner).cloned().unwrap_or_default();
 
             match owned.len() {
@@ -179,6 +224,15 @@ fn remote_path_inference_rule_matches(
 pub fn resolve_remote_path(component: &mut Component) {
     if component.remote_path.trim().is_empty() {
         if let Some(resolved) = auto_resolve_remote_path(component) {
+            component.remote_path = resolved;
+        }
+    }
+}
+
+/// [`resolve_remote_path`] against an already-resolved config root (#7505).
+pub fn resolve_remote_path_in_root(config_root: &Path, component: &mut Component) {
+    if component.remote_path.trim().is_empty() {
+        if let Some(resolved) = auto_resolve_remote_path_in_root(config_root, component) {
             component.remote_path = resolved;
         }
     }

@@ -87,6 +87,39 @@ impl DependencyMaterializationCache {
         step: &DependencyMaterializationStepSpec,
         settings: &[(String, String)],
     ) -> Result<Option<Self>> {
+        // Decline before resolving. Most materialization steps declare no
+        // cache key, and the ambient form returned `Ok(None)` for them without
+        // ever touching the data root — turning that into a resolution (and,
+        // on failure, into a hard error that fails the step) would be a
+        // behavior change, not a refactor.
+        if step.cache_key_inputs.is_empty() || step.expected_outputs.is_empty() {
+            return Ok(None);
+        }
+        Self::new_in_roots(
+            homeboy_paths::PathRoots::from_environment()?.data(),
+            rig,
+            step,
+            settings,
+        )
+    }
+
+    /// [`new`](Self::new) against an explicitly injected data root.
+    ///
+    /// The root is consumed once, here, and stored as `self.root`. Every later
+    /// operation on this type — the entry directory, the `.lock` file, and the
+    /// evidence JSON — derives from `self.root`, so nothing on the constructed
+    /// value can reach back into ambient state (#7505).
+    ///
+    /// The cache *key* deliberately still reads process state: the platform
+    /// triple, the resolved toolchain executables, and the step's own declared
+    /// environment describe the machine the materialization ran on, which is
+    /// what makes the entry safe to reuse. That is identity, not location.
+    pub fn new_in_roots(
+        data_root: &Path,
+        rig: &RigSpec,
+        step: &DependencyMaterializationStepSpec,
+        settings: &[(String, String)],
+    ) -> Result<Option<Self>> {
         if step.cache_key_inputs.is_empty() || step.expected_outputs.is_empty() {
             return Ok(None);
         }
@@ -193,7 +226,7 @@ impl DependencyMaterializationCache {
                 )
             })?,
         );
-        let root = cache_root()?;
+        let root = cache_root_in_roots(data_root);
         Ok(Some(Self {
             entry: root.join(&key),
             root,
@@ -383,11 +416,16 @@ impl DependencyMaterializationCache {
 
 /// Durable root shared by local and runner-side Homeboy processes. Lab invokes
 /// the same rig materialization contract on the runner outside its workspace.
-pub fn cache_root() -> Result<PathBuf> {
-    Ok(homeboy_paths::homeboy_data()?
+// The ambient `cache_root()` shim that used to sit here is gone. Its only
+// caller was the rig resource-lifecycle index, which now derives the root from
+// the observation store the index is recorded into (#7505).
+
+/// [`cache_root`] below an explicitly injected data root.
+pub fn cache_root_in_roots(data_root: &Path) -> PathBuf {
+    data_root
         .join("cache")
         .join("dependency-materialization")
-        .join("v1"))
+        .join("v1")
 }
 
 fn resolved_tool_identities(

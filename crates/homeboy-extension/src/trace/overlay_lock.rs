@@ -49,12 +49,23 @@ pub struct TraceOverlayLockCleanupResult {
 }
 
 impl TraceOverlayLock {
+    /// Acquire the component's overlay lock below explicitly supplied roots.
+    ///
+    /// `run_dir` is already an injected value, so the data root is the only
+    /// ambient reach this path had.
+    ///
+    /// Roots come from the caller because one trace run acquires a lock per
+    /// component in a loop. The ambient form resolved once per iteration, so a
+    /// repoint mid-loop could leave some of a single run's locks in one home
+    /// and the rest in another -- and the release path would then find only
+    /// some of them (#7505).
     pub(super) fn acquire(
+        roots: &paths::PathRoots,
         component_path: &Path,
         overlay_paths: &[String],
         run_dir: &RunDir,
     ) -> Result<Self> {
-        let lock_dir = trace_overlay_lock_dir()?;
+        let lock_dir = trace_overlay_lock_dir_in_roots(roots.data())?;
         let normalized_component_path = normalize_component_path(component_path);
         let path = lock_dir.join(format!(
             "{}.lock",
@@ -110,8 +121,17 @@ impl Drop for TraceOverlayLock {
     }
 }
 
+/// Ambient boundary: resolve the data root once, then list rooted.
 pub fn list_trace_overlay_locks() -> Result<Vec<TraceOverlayLockRecord>> {
-    let lock_dir = trace_overlay_lock_dir()?;
+    let roots = paths::PathRoots::from_environment()?;
+    list_trace_overlay_locks_in_roots(&roots)
+}
+
+/// List the overlay locks recorded below explicitly supplied roots.
+fn list_trace_overlay_locks_in_roots(
+    roots: &paths::PathRoots,
+) -> Result<Vec<TraceOverlayLockRecord>> {
+    let lock_dir = trace_overlay_lock_dir_in_roots(roots.data())?;
     let entries = fs::read_dir(&lock_dir).map_err(|e| {
         Error::internal_io(
             format!(
@@ -140,8 +160,18 @@ pub fn list_trace_overlay_locks() -> Result<Vec<TraceOverlayLockRecord>> {
     Ok(records)
 }
 
+/// Ambient boundary: resolve the data root once, then clean up rooted.
 pub fn cleanup_stale_trace_overlay_locks(force: bool) -> Result<TraceOverlayLockCleanupResult> {
-    let locks = list_trace_overlay_locks()?;
+    let roots = paths::PathRoots::from_environment()?;
+    cleanup_stale_trace_overlay_locks_in_roots(&roots, force)
+}
+
+/// Remove stale overlay locks recorded below explicitly supplied roots.
+fn cleanup_stale_trace_overlay_locks_in_roots(
+    roots: &paths::PathRoots,
+    force: bool,
+) -> Result<TraceOverlayLockCleanupResult> {
+    let locks = list_trace_overlay_locks_in_roots(roots)?;
     let mut removed = Vec::new();
     let mut kept = Vec::new();
     for lock in locks {
@@ -166,8 +196,17 @@ pub fn cleanup_stale_trace_overlay_locks(force: bool) -> Result<TraceOverlayLock
     Ok(TraceOverlayLockCleanupResult { removed, kept })
 }
 
-fn trace_overlay_lock_dir() -> Result<PathBuf> {
-    let lock_dir = paths::homeboy_data()?.join("trace-overlay-locks");
+/// Overlay lock directory below an injected Homeboy data root.
+///
+/// The boundary stops at this module's public entry points rather than moving
+/// out into `trace::run::workflow`. That workflow also calls
+/// `runner::resolve_trace_baseline_root`, which resolves `paths::rig_baseline_root`
+/// — the *rig registry* root, selected by `HOMEBOY_RIG_REGISTRY_ROOT` and not
+/// modeled by `PathRoots` at all. Threading roots into the workflow would make
+/// the overlay locks honor an injected data root while the trace baseline still
+/// came from ambient rig state: a split home (#7505).
+fn trace_overlay_lock_dir_in_roots(data_root: &Path) -> Result<PathBuf> {
+    let lock_dir = data_root.join("trace-overlay-locks");
     fs::create_dir_all(&lock_dir).map_err(|e| {
         Error::internal_io(
             format!(
@@ -179,6 +218,16 @@ fn trace_overlay_lock_dir() -> Result<PathBuf> {
         )
     })?;
     Ok(lock_dir)
+}
+
+/// Ambient resolution of the overlay lock directory.
+///
+/// Retained for in-crate tests that write lock fixtures directly; production
+/// callers reach the directory through the rooted entry points above.
+#[cfg(test)]
+fn trace_overlay_lock_dir() -> Result<PathBuf> {
+    let roots = paths::PathRoots::from_environment()?;
+    trace_overlay_lock_dir_in_roots(roots.data())
 }
 
 fn read_trace_overlay_lock_record(lock_path: &Path) -> TraceOverlayLockRecord {
@@ -407,6 +456,14 @@ fn trace_overlay_dirty_files(
 
 #[cfg(test)]
 mod tests {
+    /// The roots of the isolated home each test below installs.
+    ///
+    /// These tests are their own boundary: `acquire` takes roots now, so the
+    /// test resolves once where the trace run resolves once (#7505).
+    fn test_roots() -> paths::PathRoots {
+        paths::PathRoots::from_environment().expect("path roots")
+    }
+
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
 
@@ -418,7 +475,9 @@ mod tests {
             let lock_path;
 
             {
-                let lock = TraceOverlayLock::acquire(component_dir.path(), &[], &run_dir).unwrap();
+                let lock =
+                    TraceOverlayLock::acquire(&test_roots(), component_dir.path(), &[], &run_dir)
+                        .unwrap();
                 lock_path = lock.path.clone();
                 assert!(lock_path.exists());
                 assert!(lock_path.join("holder.json").exists());
@@ -453,7 +512,9 @@ mod tests {
         with_isolated_home(|_| {
             let component_dir = tempfile::tempdir().unwrap();
             let run_dir = RunDir::create().unwrap();
-            let lock = TraceOverlayLock::acquire(component_dir.path(), &[], &run_dir).unwrap();
+            let lock =
+                TraceOverlayLock::acquire(&test_roots(), component_dir.path(), &[], &run_dir)
+                    .unwrap();
 
             let holder = read_trace_overlay_lock_holder(&lock.path).unwrap();
 
@@ -471,10 +532,16 @@ mod tests {
             let first_run_dir = RunDir::create().unwrap();
             let second_run_dir = RunDir::create().unwrap();
             let lock =
-                TraceOverlayLock::acquire(component_dir.path(), &[], &first_run_dir).unwrap();
+                TraceOverlayLock::acquire(&test_roots(), component_dir.path(), &[], &first_run_dir)
+                    .unwrap();
 
-            let err =
-                TraceOverlayLock::acquire(component_dir.path(), &[], &second_run_dir).unwrap_err();
+            let err = TraceOverlayLock::acquire(
+                &test_roots(),
+                component_dir.path(),
+                &[],
+                &second_run_dir,
+            )
+            .unwrap_err();
 
             assert!(err.message.contains("Trace overlay already active"));
             assert!(err
@@ -512,7 +579,9 @@ mod tests {
         with_isolated_home(|_| {
             let component_dir = tempfile::tempdir().unwrap();
             let run_dir = RunDir::create().unwrap();
-            let lock = TraceOverlayLock::acquire(component_dir.path(), &[], &run_dir).unwrap();
+            let lock =
+                TraceOverlayLock::acquire(&test_roots(), component_dir.path(), &[], &run_dir)
+                    .unwrap();
 
             let locks = list_trace_overlay_locks().unwrap();
 

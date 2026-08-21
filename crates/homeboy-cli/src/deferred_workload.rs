@@ -127,7 +127,24 @@ pub struct DeferredWorkloadWorkerStartLock {
     _file: File,
 }
 
+/// Resolve the ambient Homeboy config root this store lives under.
+///
+/// Every `_in_roots` entry point below takes that root as a parameter instead.
+/// The ambient wrappers exist so external callers keep their signatures; a
+/// caller that already holds a resolved root must use the rooted variant so a
+/// single command does not mix an injected root with an ambient one.
+fn ambient_config_root() -> Result<PathBuf> {
+    homeboy_core::paths::homeboy()
+}
+
 pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
+    defer_in_roots(&ambient_config_root()?, input)
+}
+
+pub fn defer_in_roots(
+    config_root: &Path,
+    input: DeferredWorkloadInput,
+) -> Result<DeferredWorkload> {
     if input
         .job_overrides
         .secret_env_names
@@ -144,7 +161,7 @@ pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
             ]),
         ));
     }
-    update(|records| {
+    update_in_roots(config_root, |records| {
         let fingerprint = fingerprint(&input)?;
         if let Some(existing) = records.iter().find(|record| {
             record.fingerprint == fingerprint
@@ -188,7 +205,16 @@ pub fn claim(
     runner_id: &str,
     owner: &str,
 ) -> Result<Option<DeferredWorkload>> {
-    update(|records| {
+    claim_in_roots(&ambient_config_root()?, input, runner_id, owner)
+}
+
+pub fn claim_in_roots(
+    config_root: &Path,
+    input: &DeferredWorkloadInput,
+    runner_id: &str,
+    owner: &str,
+) -> Result<Option<DeferredWorkload>> {
+    update_in_roots(config_root, |records| {
         let fingerprint = fingerprint(input)?;
         let now = now_ms();
         for record in records
@@ -226,10 +252,27 @@ pub fn claim_next(runner_id: &str, owner: &str) -> Result<Option<DeferredWorkloa
     claim_next_at(runner_id, owner, now_ms())
 }
 
+pub fn claim_next_in_roots(
+    config_root: &Path,
+    runner_id: &str,
+    owner: &str,
+) -> Result<Option<DeferredWorkload>> {
+    claim_next_at_in_roots(config_root, runner_id, owner, now_ms())
+}
+
 /// Claim the next record using the supplied clock. The worker uses this seam to
 /// make lease recovery deterministic without changing the durable protocol.
 pub fn claim_next_at(runner_id: &str, owner: &str, now: u64) -> Result<Option<DeferredWorkload>> {
     claim_next_matching_at(runner_id, owner, now, |_| true)
+}
+
+pub fn claim_next_at_in_roots(
+    config_root: &Path,
+    runner_id: &str,
+    owner: &str,
+    now: u64,
+) -> Result<Option<DeferredWorkload>> {
+    claim_next_matching_at_in_roots(config_root, runner_id, owner, now, |_| true)
 }
 
 /// Claim the next deferred workload accepted by the selected runner. Records
@@ -241,7 +284,17 @@ pub fn claim_next_matching_at(
     now: u64,
     accepts: impl Fn(&DeferredWorkload) -> bool,
 ) -> Result<Option<DeferredWorkload>> {
-    update(|records| {
+    claim_next_matching_at_in_roots(&ambient_config_root()?, runner_id, owner, now, accepts)
+}
+
+pub fn claim_next_matching_at_in_roots(
+    config_root: &Path,
+    runner_id: &str,
+    owner: &str,
+    now: u64,
+    accepts: impl Fn(&DeferredWorkload) -> bool,
+) -> Result<Option<DeferredWorkload>> {
+    update_in_roots(config_root, |records| {
         for record in records.iter_mut() {
             if record.state == DeferredWorkloadState::Claimed
                 && record
@@ -271,7 +324,11 @@ pub fn claim_next_matching_at(
 }
 
 pub fn heartbeat(id: &str, owner: &str) -> Result<bool> {
-    update(|records| {
+    heartbeat_in_roots(&ambient_config_root()?, id, owner)
+}
+
+pub fn heartbeat_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<bool> {
+    update_in_roots(config_root, |records| {
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(false);
         };
@@ -288,7 +345,11 @@ pub fn heartbeat(id: &str, owner: &str) -> Result<bool> {
 }
 
 pub fn terminalize(id: &str, succeeded: bool) -> Result<()> {
-    update(|records| {
+    terminalize_in_roots(&ambient_config_root()?, id, succeeded)
+}
+
+pub fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Result<()> {
+    update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             record.state = if succeeded {
                 DeferredWorkloadState::Dispatched
@@ -303,10 +364,8 @@ pub fn terminalize(id: &str, succeeded: bool) -> Result<()> {
     })
 }
 
-/// Return a claimed workload to the queue when runner preflight discovers that
-/// the selected runner no longer satisfies its persisted contract.
-pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
-    update(|records| {
+pub fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<()> {
+    update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             if record.state == DeferredWorkloadState::Claimed
                 && record.claim_owner.as_deref() == Some(owner)
@@ -327,8 +386,8 @@ pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
 /// Reconciliation terminates a worker that can no longer prove ownership, so
 /// its claims must not sit out the full lease before another worker may take
 /// them. Returns the ids that were released.
-pub fn release_claims_for_owner(owner: &str) -> Result<Vec<String>> {
-    update(|records| {
+pub fn release_claims_for_owner_in_roots(config_root: &Path, owner: &str) -> Result<Vec<String>> {
+    update_in_roots(config_root, |records| {
         let now = now_ms();
         let mut released = Vec::new();
         for record in records.iter_mut() {
@@ -349,12 +408,15 @@ pub fn release_claims_for_owner(owner: &str) -> Result<Vec<String>> {
 }
 
 pub fn records() -> Result<Vec<DeferredWorkload>> {
-    read_store(&store_path()?)
+    records_in_roots(&ambient_config_root()?)
 }
 
-/// Whether any record still needs a worker.
-pub fn has_pending_work() -> Result<bool> {
-    Ok(records()?.iter().any(|record| {
+pub fn records_in_roots(config_root: &Path) -> Result<Vec<DeferredWorkload>> {
+    read_store(&store_path_in_roots(config_root))
+}
+
+pub fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
+    Ok(records_in_roots(config_root)?.iter().any(|record| {
         matches!(
             record.state,
             DeferredWorkloadState::Deferred | DeferredWorkloadState::Claimed
@@ -368,8 +430,8 @@ pub fn has_pending_work() -> Result<bool> {
 /// that outlives the command which started it must not hold a caller's
 /// ephemeral worktree open, because worktree cleanup then leaves the process
 /// anchored to a deleted directory (#12081).
-pub fn worker_root() -> Result<PathBuf> {
-    let root = homeboy_core::paths::homeboy()?;
+pub fn worker_root_in_roots(config_root: &Path) -> Result<PathBuf> {
+    let root = config_root.to_path_buf();
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -387,8 +449,10 @@ pub fn worker_root() -> Result<PathBuf> {
     })
 }
 
-pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
-    let root = worker_root()?;
+pub fn try_acquire_worker_lock_in_roots(
+    config_root: &Path,
+) -> Result<Option<DeferredWorkloadWorkerLock>> {
+    let root = worker_root_in_roots(config_root)?;
     let file = File::open(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -408,8 +472,10 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
     }
 }
 
-pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
-    let root = homeboy_core::paths::homeboy()?;
+pub fn acquire_worker_start_lock_in_roots(
+    config_root: &Path,
+) -> Result<DeferredWorkloadWorkerStartLock> {
+    let root = config_root.to_path_buf();
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -439,8 +505,8 @@ pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
     Ok(DeferredWorkloadWorkerStartLock { _file: file })
 }
 
-pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {
-    let path = store_path()?.with_extension("worker-status.json");
+pub fn worker_status_in_roots(config_root: &Path) -> Result<Option<DeferredWorkloadWorkerStatus>> {
+    let path = store_path_in_roots(config_root).with_extension("worker-status.json");
     if !path.exists() {
         return Ok(None);
     }
@@ -452,14 +518,14 @@ pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {
         .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))
 }
 
-pub fn worker_is_live(status: &DeferredWorkloadWorkerStatus) -> bool {
+pub fn worker_is_live_in_roots(config_root: &Path, status: &DeferredWorkloadWorkerStatus) -> bool {
     if matches!(status.state.as_str(), "idle" | "stopped") {
         return false;
     }
     if status.owner_token.is_empty() {
         return false;
     }
-    let Ok(lock) = try_acquire_worker_lock() else {
+    let Ok(lock) = try_acquire_worker_lock_in_roots(config_root) else {
         return false;
     };
     // A status file is advisory. The singleton lock is the authority.
@@ -711,12 +777,13 @@ fn process_working_directory(_pid: u32) -> (Option<String>, bool) {
     (None, false)
 }
 
-pub fn write_worker_status(
+pub fn write_worker_status_in_roots(
+    config_root: &Path,
     owner_token: &str,
     state: &str,
     detail: impl Into<String>,
 ) -> Result<()> {
-    let path = store_path()?.with_extension("worker-status.json");
+    let path = store_path_in_roots(config_root).with_extension("worker-status.json");
     let value = DeferredWorkloadWorkerStatus {
         schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
         pid: std::process::id(),
@@ -739,8 +806,8 @@ pub fn write_worker_status(
     write_store(&path, &bytes)
 }
 
-pub fn append_worker_log(message: impl AsRef<str>) -> Result<()> {
-    let path = store_path()?.with_extension("worker.log");
+pub fn append_worker_log_in_roots(config_root: &Path, message: impl AsRef<str>) -> Result<()> {
+    let path = store_path_in_roots(config_root).with_extension("worker.log");
     let line = format!("{} {}\n", now_ms(), message.as_ref());
     use std::io::Write;
     OpenOptions::new()
@@ -777,12 +844,15 @@ fn fingerprint(input: &DeferredWorkloadInput) -> Result<String> {
     Ok(sha256_hex(&value))
 }
 
-fn store_path() -> Result<PathBuf> {
-    Ok(homeboy_core::paths::homeboy()?.join("deferred-workloads.json"))
+fn store_path_in_roots(config_root: &Path) -> PathBuf {
+    config_root.join("deferred-workloads.json")
 }
 
-fn update<T>(mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>) -> Result<T> {
-    let path = store_path()?;
+fn update_in_roots<T>(
+    config_root: &Path,
+    mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>,
+) -> Result<T> {
+    let path = store_path_in_roots(config_root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
@@ -956,124 +1026,144 @@ mod tests {
 
     #[test]
     fn deferred_workload_is_idempotent_and_survives_restart_before_claim() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let first = defer(input()).expect("defer workload");
-            let replay = defer(input()).expect("replay deferred workload");
-            assert_eq!(first.id, replay.id);
-            assert_eq!(replay.state, DeferredWorkloadState::Deferred);
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let claimed = claim(&input(), "warm-lab", "first-owner")
-                .expect("claim workload")
-                .expect("pending workload");
-            assert_eq!(claimed.id, first.id);
-            assert_eq!(claimed.runner_id.as_deref(), Some("warm-lab"));
-            assert!(claim(&input(), "other-lab", "second-owner")
+        let first = defer_in_roots(&config_root, input()).expect("defer workload");
+        let replay = defer_in_roots(&config_root, input()).expect("replay deferred workload");
+        assert_eq!(first.id, replay.id);
+        assert_eq!(replay.state, DeferredWorkloadState::Deferred);
+
+        let claimed = claim_in_roots(&config_root, &input(), "warm-lab", "first-owner")
+            .expect("claim workload")
+            .expect("pending workload");
+        assert_eq!(claimed.id, first.id);
+        assert_eq!(claimed.runner_id.as_deref(), Some("warm-lab"));
+        assert!(
+            claim_in_roots(&config_root, &input(), "other-lab", "second-owner")
                 .expect("idempotent claim")
-                .is_none());
-        });
+                .is_none()
+        );
     }
 
     #[test]
     fn reading_an_absent_store_does_not_create_runtime_state() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let path = store_path().expect("store path");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
+        let path = store_path_in_roots(&config_root);
 
-            assert!(records().expect("read absent store").is_empty());
-            assert!(!path.exists(), "read created deferred workload store");
-            assert!(
-                !path.with_extension("lock").exists(),
-                "read created deferred workload lock"
-            );
-        });
+        assert!(records_in_roots(&config_root)
+            .expect("read absent store")
+            .is_empty());
+        assert!(!path.exists(), "read created deferred workload store");
+        assert!(
+            !path.with_extension("lock").exists(),
+            "read created deferred workload lock"
+        );
     }
 
     #[test]
     fn terminalized_workload_does_not_reappear_as_a_ghost() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let deferred = defer(input()).expect("defer workload");
-            let claimed = claim(&input(), "warm-lab", "owner")
-                .expect("claim workload")
-                .expect("pending workload");
-            terminalize(&claimed.id, true).expect("terminalize workload");
-            assert!(claim(&input(), "warm-lab", "other-owner")
-                .expect("claim after terminal state")
-                .is_none());
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let next = defer(input()).expect("new explicit workload after terminal state");
-            assert_ne!(
-                next.id, deferred.id,
-                "terminal work must not be revived by a replay"
-            );
-        });
+        let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
+        let claimed = claim_in_roots(&config_root, &input(), "warm-lab", "owner")
+            .expect("claim workload")
+            .expect("pending workload");
+        terminalize_in_roots(&config_root, &claimed.id, true).expect("terminalize workload");
+        assert!(
+            claim_in_roots(&config_root, &input(), "warm-lab", "other-owner")
+                .expect("claim after terminal state")
+                .is_none()
+        );
+
+        let next = defer_in_roots(&config_root, input())
+            .expect("new explicit workload after terminal state");
+        assert_ne!(
+            next.id, deferred.id,
+            "terminal work must not be revived by a replay"
+        );
     }
 
     #[test]
     fn expired_claim_is_reclaimed_after_a_post_claim_crash() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            defer(input()).expect("defer workload");
-            let claimed = claim(&input(), "first-lab", "crashed-owner")
-                .expect("claim workload")
-                .expect("pending workload");
-            update(|records| {
-                let record = records
-                    .iter_mut()
-                    .find(|record| record.id == claimed.id)
-                    .expect("claimed record");
-                record.claim_expires_at_ms = Some(0);
-                Ok(())
-            })
-            .expect("expire crashed claim");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let recovered = claim(&input(), "warm-lab", "recovery-owner")
-                .expect("reclaim workload")
-                .expect("expired claim is reclaimable");
-            assert_eq!(recovered.runner_id.as_deref(), Some("warm-lab"));
-            assert_eq!(recovered.claim_owner.as_deref(), Some("recovery-owner"));
-        });
+        defer_in_roots(&config_root, input()).expect("defer workload");
+        let claimed = claim_in_roots(&config_root, &input(), "first-lab", "crashed-owner")
+            .expect("claim workload")
+            .expect("pending workload");
+        update_in_roots(&config_root, |records| {
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == claimed.id)
+                .expect("claimed record");
+            record.claim_expires_at_ms = Some(0);
+            Ok(())
+        })
+        .expect("expire crashed claim");
+
+        let recovered = claim_in_roots(&config_root, &input(), "warm-lab", "recovery-owner")
+            .expect("reclaim workload")
+            .expect("expired claim is reclaimable");
+        assert_eq!(recovered.runner_id.as_deref(), Some("warm-lab"));
+        assert_eq!(recovered.claim_owner.as_deref(), Some("recovery-owner"));
     }
 
     #[test]
     fn next_claim_heartbeats_and_publishes_durable_worker_status() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let deferred = defer(input()).expect("defer workload");
-            let claimed = claim_next("ready-runner", "worker-a")
-                .expect("claim next")
-                .expect("deferred workload");
-            assert_eq!(claimed.id, deferred.id);
-            assert_eq!(claimed.runner_id.as_deref(), Some("ready-runner"));
-            assert!(heartbeat(&claimed.id, "worker-a").expect("heartbeat"));
-            assert!(!heartbeat(&claimed.id, "worker-b").expect("wrong worker heartbeat"));
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            write_worker_status("test-owner", "dispatching", "replaying deferred workload")
-                .expect("write worker status");
-            let status = worker_status()
-                .expect("read worker status")
-                .expect("status exists");
-            assert_eq!(status.state, "dispatching");
-            assert_eq!(status.detail, "replaying deferred workload");
-            assert_eq!(status.owner_token, "test-owner");
-        });
+        let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
+        let claimed = claim_next_in_roots(&config_root, "ready-runner", "worker-a")
+            .expect("claim next")
+            .expect("deferred workload");
+        assert_eq!(claimed.id, deferred.id);
+        assert_eq!(claimed.runner_id.as_deref(), Some("ready-runner"));
+        assert!(heartbeat_in_roots(&config_root, &claimed.id, "worker-a").expect("heartbeat"));
+        assert!(!heartbeat_in_roots(&config_root, &claimed.id, "worker-b")
+            .expect("wrong worker heartbeat"));
+
+        write_worker_status_in_roots(
+            &config_root,
+            "test-owner",
+            "dispatching",
+            "replaying deferred workload",
+        )
+        .expect("write worker status");
+        let status = worker_status_in_roots(&config_root)
+            .expect("read worker status")
+            .expect("status exists");
+        assert_eq!(status.state, "dispatching");
+        assert_eq!(status.detail, "replaying deferred workload");
+        assert_eq!(status.owner_token, "test-owner");
     }
 
     #[test]
     fn matching_claim_skips_a_live_claimed_head_for_a_later_deferred_record() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let first = defer(input()).expect("first workload");
-            let mut later_input = input();
-            later_input.args.push("later".to_string());
-            let later = defer(later_input).expect("later workload");
-            claim_next_at("other-runner", "other-worker", 1)
-                .expect("claim first")
-                .expect("first workload is claimed");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let claimed =
-                claim_next_matching_at("ready-runner", "worker", 2, |record| record.id == later.id)
-                    .expect("claim matching workload")
-                    .expect("later deferred workload is claimable");
+        let first = defer_in_roots(&config_root, input()).expect("first workload");
+        let mut later_input = input();
+        later_input.args.push("later".to_string());
+        let later = defer_in_roots(&config_root, later_input).expect("later workload");
+        claim_next_at_in_roots(&config_root, "other-runner", "other-worker", 1)
+            .expect("claim first")
+            .expect("first workload is claimed");
 
-            assert_eq!(claimed.id, later.id);
-            assert_ne!(claimed.id, first.id);
-        });
+        let claimed =
+            claim_next_matching_at_in_roots(&config_root, "ready-runner", "worker", 2, |record| {
+                record.id == later.id
+            })
+            .expect("claim matching workload")
+            .expect("later deferred workload is claimable");
+
+        assert_eq!(claimed.id, later.id);
+        assert_ne!(claimed.id, first.id);
     }
 
     #[test]
@@ -1097,27 +1187,26 @@ mod tests {
 
     #[test]
     fn worker_lock_survives_replacement_of_the_legacy_adjacent_lock_file() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let owner = try_acquire_worker_lock()
-                .expect("acquire worker lock")
-                .expect("first worker owns lock");
-            let legacy_lock = store_path()
-                .expect("store path")
-                .with_extension("worker.lock");
-            std::fs::write(&legacy_lock, b"old lock inode").expect("write old lock file");
-            let replacement = legacy_lock.with_extension("replacement");
-            std::fs::write(&replacement, b"replacement lock inode")
-                .expect("write replacement lock file");
-            std::fs::rename(&replacement, &legacy_lock).expect("replace legacy lock file");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            assert!(
-                try_acquire_worker_lock()
-                    .expect("check competing worker")
-                    .is_none(),
-                "replacing the old lock pathname must not create a second owner"
-            );
-            drop(owner);
-        });
+        let owner = try_acquire_worker_lock_in_roots(&config_root)
+            .expect("acquire worker lock")
+            .expect("first worker owns lock");
+        let legacy_lock = store_path_in_roots(&config_root).with_extension("worker.lock");
+        std::fs::write(&legacy_lock, b"old lock inode").expect("write old lock file");
+        let replacement = legacy_lock.with_extension("replacement");
+        std::fs::write(&replacement, b"replacement lock inode")
+            .expect("write replacement lock file");
+        std::fs::rename(&replacement, &legacy_lock).expect("replace legacy lock file");
+
+        assert!(
+            try_acquire_worker_lock_in_roots(&config_root)
+                .expect("check competing worker")
+                .is_none(),
+            "replacing the old lock pathname must not create a second owner"
+        );
+        drop(owner);
     }
 
     #[test]
@@ -1131,7 +1220,15 @@ mod tests {
             while !root.join("start").exists() {
                 thread::sleep(Duration::from_millis(5));
             }
-            if let Some(_owner) = try_acquire_worker_lock().expect("acquire worker lock") {
+            // The parent injects this child's `HOME`; resolving the config root
+            // from it explicitly is the same path the ambient resolver produced,
+            // without reaching through a process-global resolver to get it.
+            let config_root = PathBuf::from(std::env::var("HOME").expect("test home"))
+                .join(".config")
+                .join("homeboy");
+            if let Some(_owner) =
+                try_acquire_worker_lock_in_roots(&config_root).expect("acquire worker lock")
+            {
                 std::fs::write(root.join(format!("readiness-{child_id}")), b"polled")
                     .expect("record readiness polling");
                 thread::sleep(Duration::from_millis(250));
@@ -1199,31 +1296,32 @@ mod tests {
 
     #[test]
     fn corrupt_store_fails_closed_without_resetting_records() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let path = store_path().expect("store path");
-            std::fs::create_dir_all(path.parent().expect("store parent")).expect("create parent");
-            std::fs::write(&path, b"not-json").expect("write corrupt store");
-            assert!(defer(input()).is_err());
-            assert_eq!(
-                std::fs::read(&path).expect("corrupt bytes remain"),
-                b"not-json"
-            );
-        });
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
+        let path = store_path_in_roots(&config_root);
+        std::fs::create_dir_all(path.parent().expect("store parent")).expect("create parent");
+        std::fs::write(&path, b"not-json").expect("write corrupt store");
+        assert!(defer_in_roots(&config_root, input()).is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("corrupt bytes remain"),
+            b"not-json"
+        );
     }
 
     #[test]
     fn refuses_inline_values_for_runner_secret_identities() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut input = input();
-            input.job_overrides.env.insert(
-                "DB_SERVICE_PASSWORD".to_string(),
-                "fixture-password".to_string(),
-            );
-            input.job_overrides.secret_env_names = vec!["DB_SERVICE_PASSWORD".to_string()];
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            assert!(defer(input).is_err());
-            assert!(records().expect("records").is_empty());
-        });
+        let mut input = input();
+        input.job_overrides.env.insert(
+            "DB_SERVICE_PASSWORD".to_string(),
+            "fixture-password".to_string(),
+        );
+        input.job_overrides.secret_env_names = vec!["DB_SERVICE_PASSWORD".to_string()];
+
+        assert!(defer_in_roots(&config_root, input).is_err());
+        assert!(records_in_roots(&config_root).expect("records").is_empty());
     }
 
     /// The same command deferred from two worktrees is two workloads. Collapsing
@@ -1231,63 +1329,69 @@ mod tests {
     /// carries the worktree it must be replayed against.
     #[test]
     fn two_worktrees_deferring_the_same_command_are_two_records() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut first = input();
-            first.source_directory = Some("/workspace/repo@one".to_string());
-            let mut second = input();
-            second.source_directory = Some("/workspace/repo@two".to_string());
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let first = defer(first).expect("defer first worktree");
-            let second = defer(second).expect("defer second worktree");
+        let mut first = input();
+        first.source_directory = Some("/workspace/repo@one".to_string());
+        let mut second = input();
+        second.source_directory = Some("/workspace/repo@two".to_string());
 
-            assert_ne!(first.id, second.id);
-            assert_eq!(
-                first.source_directory.as_deref(),
-                Some("/workspace/repo@one")
-            );
-            assert_eq!(records().expect("records").len(), 2);
-        });
+        let first = defer_in_roots(&config_root, first).expect("defer first worktree");
+        let second = defer_in_roots(&config_root, second).expect("defer second worktree");
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            first.source_directory.as_deref(),
+            Some("/workspace/repo@one")
+        );
+        assert_eq!(records_in_roots(&config_root).expect("records").len(), 2);
     }
 
     /// A record deferred before `source_directory` existed must still load.
     #[test]
     fn a_record_without_a_recorded_source_directory_still_loads() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let record = defer(input()).expect("defer workload");
-            let mut value = serde_json::to_value(&record).expect("record serializes");
-            value
-                .as_object_mut()
-                .expect("record object")
-                .remove("source_directory");
-            let path = store_path().expect("store path");
-            std::fs::write(
-                &path,
-                serde_json::to_vec(&serde_json::json!({ "schema": SCHEMA, "records": [value] }))
-                    .expect("legacy store serializes"),
-            )
-            .expect("write legacy store");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let loaded = records().expect("read legacy store");
-            assert_eq!(loaded.len(), 1);
-            assert!(loaded[0].source_directory.is_none());
-        });
+        let record = defer_in_roots(&config_root, input()).expect("defer workload");
+        let mut value = serde_json::to_value(&record).expect("record serializes");
+        value
+            .as_object_mut()
+            .expect("record object")
+            .remove("source_directory");
+        let path = store_path_in_roots(&config_root);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({ "schema": SCHEMA, "records": [value] }))
+                .expect("legacy store serializes"),
+        )
+        .expect("write legacy store");
+
+        let loaded = records_in_roots(&config_root).expect("read legacy store");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].source_directory.is_none());
     }
 
     #[test]
     fn terminating_a_worker_returns_its_claims_to_the_queue() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let deferred = defer(input()).expect("defer workload");
-            claim_next_at("runner", "doomed-worker", 1).expect("claim workload");
+        let ctx = homeboy_core::test_support::HermeticTestContext::new();
+        let config_root = ctx.config_dir();
 
-            let released = release_claims_for_owner("doomed-worker").expect("release claims");
+        let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
+        claim_next_at_in_roots(&config_root, "runner", "doomed-worker", 1).expect("claim workload");
 
-            assert_eq!(released, vec![deferred.id]);
-            assert_eq!(
-                records().expect("records")[0].state,
-                DeferredWorkloadState::Deferred
-            );
-            assert!(records().expect("records")[0].claim_owner.is_none());
-        });
+        let released = release_claims_for_owner_in_roots(&config_root, "doomed-worker")
+            .expect("release claims");
+
+        assert_eq!(released, vec![deferred.id]);
+        assert_eq!(
+            records_in_roots(&config_root).expect("records")[0].state,
+            DeferredWorkloadState::Deferred
+        );
+        assert!(records_in_roots(&config_root).expect("records")[0]
+            .claim_owner
+            .is_none());
     }
 
     #[test]

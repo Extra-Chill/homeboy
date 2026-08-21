@@ -14,6 +14,14 @@ pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) extensions: &'a [ExtensionManifest],
     pub(super) component_id: &'a str,
     pub(super) options: &'a ReleaseOptions,
+    /// Homeboy roots resolved once for the whole plan by
+    /// [`execute_plan_steps_at_source`](super::execution_plan::execute_plan_steps_at_source).
+    ///
+    /// Steps read this instead of calling `PathRoots::from_environment()`
+    /// themselves. That is the difference between a plan that addresses one
+    /// home and a plan whose steps each independently rediscover a home that
+    /// may have moved between them (#7505).
+    pub(super) roots: homeboy_core::paths::PathRoots,
     pub(super) state: ReleaseState,
     pub(super) publish_failed: bool,
 }
@@ -134,6 +142,7 @@ pub(super) fn execute_release_plan_step(
         }
         "package" => Ok(Some(
             executor::run_package(
+                &context.roots,
                 context.extensions,
                 &mut context.state,
                 context.component,
@@ -244,7 +253,7 @@ pub(super) fn execute_release_plan_step(
             .unwrap_or_else(|err| failed_result("github.release", "github.release", err)),
         )),
         "cleanup" => Ok(Some(
-            executor::run_cleanup(context.component, &context.state)
+            executor::run_cleanup(context.roots.data(), context.component, &context.state)
                 .unwrap_or_else(|err| failed_result("cleanup", "cleanup", err)),
         )),
         "post_release" => {
@@ -255,6 +264,7 @@ pub(super) fn execute_release_plan_step(
             ))
         }
         "deploy" => Ok(Some(super::deployment::run_deployment_step(
+            context.roots.data(),
             context.component,
             context.state.version.as_deref(),
             context.state.tag.as_deref(),
@@ -988,6 +998,15 @@ fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStep
 
 #[cfg(test)]
 mod tests {
+    /// The isolated home each test below installs, named as roots.
+    ///
+    /// A test that builds a `ReleaseExecutionContext` by hand is standing in
+    /// for `execute_plan_steps_at_source`, so it resolves once here exactly
+    /// where the real executor resolves once — not inside the step (#7505).
+    fn test_roots() -> homeboy_core::paths::PathRoots {
+        homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+    }
+
     use super::{
         dependency_preflight_result, execute_release_plan_step, planned_release_tag_name,
         release_step_is_plan_only, release_step_is_show_stopper,
@@ -1074,6 +1093,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState::default(),
                 publish_failed: false,
             };
@@ -1126,6 +1146,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState {
                     version: Some("1.2.3".to_string()),
                     ..ReleaseState::default()
@@ -1186,6 +1207,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState {
                     version: Some("1.2.3".to_string()),
                     ..ReleaseState::default()
@@ -1250,6 +1272,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState {
                     version: Some("1.2.3".to_string()),
                     ..ReleaseState::default()
@@ -1283,6 +1306,7 @@ mod tests {
                 extensions: &recovery_extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState {
                     version: Some("1.2.3".to_string()),
                     ..ReleaseState::default()
@@ -1339,6 +1363,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState {
                     version: Some("1.2.3".to_string()),
                     ..ReleaseState::default()
@@ -1410,6 +1435,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1550,6 +1576,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1581,6 +1608,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1615,6 +1643,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: true,
         };
@@ -1654,6 +1683,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1699,6 +1729,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1743,6 +1774,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState {
                 tag: Some("v1.2.3".to_string()),
                 ..Default::default()
@@ -1802,6 +1834,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1832,6 +1865,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -1884,6 +1918,7 @@ mod tests {
                 extensions: &extensions,
                 component_id: "fixture",
                 options: &options,
+                roots: test_roots(),
                 state: ReleaseState::default(),
                 publish_failed: false,
             };
@@ -1946,6 +1981,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2015,6 +2051,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2059,6 +2096,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2094,6 +2132,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2132,6 +2171,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2172,6 +2212,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2208,6 +2249,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2258,6 +2300,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };
@@ -2329,6 +2372,7 @@ mod tests {
             extensions: &[],
             component_id: "fixture",
             options: &options,
+            roots: test_roots(),
             state: ReleaseState::default(),
             publish_failed: false,
         };

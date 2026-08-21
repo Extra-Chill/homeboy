@@ -1040,23 +1040,39 @@ pub fn run_service_worker_operation(run_id: &str, operation: &str) -> Result<(),
     run_service_worker(&request_path)
 }
 
-/// Request cleanup from the execution host recorded by the controller handoff.
-/// The runner command uses its own HOME/data root, so no runner-local path is
-/// ever interpreted by the controller.
-pub(crate) fn reconcile_run_services_on_owner(
+/// Reconcile service ownership for one run below an explicit controller data
+/// root. Request cleanup from the execution host recorded by the controller
+/// handoff; the runner command uses its own HOME/data root, so no runner-local
+/// path is ever interpreted by the controller.
+///
+/// Only the *local* branch reads a root at all: the runner branch dispatches
+/// commands the runner interprets against its own HOME. Splitting them here is
+/// what lets a rooted cancellation prove its local service ledger was reaped in
+/// the same installation it wrote the terminal record into, instead of reaping
+/// whichever ledger the process environment happened to point at (#7505).
+///
+/// The ambient `reconcile_run_services_on_owner` that used to resolve
+/// `paths::homeboy_data()` for callers is gone: both remaining callers —
+/// rooted cancellation and rooted lost-job terminalization — hold the lifecycle
+/// store whose record they are about to replace, and reaping a different home's
+/// ledger than the one that record lives in is exactly the split #7505 forbids.
+pub(crate) fn reconcile_run_services_on_owner_at(
+    data_root: &Path,
     run_id: &str,
     owner: Option<&Value>,
     reason: &str,
 ) -> Result<Value, String> {
     let Some(owner) = owner else {
-        return Ok(
-            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
-        );
+        return Ok(json!({
+            "transport": "local",
+            "services": reconcile_run_services_at(data_root, run_id, reason)?,
+        }));
     };
     let Some(runner_id) = owner.get("runner_id").and_then(Value::as_str) else {
-        return Ok(
-            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
-        );
+        return Ok(json!({
+            "transport": "local",
+            "services": reconcile_run_services_at(data_root, run_id, reason)?,
+        }));
     };
     let command = |operation: &str| {
         vec![

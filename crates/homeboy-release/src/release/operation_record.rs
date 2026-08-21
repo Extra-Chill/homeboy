@@ -48,21 +48,45 @@ impl OperationRecord {
     }
 }
 
-pub struct OperationRecordStore;
+/// Durable operation records below one explicitly injected data root.
+///
+/// Stateful on purpose. A single release workspace lifecycle writes this store
+/// roughly a dozen times — publish ownership, record the provisioned path,
+/// mark a failed verification, claim finalization, complete it — and the
+/// ambient form resolved a data root independently for every one of them.
+/// Binding the root once at construction is what makes those writes provably
+/// the same home's, rather than incidentally so (#7505).
+pub struct OperationRecordStore {
+    data_root: PathBuf,
+}
 
 impl OperationRecordStore {
-    pub fn create(record: &OperationRecord) -> Result<OperationRecord> {
-        Self::update(&record.owner_run_ref, |_| Ok(record.clone()))
+    /// Bind the store to the data root its caller already resolved.
+    pub fn in_roots(roots: &paths::PathRoots) -> Self {
+        Self {
+            data_root: roots.data().to_path_buf(),
+        }
+    }
+
+    pub fn create(&self, record: &OperationRecord) -> Result<OperationRecord> {
+        self.update(&record.owner_run_ref, |_| Ok(record.clone()))
     }
 
     /// Compare/update is serialized across processes and atomically replaces the
     /// record, so a recovered finalizer cannot race a still-running owner.
+    ///
+    /// The lock and the record path derive from one root. The ambient form
+    /// resolved the data root twice — once inside `lock()` and again inside
+    /// `record_path()` — so a repoint between them could have serialized
+    /// against one home's `.lock` while replacing the other home's record.
     pub fn update(
+        &self,
         owner_run_ref: &str,
         update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
     ) -> Result<OperationRecord> {
-        let _lock = lock()?;
-        let path = record_path(owner_run_ref)?;
+        let data_root = self.data_root.as_path();
+        let _lock = lock_in_roots(data_root)?;
+        let path = record_path_in_roots(data_root, owner_run_ref);
         let current = read_path(&path)?;
         let next = update(current)?;
         if next.owner_run_ref != owner_run_ref {
@@ -85,18 +109,19 @@ impl OperationRecordStore {
         Ok(next)
     }
 
-    pub fn load(owner_run_ref: &str) -> Result<Option<OperationRecord>> {
-        let _lock = lock()?;
-        read_path(&record_path(owner_run_ref)?)
+    pub fn load(&self, owner_run_ref: &str) -> Result<Option<OperationRecord>> {
+        let data_root = self.data_root.as_path();
+        let _lock = lock_in_roots(data_root)?;
+        read_path(&record_path_in_roots(data_root, owner_run_ref))
     }
 
     /// Claims finalization before an external provider call. A live lease is
     /// never stolen; only a bounded stale lease can be retried.
-    pub fn claim_finalization(owner_run_ref: &str) -> Result<FinalizationClaim> {
+    pub fn claim_finalization(&self, owner_run_ref: &str) -> Result<FinalizationClaim> {
         const STALE_LEASE_MS: u128 = 5 * 60 * 1000;
         let now = now_ms();
         let candidate_lease = uuid::Uuid::new_v4().to_string();
-        Self::update(owner_run_ref, |record| {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -137,8 +162,12 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn complete_finalization(owner_run_ref: &str, lease: &str) -> Result<OperationRecord> {
-        Self::update(owner_run_ref, |record| {
+    pub fn complete_finalization(
+        &self,
+        owner_run_ref: &str,
+        lease: &str,
+    ) -> Result<OperationRecord> {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -162,11 +191,12 @@ impl OperationRecordStore {
     }
 
     pub fn fail_finalization(
+        &self,
         owner_run_ref: &str,
         lease: &str,
         error: String,
     ) -> Result<OperationRecord> {
-        Self::update(owner_run_ref, |record| {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -187,17 +217,23 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn pending_for_subject(operation: &str, subject: &str) -> Result<Vec<OperationRecord>> {
-        Self::for_subject(operation, subject, true)
+    pub fn pending_for_subject(
+        &self,
+        operation: &str,
+        subject: &str,
+    ) -> Result<Vec<OperationRecord>> {
+        self.for_subject(operation, subject, true)
     }
 
     pub fn for_subject(
+        &self,
         operation: &str,
         subject: &str,
         pending_only: bool,
     ) -> Result<Vec<OperationRecord>> {
-        let _lock = lock()?;
-        let dir = store_dir()?;
+        let data_root = self.data_root.as_path();
+        let _lock = lock_in_roots(data_root)?;
+        let dir = store_dir_in_roots(data_root);
         let mut records = Vec::new();
         if !dir.exists() {
             return Ok(records);
@@ -232,23 +268,27 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn store_dir() -> Result<PathBuf> {
-    let database = paths::observation_db()?;
-    let root = database
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("observation database has no parent"))?;
-    Ok(root.join("operation-records"))
+/// The operation-record store below an explicitly injected data root.
+///
+/// The ambient form resolved `paths::observation_db()` and took its parent.
+/// `observation_db()` is `homeboy_data()?.join("homeboy.sqlite")`, so that
+/// parent is exactly the data root: the database path was only ever a detour
+/// through it, and this store has never read or written the database itself.
+/// Naming the data root directly removes both the detour and the infallible
+/// `parent()` failure branch it required.
+fn store_dir_in_roots(data_root: &Path) -> PathBuf {
+    data_root.join("operation-records")
 }
 
-fn record_path(owner_run_ref: &str) -> Result<PathBuf> {
-    Ok(store_dir()?.join(format!(
+fn record_path_in_roots(data_root: &Path, owner_run_ref: &str) -> PathBuf {
+    store_dir_in_roots(data_root).join(format!(
         "{}.json",
         paths::sanitize_path_segment(owner_run_ref)
-    )))
+    ))
 }
 
-fn lock() -> Result<std::fs::File> {
-    let dir = store_dir()?;
+fn lock_in_roots(data_root: &Path) -> Result<std::fs::File> {
+    let dir = store_dir_in_roots(data_root);
     fs::create_dir_all(&dir)
         .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?;
     let file = OpenOptions::new()
@@ -287,11 +327,33 @@ fn read_path(path: &Path) -> Result<Option<OperationRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier,
     };
+
+    /// A record store bound to a caller-owned data root.
+    ///
+    /// Deliberately not `with_isolated_home`. This store reads and writes
+    /// nothing but files below the root it is constructed with -- the lock, the
+    /// record directory, and the record file are all `*_in_roots` joins -- so a
+    /// test can name its own directory instead of mutating `HOME` and reading
+    /// it straight back out through `from_environment`.
+    ///
+    /// That is the payoff #7505 is aiming at. A test that owns its root needs
+    /// neither the environment nor the process-global mutex `HomeGuard` takes
+    /// to protect it, so it runs beside every other test instead of queueing
+    /// behind all of them.
+    ///
+    /// Only the data root is meaningful here; config and artifacts are given
+    /// the same directory because this store never consults them.
+    fn test_store_at(data_root: &std::path::Path) -> OperationRecordStore {
+        OperationRecordStore::in_roots(&homeboy_core::paths::PathRoots::new(
+            data_root.to_path_buf(),
+            data_root.to_path_buf(),
+            data_root.to_path_buf(),
+        ))
+    }
 
     fn record() -> OperationRecord {
         OperationRecord {
@@ -316,68 +378,78 @@ mod tests {
 
     #[test]
     fn persists_reloads_and_compare_updates_operation_records() {
-        with_isolated_home(|_| {
-            let record = record();
-            OperationRecordStore::create(&record).expect("persist");
-            let reloaded = OperationRecordStore::load(&record.owner_run_ref)
-                .expect("load")
-                .expect("record");
-            assert_eq!(reloaded, record);
-            let updated = OperationRecordStore::update(&record.owner_run_ref, |current| {
+        let data_root = tempfile::tempdir().expect("data root");
+        let store = test_store_at(data_root.path());
+        let record = record();
+        store.create(&record).expect("persist");
+        let reloaded = store
+            .load(&record.owner_run_ref)
+            .expect("load")
+            .expect("record");
+        assert_eq!(reloaded, record);
+        let updated = store
+            .update(&record.owner_run_ref, |current| {
                 let mut current = current.expect("record");
                 current.attempt_count += 1;
                 current.finalization_status = "completed".to_string();
                 Ok(current)
             })
             .expect("atomic update");
-            assert_eq!(updated.attempt_count, 1);
-            assert!(
-                !OperationRecordStore::pending_for_subject("provider_workspace", "component")
-                    .expect("pending")
-                    .iter()
-                    .any(|record| record.owner_run_ref == "release/test-owner")
-            );
-        });
+        assert_eq!(updated.attempt_count, 1);
+        assert!(!store
+            .pending_for_subject("provider_workspace", "component")
+            .expect("pending")
+            .iter()
+            .any(|record| record.owner_run_ref == "release/test-owner"));
     }
 
     #[test]
     fn concurrent_finalizers_claim_one_provider_effect() {
-        with_isolated_home(|_| {
-            let record = record();
-            OperationRecordStore::create(&record).expect("persist");
-            let barrier = Arc::new(Barrier::new(2));
-            let effects = Arc::new(AtomicUsize::new(0));
-            let workers = (0..2)
-                .map(|_| {
-                    let barrier = Arc::clone(&barrier);
-                    let effects = Arc::clone(&effects);
-                    let owner = record.owner_run_ref.clone();
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        if let FinalizationClaim::Claimed { lease, .. } =
-                            OperationRecordStore::claim_finalization(&owner).expect("claim")
-                        {
-                            // This is the provider-effect boundary: only a claimant may cross it.
-                            effects.fetch_add(1, Ordering::SeqCst);
-                            OperationRecordStore::complete_finalization(&owner, &lease)
-                                .expect("complete");
-                        }
-                    })
+        let data_root = tempfile::tempdir().expect("data root");
+        let store = test_store_at(data_root.path());
+        let record = record();
+        store.create(&record).expect("persist");
+        let barrier = Arc::new(Barrier::new(2));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let workers = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let effects = Arc::clone(&effects);
+                let owner = record.owner_run_ref.clone();
+                // Each worker builds its own store over the SAME root, which is
+                // what two racing processes actually do. The ambient form had
+                // them inherit one mutated `HOME` instead, so the contention it
+                // exercised was weaker than the contention it claims to test.
+                let root = data_root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let store = test_store_at(&root);
+                    barrier.wait();
+                    if let FinalizationClaim::Claimed { lease, .. } =
+                        store.claim_finalization(&owner).expect("claim")
+                    {
+                        // This is the provider-effect boundary: only a claimant may cross it.
+                        effects.fetch_add(1, Ordering::SeqCst);
+                        store
+                            .complete_finalization(&owner, &lease)
+                            .expect("complete");
+                    }
                 })
-                .collect::<Vec<_>>();
-            for worker in workers {
-                worker.join().expect("finalizer thread");
-            }
-            assert_eq!(effects.load(Ordering::SeqCst), 1);
-            let completed = OperationRecordStore::load(&record.owner_run_ref)
-                .expect("load")
-                .expect("record");
-            assert_eq!(completed.finalization_status, "completed");
-            assert!(matches!(
-                OperationRecordStore::claim_finalization(&record.owner_run_ref)
-                    .expect("completed claim"),
-                FinalizationClaim::AlreadyCompleted(_)
-            ));
-        });
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("finalizer thread");
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let completed = store
+            .load(&record.owner_run_ref)
+            .expect("load")
+            .expect("record");
+        assert_eq!(completed.finalization_status, "completed");
+        assert!(matches!(
+            store
+                .claim_finalization(&record.owner_run_ref)
+                .expect("completed claim"),
+            FinalizationClaim::AlreadyCompleted(_)
+        ));
     }
 }

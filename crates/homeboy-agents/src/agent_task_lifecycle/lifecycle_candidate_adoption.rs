@@ -10,7 +10,19 @@
 
 use super::*;
 
-pub(crate) fn project_cook_alias_adoption(
+/// Project the authoritative candidate adoption of a Cook alias onto its parent
+/// record, reading and rewriting every indexed attempt in the injected store.
+///
+/// This walks the Cook index and *writes back* each attempt whose adoption it
+/// reconciles, so the attempt reads and the attempt writes have to land in the
+/// same installation the index itself was read from. Resolved ambiently while
+/// the caller held explicit roots, this would have reported a parent adoption
+/// assembled from another home's attempts (#7505).
+///
+/// There is no ambient wrapper: `status_in_store` is the only caller, and the
+/// store it hands down is the one its own caller injected.
+pub(crate) fn project_cook_alias_adoption_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     index: &AgentTaskCookIndex,
 ) -> Result<()> {
@@ -23,11 +35,11 @@ pub(crate) fn project_cook_alias_adoption(
     )> = None;
 
     for (index_order, indexed_attempt) in index.attempts.iter().enumerate() {
-        let Ok(mut attempt_record) = store::read_record(&indexed_attempt.run_id) else {
+        let Ok(mut attempt_record) = lifecycle_store.read_record(&indexed_attempt.run_id) else {
             continue;
         };
         if reconcile_candidate_adoption(&mut attempt_record) {
-            store::write_record(&attempt_record)?;
+            lifecycle_store.write_record(&attempt_record)?;
         }
         let Some(adoption) = attempt_record.candidate_adoption else {
             continue;
@@ -245,14 +257,6 @@ pub(crate) fn start_candidate_adoption_with_policy_in_store(
     Ok(record)
 }
 
-pub fn checkpoint_candidate_adoption_remediation(
-    run_id: &str,
-    remediation_run_id: &str,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    checkpoint_candidate_adoption_remediation_in_store(&lifecycle_store, run_id, remediation_run_id)
-}
-
 pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -279,22 +283,6 @@ pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
     ));
     lifecycle_store.write_record(&record)?;
     Ok(())
-}
-
-pub fn start_candidate_adoption_gate(
-    run_id: &str,
-    command: &str,
-    process_group: u32,
-    timeout_seconds: u64,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    start_candidate_adoption_gate_in_store(
-        &lifecycle_store,
-        run_id,
-        command,
-        process_group,
-        timeout_seconds,
-    )
 }
 
 pub(crate) fn start_candidate_adoption_gate_in_store(
@@ -328,22 +316,6 @@ pub(crate) fn start_candidate_adoption_gate_in_store(
         true
     })?;
     Ok(())
-}
-
-pub(crate) fn heartbeat_candidate_adoption_gate(
-    run_id: &str,
-    visibility: crate::agent_task_gate::AgentTaskGateVisibility,
-    reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
-    status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    heartbeat_candidate_adoption_gate_in_store(
-        &lifecycle_store,
-        run_id,
-        visibility,
-        reveal_policy,
-        status,
-    )
 }
 
 pub(crate) fn heartbeat_candidate_adoption_gate_in_store(
@@ -395,11 +367,6 @@ pub(crate) fn heartbeat_candidate_adoption_gate_in_store(
     Ok(())
 }
 
-pub fn candidate_adoption_cancel_requested(run_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    candidate_adoption_cancel_requested_in_store(&lifecycle_store, run_id)
-}
-
 pub(crate) fn candidate_adoption_cancel_requested_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -409,11 +376,6 @@ pub(crate) fn candidate_adoption_cancel_requested_in_store(
         .candidate_adoption
         .as_ref()
         .is_some_and(|attempt| attempt.state == "cancel_requested" || attempt.state == "cancelled"))
-}
-
-pub fn checkpoint_candidate_adoption(run_id: &str, phase: &str, active_gate: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    checkpoint_candidate_adoption_in_store(&lifecycle_store, run_id, phase, active_gate)
 }
 
 pub(crate) fn checkpoint_candidate_adoption_in_store(

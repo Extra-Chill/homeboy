@@ -31,8 +31,15 @@ impl PathRoots {
     }
 
     /// Resolve the current process configuration once.
+    ///
+    /// The data root is resolved exactly once and reused as the artifact-root
+    /// default, so a repoint between the two cannot split this value across two
+    /// homes.
     pub fn from_environment() -> Result<Self> {
-        Ok(Self::new(homeboy()?, homeboy_data()?, artifact_root()?))
+        let config = homeboy()?;
+        let data = homeboy_data()?;
+        let artifacts = artifact_root_in_root(&data);
+        Ok(Self::new(config, data, artifacts))
     }
 
     pub fn config(&self) -> &Path {
@@ -183,9 +190,14 @@ pub fn homeboy() -> Result<PathBuf> {
     }
 }
 
+/// Global product config file path below an already-resolved config root.
+pub fn homeboy_json_in_root(config_root: &Path) -> PathBuf {
+    homeboy_product_identity::PRODUCT_IDENTITY.config_file(config_root.to_path_buf())
+}
+
 /// Global product config file path
 pub fn homeboy_json() -> Result<PathBuf> {
-    Ok(homeboy_product_identity::PRODUCT_IDENTITY.config_file(homeboy()?))
+    Ok(homeboy_json_in_root(&homeboy()?))
 }
 
 /// Base Homeboy data directory for local observed state.
@@ -251,9 +263,19 @@ pub fn homeboy_data() -> Result<PathBuf> {
     }
 }
 
+/// Local SQLite observation-store path below an already-resolved data root.
+pub fn observation_db_in_root(data_root: &Path) -> PathBuf {
+    data_root.join("homeboy.sqlite")
+}
+
 /// Local SQLite observation-store path.
 pub fn observation_db() -> Result<PathBuf> {
-    Ok(homeboy_data()?.join("homeboy.sqlite"))
+    Ok(observation_db_in_root(&homeboy_data()?))
+}
+
+/// Resolve a named store below an already-resolved Homeboy data root.
+pub fn homeboy_data_store_in_root(data_root: &Path, name: &str) -> PathBuf {
+    data_root.join(name)
 }
 
 /// Resolve a named store below the Homeboy data root.
@@ -261,19 +283,33 @@ pub fn observation_db() -> Result<PathBuf> {
 /// Storage owners use this rather than rebuilding paths so reporting and future
 /// placement policy can refer to the same stable store identities.
 pub fn homeboy_data_store(name: &str) -> Result<PathBuf> {
-    Ok(homeboy_data()?.join(name))
+    Ok(homeboy_data_store_in_root(&homeboy_data()?, name))
 }
 
+/// Content-addressed cargo target cache.
+///
+/// Deliberately NOT given a root-taking sibling: this store is keyed to the
+/// real machine and is shared process-globally on purpose (#7505). Rooting it
+/// per-workload would fragment the cache it exists to share.
 pub fn cargo_targets_store() -> Result<PathBuf> {
     homeboy_data_store(CARGO_TARGETS_STORE)
 }
 
+/// Content-addressed controller runtime store.
+///
+/// Deliberately NOT given a root-taking sibling, for the same reason as
+/// [`cargo_targets_store`].
 pub fn controller_runtimes_store() -> Result<PathBuf> {
     homeboy_data_store(CONTROLLER_RUNTIMES_STORE)
 }
 
+/// Controller scratch store below an already-resolved data root.
+pub fn controller_scratch_store_in_root(data_root: &Path) -> PathBuf {
+    homeboy_data_store_in_root(data_root, CONTROLLER_SCRATCH_STORE)
+}
+
 pub fn controller_scratch_store() -> Result<PathBuf> {
-    homeboy_data_store(CONTROLLER_SCRATCH_STORE)
+    Ok(controller_scratch_store_in_root(&homeboy_data()?))
 }
 
 /// Root directory for copied run artifacts.
@@ -284,27 +320,53 @@ pub fn controller_scratch_store() -> Result<PathBuf> {
 /// 3. global config `/artifact_root`
 /// 4. historical default: `<homeboy_data>/artifacts`
 pub fn artifact_root() -> Result<PathBuf> {
+    // Resolved lazily: an override short-circuits before `homeboy_data()`, so a
+    // process given an explicit artifact root still resolves one without a
+    // resolvable data root. That is the pre-injection behavior, preserved.
+    match resolved_artifact_root_override() {
+        Some(path) => Ok(path),
+        None => homeboy_data_store("artifacts"),
+    }
+}
+
+/// Root directory for copied run artifacts, defaulting below an
+/// already-resolved *data* root.
+///
+/// The CLI override, `HOMEBOY_ARTIFACT_ROOT`, and the config-level resolver all
+/// still outrank the supplied root, exactly as they outrank `homeboy_data()` on
+/// the ambient path — the injected root replaces only the historical default.
+///
+/// This shares [`resolved_artifact_root_override`] with [`artifact_root`], so
+/// the pair cannot disagree about override precedence.
+pub fn artifact_root_in_root(data_root: &Path) -> PathBuf {
+    resolved_artifact_root_override()
+        .unwrap_or_else(|| homeboy_data_store_in_root(data_root, "artifacts"))
+}
+
+/// Tiers 1-3 of the artifact-root precedence chain, shared by the ambient and
+/// rooted resolvers so neither can drift from the other.
+fn resolved_artifact_root_override() -> Option<PathBuf> {
     if let Some(path) = artifact_root_override()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
     {
-        return Ok(expand_tilde_path(path));
+        return Some(expand_tilde_path(path));
     }
 
     if let Ok(path) = env::var("HOMEBOY_ARTIFACT_ROOT") {
         if !path.trim().is_empty() {
-            return Ok(expand_tilde_path(path));
+            return Some(expand_tilde_path(path));
         }
     }
 
     if let Some(path) = resolved_config_artifact_root() {
         if !path.trim().is_empty() {
-            return Ok(expand_tilde_path(path));
+            return Some(expand_tilde_path(path));
         }
     }
 
-    homeboy_data_store("artifacts")
+    None
 }
 
 /// Expand a leading tilde in a local path.
@@ -444,24 +506,48 @@ pub fn resolve_contained_local_path(
     }
 }
 
+/// Extension directory path below an already-resolved config root.
+pub fn extension_in_root(config_root: &Path, id: &str) -> PathBuf {
+    extensions_in_root(config_root).join(id)
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
-    Ok(extensions()?.join(id))
+    Ok(extension_in_root(&homeboy()?, id))
+}
+
+/// Extension manifest file path below an already-resolved config root.
+pub fn extension_manifest_in_root(config_root: &Path, id: &str) -> PathBuf {
+    extensions_in_root(config_root)
+        .join(id)
+        .join(format!("{}.json", id))
 }
 
 /// Extension manifest file path
 pub fn extension_manifest(id: &str) -> Result<PathBuf> {
-    Ok(extensions()?.join(id).join(format!("{}.json", id)))
+    Ok(extension_manifest_in_root(&homeboy()?, id))
+}
+
+/// Agent runtime manifest file path below an already-resolved config root.
+pub fn agent_runtime_manifest_in_root(config_root: &Path, id: &str) -> PathBuf {
+    agent_runtimes_in_root(config_root)
+        .join(id)
+        .join(format!("{}.json", id))
 }
 
 /// Agent runtime manifest file path
 pub fn agent_runtime_manifest(id: &str) -> Result<PathBuf> {
-    Ok(agent_runtimes()?.join(id).join(format!("{}.json", id)))
+    Ok(agent_runtime_manifest_in_root(&homeboy()?, id))
+}
+
+/// Key file path below an already-resolved config root.
+pub fn key_in_root(config_root: &Path, server_id: &str) -> PathBuf {
+    keys_in_root(config_root).join(format!("{}_id_rsa", server_id))
 }
 
 /// Key file path
 pub fn key(server_id: &str) -> Result<PathBuf> {
-    Ok(keys()?.join(format!("{}_id_rsa", server_id)))
+    Ok(key_in_root(&homeboy()?, server_id))
 }
 
 /// Resolve path that may be absolute or relative to base.

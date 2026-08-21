@@ -109,22 +109,6 @@ pub(crate) fn record_pre_execution_failure_in_store(
     Ok(failed_record)
 }
 
-/// Record a post-provider transport/handoff failure without terminalizing a run
-/// that already produced a candidate (#9377). The existing durable record — its
-/// state, aggregate, artifacts, and provider handles — is preserved verbatim;
-/// only a recoverable `transport_follow_up_failure` marker is stamped so
-/// controller reconciliation can adopt the completed candidate rather than
-/// rerunning the provider. The failure stays `retryable` so recovery is
-/// attempted, and never regresses a terminal candidate to `Failed`.
-fn record_transport_follow_up_failure(
-    record: AgentTaskRunRecord,
-    phase: &str,
-    error: &Error,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_transport_follow_up_failure_in_store(&lifecycle_store, record, phase, error)
-}
-
 fn record_transport_follow_up_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     mut record: AgentTaskRunRecord,
@@ -737,14 +721,12 @@ pub(crate) fn record_aggregate_in_store(
     Ok(record.clone())
 }
 
-pub(crate) fn record_terminal_artifact_projection(
-    record: &mut AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_terminal_artifact_projection_in_store(&lifecycle_store, record, aggregate)
-}
-
+/// Register a terminal run's artifacts into its own store's projection root.
+///
+/// There is no ambient wrapper: the last caller that resolved its own root was
+/// `project_terminal_runner_lifecycle_event`, and it now takes a store (#7505).
+/// Leaving an unused ambient form behind would only be a new way to reach the
+/// process artifact root by accident.
 pub(crate) fn record_terminal_artifact_projection_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
@@ -912,7 +894,14 @@ pub(crate) fn terminal_provider_model_reconciliation_needed(
 /// promotion evidence, gates, totals, and artifact projections are preserved:
 /// `set_run_state` re-asserts the existing terminal state and only the
 /// model-bearing lifecycle projection is rebuilt from the record's own tasks.
-pub(crate) fn reconcile_terminal_provider_model(
+///
+/// The persist at the end is the whole point of taking a store: it is the only
+/// durable effect, so a reconciliation driven from injected roots must land its
+/// repaired model in the same installation the record and aggregate were read
+/// from. There is no ambient wrapper — `status_in_store` is the only caller,
+/// and the store it hands down is the one its own caller injected.
+pub(crate) fn reconcile_terminal_provider_model_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
@@ -938,7 +927,7 @@ pub(crate) fn reconcile_terminal_provider_model(
     persist_provider_handle_models(&mut record.provider_handles, plan);
     update_lifecycle_from_record(record, plan);
     record.updated_at = Some(now_timestamp());
-    store::write_record(record)
+    lifecycle_store.write_record(record)
 }
 
 /// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
@@ -1098,6 +1087,35 @@ pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<Str
     )
 }
 
+/// [`terminal_artifact_projection_readiness`] against an explicitly injected
+/// durable lifecycle root.
+///
+/// All three reads follow the injected store, and the third is the one that
+/// matters: the projection check opens an observation database *and* resolves
+/// an artifact root, which `PathRoots` carries separately from `data`. Answered
+/// ambiently, an otherwise-complete candidate is reported as unprojected purely
+/// because the controller-owned bytes were looked for under the wrong home
+/// (#7505, #12618, #12619) — and here that verdict is not merely cosmetic: the
+/// caller turns it into a `cook_continuation_scheduler` status that suppresses
+/// the terminal continuation enqueue.
+///
+/// This is the initializing counterpart of
+/// [`terminal_artifact_projection_readiness_bounded_in_store`]; it opens the
+/// same stores the ambient form opens rather than the read-only ones.
+pub fn terminal_artifact_projection_readiness_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record_with(
+        &record,
+        lifecycle_store.read_aggregate(&record.run_id),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+        },
+    )
+}
+
 /// Bounded read-only counterpart used by fanout status while coordinators are
 /// writing observations. It intentionally leaves reconciliation to `resume`.
 pub fn terminal_artifact_projection_readiness_bounded(run_id: &str) -> Result<Option<String>> {
@@ -1169,17 +1187,6 @@ fn terminal_artifact_projection_readiness_for_record_with(
             )
             .to_string(),
     ))
-}
-
-/// Project finalized executor artifacts into the standard observation registry.
-/// The lifecycle aggregate remains the source of task semantics; the registry
-/// supplies the canonical retrievable-byte index used by `runs artifact get`.
-pub(crate) fn project_terminal_artifacts(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    project_terminal_artifacts_in_store(&store, record, aggregate)
 }
 
 fn project_terminal_artifacts_in_store(

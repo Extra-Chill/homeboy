@@ -1085,27 +1085,41 @@ pub(super) fn normalize_missing_path(path: &Path) -> PathBuf {
 }
 
 pub(super) fn metadata_dir() -> Result<PathBuf> {
-    let observation_db = paths::observation_db()?;
-    let data_root = observation_db.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "observation database path `{}` has no parent directory",
-            observation_db.display()
-        ))
-    })?;
+    Ok(metadata_dir_in_root(&data_root_of(
+        &paths::observation_db()?,
+    )?))
+}
 
-    Ok(data_root.join("task-worktrees"))
+/// [`metadata_dir`] below an explicitly injected data root.
+pub(super) fn metadata_dir_in_root(data_root: &Path) -> PathBuf {
+    data_root.join("task-worktrees")
 }
 
 pub(super) fn adopted_metadata_dir() -> Result<PathBuf> {
-    let observation_db = paths::observation_db()?;
-    let data_root = observation_db.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "observation database path `{}` has no parent directory",
-            observation_db.display()
-        ))
-    })?;
+    Ok(adopted_metadata_dir_in_root(&data_root_of(
+        &paths::observation_db()?,
+    )?))
+}
 
-    Ok(data_root.join("adopted-workspaces"))
+/// [`adopted_metadata_dir`] below an explicitly injected data root.
+pub(super) fn adopted_metadata_dir_in_root(data_root: &Path) -> PathBuf {
+    data_root.join("adopted-workspaces")
+}
+
+/// The data root that owns an observation database file.
+///
+/// Both registries are siblings of the SQLite store, so they are derived from
+/// one resolution rather than each re-resolving the data root.
+fn data_root_of(observation_db: &Path) -> Result<PathBuf> {
+    observation_db
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "observation database path `{}` has no parent directory",
+                observation_db.display()
+            ))
+        })
 }
 
 pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {

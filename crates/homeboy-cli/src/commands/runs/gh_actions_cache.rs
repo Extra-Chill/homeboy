@@ -5,7 +5,6 @@
 //! orchestration of directory creation and byte writes lives here.
 
 use homeboy::core::error::{Error, Result};
-use homeboy::core::paths;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,20 +13,20 @@ pub fn sanitize_artifact_file_name(raw: &str) -> String {
     raw.replace(['/', '\\', '\0'], "_")
 }
 
-/// Materialize a downloaded artifact file under the homeboy data dir.
+/// Materialize a downloaded artifact file under an already-resolved data root.
 ///
-/// Creates `<data>/artifacts/<homeboy_run_id>/` and writes
-/// `<artifact_id>-<safe_name>`, returning the written path. Errors propagate.
-pub fn persist_artifact_file(
+/// An import walks every artifact of every run; resolving the data root per
+/// file made the destination of one import depend on process-global state that
+/// could change between two files of the same run.
+pub fn persist_artifact_file_in_roots(
+    data_root: &Path,
     homeboy_run_id: &str,
     artifact_id: &str,
     file_name: &str,
     bytes: &[u8],
 ) -> Result<PathBuf> {
     let safe_name = sanitize_artifact_file_name(file_name);
-    let target_dir = paths::homeboy_data()?
-        .join("artifacts")
-        .join(homeboy_run_id);
+    let target_dir = data_root.join("artifacts").join(homeboy_run_id);
     fs::create_dir_all(&target_dir).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -44,12 +43,13 @@ pub fn persist_artifact_file(
     Ok(target)
 }
 
-/// Compute (and ensure) the cache path for a list-runs cache entry.
+/// Compute (and ensure) a list-runs cache entry under an injected config root.
 ///
-/// Creates `<homeboy>/cache/gh-actions-runs/` and returns the path for
-/// `<key>.<ext>`. Errors propagate.
-pub fn list_runs_cache_path(key: &str, ext: &str) -> Result<PathBuf> {
-    let base = paths::homeboy()?.join("cache").join("gh-actions-runs");
+/// The body and the ETag of one cache entry are two files that must live beside
+/// each other; resolving the root once per file let a 304 be validated against
+/// an ETag from a different installation.
+pub fn list_runs_cache_path_in_roots(config_root: &Path, key: &str, ext: &str) -> Result<PathBuf> {
+    let base = config_root.join("cache").join("gh-actions-runs");
     fs::create_dir_all(&base).map_err(|e| {
         Error::internal_io(
             e.to_string(),

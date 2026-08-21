@@ -9,7 +9,40 @@
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 
-pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
+// The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
+// above this resolved a root and delegated straight here. It had no callers, so
+// it was a resolution point that existed for nobody (#7505).
+//
+// Worth naming rather than burying: the rooted form below is reached only by
+// `tests::terminal_and_reconcile`, so this scan currently has no production
+// caller either. That is a coverage question, not a rooting one, and deleting
+// the ambient half does not change it — but it is why the shim could rot here
+// unnoticed. The module carries `#[allow(dead_code)]` in `lib.rs`, so the
+// compiler was never going to say so.
+
+/// Reconcile every active lab-runner handoff inside an explicitly rooted store.
+///
+/// This is a queue scan that mutates every row it selects, so the scan and its
+/// consequences have to name one installation. The queue itself is read from
+/// this store's own observation database, and each of the three follow-ups is
+/// dispatched to the rooted sibling that takes its lock and commits its record
+/// in the same home:
+///
+/// * `reconcile_pending_runner_submission_intent_in_store` replays a submission
+///   key and binds the acceptance it gets back;
+/// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
+///   store's `run_dir` and terminalizes;
+/// * `status_in_store` takes two advisory locks of its own and has roughly
+///   twenty durable write sites.
+///
+/// Selecting a run from one installation's queue and then expiring or
+/// terminalizing it in another is the exact shape #7505 exists to stop: the
+/// handoff lock would be held where nobody contends for it, so an acceptance
+/// racing this expiry would not be excluded by it, and the terminal record
+/// would land beside a queue row that still reads `Running`.
+pub fn reconcile_active_lab_runner_handoffs_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
     let mut pending_intent_run_ids = Vec::new();
@@ -17,7 +50,7 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
     // Scan the stored snapshot so this operation owns and reports its expiry
     // mutations. `list_records` refreshes through `status`, which also expires
     // pending handoffs as a user-visible read-side convergence guarantee.
-    for record in store::read_records()? {
+    for record in lifecycle_store.read_records()? {
         if record.state == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
             accepted_run_ids.push(record.run_id);
         } else if has_pending_runner_submission_intent(&record) {
@@ -29,20 +62,30 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
 
     let mut reconciled = 0;
     for run_id in pending_intent_run_ids {
-        if reconcile_pending_runner_submission_intent(&run_id)? {
+        if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &run_id)? {
             reconciled += 1;
         }
     }
     for run_id in expired_run_ids {
-        if expire_unaccepted_lab_handoff(&run_id)? {
+        if expire_unaccepted_lab_handoff_in_store(lifecycle_store, &run_id)? {
             reconciled += 1;
         }
     }
     for run_id in accepted_run_ids {
         // `status` owns snapshot validation, persistence, and the exact
         // no-PID daemon-loss projection. A bad remote record must not prevent
-        // unrelated activity from being listed.
-        if status(&run_id).is_ok() {
+        // unrelated activity from being listed. This is the rooted body the
+        // ambient `status` entry point delegates to, with its own defaults:
+        // `AgentTaskStatusOptions::default()` and a Cook-alias-resolving
+        // (non-exact) read, which is exactly what `status` passed.
+        if status_in_store(
+            lifecycle_store,
+            &run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .is_ok()
+        {
             reconciled += 1;
         }
     }
@@ -148,8 +191,31 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
 /// original POST returns the same job for its submission key, so this covers
 /// both controller crash boundaries without retaining secret values.
 pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> {
+    reconcile_pending_runner_submission_intent_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`reconcile_pending_runner_submission_intent`].
+///
+/// The replay decision and its consequence must name one installation. This
+/// body reads the intent that authorises the replay, and on acceptance commits
+/// the accepted handoff through `record_detached_lab_run_in_store` — which
+/// takes the handoff lock on the same store's `run_dir`. Deciding from one
+/// home's intent and binding the acceptance into another's would let two
+/// controllers replay the same submission key while neither handoff lock
+/// excluded the other (#7505).
+///
+/// The broker transport stays process-global on purpose:
+/// `with_runner_continuation` resolves the configured provider registry, which
+/// is trust material and a subprocess contract, not a lifecycle root.
+pub(crate) fn reconcile_pending_runner_submission_intent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::read_record(&run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     if !has_pending_runner_submission_intent(&record) {
         return Ok(false);
     }
@@ -204,17 +270,20 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
         provider.submit_reverse_broker_job(&runner_id, request)
     }) {
         Ok(job) => {
-            record_detached_lab_run(DetachedLabRunRecord {
-                run_id: &run_id,
-                runner_id: &runner_id,
-                runner_job_id: &job.id.to_string(),
-                remote_workspace: &cwd,
-                remote_command: &command,
-            })?;
+            record_detached_lab_run_in_store(
+                lifecycle_store,
+                DetachedLabRunRecord {
+                    run_id: &run_id,
+                    runner_id: &runner_id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: &cwd,
+                    remote_command: &command,
+                },
+            )?;
             Ok(true)
         }
         Err(error) => {
-            let _ = store::mutate_record(&run_id, |record| {
+            let _ = lifecycle_store.mutate_record(&run_id, |record| {
                 let metadata = record.ensure_metadata_object();
                 metadata["runner_submission_intent"]["last_reconciliation_error"] = json!({
                     "code": error.code.as_str(),
@@ -231,9 +300,18 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
 /// Resolve a possibly accepted submission without replaying it. This is used
 /// only after the acceptance deadline or an operator cancellation request:
 /// those paths must never create new runner work.
-pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result<bool> {
+///
+/// There is deliberately no ambient wrapper. Both callers — expiry and
+/// cancellation — are destructive, and each already holds the store whose
+/// record it is about to terminalize. An ambient form would exist only to let a
+/// future caller decide acceptance from one installation's intent and bind the
+/// acceptance into another's (#7505).
+pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::read_record(&run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     if record.runner_job_id().is_some()
         || record
             .metadata
@@ -285,13 +363,16 @@ pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result
     });
     match lookup {
         Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Accepted { job }) => {
-            record_detached_lab_run(DetachedLabRunRecord {
-                run_id: &run_id,
-                runner_id: &runner_id,
-                runner_job_id: &job.id.to_string(),
-                remote_workspace: request.cwd.as_deref().unwrap_or_default(),
-                remote_command: &request.command,
-            })?;
+            record_detached_lab_run_in_store(
+                lifecycle_store,
+                DetachedLabRunRecord {
+                    run_id: &run_id,
+                    runner_id: &runner_id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: request.cwd.as_deref().unwrap_or_default(),
+                    remote_command: &request.command,
+                },
+            )?;
             Ok(true)
         }
         Ok(
@@ -299,14 +380,16 @@ pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result
             | homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Expired { .. },
         ) => Ok(false),
         Err(error) => {
-            let _ = store::mutate_record(&run_id, |record| {
-                record.ensure_metadata_object()["runner_submission_intent"]["last_lookup_error"] = json!({
-                    "code": error.code.as_str(),
-                    "message": error.message.clone(),
-                    "retryable": true,
-                });
-                true
-            })?;
+            let _ =
+                lifecycle_store.mutate_record(&run_id, |record| {
+                    record.ensure_metadata_object()["runner_submission_intent"]
+                        ["last_lookup_error"] = json!({
+                        "code": error.code.as_str(),
+                        "message": error.message.clone(),
+                        "retryable": true,
+                    });
+                    true
+                })?;
             Err(error)
         }
     }
@@ -365,20 +448,41 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
 /// their aggregate-free legacy shape; preacceptance failures retain their
 /// canonical failure aggregate and its synthetic runtime projection.
 pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
+    expire_unaccepted_lab_handoff_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`expire_unaccepted_lab_handoff`].
+///
+/// This is the operation the handoff lock exists for: expiry and acceptance
+/// race for the same run, and only one may win. That is why the lock and the
+/// cancellation spine had to be rooted in the same change (#7505) — a lock
+/// resolved from `paths::homeboy_data()` while the acceptance check, the
+/// cancellation, and the terminal record write all followed an injected store
+/// would be held in an installation nobody else contends in. Acceptance and
+/// expiry would each believe they were exclusive, and expiry would terminalize
+/// a run a runner had just accepted.
+pub(crate) fn expire_unaccepted_lab_handoff_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     // An expired pending request may have been accepted immediately before its
     // response was lost. Querying its key is read-only; never replay here.
-    if bind_pending_runner_submission_if_accepted(run_id)? {
+    if bind_pending_runner_submission_if_accepted_in_store(lifecycle_store, run_id)? {
         return Ok(true);
     }
-    let _lock = LabHandoffLock::lock(run_id)?;
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, run_id)?;
     // Re-read while holding the handoff lock: an accepted job is runner-owned
     // and must never be terminalized by controller deadline recovery.
-    let record = store::read_record(run_id)?;
+    let record = lifecycle_store.read_record(run_id)?;
     if !has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         return Ok(false);
     }
 
-    let mut record = cancel_run(run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
+    let mut record =
+        cancel_run_in_store(lifecycle_store, run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
     let expired_at = now_timestamp();
     let record_run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
@@ -422,11 +526,29 @@ pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
         )
         .unwrap_or(Value::Null),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(true)
 }
 
-pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
+/// Project the runner daemon's view of an accepted job back onto the durable
+/// record below explicitly injected lifecycle roots.
+///
+/// There is deliberately no ambient wrapper. Both outcomes this dispatches to
+/// write: the snapshot branch commits a binding, a live-progress update, or a
+/// terminal aggregate, and the confirmed-absence branch replaces the record
+/// with a terminal pre-execution failure. Its only caller is `status_in_store`
+/// in `lifecycle_ops`, which already holds the store whose record it is
+/// reconciling. An ambient form would exist only to let a rooted status decide
+/// liveness against one installation's record and commit the result into
+/// another's (#7505).
+///
+/// The runner transport itself stays process-global: `with_runner_continuation`
+/// resolves a configured provider registry, which is trust material and a
+/// subprocess contract, not a lifecycle root.
+pub(crate) fn reconcile_runner_job_state_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     if record.state != AgentTaskRunState::Running {
         return Ok(());
     }
@@ -440,11 +562,13 @@ pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Res
         p.reconcile_runner_job(&runner_id, &job_id)
     }) {
         super::runner_continuation::RunnerJobReconciliation::Snapshot(snapshot) => {
-            reconcile_runner_job_snapshot(record, &snapshot)
+            reconcile_runner_job_snapshot_in_store(lifecycle_store, record, &snapshot)
         }
         super::runner_continuation::RunnerJobReconciliation::ConfirmedAbsent {
             checked_generations,
-        } => terminalize_lost_accepted_lab_job(record, checked_generations),
+        } => {
+            terminalize_lost_accepted_lab_job_in_store(lifecycle_store, record, checked_generations)
+        }
         super::runner_continuation::RunnerJobReconciliation::UnconfirmedAbsence => {
             let disconnected = super::runner_continuation::with_runner_continuation(|p| {
                 !p.is_runner_connected(&runner_id)
@@ -457,14 +581,30 @@ pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Res
     }
 }
 
-fn terminalize_lost_accepted_lab_job(
+/// Terminalize an accepted Lab job the daemon can no longer account for, below
+/// explicitly injected lifecycle roots.
+///
+/// Every step here has to name the same installation. The controller plan it
+/// reads is the plan the terminal failure is shaped from; the managed-service
+/// ledger it reaps is the one this run wrote; the terminal record it commits
+/// replaces the record the caller is holding. Reading a plan from one home and
+/// reaping another home's service ledger would report a cleanup proof for
+/// services this run never started, which is the same failure class as the
+/// permission gate that failed open in #7505.
+///
+/// Only the *local* branch of `reconcile_run_services_on_owner_at` reads a root
+/// at all — the runner branch dispatches a command the runner interprets
+/// against its own HOME — so passing this store's data root is precise rather
+/// than merely conservative.
+fn terminalize_lost_accepted_lab_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     checked_generations: usize,
 ) -> Result<()> {
     if !record.has_accepted_lab_handoff() || !record.provider_handles.is_empty() {
         return Ok(());
     }
-    let plan = store::read_controller_plan(&record.run_id)?;
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     let run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
     let runner_job_id = record.runner_job_id().unwrap_or_default().to_string();
@@ -477,13 +617,15 @@ fn terminalize_lost_accepted_lab_job(
     // a service supervisor. Resolve that owner before replacing the run record
     // with a terminal failure so the cleanup proof remains durable.
     let service_cleanup =
-        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner(
+        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner_at(
+            &lifecycle_store.data_root(),
             &run_id,
             record.metadata.get("managed_service_supervisor"),
             "accepted_lab_runner_job_lost",
         )
         .map_err(Error::internal_unexpected)?;
-    let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure(
+    let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure_in_store(
+        lifecycle_store,
         &run_id,
         &plan,
         "accepted_lab_runner_job_lost",
@@ -512,7 +654,7 @@ fn terminalize_lost_accepted_lab_job(
     if let Some(handoff) = metadata.get_mut("runner_handoff") {
         handoff["state"] = json!("lost");
     }
-    store::write_record(&terminal)?;
+    lifecycle_store.write_record(&terminal)?;
     *record = terminal;
     Ok(())
 }

@@ -15,11 +15,29 @@ pub fn record_runner_job_identity(
     runner_id: &str,
     runner_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record_runner_job_identity_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        runner_job_id,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_job_identity`].
+///
+/// The read and the write are one operation — the record read back is the one
+/// returned to the caller — so they must name the same installation (#7505).
+pub(crate) fn record_runner_job_identity_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    runner_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_id".to_string(), json!(runner_id));
     metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -40,7 +58,24 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
 pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    accepted_lab_runner_job_identity_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`accepted_lab_runner_job_identity`].
+///
+/// This is the read half of Lab acceptance, and `record_detached_lab_run_in_store`
+/// is the write half. An acceptance committed into one installation and then
+/// verified against another's record would report "not accepted" for a run that
+/// is already bound — the mirror image of the double-acceptance the write side
+/// refuses — so both halves have to name the same store (#7505).
+pub(crate) fn accepted_lab_runner_job_identity_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
+    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(accepted_lab_runner_job_identity_from_record(&record))
 }
 
@@ -642,10 +677,38 @@ pub fn project_terminal_runner_exec_result(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<bool> {
+    project_terminal_runner_exec_result_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of [`project_terminal_runner_exec_result`].
+///
+/// This finalizes an observation run: it reads the row, decides from that row's
+/// own `kind`, terminal status, and artifact-promotion checkpoint whether to
+/// project at all, and then commits the result with `finish_run`. The decision
+/// and the write are the same row, so they have to be the same database — a
+/// projection that read one installation's row and finished another's would
+/// either refuse a valid terminal result or overwrite an unrelated run.
+///
+/// The observation store is opened through
+/// [`AgentTaskLifecycleStore::open_observation_maintained`], not the lifecycle
+/// opener: the ambient body used `ObservationStore::open_initialized()`, which
+/// runs startup artifact maintenance, and this path gates on a durable
+/// artifact-promotion checkpoint. Rooting it through the maintenance-deferring
+/// lifecycle opener would have changed behaviour rather than just its home
+/// (#7505).
+pub(crate) fn project_terminal_runner_exec_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<bool> {
     if !snapshot.job.status.is_terminal() {
         return Ok(false);
     }
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(false);
     };
@@ -972,8 +1035,13 @@ pub fn record_lab_offload_submission_intent(
     secret_env_names: &[String],
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let _lock = LabHandoffLock::lock(&run_id)?;
-    let mut record = store::read_record(&run_id)?;
+    // One store for the lock and for every record touch below it. This is an
+    // ambient entry point, so it resolves a root; what it must not do is
+    // resolve one root for the lock and let each `store::` shim resolve its own
+    // (#7505).
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
     let submission_key = format!("agent-task:v1:{runner_id}:{run_id}");
     if let Some(handoff) = record.lab_handoff.as_mut() {
         handoff.submission_key = Some(submission_key.clone());
@@ -1001,7 +1069,7 @@ pub fn record_lab_offload_submission_intent(
         "phase_activity".to_string(),
         json!("durable broker submission intent recorded; waiting for runner capacity"),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -1012,8 +1080,10 @@ pub fn record_lab_offload_submission_request(
     request: &RemoteRunnerJobRequest,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let _lock = LabHandoffLock::lock(&run_id)?;
-    let mut record = store::read_record(&run_id)?;
+    // As above: the lock and the record write it guards resolve one root once.
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
     if record.state.is_terminal() {
         return Ok(record);
     }
@@ -1050,6 +1120,6 @@ pub fn record_lab_offload_submission_request(
             "deadline_at": handoff.acceptance_deadline_at,
         }),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }

@@ -252,6 +252,22 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores(
         recipe_store,
         lifecycle_store,
         options,
+        false,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    recipe_created_by_invocation: bool,
+) -> Result<bool> {
+    materialize_initial_cook_attempt_with_store_and_lifecycle(
+        recipe_store,
+        lifecycle_store,
+        options,
+        recipe_created_by_invocation,
     )
 }
 
@@ -259,7 +275,8 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
+    recipe_created_by_invocation: bool,
+) -> Result<bool> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).materialize_with_runtime(
         &options.cook_id,
         &options.initial_run_id,
@@ -268,20 +285,8 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
-    )
-}
-
-/// Complete recipe, run-record, and index registration for an attempt. Each
-/// write is independently durable, so replay must repair whichever suffix of
-/// the sequence was interrupted.
-pub(crate) fn materialize_cook_attempt(
-    cook_id: &str,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-) -> Result<()> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_cook_attempt_with_stores(&recipe_store, &lifecycle_store, cook_id, run_id, plan)
+    )?;
+    Ok(recipe_created_by_invocation)
 }
 
 /// Complete recipe, run-record, and index registration through explicit recipe
@@ -493,15 +498,6 @@ pub(crate) fn recover_recipe_attempt_with_stores(
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )
-}
-
-pub(crate) fn recover_adoption_attempt(
-    cook_id: &str,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    recover_adoption_attempt_with_stores(&recipe_store, &lifecycle_store, cook_id, run_id)
 }
 
 /// Recover an adopted attempt through explicit recipe and lifecycle stores so

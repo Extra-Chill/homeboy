@@ -35,6 +35,10 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    /// Terminal outcome of `runner disconnect`. This makes bounded remote
+    /// ambiguity machine-readable without changing other runner commands.
+    #[serde(rename = "status", skip_serializing_if = "Option::is_none")]
+    pub disconnect_status: Option<RunnerDisconnectStatus>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +55,11 @@ pub struct RunnerExtra {
     pub operator_commands: Vec<RunnerOperatorCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator_summary: Option<RunnerOperatorSummary>,
+    /// Controller-local execution and Lab connection state are separate
+    /// contracts. In particular, local placement has no runner connection to
+    /// establish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_capabilities: Option<RunnerExecutionCapabilities>,
     /// One compact row per configured runner: what exists, whether it is
     /// reachable, and whether it can take work (#9487).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -77,6 +86,7 @@ impl Default for RunnerExtra {
             selected_lab_runner: None,
             managed_followups: Vec::new(),
             connection: None,
+            disconnect_status: None,
             reconciliation: None,
             admission_summary: None,
             inspection: None,
@@ -85,6 +95,7 @@ impl Default for RunnerExtra {
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
             operator_summary: None,
+            execution_capabilities: None,
             runner_summaries: Vec::new(),
             operator_summaries: Vec::new(),
             truncation: None,
@@ -157,6 +168,30 @@ pub struct RunnerOperatorSummary {
     pub state: String,
     pub risk: Vec<String>,
     pub next_action: String,
+}
+
+/// Execution paths available to this controller, kept apart from concrete
+/// runner identities and their connection lifecycle.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunnerExecutionCapabilities {
+    pub local_placement: RunnerExecutionCapability,
+    pub lab_runner_connection: LabRunnerConnectionCapability,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunnerExecutionCapability {
+    pub available: bool,
+    pub state: &'static str,
+    pub next_action: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRunnerConnectionCapability {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub connected_runner_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,6 +419,16 @@ pub enum RunnerConnectionOutput {
     Connect(Box<RunnerConnectReport>),
     Status(Box<RunnerStatusReport>),
     Disconnect(Box<RunnerDisconnectReport>),
+}
+
+/// The postcondition reached by `runner disconnect`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerDisconnectStatus {
+    Disconnected,
+    LocalRecovery,
+    AlreadyDisconnected,
+    PartialFailure,
 }
 
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;

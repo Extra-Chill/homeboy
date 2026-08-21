@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 use uuid::Uuid;
@@ -49,10 +50,31 @@ fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> Run
 
 impl ObservationStore {
     /// Open and lazily initialize the local observed-state database.
+    ///
+    /// This is the ambient boundary: the database path comes from
+    /// `paths::observation_db()` and artifact resolution falls back to
+    /// `paths::artifact_root()`. Callers that already hold resolved roots must
+    /// use [`ObservationStore::open_initialized_in_roots`] instead, or they
+    /// index an injected artifact root against an ambient database (#7505).
     pub fn open_initialized() -> Result<Self> {
         Self::open_initialized_at(database_path()?)
     }
 
+    /// Open and initialize the store against injected roots.
+    ///
+    /// BOTH roots come from `roots`: the database below `roots.data()` and the
+    /// artifact tree it indexes below `roots.artifacts()`. Nothing in the
+    /// returned store consults ambient process state for either.
+    pub fn open_initialized_in_roots(roots: &PathRoots) -> Result<Self> {
+        Self::open_in_roots_with_maintenance(roots, true)
+    }
+
+    /// Open and initialize the store at an explicit database path.
+    ///
+    /// This roots only the DATABASE. Artifact resolution still falls back to
+    /// the ambient `paths::artifact_root()`, so a caller that also holds an
+    /// injected artifact root must use
+    /// [`ObservationStore::open_initialized_in_roots`] rather than this.
     pub fn open_initialized_at(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_initialized_at_with_maintenance(path.into(), true)
     }
@@ -66,21 +88,43 @@ impl ObservationStore {
         Self::open_initialized_for_lifecycle_at(database_path()?)
     }
 
+    /// Lifecycle-mode open against injected roots. See
+    /// [`ObservationStore::open_initialized_for_lifecycle`] for the maintenance
+    /// contract and [`ObservationStore::open_initialized_in_roots`] for the
+    /// rooting contract.
+    pub fn open_initialized_for_lifecycle_in_roots(roots: &PathRoots) -> Result<Self> {
+        Self::open_in_roots_with_maintenance(roots, false)
+    }
+
+    /// Lifecycle-mode open at an explicit database path. Roots only the
+    /// database; see [`ObservationStore::open_initialized_at`].
     pub fn open_initialized_for_lifecycle_at(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_initialized_at_with_maintenance(path.into(), false)
     }
 
-    pub fn open_initialized_for_lifecycle_at_roots(
-        path: impl Into<PathBuf>,
-        artifact_root: impl Into<PathBuf>,
-    ) -> Result<Self> {
-        let mut store = Self::open_initialized_at_with_maintenance(path.into(), false)?;
-        store.artifact_root = Some(artifact_root.into());
-        Ok(store)
+    fn open_in_roots_with_maintenance(roots: &PathRoots, maintain_artifacts: bool) -> Result<Self> {
+        Self::open_initialized_with_maintenance(
+            crate::paths::observation_db_in_root(roots.data()),
+            Some(roots.clone()),
+            maintain_artifacts,
+        )
     }
 
     fn open_initialized_at_with_maintenance(
         path: PathBuf,
+        maintain_artifacts: bool,
+    ) -> Result<Self> {
+        Self::open_initialized_with_maintenance(path, None, maintain_artifacts)
+    }
+
+    /// Single construction path for every initializing open.
+    ///
+    /// `roots` is installed on the store *before* startup maintenance runs, so
+    /// artifact-touching maintenance can never resolve the ambient root on a
+    /// store the caller asked to be rooted.
+    fn open_initialized_with_maintenance(
+        path: PathBuf,
+        roots: Option<PathRoots>,
         maintain_artifacts: bool,
     ) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -98,7 +142,7 @@ impl ObservationStore {
             connection,
             path,
             readonly: false,
-            artifact_root: None,
+            roots,
         };
         if maintain_artifacts {
             // Evidence projections expose opaque handles and failure ranks, so
@@ -117,16 +161,34 @@ impl ObservationStore {
         Self::open_readonly()
     }
 
+    /// Scheduler scan connection against injected roots. See
+    /// [`ObservationStore::open_initialized_in_roots`] for the rooting contract.
+    pub fn open_scheduler_reader_in_roots(roots: &PathRoots) -> Result<Self> {
+        Self::open_readonly_in_roots(roots)
+    }
+
     /// Open the scheduler's bounded claim connection. It performs no startup
     /// maintenance; callers use it only for short durable claim transitions.
     pub fn open_scheduler_writer() -> Result<Self> {
-        let path = database_path()?;
+        Self::open_scheduler_writer_inner(database_path()?, None)
+    }
+
+    /// Scheduler claim connection against injected roots. See
+    /// [`ObservationStore::open_initialized_in_roots`] for the rooting contract.
+    pub fn open_scheduler_writer_in_roots(roots: &PathRoots) -> Result<Self> {
+        Self::open_scheduler_writer_inner(
+            crate::paths::observation_db_in_root(roots.data()),
+            Some(roots.clone()),
+        )
+    }
+
+    fn open_scheduler_writer_inner(path: PathBuf, roots: Option<PathRoots>) -> Result<Self> {
         let connection = schema::open_bounded_writer_connection(&path)?;
         Ok(Self {
             connection,
             path,
             readonly: false,
-            artifact_root: None,
+            roots,
         })
     }
 
@@ -137,8 +199,28 @@ impl ObservationStore {
         Self::open_readonly_at(database_path()?)
     }
 
+    /// Open the store read-only against injected roots.
+    ///
+    /// BOTH roots come from `roots`; see
+    /// [`ObservationStore::open_initialized_in_roots`].
+    pub fn open_readonly_in_roots(roots: &PathRoots) -> Result<Self> {
+        Self::open_readonly_inner(
+            crate::paths::observation_db_in_root(roots.data()),
+            Some(roots.clone()),
+        )
+    }
+
+    /// Open the store read-only at an explicit database path.
+    ///
+    /// This roots only the DATABASE. Artifact resolution still falls back to
+    /// the ambient `paths::artifact_root()`; use
+    /// [`ObservationStore::open_readonly_in_roots`] when the caller holds an
+    /// artifact root too.
     pub fn open_readonly_at(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
+        Self::open_readonly_inner(path.into(), None)
+    }
+
+    fn open_readonly_inner(path: PathBuf, roots: Option<PathRoots>) -> Result<Self> {
         if !path.exists() {
             // Preserve the normal "run not found" contract without creating a
             // database merely because a metadata reader was invoked first.
@@ -153,7 +235,7 @@ impl ObservationStore {
                 connection,
                 path,
                 readonly: true,
-                artifact_root: None,
+                roots,
             });
         }
         let connection = schema::open_readonly_connection(&path)?;
@@ -161,14 +243,57 @@ impl ObservationStore {
             connection,
             path,
             readonly: true,
-            artifact_root: None,
+            roots,
         })
     }
 
+    /// The filesystem roots this store was opened against, or `None` when it
+    /// was opened at the ambient boundary.
+    ///
+    /// This is what lets a caller holding its own `PathRoots` ask the store
+    /// which roots it is actually indexing against, rather than independently
+    /// re-resolving the ambient ones and silently comparing two different
+    /// worlds (#7505).
+    pub fn roots(&self) -> Option<&PathRoots> {
+        self.roots.as_ref()
+    }
+
+    /// Whether this store was opened against injected roots.
+    pub fn is_rooted(&self) -> bool {
+        self.roots.is_some()
+    }
+
+    /// The exact SQLite database file backing this store.
+    ///
+    /// Always the truth for this handle and never an ambient re-resolution, so
+    /// it is safe to compare against a caller-held path.
+    pub fn database_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The data root this store's database lives under.
+    ///
+    /// Injected roots answer directly; otherwise the database file's own parent
+    /// directory answers. Both are properties of this handle, so this never
+    /// consults ambient process state.
+    pub fn data_root(&self) -> Option<&Path> {
+        self.roots
+            .as_ref()
+            .map(|roots| roots.data())
+            .or_else(|| self.path.parent())
+    }
+
+    /// The artifact root this store indexes against.
+    ///
+    /// Injected roots answer directly. An ambient store falls back to
+    /// `paths::artifact_root()` — correct for a store that was itself opened
+    /// ambiently, and the reason a caller holding injected roots must open the
+    /// store with [`ObservationStore::open_initialized_in_roots`] rather than
+    /// comparing against this.
     pub fn artifact_root(&self) -> Result<PathBuf> {
-        self.artifact_root
-            .clone()
-            .map(Ok)
+        self.roots
+            .as_ref()
+            .map(|roots| Ok(roots.artifacts().to_path_buf()))
             .unwrap_or_else(crate::paths::artifact_root)
     }
 

@@ -2,7 +2,7 @@
 //!
 //! Extracted from `cook.rs`: the `adopt_cook_candidate*` family that admits an
 //! externally prepared immutable commit into a durable cook, plus the adoption
-//! resolution helpers (`resolve_cook_adoption_attempt`/`resolve_adoption_target`/
+//! resolution helpers (`resolve_cook_adoption_attempt_in_store`/`resolve_adoption_target`/
 //! `candidate_adoption_source`/`concrete_adoption_ai_model`) and gate-failure
 //! comparison (`compare_adoption_gate_failures_to_base`). Adoption never replays
 //! provider work — it replaces provider artifact harvesting while the source
@@ -28,6 +28,7 @@ use crate::agent_task_promotion::{
     AgentTaskPromotionReport,
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
+use crate::agent_task_scheduler::SharedAgentTaskExecutor;
 use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
@@ -153,24 +154,21 @@ pub fn adopt_cook_candidate_with_options_and_dispatcher(
         candidate_ref,
         adoption,
         reconstruct_dispatcher,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
 /// Adopt a candidate and retain the normal Cook execution boundary for any
 /// remediation requested by its deterministic feedback.
-pub fn adopt_cook_candidate_with_options_dispatcher_and_executor<E>(
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor(
     cook_or_run_id: &str,
     candidate_ref: &str,
     adoption: AgentTaskCandidateAdoptionOptions,
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
         cook_or_run_id,
         None,
@@ -182,7 +180,7 @@ where
 }
 
 /// Adopt a candidate against an explicit numbered Cook attempt.
-pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt<E>(
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
     cook_or_run_id: &str,
     attempt: Option<u32>,
     candidate_ref: &str,
@@ -190,11 +188,8 @@ pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt<E>(
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
         cook_or_run_id,
         attempt,
@@ -207,7 +202,6 @@ where
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     cook_or_run_id: &str,
@@ -216,7 +210,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
@@ -231,7 +225,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     cook_or_run_id: &str,
@@ -241,7 +234,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
@@ -261,7 +254,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_stores<
-    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     recipe_store: &CookRecipeStore,
@@ -273,7 +265,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     super::cook::validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
@@ -780,21 +772,25 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                         )
                     })?;
                 options.initial_run_id = run_id;
-                let mut result = super::cook::run_cook_with_finalizer_with_store(
-                    recipe_store,
-                    options,
-                    executor,
-                    |options, run_id, promotion| {
-                        finalize_or_load_cook_pr_with_backend_with_stores(
-                            recipe_store,
-                            lifecycle_store,
-                            options,
-                            run_id,
-                            promotion,
-                            backend,
-                        )
-                    },
-                )?;
+                let mut result = super::cook::run_cook(super::cook::CookContext {
+                    store: Some(recipe_store),
+                    side_effects: Some(Box::new(super::cook::DefaultCookSideEffects::new(
+                        |_lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+                         options: &_,
+                         run_id: &_,
+                         promotion: &_| {
+                            finalize_or_load_cook_pr_with_backend_with_stores(
+                                recipe_store,
+                                lifecycle_store,
+                                options,
+                                run_id,
+                                promotion,
+                                backend,
+                            )
+                        },
+                    ))),
+                    ..super::cook::CookContext::new(options, executor)
+                })?;
                 result.value.attempts.insert(0, attempt);
                 Ok(result)
             }
@@ -1117,7 +1113,12 @@ pub(crate) fn resolve_adoption_target_with_attempt(
     )
 }
 
-fn resolve_adoption_target_with_attempt_in_stores(
+/// Visible to the rest of `agent_task_service` so Cook's tests can resolve an
+/// adoption target through explicit roots. The ambient wrapper above is the
+/// only production caller; widening this to `pub(super)` keeps the rooted seam
+/// reachable without giving tests a second, ambient-resolving entry point
+/// (#7505).
+pub(super) fn resolve_adoption_target_with_attempt_in_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_or_run_id: &str,
@@ -1253,19 +1254,6 @@ fn resolve_adoption_target_with_attempt_in_stores(
     ))
 }
 
-fn materialize_adoption_attempt(
-    recipe: super::AgentTaskCookRecipe,
-    run_id: String,
-) -> Result<(
-    agent_task_lifecycle::AgentTaskRunRecord,
-    super::AgentTaskCookRecipe,
-)> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_adoption_attempt_in_stores(&recipe_store, &lifecycle_store, recipe, run_id)
-}
-
 fn materialize_adoption_attempt_in_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -1298,17 +1286,18 @@ fn materialize_adoption_attempt_in_stores(
     Ok((record, recipe))
 }
 
+// The ambient `resolve_cook_adoption_attempt()` shim that used to sit above
+// this resolved a root and delegated straight here. It had no callers, so it
+// was a resolution point that existed for nobody (#7505).
+
 /// A retried cook may have several lifecycle attempts for the same immutable
 /// plan. The earliest is the stable target; different plans require an explicit
 /// run ID so a candidate is never attached to the wrong policy.
-fn resolve_cook_adoption_attempt(
-    recipe: &super::AgentTaskCookRecipe,
-) -> Result<&super::AgentTaskCookRecipeAttempt> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    resolve_cook_adoption_attempt_in_store(&lifecycle_store, recipe)
-}
-
+///
+/// The candidate selection this reads and the recipe attempt it returns must
+/// name one installation: selecting from an ambient store and then binding the
+/// adopted attempt into an injected one silently attaches a candidate to the
+/// wrong policy without failing.
 fn resolve_cook_adoption_attempt_in_store<'a>(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     recipe: &'a super::AgentTaskCookRecipe,

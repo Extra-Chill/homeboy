@@ -1508,7 +1508,23 @@ impl RigRunObserver {
         }
         let mut index = rig_resource_lifecycle_index(&rig.id, &resources, options.clone());
         if cache_enabled {
-            if let Ok(root) = super::dependency_materialization_cache::cache_root() {
+            // The cache root belongs to the same home as the store this index
+            // is recorded into. Only an ambiently-opened store has no better
+            // answer than the environment (#7505).
+            let ambient;
+            let data_root = match self.store.data_root() {
+                Some(root) => Some(root),
+                None => match homeboy_core::paths::PathRoots::from_environment() {
+                    Ok(roots) => {
+                        ambient = roots;
+                        Some(ambient.data())
+                    }
+                    Err(_) => None,
+                },
+            };
+            if let Some(root) =
+                data_root.map(super::dependency_materialization_cache::cache_root_in_roots)
+            {
                 index
                     .resources
                     .push(dependency_materialization_cache_lifecycle_record(

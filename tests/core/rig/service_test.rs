@@ -273,8 +273,8 @@ mod lifecycle {
 
             service::stop(&rig, "cmd").expect("stop command service");
             assert!(
-                !wait_until(Duration::from_secs(2), || unsafe {
-                    libc::kill(-(pid as libc::pid_t), 0) == 0
+                !wait_until(Duration::from_secs(2), || {
+                    homeboy_core::process::process_group_is_running(pid as i32)
                 }),
                 "stop should terminate the whole managed process group, not just the shell"
             );

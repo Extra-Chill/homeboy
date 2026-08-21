@@ -4,6 +4,241 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.34] - 2026-08-21
+
+### Changed
+- take the artifact root from the store the records land in
+
+## [0.350.33] - 2026-08-21
+
+### Changed
+- take one root for every lock a trace run acquires
+- free the operation-record tests from with_isolated_home
+- collapse three lifecycle_ops wrapper pairs
+- delete three more dead ambient wrappers the first scan missed
+- derive the materialization cache root from the store
+
+### Fixed
+- Fix remaining red-main test failures
+- locate terminal retention paths in the store's own home
+
+## [0.350.32] - 2026-08-21
+
+### Changed
+- free the deploy lifecycle round-trip from with_isolated_home
+- index artifacts against the store's own root
+- root the deploy receipt store
+
+## [0.350.31] - 2026-08-21
+
+### Fixed
+- an unreaped tunnel reads as live, and a fixture inherits the host's default branch
+
+## [0.350.30] - 2026-08-21
+
+### Changed
+- delete five dead ambient path wrappers
+- Root the agent-task status read
+- delete the retry wrappers the rooted boundary orphaned
+- make prune failures say why the scan withheld a workspace
+- delete the dead private-batch-plan dir wrapper
+- root the deferred-workload worker path
+
+### Fixed
+- stop one fat process withholding every prunable workspace
+- two deterministic red-main failures with environment-shaped causes
+
+## [0.350.29] - 2026-08-21
+
+### Changed
+- give OperationRecordStore its root
+- thread PathRoots from the release boundary
+
+### Fixed
+- declare a digest for every asset in the recovery manifest
+
+## [0.350.28] - 2026-08-20
+
+### Fixed
+- three root causes behind red main
+
+## [0.350.27] - 2026-08-20
+
+### Changed
+- root the Cook retry boundary
+
+### Fixed
+- scope checksum coverage to the assets cargo-dist checksums
+
+## [0.350.26] - 2026-08-20
+
+### Changed
+- root the detached-Cook handoff protocol
+- root the terminal-notification claim protocol
+
+## [0.350.25] - 2026-08-20
+
+### Changed
+- root the Cook spine's remaining ambient reads
+- stop the durable failure report splitting its roots
+- collapse the run_cook variant family into CookContext
+- delete the ambient store wrappers nobody calls
+- erase the executor type parameter
+
+### Fixed
+- compact recovered attempt worktrees
+
+## [0.350.24] - 2026-08-19
+
+### Fixed
+- serialize nextest shard replay until the shared stores take roots
+
+## [0.350.23] - 2026-08-19
+
+### Changed
+- root the cook-recipe tests and delete their ambient wrappers
+- root the deferred-workload tests and delete their ambient wrappers
+
+## [0.350.22] - 2026-08-19
+
+### Changed
+- use explicit lifecycle store
+
+### Fixed
+- make bounded status explicit
+- bound full status details
+- project detached Cook materialization
+- derive status capabilities globally
+- separate local placement status
+- persist explicit transport rejections
+- classify terminal transport rejections
+
+## [0.350.21] - 2026-08-19
+
+### Changed
+- root Cook selection-required metadata
+- delete the ambient twins nothing calls anymore
+
+### Fixed
+- retain timeout candidates after rotation failure
+
+## [0.350.20] - 2026-08-19
+
+### Changed
+- revert the pending-handoff migration the full suite caught
+
+## [0.350.19] - 2026-08-19
+
+### Changed
+- revert the seven mark_running migrations that broke main
+
+## [0.350.18] - 2026-08-19
+
+### Changed
+- stop the rooted offload tests reaching the operator's runtime store
+- root submit_and_persist tests in an injected store
+- root 5 handoff_and_proxy transport-proxy tests in an injected store
+- root the transport-proxy snapshot reconcile in an injected store
+
+## [0.350.17] - 2026-08-19
+
+### Changed
+- root 12 status_and_recovery tests in an injected store
+- root 20 handoff/proxy tests in an injected lifecycle store
+- root 17 terminal_and_reconcile tests in an injected store
+- root transport-proxy recovery and reconcile in a store
+
+### Fixed
+- elect initial recipe ownership
+- bind failures to materialization
+- verify materialized failure ownership
+
+## [0.350.16] - 2026-08-19
+
+### Changed
+- root the Lab offload entry points in a store
+- root logs, record health, and aggregate source in a store
+- root the terminal runner-result projection
+- root the active Lab handoff reconciliation scan
+
+### Fixed
+- retain materialization failure status
+- preserve pre-execution failures
+
+## [0.350.15] - 2026-08-18
+
+### Changed
+- stabilize archive fixtures
+
+### Fixed
+- preserve archive replay process contracts
+
+## [0.350.14] - 2026-08-18
+
+### Changed
+- root four continuation tests on an injected recipe store
+- root status_and_recovery lifecycle tests on an injected store
+- root four cook tests on an injected lifecycle store
+- root terminal_and_reconcile lifecycle tests on an injected store
+- root the direct-import artifact conflict test on an injected store
+- root five handoff_and_proxy tests on an injected store
+- root agent_task_lifecycle::status on an injected store
+
+### Fixed
+- import the rooted siblings the cook tests call
+
+## [0.350.13] - 2026-08-18
+
+### Changed
+- clarify controller-owned gates
+- root the cancel_run spine and LabHandoffLock together
+- give admission_status a rooted _at sibling
+
+### Fixed
+- preserve stdin through timed commands
+- keep local recovery idempotent
+- report partial disconnect failures
+
+## [0.350.12] - 2026-08-18
+
+### Changed
+- root the status read's reconciliation leaves on one store
+- root the injectable half of the evidence mirror tests
+- root the completed-run evidence test in an explicit store
+- root Cook's adoption-target tests on explicit stores
+- root the store tests instead of mutating the process home
+- root five status_and_recovery tests in an explicit store
+- root two terminal_and_reconcile tests in an explicit store
+
+## [0.350.11] - 2026-08-18
+
+### Changed
+- give the extension and component stores rooted siblings
+- root the notify outbox, invocation lease, and child records
+- root the ConfigEntity hooks and the mutating CRUD
+
+## [0.350.10] - 2026-08-17
+
+### Changed
+- root the recorded-artifact provider chain
+- bind workspace-claim leases to the authority that issued them
+- root ConfigEntity path resolution and the generic CRUD it feeds
+- root the release, deploy, rig, and tunnel filesystem reaches
+- root ObservationStore on injected PathRoots
+- root homeboy-core's filesystem reaches through PathRoots
+- root the authority gates that resolved a home twice
+- give every derived resolver a root-taking sibling
+- inject filesystem roots at the CLI command boundary
+- root the separable path reaches in audit + extension
+- root the crate's ambient filesystem reaches
+- root the batch side's lifecycle reaches
+- use the scoped duplication path in the engine
+- give the lifecycle read surface explicit stores
+
+### Fixed
+- update the test callers of the renamed prepare
+- restore nextest shard parallelism
+
 ## [0.350.9] - 2026-08-16
 
 ### Changed

@@ -200,9 +200,7 @@ fn start_or_reconcile_worker_with_retry(
             })
     }
     #[cfg(not(test))]
-    let worker = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
+    let worker = postprocess_worker_executable();
     #[cfg(not(test))]
     let child = Command::new(worker)
         .args(["self", "postprocess-worker", "--request"])
@@ -252,6 +250,24 @@ fn start_or_reconcile_worker_with_retry(
     }
     #[cfg(not(test))]
     Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
+}
+
+fn postprocess_worker_executable() -> PathBuf {
+    let configured = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER").map(PathBuf::from);
+    // Archive-replayed integration tests execute from a rooted helper copy while
+    // their compile-time override can still name the discarded build output.
+    // Prefer the configured executable when it exists; otherwise use the live
+    // test helper path inherited by the child.
+    if let Some(worker) = configured.as_ref().filter(|worker| worker.is_file()) {
+        return worker.clone();
+    }
+    if let Some(worker) = std::env::var_os("CARGO_BIN_EXE_homeboy")
+        .map(PathBuf::from)
+        .filter(|worker| worker.is_file())
+    {
+        return worker;
+    }
+    configured.unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"))
 }
 
 /// A restarted scheduler must adopt the durable worker it finds. The worker owns
@@ -2048,7 +2064,7 @@ mod tests {
                     }
                 }
             }
-            let aggregate = AgentTaskScheduler::new(Executor(Arc::clone(&calls)))
+            let aggregate = AgentTaskScheduler::new(Arc::new(Executor(Arc::clone(&calls))))
                 .with_run_id("restart-run")
                 .run(plan);
             assert_eq!(

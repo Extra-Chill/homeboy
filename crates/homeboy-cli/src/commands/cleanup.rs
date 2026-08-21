@@ -98,7 +98,7 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
 /// running job still needs; `shared-cargo-targets` is reclaimed by its own
 /// separately budgeted pass (`run_automatic_cargo_retention`) and must not
 /// enter the aggregate sweep. `repo-artifacts` is likewise driven separately,
-/// by `run_automatic_artifact_retention` over registered workspace roots.
+/// by `try_run_automatic_artifact_retention_in_root` over registered workspace roots.
 const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
     (
         CleanupCategoryArg::RunnerDownloads,
@@ -776,11 +776,22 @@ fn runtime_tmp_retained_record(row: engine::temp::RuntimeTempCleanupRow) -> Reta
 }
 
 fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStorageFilesystem> {
-    let root = homeboy::core::paths::homeboy_data()?;
-    let config_root = homeboy::core::paths::homeboy()?;
-    let artifact_root = homeboy::core::artifacts::root()?;
+    // One resolution for the whole report. The data, config, and artifact roots
+    // are compared against each other below (`starts_with` containment decides
+    // what is double-counted), so three independent resolutions could have
+    // described three different installations and reported a disjoint pair as
+    // nested — or the reverse.
+    //
+    // The shared Cargo target store stays outside the trio on purpose: it is a
+    // content-addressed cache keyed to the real machine, not to a Homeboy home.
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
     let cargo_target_root = cleanup::shared_cargo_target_root()?;
-    retained_storage_filesystem_inventory_for(root, config_root, artifact_root, cargo_target_root)
+    retained_storage_filesystem_inventory_for(
+        roots.data().to_path_buf(),
+        roots.config().to_path_buf(),
+        roots.artifacts().to_path_buf(),
+        cargo_target_root,
+    )
 }
 
 fn retained_storage_filesystem_inventory_for(
@@ -1549,7 +1560,7 @@ fn automatic_retention() -> CmdResult<Value> {
             "reason": "no controller-accessible registered workspace roots",
         })
     } else {
-        match cleanup::try_run_automatic_artifact_retention(roots) {
+        match cleanup::try_run_automatic_artifact_retention_in_root(&data, roots) {
             Ok(Some(output)) => serde_json::to_value(output).map_err(|error| {
                 homeboy::core::Error::internal_json(
                     error.to_string(),

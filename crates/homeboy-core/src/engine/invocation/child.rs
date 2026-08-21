@@ -43,7 +43,28 @@ pub fn register_child_process(
     pgid: Option<i32>,
     command_label: String,
 ) -> Result<InvocationChildGuard> {
-    let dir = InvocationChildRecord::children_dir(invocation_id)?;
+    register_child_process_in_root(
+        &paths::homeboy()?,
+        invocation_id,
+        root_pid,
+        pgid,
+        command_label,
+    )
+}
+
+/// [`register_child_process`] against an already-resolved config root.
+///
+/// The guard retains the *resolved* record path, so release is already
+/// root-stable: `Drop` removes the file this call created rather than
+/// re-deriving one.
+pub fn register_child_process_in_root(
+    config_root: &Path,
+    invocation_id: &str,
+    root_pid: u32,
+    pgid: Option<i32>,
+    command_label: String,
+) -> Result<InvocationChildGuard> {
+    let dir = InvocationChildRecord::children_dir_in_root(config_root, invocation_id);
     fs::create_dir_all(&dir).map_err(|e| {
         Error::internal_io(
             format!(
@@ -67,7 +88,7 @@ pub fn register_child_process(
         pgid,
         started_at: chrono::Utc::now().to_rfc3339(),
     };
-    let path = InvocationChildRecord::record_path(invocation_id, root_pid)?;
+    let path = InvocationChildRecord::record_path_in_root(config_root, invocation_id, root_pid);
     let json = serde_json::to_string_pretty(&record).map_err(|e| {
         Error::internal_unexpected(format!(
             "Failed to serialize invocation child record: {}",
@@ -88,9 +109,12 @@ pub fn register_child_process(
     Ok(InvocationChildGuard { path })
 }
 
-pub fn cleanup_invocation_children(invocation_id: &str) -> Result<usize> {
+pub fn cleanup_invocation_children_in_root(
+    config_root: &Path,
+    invocation_id: &str,
+) -> Result<usize> {
     let mut cleaned = 0;
-    for path in InvocationChildRecord::files_for_invocation(invocation_id)? {
+    for path in InvocationChildRecord::files_for_invocation_in_root(config_root, invocation_id)? {
         let Some(record) = InvocationChildRecord::decode(&path)? else {
             continue;
         };
@@ -102,9 +126,9 @@ pub fn cleanup_invocation_children(invocation_id: &str) -> Result<usize> {
     Ok(cleaned)
 }
 
-pub fn cleanup_stale_child_records() -> Result<usize> {
+pub fn cleanup_stale_child_records_in_root(config_root: &Path) -> Result<usize> {
     let mut cleaned = 0;
-    let root = InvocationChildRecord::root()?;
+    let root = InvocationChildRecord::root_in_root(config_root);
     if !root.exists() {
         return Ok(0);
     }
@@ -143,20 +167,35 @@ pub fn cleanup_stale_child_records() -> Result<usize> {
 }
 
 impl InvocationChildRecord {
-    fn root() -> Result<PathBuf> {
-        Ok(paths::homeboy()?.join(CHILD_RECORD_DIR))
+    /// Child-record root below an already-resolved config root.
+    fn root_in_root(config_root: &Path) -> PathBuf {
+        config_root.join(CHILD_RECORD_DIR)
     }
 
-    pub(crate) fn children_dir(invocation_id: &str) -> Result<PathBuf> {
-        Ok(Self::root()?.join(paths::sanitize_path_segment(invocation_id)))
+    /// Per-invocation child-record directory below an already-resolved config
+    /// root.
+    ///
+    /// There is deliberately no ambient sibling: every caller either already
+    /// holds the root it registered under, or is the ambient wrapper that
+    /// resolved it once for the whole operation.
+    pub(crate) fn children_dir_in_root(config_root: &Path, invocation_id: &str) -> PathBuf {
+        Self::root_in_root(config_root).join(paths::sanitize_path_segment(invocation_id))
     }
 
-    pub(crate) fn record_path(invocation_id: &str, root_pid: u32) -> Result<PathBuf> {
-        Ok(Self::children_dir(invocation_id)?.join(format!("{}.json", root_pid)))
+    /// One child record below an already-resolved config root.
+    pub(crate) fn record_path_in_root(
+        config_root: &Path,
+        invocation_id: &str,
+        root_pid: u32,
+    ) -> PathBuf {
+        Self::children_dir_in_root(config_root, invocation_id).join(format!("{}.json", root_pid))
     }
 
-    fn files_for_invocation(invocation_id: &str) -> Result<Vec<PathBuf>> {
-        Self::files_in_dir(&Self::children_dir(invocation_id)?)
+    fn files_for_invocation_in_root(
+        config_root: &Path,
+        invocation_id: &str,
+    ) -> Result<Vec<PathBuf>> {
+        Self::files_in_dir(&Self::children_dir_in_root(config_root, invocation_id))
     }
 
     fn files_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -277,6 +316,15 @@ mod audit_coverage_tests {
     use super::*;
     use crate::test_support::with_isolated_home;
 
+    /// The config root of the isolated home each test below installs.
+    ///
+    /// The ambient `cleanup_invocation_children` / `cleanup_stale_child_records`
+    /// wrappers existed only to serve these two assertions. The test is its own
+    /// boundary, so it resolves here and calls the rooted form directly (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        paths::homeboy().expect("config root")
+    }
+
     #[test]
     fn test_register_child_process() {
         with_isolated_home(|_| {
@@ -294,7 +342,8 @@ mod audit_coverage_tests {
     #[test]
     fn test_children_dir() {
         with_isolated_home(|_| {
-            let dir = InvocationChildRecord::children_dir("inv/../audit").expect("children dir");
+            let config_root = crate::paths::homeboy().expect("config root");
+            let dir = InvocationChildRecord::children_dir_in_root(&config_root, "inv/../audit");
 
             assert!(dir.ends_with("inv____audit"));
         });
@@ -303,9 +352,10 @@ mod audit_coverage_tests {
     #[test]
     fn test_record_path() {
         with_isolated_home(|_| {
-            let dir = InvocationChildRecord::children_dir("inv/../audit").expect("children dir");
+            let config_root = crate::paths::homeboy().expect("config root");
+            let dir = InvocationChildRecord::children_dir_in_root(&config_root, "inv/../audit");
             let path =
-                InvocationChildRecord::record_path("inv/../audit", 1234).expect("record path");
+                InvocationChildRecord::record_path_in_root(&config_root, "inv/../audit", 1234);
 
             assert_eq!(
                 path.file_name().and_then(|name| name.to_str()),
@@ -324,14 +374,20 @@ mod audit_coverage_tests {
     #[test]
     fn test_cleanup_invocation_children() {
         with_isolated_home(|_| {
-            assert_eq!(cleanup_invocation_children("inv-empty").unwrap(), 0);
+            assert_eq!(
+                cleanup_invocation_children_in_root(&test_config_root(), "inv-empty").unwrap(),
+                0
+            );
         });
     }
 
     #[test]
     fn test_cleanup_stale_child_records() {
         with_isolated_home(|_| {
-            assert_eq!(cleanup_stale_child_records().unwrap(), 0);
+            assert_eq!(
+                cleanup_stale_child_records_in_root(&test_config_root()).unwrap(),
+                0
+            );
         });
     }
 }

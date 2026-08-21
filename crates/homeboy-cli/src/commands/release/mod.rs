@@ -503,16 +503,22 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
         }
         Some(ReleaseSubcommand::Readiness(args)) => match args.command {
             ReleaseReadinessCommand::Show { reference } => {
+                // The readiness subcommand is its own unit of work, so it
+                // resolves roots once and binds the record store to them
+                // rather than letting each store call rediscover a home
+                // (#7505).
+                let store = release::operation_record::OperationRecordStore::in_roots(
+                    &homeboy::core::paths::PathRoots::from_environment()?,
+                );
                 let owner_run_ref = reference.strip_prefix("operation://").unwrap_or(&reference);
-                let record = release::operation_record::OperationRecordStore::load(owner_run_ref)?
-                    .ok_or_else(|| {
-                        homeboy::core::Error::validation_invalid_argument(
-                            "reference",
-                            "release readiness operation does not exist",
-                            Some(reference.clone()),
-                            None,
-                        )
-                    })?;
+                let record = store.load(owner_run_ref)?.ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "reference",
+                        "release readiness operation does not exist",
+                        Some(reference.clone()),
+                        None,
+                    )
+                })?;
                 if record.operation != "release_readiness" {
                     return Err(homeboy::core::Error::validation_invalid_argument(
                         "reference",
@@ -530,11 +536,10 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                 ));
             }
             ReleaseReadinessCommand::List { component_id } => {
-                let records = release::operation_record::OperationRecordStore::for_subject(
-                    "release_readiness",
-                    &component_id,
-                    false,
-                )?;
+                let store = release::operation_record::OperationRecordStore::in_roots(
+                    &homeboy::core::paths::PathRoots::from_environment()?,
+                );
+                let records = store.for_subject("release_readiness", &component_id, false)?;
                 return Ok((
                     ReleaseCommandOutput::ReadinessList(ReleaseReadinessListOutput {
                         variant: "readiness-list",
@@ -1564,6 +1569,16 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// The record store for the isolated home each test below installs.
+    ///
+    /// `with_isolated_home` establishes the home; this binds a store to it once,
+    /// the same way the release boundary binds one for a whole command (#7505).
+    fn test_store() -> release::operation_record::OperationRecordStore {
+        release::operation_record::OperationRecordStore::in_roots(
+            &homeboy::core::paths::PathRoots::from_environment().expect("path roots"),
+        )
+    }
+
     fn args(components: &[&str]) -> ReleaseExecuteArgs {
         ReleaseExecuteArgs {
             components: components.iter().map(|value| value.to_string()).collect(),
@@ -2158,7 +2173,7 @@ jobs:
                 continuation_evidence: Vec::new(),
                 attributes: Default::default(),
             };
-            release::operation_record::OperationRecordStore::create(&record).expect("record");
+            test_store().create(&record).expect("record");
             let (output, exit_code) = run(ReleaseArgs {
                 command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {
                     command: ReleaseReadinessCommand::Show {
@@ -2197,7 +2212,7 @@ jobs:
                 continuation_evidence: Vec::new(),
                 attributes: Default::default(),
             };
-            release::operation_record::OperationRecordStore::create(&record).expect("record");
+            test_store().create(&record).expect("record");
             let error = match run(ReleaseArgs {
                 command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {
                     command: ReleaseReadinessCommand::Show {

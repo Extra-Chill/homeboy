@@ -10,7 +10,7 @@ use super::context::{load_component, resolve_extensions};
 use super::executor::artifacts::{
     PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
 };
-use super::executor::{run_package, PackageRequest};
+use super::executor::{run_cleanup, run_package, PackageRequest};
 use super::types::{ReleaseArtifact, ReleaseOptions, ReleaseState, ReleaseStepResult};
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +27,14 @@ pub struct ReleasePackageResult {
     pub package_step: ReleaseStepResult,
 }
 
+/// Regenerate the release package for an already-published tag.
+///
+/// Resolves the Homeboy roots exactly once for the whole recovery. Packaging,
+/// the durable recovery directory, and the checkout cleanup that follows all
+/// address the same home; the ambient form resolved a root independently
+/// inside each of them, so a repoint mid-operation could have written the
+/// deliverables to one artifact root, recorded the failed-attempt ownership in
+/// another data root, and then cleaned the checkout against a third (#7505).
 pub fn package_existing_tag(
     component_id: &str,
     path_override: Option<String>,
@@ -34,6 +42,7 @@ pub fn package_existing_tag(
     skip_build_validation: bool,
     expected_source: Option<&str>,
 ) -> Result<ReleasePackageResult> {
+    let roots = paths::PathRoots::from_environment()?;
     let component = load_component(
         component_id,
         &ReleaseOptions {
@@ -62,6 +71,7 @@ pub fn package_existing_tag(
     };
 
     let package_step = run_package(
+        &roots,
         &extensions,
         &mut state,
         &component,
@@ -80,7 +90,7 @@ pub fn package_existing_tag(
     }
     super::executor::artifacts::establish_publication_authority(&mut state)?;
 
-    let artifact_dir = release_package_dir(component_id, tag)?;
+    let artifact_dir = release_package_dir_in_roots(roots.artifacts(), component_id, tag);
     fs::create_dir_all(&artifact_dir).map_err(|error| {
         Error::internal_io(
             format!(
@@ -125,7 +135,7 @@ pub fn package_existing_tag(
 
     // The durable recovery directory now owns the deliverables. Remove only
     // checkout paths proven to have been created by this package invocation.
-    super::executor::run_cleanup(&component, &state)?;
+    run_cleanup(roots.data(), &component, &state)?;
 
     homeboy_core::log_status!(
         "release",
@@ -202,11 +212,11 @@ fn validate_existing_tag_at_head(local_path: &str, tag: &str, head_commit: &str)
     Ok(())
 }
 
-fn release_package_dir(component_id: &str, tag: &str) -> Result<PathBuf> {
-    Ok(paths::artifact_root()?
+fn release_package_dir_in_roots(artifact_root: &Path, component_id: &str, tag: &str) -> PathBuf {
+    artifact_root
         .join("release-packages")
         .join(paths::sanitize_path_segment(component_id))
-        .join(paths::sanitize_path_segment(tag)))
+        .join(paths::sanitize_path_segment(tag))
 }
 
 fn copy_release_artifacts(

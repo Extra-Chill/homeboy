@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -34,7 +35,7 @@ use homeboy::agents::agent_tasks::gate::{
 };
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
-use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+use homeboy::agents::agent_tasks::scheduler::{AgentTaskPlan, SharedAgentTaskExecutor};
 use homeboy::agents::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
@@ -317,7 +318,7 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     let result = agent_task_service::resume_cook_batch(
         &args.batch_id,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
@@ -937,7 +938,7 @@ fn resume_fanout_child(
 ) -> Result<()> {
     agent_task_service::resume_cook(
         &child.run_id,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
         rerun_completed_gates,
     )?;
@@ -1371,7 +1372,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
                     cooks,
                     max_concurrency: concurrency.limit,
                 },
-                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
                 agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
             )
         });
@@ -1392,28 +1393,22 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
     run_batch_cook_fanout_plan_with_executor(
         plan,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-fn run_batch_cook_fanout_plan_with_executor<E>(
+fn run_batch_cook_fanout_plan_with_executor(
     plan: BatchCookFanoutPlan,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     run_batch_cook_fanout_plan_with_executor_claim(plan, executor, None)
 }
 
-fn run_batch_cook_fanout_plan_with_executor_claim<E>(
+fn run_batch_cook_fanout_plan_with_executor_claim(
     plan: BatchCookFanoutPlan,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     claim_id: Option<String>,
-) -> CmdResult<Value>
-where
-    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
-{
+) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
     let claim_id = match claim_id {
@@ -1893,7 +1888,7 @@ fn cook_batch_inner(
             )?,
             None => run_batch_cook_fanout_plan_with_executor_claim(
                 plan.clone(),
-                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
                 claim_id.clone(),
             )?,
         };
@@ -2773,9 +2768,16 @@ fn load_batch_cook_fanout_plan(
     args: &AgentTaskFanoutInputArgs,
     allow_private_execution_input: bool,
 ) -> Result<BatchCookFanoutPlan> {
+    // Both private-plan reads below answer the same security question — is the
+    // supplied path THE controller-owned artifact? — so they have to agree on
+    // where that artifact lives. Resolving the data root twice let the
+    // pre-read permission validation and the path authorization consult two
+    // different answers: a plan whose parent missed the first check could still
+    // satisfy the second, and the owner-only permission gate would be skipped.
+    let data_root = homeboy::core::paths::homeboy_data()?;
     let raw = if let Some(path) = args.input.strip_prefix('@') {
         let path = PathBuf::from(path);
-        if path.parent() == Some(private_batch_plan_dir()?.as_path()) {
+        if path.parent() == Some(private_batch_plan_dir_in_roots(&data_root).as_path()) {
             validate_private_plan_path_before_read(&path)?;
         }
         read_batch_plan_input(path)?
@@ -2806,7 +2808,7 @@ fn load_batch_cook_fanout_plan(
                 None,
             )
         })?;
-        let expected_path = private_batch_plan_path(fanout_id)?;
+        let expected_path = private_batch_plan_path_in_roots(&data_root, fanout_id);
         let supplied_path = args
             .input
             .strip_prefix('@')
@@ -2955,16 +2957,21 @@ fn private_plan_digest(plan: &Value) -> Result<String> {
 }
 
 fn private_batch_plan_path(fanout_id: &str) -> Result<PathBuf> {
-    Ok(private_batch_plan_dir()?.join(format!(
-        "{}.json",
-        homeboy::core::paths::sanitize_path_segment(fanout_id)
-    )))
+    Ok(private_batch_plan_path_in_roots(
+        &homeboy::core::paths::homeboy_data()?,
+        fanout_id,
+    ))
 }
 
-fn private_batch_plan_dir() -> Result<PathBuf> {
-    Ok(homeboy::core::paths::homeboy_data()?
-        .join("agent-task")
-        .join("private-batch-plans"))
+fn private_batch_plan_path_in_roots(data_root: &Path, fanout_id: &str) -> PathBuf {
+    private_batch_plan_dir_in_roots(data_root).join(format!(
+        "{}.json",
+        homeboy::core::paths::sanitize_path_segment(fanout_id)
+    ))
+}
+
+fn private_batch_plan_dir_in_roots(data_root: &Path) -> PathBuf {
+    data_root.join("agent-task").join("private-batch-plans")
 }
 
 fn validate_private_plan_path_before_read(path: &PathBuf) -> Result<()> {
@@ -4891,7 +4898,9 @@ mod tests {
     #[test]
     fn private_plan_temp_and_parent_are_owner_only_before_write() {
         with_isolated_home(|_| {
-            let parent = private_batch_plan_dir().expect("private plan dir");
+            let parent = private_batch_plan_dir_in_roots(
+                &homeboy::core::paths::homeboy_data().expect("data root"),
+            );
             fs::create_dir_all(&parent).expect("create parent");
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
                 .expect("make parent permissive for repair test");
