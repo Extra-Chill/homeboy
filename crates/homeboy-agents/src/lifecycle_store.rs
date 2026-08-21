@@ -33,6 +33,15 @@ impl AgentTaskLifecycleStore {
         Self { roots }
     }
 
+    /// The roots this store was built from.
+    ///
+    /// Exposed so operations that reach sibling stores below the same
+    /// installation can derive their roots from this one rather than resolving
+    /// the environment again (#7505).
+    pub fn roots(&self) -> &paths::PathRoots {
+        &self.roots
+    }
+
     /// Construct an explicitly self-contained store from a data root.
     ///
     /// The companion roots live below the supplied root so this constructor
