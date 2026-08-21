@@ -1876,19 +1876,10 @@ fn preflight_hot_command_with(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
-                    resource_policy::rerun_command(
-                        hot_command,
+                    resource_policy::admission_recovery(
                         &std::env::args().collect::<Vec<_>>(),
-                        selected_lab_runner,
-                    )
-                    .or_else(|| {
-                        // No ready runner means there is no placement rewrite,
-                        // but the original request remains the deterministic
-                        // resume input after the targeted recovery action.
-                        Some(crate::core::engine::shell::quote_args(
-                            &std::env::args().collect::<Vec<_>>(),
-                        ))
-                    }),
+                        lab_readiness.as_ref(),
+                    ),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if let Some(diagnostic) = lab_inventory_diagnostic {
