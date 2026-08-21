@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.29] - 2026-08-21
+
+### Changed
+- give OperationRecordStore its root
+- thread PathRoots from the release boundary
+
+### Fixed
+- declare a digest for every asset in the recovery manifest
+
 ## [0.350.28] - 2026-08-20
 
 ### Fixed
