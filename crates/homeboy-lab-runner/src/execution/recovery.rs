@@ -156,8 +156,11 @@ fn recovery_schedule(
 fn reconcile_terminal_runner_exec_runs_with_owner(
     worker: &RecoveryWorker,
     source_run_id: &str,
+    roots: &homeboy_core::paths::PathRoots,
 ) -> Result<(usize, usize, Option<RunnerExecRecoveryDiagnostic>)> {
-    let store = ObservationStore::open_initialized()?;
+    // Reconciliation runs under the caller's child lock and writes the same
+    // runs the caller already opened, so it shares the caller's roots (#7505).
+    let store = ObservationStore::open_initialized_in_roots(roots)?;
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
@@ -708,13 +711,19 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
     let stop = Arc::new(AtomicBool::new(false));
     let heartbeat_stop = Arc::clone(&stop);
     let heartbeat_worker = worker.clone();
+    // The heartbeat renews the same lease the caller's lock arbitrates, so it
+    // carries the caller's roots instead of resolving its own. Reading the
+    // environment again here is the disagreement the function doc warns about:
+    // this thread runs for up to a day, and a repoint mid-run would renew the
+    // lease in one installation while the child lock guards another (#7505).
+    let heartbeat_roots = roots.clone();
     let heartbeat = thread::spawn(move || {
         while !heartbeat_stop.load(Ordering::Acquire) {
             thread::sleep(RECOVERY_LEASE_HEARTBEAT);
             if heartbeat_stop.load(Ordering::Acquire) {
                 break;
             }
-            let Ok(store) = ObservationStore::open_initialized() else {
+            let Ok(store) = ObservationStore::open_initialized_in_roots(&heartbeat_roots) else {
                 break;
             };
             if heartbeat_worker.renew(&store).is_err() {
@@ -722,7 +731,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
             }
         }
     });
-    let result = reconcile_terminal_runner_exec_runs_with_owner(&worker, &source_run_id);
+    let result = reconcile_terminal_runner_exec_runs_with_owner(&worker, &source_run_id, &roots);
     stop.store(true, Ordering::Release);
     let _ = heartbeat.join();
     match result {
