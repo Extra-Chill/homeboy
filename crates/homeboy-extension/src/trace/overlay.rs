@@ -41,9 +41,14 @@ pub(super) fn acquire_trace_overlay_locks(
         overlay_paths.push(request.overlay_path.clone());
     }
 
+    // One resolution for every lock this run takes. Acquiring per component
+    // used to re-resolve per iteration, which is how a single run's locks
+    // could end up split across two homes (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let mut locks = Vec::new();
     for (component_path, overlay_paths) in component_requests.values() {
         locks.push(overlay_lock::TraceOverlayLock::acquire(
+            &roots,
             component_path,
             overlay_paths,
             run_dir,
