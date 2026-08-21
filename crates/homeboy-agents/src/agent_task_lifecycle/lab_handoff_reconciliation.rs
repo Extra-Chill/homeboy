@@ -429,7 +429,21 @@ pub fn has_recorded_provider_progress(run_id: &str) -> Result<bool> {
 /// projection or handoff has not — so the preserved candidate remains
 /// recoverable on the lab. Returns `false` when no record exists.
 pub fn run_owes_candidate_follow_up(run_id: &str) -> Result<bool> {
-    match store::read_record(&sanitize_run_id(run_id)) {
+    run_owes_candidate_follow_up_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// [`run_owes_candidate_follow_up`] against an explicitly injected root.
+///
+/// The caller decides whether to leave a run alive for follow-up from this
+/// answer, so it has to read the same installation the run was recorded in.
+pub fn run_owes_candidate_follow_up_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    match lifecycle_store.read_record(&sanitize_run_id(run_id)) {
         Ok(record) => Ok(record.metadata.get("transport_follow_up_failure").is_some()
             || record
                 .metadata

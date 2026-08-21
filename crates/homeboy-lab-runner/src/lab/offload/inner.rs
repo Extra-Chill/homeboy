@@ -485,6 +485,12 @@ fn lab_runner_exec_options(
 pub(crate) fn exec_lab_context(
     mut context: LabDispatchExecutionContext<'_>,
 ) -> Result<LabOffloadOutcome> {
+    // One store for the whole lab context. Phase records, the submission
+    // intent, the plan read, placement normalisation and outcome, the
+    // detached-run record and the follow-up check all describe one run
+    // (#7505).
+    let lab_lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Keep the daemon-visible admission active until this function returns.
     let _admission = context.admission.take();
     let request = context.request;
@@ -562,17 +568,21 @@ pub(crate) fn exec_lab_context(
         .as_ref()
         .and_then(|snapshot| serde_json::to_value(snapshot).ok());
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "executor_preflight",
-            Some(&remote_cwd),
-            source_checkout.as_ref(),
-            None,
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id: runner_id,
+                phase: "executor_preflight",
+                remote_workspace: Some(&remote_cwd),
+                source_checkout: source_checkout.as_ref(),
+                provider_rotation: None,
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
         if context.detach_after_handoff {
-            agent_task_lifecycle::record_lab_offload_submission_intent(
+            agent_task_lifecycle::record_lab_offload_submission_intent_in_store(
+                &lab_lifecycle_store,
                 run_id,
                 runner_id,
                 &remote_cwd,
@@ -597,14 +607,17 @@ pub(crate) fn exec_lab_context(
         context.source_snapshot.as_ref(),
     ) {
         if let Some(run_id) = context.agent_task_run_id.as_deref() {
-            agent_task_lifecycle::record_lab_offload_phase(
-                run_id,
-                runner_id,
-                "provider_preflight",
-                Some(&remote_cwd),
-                source_checkout.as_ref(),
-                None,
-                request.durable_agent_task_plan,
+            agent_task_lifecycle::record_lab_offload_phase_in_store(
+                &lab_lifecycle_store,
+                agent_task_lifecycle::LabOffloadPhaseRecord {
+                    requested_run_id: run_id,
+                    runner_id: runner_id,
+                    phase: "provider_preflight",
+                    remote_workspace: Some(&remote_cwd),
+                    source_checkout: source_checkout.as_ref(),
+                    provider_rotation: None,
+                    durable_plan: request.durable_agent_task_plan,
+                },
             )?;
         }
         preflight_agent_task_provider_on_runner(
@@ -638,7 +651,8 @@ pub(crate) fn exec_lab_context(
     // intentionally before `exec`: a controller timeout must leave status and
     // logs resolvable without reading the runner's private lifecycle store.
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
-        agent_task_lifecycle::record_lab_offload_planned(
+        agent_task_lifecycle::record_lab_offload_planned_in_store(
+            &lab_lifecycle_store,
             agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id,
                 runner_id,
@@ -647,14 +661,17 @@ pub(crate) fn exec_lab_context(
                 durable_plan: request.durable_agent_task_plan,
             },
         )?;
-        agent_task_lifecycle::record_lab_offload_phase(
-            run_id,
-            runner_id,
-            "provider_dispatch",
-            Some(&remote_cwd),
-            source_checkout.as_ref(),
-            None,
-            request.durable_agent_task_plan,
+        agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id: runner_id,
+                phase: "provider_dispatch",
+                remote_workspace: Some(&remote_cwd),
+                source_checkout: source_checkout.as_ref(),
+                provider_rotation: None,
+                durable_plan: request.durable_agent_task_plan,
+            },
         )?;
     }
 
@@ -698,8 +715,10 @@ pub(crate) fn exec_lab_context(
                 if let Some(run_id) = context.agent_task_run_id.as_deref() {
                     // The controller parent already exists, so a failed handoff
                     // must terminalize it rather than leave a queued ghost.
-                    let plan = agent_task_lifecycle::load_plan(run_id)?;
-                    agent_task_lifecycle::record_pre_execution_failure(
+                    let plan =
+                        agent_task_lifecycle::load_plan_in_store(&lab_lifecycle_store, run_id)?;
+                    agent_task_lifecycle::record_pre_execution_failure_in_store(
+                        &lab_lifecycle_store,
                         run_id,
                         &plan,
                         "lab_handoff",
@@ -824,7 +843,8 @@ pub(crate) fn exec_lab_context(
         // This route's decision is the authoritative one for the execution
         // being verified. Adopt it when the record carries none, or carries
         // only a submission-derived placeholder (#11600).
-        agent_task_lifecycle::normalize_missing_execution_placement_decision(
+        agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+            &lab_lifecycle_store,
             run_id,
             &request.placement_decision,
         )?;
@@ -842,7 +862,11 @@ pub(crate) fn exec_lab_context(
                     None,
                 )
             })?;
-        agent_task_lifecycle::record_execution_placement_outcome(run_id, outcome)?;
+        agent_task_lifecycle::record_execution_placement_outcome_in_store(
+            &lab_lifecycle_store,
+            run_id,
+            outcome,
+        )?;
     }
     let dependency_cache_save_outputs =
         save_dependency_caches(runner_id, &context.dependency_cache_saves)?;
@@ -877,7 +901,8 @@ pub(crate) fn exec_lab_context(
             context.agent_task_run_id.as_deref(),
             exec_output.job_id.as_deref(),
         ) {
-            agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::record_detached_lab_run_in_store(
+                &lab_lifecycle_store,
                 agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
                     runner_id,
@@ -1045,7 +1070,11 @@ pub(crate) fn exec_lab_context(
             .agent_task_run_id
             .as_deref()
             .map(|run_id| {
-                agent_task_lifecycle::run_owes_candidate_follow_up(run_id).unwrap_or(false)
+                agent_task_lifecycle::run_owes_candidate_follow_up_in_store(
+                    &lab_lifecycle_store,
+                    run_id,
+                )
+                .unwrap_or(false)
             })
             .unwrap_or(false);
         workspace.set_terminal_outcome(if exit_code == 0 && !owes_candidate_follow_up {
