@@ -28,8 +28,8 @@ use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -2300,6 +2300,9 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
+    if let Some(receipt) = recover_verified_no_change_finalization(&recipe, &run_id)? {
+        return Ok(receipt);
+    }
     let promotion = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
@@ -2341,6 +2344,188 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+/// Finalize a verified no-change Cook without routing it through patch publication.
+/// The candidate is still re-read exactly: a no-change declaration authorizes no
+/// publication only for the clean, bound candidate that deterministic gates checked.
+fn recover_verified_no_change_finalization(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    let Some(promotion) = persisted_promotion_for_attempt(run_id)? else {
+        return Ok(None);
+    };
+    if promotion.status != AgentTaskPromotionStatus::VerifiedNoChanges {
+        return Ok(None);
+    }
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id)?;
+    let declaration = super::cook::intentional_no_change_from_aggregate(&aggregate).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "intentional_no_change",
+            "verified no-change recovery requires the attempt's durable intentional-no-change declaration",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let options = super::cook_recipe::reconstruct_adoption_options(recipe)?;
+    let verified_base = promotion
+        .verified_base
+        .as_ref()
+        .filter(|base| base.base == options.base && !base.sha.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.verified_base",
+                "verified no-change recovery requires the Cook's declared immutable base snapshot",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if !promotion.finalization_eligible(false) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion",
+            "verified no-change recovery requires green deterministic gates",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let selection = canonical_cook_candidate(&recipe.cook_id)
+        .filter(|candidate| {
+            candidate["incomplete"] != true && candidate["run_id"].as_str() == Some(run_id)
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_or_cook_id",
+                "verified no-change recovery requires the exact Cook-bound candidate",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let expected: AgentTaskPromotionCandidate = serde_json::from_value(
+        promotion
+            .provenance
+            .get("candidate")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|_| {
+        Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "verified no-change recovery requires a durable Git candidate fingerprint",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let AgentTaskPromotionCandidate::Git { .. } = &expected else {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "verified no-change recovery requires a durable Git candidate fingerprint",
+            Some(run_id.to_string()),
+            None,
+        ));
+    };
+    let path = promotion
+        .provenance
+        .pointer("/worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.provenance.worktree_path",
+                "verified no-change recovery requires the verified candidate worktree path",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let actual = candidate_fingerprint(path)?;
+    if !verified_no_change_candidate_is_valid(&expected, &actual, &verified_base.sha) {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "verified no-change recovery requires the exact clean, non-base candidate checked by deterministic gates",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    let receipt = json!({
+        "schema": "homeboy/agent-task-cook-no-change-finalization/v1",
+        "run_id": run_id,
+        "status": "intentional_no_change_finalized",
+        "disposition": "no_change_finalized",
+        "publication": { "action": "none", "committed": false, "pushed": false, "published": false },
+        "source_attempt": { "cook_id": recipe.cook_id, "run_id": run_id, "candidate": selection },
+        "intentional_no_change": declaration,
+        "gate_results": promotion.gate_outcome().gate_results,
+    });
+    // A completed receipt makes recovery idempotent without inventing a patch publication.
+    agent_task_lifecycle::record_cook_finalization(run_id, receipt.clone())?;
+    Ok(Some(receipt))
+}
+
+fn verified_no_change_candidate_is_valid(
+    expected: &AgentTaskPromotionCandidate,
+    actual: &AgentTaskPromotionCandidate,
+    verified_base_sha: &str,
+) -> bool {
+    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
+        return false;
+    };
+    expected == actual
+        && fingerprint.changed_files.is_empty()
+        && fingerprint.head != verified_base_sha
+}
+
+#[cfg(test)]
+mod no_change_recovery_tests {
+    use super::*;
+
+    fn candidate(head: &str, changed_files: &[&str]) -> AgentTaskPromotionCandidate {
+        serde_json::from_value(json!({
+            "kind": "git",
+            "fingerprint": {
+                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                "target_path": "/fixture",
+                "head": head,
+                "base": "parent-head",
+                "sha256": "candidate-sha",
+                "tree": "candidate-tree",
+                "changed_files": changed_files
+            }
+        }))
+        .expect("candidate fixture")
+    }
+
+    #[test]
+    fn verified_no_change_candidate_requires_exact_clean_non_base_binding() {
+        let bound = candidate("candidate-head", &[]);
+        assert!(verified_no_change_candidate_is_valid(
+            &bound,
+            &bound,
+            "verified-base"
+        ));
+
+        assert!(!verified_no_change_candidate_is_valid(
+            &candidate("verified-base", &[]),
+            &candidate("verified-base", &[]),
+            "verified-base"
+        ));
+        assert!(!verified_no_change_candidate_is_valid(
+            &candidate("candidate-head", &["dirty.rs"]),
+            &candidate("candidate-head", &["dirty.rs"]),
+            "verified-base"
+        ));
+        assert!(!verified_no_change_candidate_is_valid(
+            &bound,
+            &candidate("different-head", &[]),
+            "verified-base"
+        ));
+        assert!(!verified_no_change_candidate_is_valid(
+            &candidate("candidate-head", &[]),
+            &serde_json::from_value(
+                json!({ "kind": "non_git", "disposition": "not_a_git_worktree" })
+            )
+            .expect("unbound candidate fixture"),
+            "verified-base"
+        ));
+    }
 }
 
 pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
@@ -2450,6 +2635,9 @@ fn completed_finalization_receipt_for_recovery(
         let Some(value) = record.metadata.get("cook_finalization") else {
             continue;
         };
+        if value["status"].as_str() == Some("intentional_no_change_finalized") {
+            return Ok(Some(value.clone()));
+        }
         if !matches!(
             value["status"].as_str(),
             Some("review_ready" | "draft_published")

@@ -245,7 +245,7 @@ fn pre_artifact_interruption_phase(
     }
 }
 
-fn intentional_no_change_from_aggregate(
+pub(crate) fn intentional_no_change_from_aggregate(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
 ) -> Option<AgentTaskIntentionalNoChange> {
     aggregate.outcomes.iter().find_map(|outcome| {
