@@ -238,11 +238,26 @@ pub(super) fn exec_via_daemon(
         &cwd,
         &command,
     )?;
+    // One store for the whole foreground lease: claim, every renewal, and the
+    // release. Each step used to open its own, which split the lease's identity
+    // across three independent reads of process state -- a claim taken in one
+    // home and released against another leaves the source stuck `running` with
+    // nothing alive holding it (#7505).
+    //
+    // The renewal also sits inside the `while !job.status.is_terminal()` poll
+    // below, so a five-minute daemon exec opened SQLite and walked the
+    // migration ladder roughly 1,500 times to renew a lease it already held.
+    let lease_store = run_id
+        .as_deref()
+        .map(|_| ObservationStore::open_initialized())
+        .transpose()?;
     let foreground_source_lease = run_id
         .as_deref()
         .map(|run_id| {
             let token = uuid::Uuid::new_v4().to_string();
-            let store = ObservationStore::open_initialized()?;
+            let store = lease_store
+                .as_ref()
+                .expect("lease store is opened whenever run_id is present");
             if !store.claim_running_runner_exec_recovery_source(
                 run_id,
                 "foreground-runner-exec",
@@ -250,7 +265,7 @@ pub(super) fn exec_via_daemon(
                 &job.id.to_string(),
             )? {
                 return Err(runner_exec_source_claim_error(
-                    &store,
+                    store,
                     run_id,
                     &job.id.to_string(),
                 )?);
@@ -302,7 +317,9 @@ pub(super) fn exec_via_daemon(
         }
         std::thread::sleep(Duration::from_millis(200));
         if let Some((run_id, token)) = &foreground_source_lease {
-            let _ = ObservationStore::open_initialized()?
+            let _ = lease_store
+                .as_ref()
+                .expect("lease store is opened whenever a lease is held")
                 .renew_running_runner_exec_source_lease(run_id, token)?;
         }
         let job_id = job.id.to_string();
@@ -408,7 +425,9 @@ pub(super) fn exec_via_daemon(
         None
     };
     if let Some((run_id, token)) = &foreground_source_lease {
-        let _ = ObservationStore::open_initialized()?
+        let _ = lease_store
+            .as_ref()
+            .expect("lease store is opened whenever a lease is held")
             .release_running_runner_exec_source_lease(run_id, token)?;
     }
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
