@@ -5134,14 +5134,12 @@ pub fn durable_local_read_in_store(
 }
 
 /// Read one concrete durable record without resolving a Cook ID through its
-/// latest attempt. This is the inspection counterpart to [`exact_record`].
-pub fn exact_durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    exact_durable_local_read_in_store(&lifecycle_store, run_id)
-}
-
-/// [`exact_durable_local_read`] against explicitly injected durable lifecycle
-/// roots.
+/// latest attempt, from an explicitly injected durable lifecycle root. This is
+/// the inspection counterpart to [`exact_record`].
+///
+/// The ambient `exact_durable_local_read()` shim that used to sit above this is
+/// gone: `status_once` was its only caller and now reads through the store it
+/// resolved for the whole status read (#7505).
 pub fn exact_durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
