@@ -183,6 +183,22 @@ jq -e '.data.test_counts.total == 4' "${tmp}/candidate-replay-output/review-test
 jq -e '.data.shard_plan_digest == $digest' --arg digest "${plan_digest}" "${tmp}/candidate-replay-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not preserve immutable plan identity\n'; exit 1; }
 jq -e '."review test" == "pass"' "${tmp}/candidate-output/results.json" >/dev/null
 jq -e '.data.test_counts.total == 4' "${tmp}/candidate-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not sum actual structured shard counts\n'; exit 1; }
+mkdir -p "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/homeboy-ci-results"
+cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/homeboy-ci-results/review-test.json"
+jq '.run_attempt = 1 | .results["review test"] = "timeout"' "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json" > "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/manifest.json"
+jq '.run_attempt = 1' "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json"
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/mixed-attempt-output" RUN_ATTEMPT=2 \
+  bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '.success == true and .data.test_counts.total == 4' "${tmp}/mixed-attempt-output/review-test.json" >/dev/null || { printf 'FAIL: mixed-attempt shard evidence did not select the newest result per shard\n'; exit 1; }
+cp -R "${tmp}/artifacts/candidate-shard-2" "${tmp}/artifacts/candidate-shard-2-duplicate"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/ambiguous-attempt-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: duplicate evidence within the newest shard attempt must fail closed\n'; exit 1
+fi
+rm -rf "${tmp}/artifacts/candidate-shard-2-duplicate" "${tmp}/artifacts/candidate-shard-1-attempt-1"
+jq '.run_attempt = 2' "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json"
+printf 'PASS: mixed-attempt reruns retain prior shards and supersede only rerun evidence\n'
 cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/passing-shard.json"
 jq '.data.test_counts.failed = 1 | .data.test_counts.passed -= 1' "${tmp}/passing-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
 mkdir "${tmp}/payload-stream-tmp"
@@ -290,7 +306,7 @@ fi
 # stays candidate-only so the dead-branch class that produced homeboy#10997
 # cannot grow back.
 for dead_job in baseline-test-plan baseline-test-shards; do
-  grep -qE "^  ${dead_job}:" "${WORKFLOW}" && { printf 'FAIL: sharded Test path reintroduced %%s\n' "${dead_job}"; exit 1; }
+  grep -qE "^  ${dead_job}:" "${WORKFLOW}" && { printf 'FAIL: sharded Test path reintroduced %s\n' "${dead_job}"; exit 1; }
 done
 grep -F 'homeboy-baseline-results' "${WORKFLOW}" >/dev/null && { printf 'FAIL: sharded Test reconciliation reintroduced baseline aggregate handling\n'; exit 1; }
 
@@ -315,6 +331,12 @@ grep -F "steps.prepare-binary-workspace.outcome == 'success'" "${WORKFLOW}" >/de
 grep -F 'name: Write candidate Test inventory failure provenance' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory failures do not preserve provenance\n'; exit 1; }
 # shellcheck disable=SC2016
 grep -F 'name: homeboy-test-inventory-failure-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory failure provenance is not artifact-scoped\n'; exit 1; }
+if [ "$(grep -c 'resolve-run-artifact.sh homeboy-test-shard-plan' "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: shard execution and aggregation do not resolve the newest available plan artifact\n'; exit 1
+fi
+grep -F 'resolve-run-artifact.sh homeboy-test-archive' "${WORKFLOW}" >/dev/null || { printf 'FAIL: shard execution does not resolve the newest available archive artifact\n'; exit 1; }
+# shellcheck disable=SC2016
+grep -F 'name: ${{ steps.test-plan-artifact.outputs.artifact-name }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: shard jobs do not consume the resolved plan artifact\n'; exit 1; }
 grep -F "needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate shard work can start without a successful inventory plan\n'; exit 1; }
 grep -F 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not report candidate inventory generation failures\n'; exit 1; }
 grep -F "if: needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }

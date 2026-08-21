@@ -90,17 +90,27 @@ aggregate() (
   [ "$(digest "$(jq -cS 'del(.plan_digest)' "${plan}")")" = "${plan_digest}" ] || fail "Test shard plan digest does not match its immutable contents."
   mkdir -p "${output}"
 
-  local shard id manifest payload status aggregate_status="pass" expected_total payload_stream
+  local shard id manifest manifest_attempt payload status aggregate_status="pass" expected_total payload_stream selected_attempt
   payload_stream="$(mktemp)"
   trap 'rm -f -- "${payload_stream:-}"' EXIT
   while IFS= read -r shard; do
-    id="$(jq -r .id <<< "${shard}")"; matches=()
+    id="$(jq -r .id <<< "${shard}")"; matches=(); selected_attempt=0
     while IFS= read -r manifest; do
       if jq -e --arg phase "${phase}" --arg command "${command}" --arg id "${id}" --arg inventory_digest "${inventory_digest}" --arg plan_digest "${plan_digest}" --argjson attempt "${attempt}" '
-        .phase == $phase and .command == $command and .shard_id == $id and .inventory_digest == $inventory_digest and .plan_digest == $plan_digest and .run_attempt == $attempt and (.results[$command] == "pass" or .results[$command] == "fail" or .results[$command] == "timeout")
-      ' "${manifest}" >/dev/null 2>&1; then matches+=("${manifest}"); fi
+        .phase == $phase and .command == $command and .shard_id == $id and .inventory_digest == $inventory_digest and .plan_digest == $plan_digest
+        and (.run_attempt | type == "number" and floor == . and . > 0 and . <= $attempt)
+        and (.results[$command] == "pass" or .results[$command] == "fail" or .results[$command] == "timeout")
+      ' "${manifest}" >/dev/null 2>&1; then
+        manifest_attempt="$(jq -r .run_attempt "${manifest}")"
+        if [ "${manifest_attempt}" -gt "${selected_attempt}" ]; then
+          matches=("${manifest}")
+          selected_attempt="${manifest_attempt}"
+        elif [ "${manifest_attempt}" -eq "${selected_attempt}" ]; then
+          matches+=("${manifest}")
+        fi
+      fi
     done < <(find "${root}" -path "*/${phase}/manifest.json" -type f -print | sort)
-    [ "${#matches[@]}" -eq 1 ] || fail "Expected exactly one valid ${phase} shard evidence manifest for ${id}."
+    [ "${#matches[@]}" -eq 1 ] || fail "Expected exactly one newest valid ${phase} shard evidence manifest for ${id} at or before attempt ${attempt}."
     manifest="${matches[0]}"; status="$(jq -r --arg command "${command}" '.results[$command]' "${manifest}")"; payload="$(dirname "${manifest}")/homeboy-ci-results/$(command_result_filename "${command}")"
     case "${status}" in
       timeout) aggregate_status="timeout" ;;
