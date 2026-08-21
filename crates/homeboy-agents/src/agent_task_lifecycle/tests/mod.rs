@@ -201,6 +201,37 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
     }
 }
 
+/// The submission a rooted Lab-offload test hands to the
+/// `*_with_submission_in_store` entry points.
+///
+/// Every Lab offload entry point reads its record first and submits only on the
+/// fall-through, and that fall-through is the one reach a rooted Lab offload
+/// function still makes past its lifecycle store: the default
+/// `admitted_lab_offload_submission` calls `submit_plan_in_store`, which admits
+/// through `homeboy_core::controller_runtime`, whose FIFO admission queue and
+/// content-addressed pin store hang off `paths::controller_runtimes_store()` and
+/// are machine-global on purpose (#7505, #12608). A test that no longer mutates
+/// HOME would therefore enqueue against the *real operator* runtime store and
+/// block on its cross-process lock. Naming the submission keeps the whole
+/// operation inside the injected store and reaches nothing process-global at
+/// all. This is the same stub admission every other rooted test in this crate
+/// passes to `submit_plan_with_runtime_admission`.
+///
+/// The consequence to keep in mind when choosing what to migrate: the durable
+/// run this creates carries `{}` for its controller-runtime pin rather than a
+/// real admission, so a test that asserts on controller-runtime provenance
+/// stays on `with_isolated_home`.
+///
+/// This lives here rather than beside its first caller because more than one
+/// partition of these tests now needs it (#7505).
+pub(super) fn stub_lab_offload_submission(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, |_| Ok(json!({})))
+}
+
 pub(super) fn outcome_with_refs(
     task_id: &str,
     artifacts: Vec<AgentTaskArtifact>,

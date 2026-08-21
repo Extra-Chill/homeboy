@@ -1121,7 +1121,7 @@ fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
     assert!(recovery.contains("--arg schema homeboy.package-recovery"));
     assert!(recovery.contains("--arg tag \"${RELEASE_TAG}\""));
     assert!(recovery.contains("--arg commit \"${COMMIT}\""));
-    assert!(recovery.contains("artifacts: [$expected_assets[] | {path: .}]"));
+    assert!(recovery.contains("--argjson artifacts \"${artifacts_json}\""));
     assert!(
         !recovery.contains("path: (\"artifacts/\" + .)"),
         "manifest paths are relative to --from-artifacts artifacts"
@@ -1413,6 +1413,264 @@ fn verify_published_distinguishes_an_unpublished_release_from_a_broken_one() {
         step.contains("still a draft or absent"),
         "the operator needs to know the tag exists without a consumable release"
     );
+}
+
+/// Run `verify-published`'s asset step under the runner's shell with a mocked
+/// `gh`, returning (exit code, combined output) plus the commands `gh` saw.
+fn run_verify_published_step(
+    host_result: &str,
+    release_json: Option<&str>,
+) -> (i32, String, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let verify = job_section(release_workflow(), "verify-published");
+    let script = step_run_script(verify, "name: Verify planned release assets");
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-verify-published-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("temp bin");
+    let log = dir.join("gh.log");
+    std::fs::write(&log, "").expect("write gh log");
+
+    // `gh api` succeeds only when the release is published; a draft or absent
+    // release 404s on `releases/tags/{tag}`, which is a non-zero exit here.
+    let api_branch = match release_json {
+        Some(body) => {
+            let fixture = dir.join("release-fixture.json");
+            std::fs::write(&fixture, body).expect("write release fixture");
+            format!("cat {}", fixture.display())
+        }
+        None => "exit 1".to_owned(),
+    };
+    std::fs::write(
+        bin.join("gh"),
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$1 $2\" >> {log}\n\
+             if [ \"$1\" = api ]; then {api_branch}; fi\n",
+            log = log.display(),
+        ),
+    )
+    .expect("write mock gh");
+    let mut perms = std::fs::metadata(bin.join("gh"))
+        .expect("mock gh metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(bin.join("gh"), perms).expect("mark mock gh executable");
+
+    let script_path = dir.join("verify.sh");
+    std::fs::write(&script_path, &script).expect("write script");
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .current_dir(&dir)
+        .env("PATH", path)
+        .env("RELEASE_TAG", "v0.350.25")
+        .env("HOST_RESULT", host_result)
+        .env("GITHUB_REPOSITORY", "Extra-Chill/homeboy")
+        .env("EXPECTED_ASSETS", r#"["payload.tar.gz"]"#)
+        .output()
+        .expect("verify-published step should run");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    (output.status.code().unwrap_or(-1), combined, calls)
+}
+
+/// A failed `host` must be diagnosed from the release, not from an assumption.
+///
+/// This guard used to `exit 1` on a non-success host result without ever
+/// calling the API, reporting "The tag exists with no GitHub Release" as
+/// though it had looked. For v0.350.22 through v0.350.25 that was false: each
+/// release was published complete with all 14 assets while `host` failed on a
+/// post-publish assertion (#12701). The run must stay red either way — #8567
+/// requires a broken publish chain be loud — but the operator must be pointed
+/// at the failing step, not at a release state that was never observed.
+#[test]
+fn verify_published_diagnoses_a_failed_host_from_the_observed_release() {
+    let published = serde_json::json!({
+        "draft": false,
+        "assets": [{"name": "payload.tar.gz", "state": "uploaded", "size": 1}],
+    })
+    .to_string();
+
+    let (code, output, calls) = run_verify_published_step("failure", Some(&published));
+
+    assert_eq!(code, 1, "a failed host must still fail the run: {output}");
+    assert!(
+        calls.iter().any(|call| call.starts_with("api ")),
+        "the guard must read the release before judging it, saw: {calls:?}"
+    );
+    assert!(
+        output.contains("IS published"),
+        "an intact release must be reported as intact so the operator inspects \
+         the failing job instead of the release: {output}"
+    );
+    assert!(
+        !output.contains("The tag exists with no GitHub Release"),
+        "the guard must not assert an unobserved state as fact: {output}"
+    );
+
+    // The same host failure with nothing published keeps the original,
+    // now-accurate diagnosis.
+    let (code, output, _) = run_verify_published_step("failure", None);
+    assert_eq!(
+        code, 1,
+        "an unpublished release must fail the run: {output}"
+    );
+    assert!(
+        output.contains("no published GitHub Release exists"),
+        "an absent release must still be named as absent: {output}"
+    );
+}
+
+/// The recovery manifest must declare a real digest for every expected asset.
+///
+/// It emitted `{path: .}` and nothing else, so every artifact carried a null
+/// `sha256` — while `validate_recovery_artifact`
+/// (`homeboy-release/src/release/executor/artifacts.rs`) requires a 64-hex
+/// digest for each one and rejects the first it reads. The manifest and its
+/// only reader had disagreed since the manifest was introduced. Nothing
+/// reached the reader until the asset-completeness gate ahead of it was fixed,
+/// at which point v0.350.27 failed with "Recovered release asset
+/// 'dist-manifest.json' is missing a valid sha256" — that asset is merely
+/// first in the sorted expected set, not special.
+///
+/// Executed rather than string-matched. The previous assertion pinned the jq
+/// expression exactly and still could not see that the document it produced
+/// was rejected by the code that consumes it, which is the whole reason this
+/// file has a script harness.
+#[test]
+fn recovery_manifest_declares_a_verified_digest_for_every_expected_asset() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = job_section(release_workflow(), "host");
+    let script = step_run_script(host, "name: Create authoritative recovery manifest");
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-recovery-manifest-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("temp bin");
+    std::fs::create_dir_all(dir.join("artifacts")).expect("artifacts dir");
+
+    // The bootstrap assets cargo-dist never checksums are deliberately included.
+    let assets = [
+        "dist-manifest.json",
+        "homeboy-installer.sh",
+        "homeboy.rb",
+        "sha256.sum",
+        "source.tar.gz",
+    ];
+    for asset in assets {
+        std::fs::write(
+            dir.join("artifacts").join(asset),
+            format!("bytes of {asset}\n"),
+        )
+        .expect("write asset");
+    }
+
+    let commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    std::fs::write(
+        bin.join("git"),
+        format!("#!/usr/bin/env bash\nprintf '%s\\n' {commit}\n"),
+    )
+    .expect("write mock git");
+    let mut perms = std::fs::metadata(bin.join("git"))
+        .expect("mock git metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(bin.join("git"), perms).expect("mark mock git executable");
+
+    let script_path = dir.join("manifest.sh");
+    std::fs::write(&script_path, &script).expect("write script");
+
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .current_dir(&dir)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("RELEASE_TAG", "v0.350.28")
+        .env("RELEASE_VERSION", "0.350.28")
+        .env(
+            "EXPECTED_ASSETS",
+            serde_json::to_string(&assets).expect("asset JSON"),
+        )
+        .output()
+        .expect("recovery manifest step should run");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("artifacts").join("manifest.json")).expect("read manifest"),
+    )
+    .expect("manifest is JSON");
+
+    let artifacts = manifest["artifacts"]
+        .as_array()
+        .expect("manifest declares artifacts");
+    assert_eq!(
+        artifacts.len(),
+        assets.len(),
+        "every expected asset must appear: {manifest}"
+    );
+
+    for (artifact, asset) in artifacts.iter().zip(assets) {
+        assert_eq!(artifact["path"], serde_json::json!(asset));
+        let declared = artifact["sha256"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{asset} must declare a sha256: {manifest}"));
+        // Exactly the predicate `validate_recovery_artifact` applies.
+        assert!(
+            declared.len() == 64 && declared.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{asset} sha256 {declared:?} must satisfy the recovery validator"
+        );
+        // And it must be the digest of the bytes actually on disk, not a
+        // placeholder that merely satisfies the shape.
+        let expected = std::process::Command::new("sha256sum")
+            .arg(dir.join("artifacts").join(asset))
+            .output()
+            .expect("sha256sum");
+        let expected = String::from_utf8_lossy(&expected.stdout)
+            .split_whitespace()
+            .next()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(declared, expected, "{asset} digest must match its bytes");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Extract the shell body of a `run: |` step so its BEHAVIOUR can be exercised

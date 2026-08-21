@@ -109,11 +109,6 @@ pub fn register_child_process_in_root(
     Ok(InvocationChildGuard { path })
 }
 
-pub fn cleanup_invocation_children(invocation_id: &str) -> Result<usize> {
-    cleanup_invocation_children_in_root(&paths::homeboy()?, invocation_id)
-}
-
-/// [`cleanup_invocation_children`] against an already-resolved config root.
 pub fn cleanup_invocation_children_in_root(
     config_root: &Path,
     invocation_id: &str,
@@ -131,11 +126,6 @@ pub fn cleanup_invocation_children_in_root(
     Ok(cleaned)
 }
 
-pub fn cleanup_stale_child_records() -> Result<usize> {
-    cleanup_stale_child_records_in_root(&paths::homeboy()?)
-}
-
-/// [`cleanup_stale_child_records`] against an already-resolved config root.
 pub fn cleanup_stale_child_records_in_root(config_root: &Path) -> Result<usize> {
     let mut cleaned = 0;
     let root = InvocationChildRecord::root_in_root(config_root);
@@ -326,6 +316,15 @@ mod audit_coverage_tests {
     use super::*;
     use crate::test_support::with_isolated_home;
 
+    /// The config root of the isolated home each test below installs.
+    ///
+    /// The ambient `cleanup_invocation_children` / `cleanup_stale_child_records`
+    /// wrappers existed only to serve these two assertions. The test is its own
+    /// boundary, so it resolves here and calls the rooted form directly (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        paths::homeboy().expect("config root")
+    }
+
     #[test]
     fn test_register_child_process() {
         with_isolated_home(|_| {
@@ -375,14 +374,20 @@ mod audit_coverage_tests {
     #[test]
     fn test_cleanup_invocation_children() {
         with_isolated_home(|_| {
-            assert_eq!(cleanup_invocation_children("inv-empty").unwrap(), 0);
+            assert_eq!(
+                cleanup_invocation_children_in_root(&test_config_root(), "inv-empty").unwrap(),
+                0
+            );
         });
     }
 
     #[test]
     fn test_cleanup_stale_child_records() {
         with_isolated_home(|_| {
-            assert_eq!(cleanup_stale_child_records().unwrap(), 0);
+            assert_eq!(
+                cleanup_stale_child_records_in_root(&test_config_root()).unwrap(),
+                0
+            );
         });
     }
 }

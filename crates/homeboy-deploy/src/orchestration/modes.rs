@@ -20,6 +20,10 @@ use super::super::types::{
 
 /// Check mode: return component status without building or deploying.
 pub(super) struct CheckModeInput<'a> {
+    /// Data root resolved by the deploy boundary. Check mode reads receipts
+    /// the apply path later writes and invalidates, so all three must address
+    /// the same home (#7505).
+    pub(super) data_root: &'a std::path::Path,
     pub(super) components: &'a [Component],
     pub(super) local_versions: &'a HashMap<String, String>,
     pub(super) remote_versions: &'a HashMap<String, String>,
@@ -34,6 +38,7 @@ pub(super) struct CheckModeInput<'a> {
 
 pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationResult {
     let CheckModeInput {
+        data_root,
         components,
         local_versions,
         remote_versions,
@@ -90,6 +95,7 @@ pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationRe
             } else {
                 let version = local_versions.get(&c.id).map(String::as_str).unwrap_or_default();
                 match super::super::receipt::load(
+                    data_root,
                     project,
                     &c.id,
                     &target,
@@ -384,6 +390,14 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
 
 #[cfg(test)]
 mod tests {
+    /// The data root of the isolated home each test below installs.
+    ///
+    /// Check mode reads receipts that the apply path writes and invalidates, so
+    /// the test stands in for the deploy boundary and resolves once (#7505).
+    fn test_data_root() -> std::path::PathBuf {
+        homeboy_core::paths::homeboy_data().expect("data root")
+    }
+
     use super::*;
     use crate::PreparedDeployArtifact;
     use std::collections::BTreeMap;
@@ -698,6 +712,7 @@ mod tests {
         };
 
         let checked = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: std::slice::from_ref(&component),
             local_versions: &local_versions,
             remote_versions: &remote_versions,
@@ -777,6 +792,7 @@ mod tests {
         let packages = HashMap::from([("plugin".to_string(), package)]);
 
         let clean = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -807,6 +823,7 @@ mod tests {
 
         std::fs::write(remote.join("plugin.php"), "modified").expect("drift");
         let drift = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -825,6 +842,7 @@ mod tests {
 
         std::fs::write(&packages["plugin"].path, "mutated after lease").expect("mutate package");
         let mutated = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: std::slice::from_ref(&component),
             local_versions: &versions,
             remote_versions: &versions,
@@ -904,6 +922,7 @@ mod tests {
             source_commit: "prepared-commit".to_string(),
         });
         let result = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -962,6 +981,7 @@ mod tests {
         let local_versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let remote_versions = HashMap::from([("plugin".to_string(), "2.0.0".to_string())]);
         let result = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: &[component],
             local_versions: &local_versions,
             remote_versions: &remote_versions,
@@ -997,6 +1017,7 @@ mod tests {
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let result = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -1057,6 +1078,7 @@ mod tests {
         ] {
             config.check = true;
             let result = run_check_mode(CheckModeInput {
+                data_root: &test_data_root(),
                 components: std::slice::from_ref(&component),
                 local_versions: &versions,
                 remote_versions: &versions,
@@ -1094,6 +1116,7 @@ mod tests {
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let result = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,
@@ -1125,6 +1148,7 @@ mod tests {
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let result = run_check_mode(CheckModeInput {
+            data_root: &test_data_root(),
             components: &[component],
             local_versions: &versions,
             remote_versions: &versions,

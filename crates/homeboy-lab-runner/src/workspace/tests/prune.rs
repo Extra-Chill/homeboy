@@ -21,6 +21,34 @@ use crate::workspace::types::{
 use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 use homeboy_core::api_jobs::JobStatus;
 
+/// Why the scan produced the candidate set it did.
+///
+/// Every prune failure reported from CI has been a bare `left: 0, right: 1`
+/// with no indication of which guard withheld the workspace, and #12715 stayed
+/// unexplained for weeks behind exactly that comparison. The reasons were never
+/// missing -- `prune_workspaces` already returns `skipped`,
+/// `withheld_by_liveness_reason`, `scanned_workspace_count` and `scan_complete`
+/// -- the assertions simply threw them away, so a failure that reproduces only
+/// on CI could not be read from CI.
+///
+/// Same defect as the promotion provider assertion in #12741, which printed
+/// `error.message` and discarded the `error.details` naming the operation.
+fn prune_diagnosis(output: &crate::workspace::types::RunnerWorkspacePruneOutput) -> String {
+    format!(
+        "scanned={} scan_complete={} candidates={} removed={} skipped_live={} skipped_unknown={}\n  withheld_by_liveness_reason={:?}\n  skipped={:?}\n  workspace_root={} lab_workspaces_root={}",
+        output.scanned_workspace_count,
+        output.scan_complete,
+        output.candidates.len(),
+        output.removed.len(),
+        output.skipped_live_count,
+        output.skipped_unknown_count,
+        output.withheld_by_liveness_reason,
+        output.skipped,
+        output.workspace_root,
+        output.lab_workspaces_root,
+    )
+}
+
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -59,7 +87,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
 
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(output.total_candidate_count, 1);
         assert!(output.total_candidate_bytes > 0);
         assert_eq!(output.remaining_candidate_count, 0);
@@ -128,7 +156,7 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
 
         assert_eq!(exit_code, 0);
         assert!(!output.dry_run);
-        assert_eq!(output.removed.len(), 2);
+        assert_eq!(output.removed.len(), 2, "{}", prune_diagnosis(&output));
         assert_eq!(output.total_candidate_count, 2);
         assert!(output.total_candidate_bytes >= output.total_removed_bytes);
         assert_eq!(output.remaining_candidate_count, 0);
@@ -180,7 +208,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
             .expect("prune process-owned workspace");
             assert_eq!(exit_code, 0);
             assert!(output.candidates.is_empty());
-            assert_eq!(output.skipped_live_count, 1);
+            assert_eq!(output.skipped_live_count, 1, "{output:#?}");
             assert!(workspace.exists());
         }
         child.kill().expect("stop held process");
@@ -292,7 +320,7 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
             },
         )
         .expect("preview receipt-authorized workspace");
-        assert_eq!(preview.candidates.len(), 1);
+        assert_eq!(preview.candidates.len(), 1, "{}", prune_diagnosis(&preview));
         assert_eq!(preview.candidates[0].reason, "terminal_resource_lifecycle");
         assert!(preview.withheld_by_liveness_reason.is_empty());
         homeboy_agents::agent_task_lifecycle::begin_workspace_terminal_authority_release(
@@ -314,7 +342,7 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
             },
         )
         .expect("remove receipt-authorized workspace");
-        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.removed.len(), 1, "{}", prune_diagnosis(&applied));
         assert!(!workspace.exists());
         homeboy_agents::agent_task_lifecycle::persist_workspace_terminal_authority_for_test(
             run_id,
@@ -578,7 +606,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         .expect("prune preview");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(output.candidates[0].remote_path, synced.remote_path);
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
@@ -622,7 +650,7 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         .expect("prune stale materialized workspace");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1);
+        assert_eq!(output.removed.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(
             output.removed[0].reason,
             "stale_materialized_workspace_lifecycle"
@@ -669,7 +697,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
         .expect("prune stale materialized workspace with missing source");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1);
+        assert_eq!(output.removed.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(
             output.removed[0].reason,
             "stale_materialized_workspace_lifecycle"
@@ -745,6 +773,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         )
         .expect("prune preview");
 
+        assert_eq!(preview.candidates.len(), 1, "{}", prune_diagnosis(&preview));
         assert_eq!(preview.candidates[0].reason, "resource_ttl_expired");
         assert_eq!(preview.candidates[0].remote_path, synced.remote_path);
         assert!(Path::new(&synced.remote_path).exists());
@@ -763,7 +792,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         .expect("apply ttl prune");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.removed.len(), 1, "{}", prune_diagnosis(&applied));
         assert_eq!(applied.removed[0].reason, "resource_ttl_expired");
         assert_eq!(applied.removed[0].remote_path, synced.remote_path);
         assert!(
@@ -880,7 +909,7 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
 
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(
             output.candidates[0].remote_path,
             workspace.display().to_string()
@@ -941,7 +970,7 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
 
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{}", prune_diagnosis(&output));
         assert_eq!(output.scanned_workspace_count, 1);
         assert!(!output.scan_complete);
         assert_eq!(output.total_candidate_count, 1);
@@ -1009,7 +1038,7 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         assert!(!output.dry_run);
         assert_eq!(output.scanned_workspace_count, 2);
         assert_eq!(output.total_candidate_count, 1);
-        assert_eq!(output.removed.len(), 2);
+        assert_eq!(output.removed.len(), 2, "{}", prune_diagnosis(&output));
         assert_eq!(output.remaining_candidate_count, 0);
         assert_eq!(output.remaining_candidate_bytes, 0);
         assert!(!output.has_more);
@@ -1349,7 +1378,7 @@ fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
         let evidence =
             workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
 
-        assert_eq!(evidence.state, "inactive");
+        assert_eq!(evidence.state, "inactive", "{evidence:#?}");
         assert_eq!(
             evidence.observations,
             vec!["workspace_size_measurement_unavailable"]

@@ -2,6 +2,7 @@
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
 use serde_json::Value;
+use std::sync::Arc;
 
 use homeboy::agents::agent_task_controller_service::{
     build_run_failure_summary, controller_spec_fingerprint_for_status,
@@ -21,7 +22,7 @@ use homeboy::agents::agent_tasks::controller_service::{
 use homeboy::agents::agent_tasks::provider::{
     is_fixture_backend, ExtensionProviderAgentTaskExecutor,
 };
-use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
+use homeboy::agents::agent_tasks::scheduler::SharedAgentTaskExecutor;
 use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
@@ -264,7 +265,7 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
     let (resume_report, exit_code) = loop_resume_with_executor(
         report.loop_id.clone(),
         args.revolution_limit,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     )?;
     Ok((
@@ -299,20 +300,17 @@ fn loop_resume(args: AgentTaskLoopResumeArgs) -> CmdResult<Value> {
     loop_resume_with_executor(
         args.loop_id,
         args.revolution_limit,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     )
 }
 
-fn loop_resume_with_executor<E>(
+fn loop_resume_with_executor(
     loop_id: String,
     revolution_limit: Option<u32>,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&loop_id)?;
     let runtime = loop_runtime_metadata(&record.metadata);
     if !runtime["on"].as_bool().unwrap_or(true) {
@@ -389,27 +387,24 @@ fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
 /// dispatches through the existing controller run-from-spec path and emits
 /// either the run result (preview URL / evidence) or a compact failure summary.
 fn controller_proof(args: AgentTaskControllerProofArgs) -> CmdResult<Value> {
-    controller_proof_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+    controller_proof_with_executor(
+        args,
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
+    )
 }
 
 #[cfg(test)]
-pub(super) fn controller_proof_with_test_executor<E>(
+pub(super) fn controller_proof_with_test_executor(
     args: AgentTaskControllerProofArgs,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     controller_proof_with_executor(args, executor)
 }
 
-fn controller_proof_with_executor<E>(
+fn controller_proof_with_executor(
     args: AgentTaskControllerProofArgs,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     let profile = agent_task_controller_service::resolve_proof_profile(
         &args.profile,
         args.profiles.as_deref(),
@@ -533,27 +528,24 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
 }
 
 fn controller_run_from_spec(args: AgentTaskControllerRunFromSpecArgs) -> CmdResult<Value> {
-    controller_run_from_spec_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+    controller_run_from_spec_with_executor(
+        args,
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
+    )
 }
 
 #[cfg(test)]
-pub(super) fn controller_run_from_spec_with_test_executor<E>(
+pub(super) fn controller_run_from_spec_with_test_executor(
     args: AgentTaskControllerRunFromSpecArgs,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     controller_run_from_spec_with_executor(args, executor)
 }
 
-fn controller_run_from_spec_with_executor<E>(
+fn controller_run_from_spec_with_executor(
     args: AgentTaskControllerRunFromSpecArgs,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     if args.max_actions == 0 {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "max-actions",
@@ -794,12 +786,12 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     }
 
     let dispatch = CliDispatchHook {
-        executor: ExtensionProviderAgentTaskExecutor::discover(),
+        executor: Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     };
     let resume_result = agent_task_controller_service::resume_with_options(
         &report.loop_id,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         &dispatch,
         agent_task_controller_service::ControllerResumeOptions {
             max_actions: args.max_actions.unwrap_or(100) as usize,
@@ -1063,8 +1055,8 @@ fn doctor_check(
 
 /// Bridge controller spawn-task `"dispatch"` requests into the CLI dispatch path.
 #[derive(Clone)]
-struct CliDispatchHook<E> {
-    executor: E,
+struct CliDispatchHook {
+    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
 }
 
@@ -1329,10 +1321,7 @@ fn loop_runtime_metadata(metadata: &Value) -> Value {
     })
 }
 
-impl<E> ControllerDispatchHook for CliDispatchHook<E>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+impl ControllerDispatchHook for CliDispatchHook {
     fn dispatch(&self, request: &Value) -> homeboy::core::Result<(Value, i32)> {
         let command = agent_task_controller_service::controller_request_dispatch_command(
             request,
@@ -1389,7 +1378,7 @@ fn controller_run_next(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value>
     let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
     controller_run_next_with_executor_and_defaults(
         args.loop_id,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     )
 }
@@ -1399,7 +1388,7 @@ fn controller_run_action(args: AgentTaskControllerRunArgs) -> CmdResult<Value> {
     controller_run_action_with_executor_and_defaults(
         args.loop_id,
         args.action_id,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     )
 }
@@ -1408,16 +1397,16 @@ fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
     let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
     controller_resume_with_executor_and_defaults(
         args.loop_id,
-        ExtensionProviderAgentTaskExecutor::discover(),
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         defaults,
     )
 }
 
 #[cfg(test)]
-pub(super) fn controller_run_next_with_executor<E>(loop_id: String, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+pub(super) fn controller_run_next_with_executor(
+    loop_id: String,
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     controller_run_next_with_executor_and_defaults(
         loop_id,
         executor,
@@ -1425,14 +1414,11 @@ where
     )
 }
 
-fn controller_run_next_with_executor_and_defaults<E>(
+fn controller_run_next_with_executor_and_defaults(
     loop_id: String,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
@@ -1442,14 +1428,11 @@ where
 }
 
 #[cfg(test)]
-pub(super) fn controller_run_action_with_executor<E>(
+pub(super) fn controller_run_action_with_executor(
     loop_id: String,
     action_id: String,
-    executor: E,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
     controller_run_action_with_executor_and_defaults(
         loop_id,
         action_id,
@@ -1458,15 +1441,12 @@ where
     )
 }
 
-fn controller_run_action_with_executor_and_defaults<E>(
+fn controller_run_action_with_executor_and_defaults(
     loop_id: String,
     action_id: String,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
@@ -1476,14 +1456,11 @@ where
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-fn controller_resume_with_executor_and_defaults<E>(
+fn controller_resume_with_executor_and_defaults(
     loop_id: String,
-    executor: E,
+    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
+) -> CmdResult<Value> {
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
