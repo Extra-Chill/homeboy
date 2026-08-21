@@ -248,8 +248,29 @@ pub struct AgentTaskPreDispatchFailure<'a> {
 pub fn record_pre_dispatch_failure(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
+    record_pre_dispatch_failure_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        failure,
+    )
+}
+
+/// [`record_pre_dispatch_failure`] against an explicitly injected root.
+///
+/// The prior record and the plan this failure submits describe the same run, so
+/// they have to come from and land in the same installation (#7505).
+pub fn record_pre_dispatch_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    failure: AgentTaskPreDispatchFailure<'_>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(failure.identity.run_id);
-    if let Ok(record) = status(&run_id) {
+    if let Ok(record) = status_in_store(
+        lifecycle_store,
+        &run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .map(|outcome| outcome.record)
+    {
         return Ok(record);
     }
 
@@ -316,7 +337,7 @@ pub fn record_pre_dispatch_failure(
             metadata: metadata.clone(),
         }],
     );
-    submit_plan(&plan, Some(&run_id))?;
+    submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?;
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
@@ -394,6 +415,23 @@ pub fn record_remote_dispatch_failure(
     failure: AgentTaskRemoteDispatchFailure<'_>,
     envelope: &Value,
 ) -> Result<Option<AgentTaskRunRecord>> {
+    record_remote_dispatch_failure_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        failure,
+        envelope,
+    )
+}
+
+/// [`record_remote_dispatch_failure`] against an explicitly injected root.
+///
+/// The plan rewrite, the aggregate, and the record commit are one durable
+/// failure. The body used to resolve a root for the submit/aggregate pair and
+/// let four `store::` shims resolve their own for everything around it (#7505).
+pub fn record_remote_dispatch_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    failure: AgentTaskRemoteDispatchFailure<'_>,
+    envelope: &Value,
+) -> Result<Option<AgentTaskRunRecord>> {
     if envelope.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-dispatch/v1") {
         return Ok(None);
     }
@@ -438,12 +476,17 @@ pub fn record_remote_dispatch_failure(
             synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
         };
         record.run_id = run_id.clone();
-        record.plan_path = store::write_plan(&run_id, &plan)?.display().to_string();
+        record.plan_path = store::write_plan_in_store(lifecycle_store, &run_id, &plan)?
+            .display()
+            .to_string();
         apply_aggregate_to_record(
             &mut record,
             &plan,
             &aggregate,
-            store::aggregate_path(&run_id)?.display().to_string(),
+            lifecycle_store
+                .aggregate_path(&run_id)
+                .display()
+                .to_string(),
         );
         (
             record,
@@ -476,9 +519,8 @@ pub fn record_remote_dispatch_failure(
         let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
         // One store for both: the record this submits and the aggregate written
         // against it are one durable outcome (#7505).
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-        let mut record = submit_plan_in_store(&lifecycle_store, &plan, Some(&run_id))?;
-        record_aggregate_in_store(&lifecycle_store, &mut record, &plan, &aggregate)?;
+        let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?;
+        record_aggregate_in_store(lifecycle_store, &mut record, &plan, &aggregate)?;
         (
             record,
             remote_run_id,
@@ -517,9 +559,9 @@ pub fn record_remote_dispatch_failure(
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 
     if needs_atomic_terminal_commit {
-        store::write_aggregate_and_record(&record, &aggregate)?;
+        lifecycle_store.write_aggregate_and_record(&record, &aggregate)?;
     } else {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     Ok(Some(record))
 }
