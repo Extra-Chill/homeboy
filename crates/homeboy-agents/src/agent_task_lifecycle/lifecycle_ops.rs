@@ -2770,6 +2770,17 @@ pub(crate) fn record_provider_execution_terminal_in_store(
     attempt: u32,
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
+    if !matches!(
+        state,
+        "succeeded" | "cancelled" | "timed_out" | "candidate_recoverable" | "failed"
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "state",
+            "provider execution terminal state is invalid",
+            Some(state.to_string()),
+            None,
+        ));
+    }
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
@@ -2809,9 +2820,9 @@ pub(crate) fn record_provider_execution_terminal_in_store(
             "provider execution reached a terminal result without its durable attempt record",
         ));
     }
-    record.ok_or_else(|| {
-        Error::internal_unexpected("provider execution terminal record was unchanged")
-    })
+    // The mutation is intentionally a no-op when cancellation or another
+    // terminal writer won the race. That existing record is the durable outcome.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
 }
 
 // The ambient `has_active_provider_execution()` shim that used to sit here is gone;
