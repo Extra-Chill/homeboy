@@ -1040,15 +1040,8 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
-/// Restore an explicit plan placement decision onto a legacy run record.
-///
-/// Placement is opt-in policy evidence. A controller-local plan without a
-/// decision must remain unclassified rather than acquiring a synthetic local
-/// contract that could contradict later runner evidence.
-pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    normalize_local_execution_placement_in_store(&lifecycle_store, run_id)
-}
+// The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
+// its two normalization tests now normalize inside a store they resolve (#7505).
 
 /// Restore an explicit plan placement decision onto a legacy record inside an
 /// explicitly rooted store.
@@ -1308,12 +1301,16 @@ mod execution_placement_tests {
     #[test]
     fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            // One store for the whole test: both normalizations and the record
+            // they read must name one installation.
+            let store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
             let plan = super::super::tests::test_plan();
             let record =
                 submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
                     .expect("submit plan");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("submission stamp remains authoritative");
             let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
                 serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
@@ -1343,7 +1340,7 @@ mod execution_placement_tests {
                 .remove("execution_placement_decision");
             store::write_record(&legacy_record).expect("remove legacy record projection");
 
-            let normalized = normalize_local_execution_placement(&record.run_id)
+            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("explicit plan decision is restored");
             assert_eq!(
                 normalized.metadata["execution_placement_decision"]["decision_id"],
@@ -2817,16 +2814,8 @@ pub(crate) fn record_provider_execution_terminal_in_store(
     })
 }
 
-/// Whether this run still has a provider execution that can produce work.
-///
-/// Controller-owned artifact harvesting may continue after a provider result is
-/// terminal. Foreground liveness sampling is only meaningful while a provider
-/// boundary remains active, so callers use this durable predicate to stop
-/// sampling during that bounded cleanup phase.
-pub fn has_active_provider_execution(run_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    has_active_provider_execution_in_store(&lifecycle_store, run_id)
-}
+// The ambient `has_active_provider_execution()` shim that used to sit here is gone;
+// its one scheduler test now asks the store it resolves (#7505).
 
 /// [`has_active_provider_execution`] against explicitly injected durable
 /// lifecycle roots.
@@ -5302,15 +5291,8 @@ pub(crate) fn record_cook_attempt_in_store(
     Ok(index)
 }
 
-/// Register a Cook attempt while the caller owns the config lock.
-pub(crate) fn record_cook_attempt_locked(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-) -> Result<CookAttemptRegistration> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_attempt_locked_in_store(&lifecycle_store, cook_id, attempt, run_id)
-}
+// The ambient `record_cook_attempt_locked()` shim that used to sit here is gone;
+// its one strict-lock test now registers inside the store it resolves (#7505).
 
 pub(crate) fn record_cook_attempt_locked_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5413,17 +5395,8 @@ impl CookAttemptRegistration {
     }
 }
 
-/// Record the controller-owned boundary that a resumed Cook must advance.
-/// Provider terminal evidence and promotion reports remain separate so a later
-/// failed attempt cannot replace the source candidate's recovery checkpoint.
-pub fn record_cook_recovery_checkpoint(
-    run_id: &str,
-    phase: &str,
-    next_command: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_recovery_checkpoint_in_store(&lifecycle_store, run_id, phase, next_command)
-}
+// The ambient `record_cook_recovery_checkpoint()` shim that used to sit here is gone;
+// the fanout resume path was its only caller and now checkpoints inside the store it resolves (#7505).
 
 pub fn record_cook_recovery_checkpoint_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
