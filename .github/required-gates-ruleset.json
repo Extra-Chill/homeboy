@@ -23,7 +23,8 @@
           { "context": "homeboy / Rustfmt", "integration_id": 15368 },
           { "context": "homeboy / Audit", "integration_id": 15368 },
           { "context": "homeboy / Lint", "integration_id": 15368 },
-          { "context": "homeboy / Test", "integration_id": 15368 }
+          { "context": "homeboy / Test", "integration_id": 15368 },
+          { "context": "homeboy / Required Gates Executed", "integration_id": 15368 }
         ]
       }
     }
