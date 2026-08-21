@@ -156,6 +156,16 @@ pub struct ProcessContainment {
     scope: String,
 }
 
+/// The result of best-effort containment cleanup. Linux process scopes use an
+/// inherited environment marker rather than a kernel-enforced boundary, so an
+/// escaped descendant can remove the marker before it is discovered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessContainmentCleanup {
+    pub forced: bool,
+    pub complete: bool,
+    pub detail: Option<String>,
+}
+
 impl ProcessContainment {
     /// Establish containment before spawning so every descendant inherits its
     /// ownership marker from the first instruction it executes.
@@ -221,10 +231,25 @@ impl ProcessContainment {
     /// Clean up descendants after the direct child has exited. Linux uses only
     /// the inherited marker here, never the former leader's process-group ID.
     /// Other platforms intentionally preserve their existing normal-exit path.
-    pub fn cleanup_after_leader_exit_bounded(&self, timeout: Duration) -> Result<()> {
+    pub fn cleanup_after_leader_exit_bounded(
+        &self,
+        timeout: Duration,
+    ) -> Result<ProcessContainmentCleanup> {
         #[cfg(target_os = "linux")]
         {
-            return terminate_linux_scope_members(&self.scope, timeout, None);
+            let cleanup = terminate_linux_scope_members(&self.scope, timeout, None)?;
+            let group = self.process_group_id.ok_or_else(|| {
+                Error::internal_unexpected("process containment was not attached to a child")
+            })?;
+            terminate_isolated_process_group(group)?;
+            if !wait_for_isolated_process_group_exit(group, timeout)
+                .map_err(Error::internal_unexpected)?
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "isolated process group {group} remains alive after cleanup"
+                )));
+            }
+            return Ok(cleanup);
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -235,7 +260,11 @@ impl ProcessContainment {
             if wait_for_isolated_process_group_exit(group, timeout)
                 .map_err(Error::internal_unexpected)?
             {
-                Ok(())
+                Ok(ProcessContainmentCleanup {
+                    forced: true,
+                    complete: true,
+                    detail: None,
+                })
             } else {
                 Err(Error::internal_unexpected(format!(
                     "isolated process group {group} remains alive after cleanup"
@@ -247,11 +276,23 @@ impl ProcessContainment {
     /// Gracefully stop this containment boundary, escalating only when its
     /// members survive `grace`. The boolean reports whether force termination
     /// was required, so durable callers can distinguish cleanup outcomes.
-    pub fn cleanup_with_grace(&self, grace: Duration, leader_has_exited: bool) -> Result<bool> {
+    pub fn cleanup_with_grace(
+        &self,
+        grace: Duration,
+        leader_has_exited: bool,
+    ) -> Result<ProcessContainmentCleanup> {
         #[cfg(target_os = "linux")]
         {
-            let _ = leader_has_exited;
-            return terminate_linux_scope_members_with_grace(&self.scope, grace);
+            let cleanup = terminate_linux_scope_members_with_grace(&self.scope, grace)?;
+            let group = self.process_group_id.ok_or_else(|| {
+                Error::internal_unexpected("process containment was not attached to a child")
+            })?;
+            let forced_group = terminate_isolated_process_group_with_grace(group, grace)?;
+            return Ok(ProcessContainmentCleanup {
+                forced: cleanup.forced || forced_group,
+                complete: cleanup.complete,
+                detail: cleanup.detail,
+            });
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -259,13 +300,24 @@ impl ProcessContainment {
                 let pid = self.leader_pid.ok_or_else(|| {
                     Error::internal_unexpected("process containment was not attached to a child")
                 })?;
-                return terminate_process_tree_with_grace(pid, grace)
-                    .map(|termination| termination.signal == "SIGKILL");
+                return terminate_process_tree_with_grace(pid, grace).map(|termination| {
+                    ProcessContainmentCleanup {
+                        forced: termination.signal == "SIGKILL",
+                        complete: true,
+                        detail: None,
+                    }
+                });
             }
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
-            terminate_isolated_process_group_with_grace(group, grace)
+            terminate_isolated_process_group_with_grace(group, grace).map(|forced| {
+                ProcessContainmentCleanup {
+                    forced,
+                    complete: true,
+                    detail: None,
+                }
+            })
         }
     }
 }
@@ -1114,7 +1166,14 @@ fn terminate_linux_process_scope(owner_pid: u32, scope: &str, timeout: Duration)
         }
     }
 
-    terminate_linux_scope_members(scope, timeout, Some(owner_pid))
+    let cleanup = terminate_linux_scope_members(scope, timeout, Some(owner_pid))?;
+    if cleanup.complete {
+        Ok(())
+    } else {
+        Err(Error::internal_unexpected(cleanup.detail.unwrap_or_else(
+            || "process-scope cleanup could not be verified".to_string(),
+        )))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1122,14 +1181,14 @@ fn terminate_linux_scope_members(
     scope: &str,
     timeout: Duration,
     owner_pid: Option<u32>,
-) -> Result<()> {
+) -> Result<ProcessContainmentCleanup> {
     let deadline = Instant::now() + timeout;
     loop {
         let targets = linux_scope_pids(scope)?;
-        signal_pids(&targets, libc::SIGKILL)?;
+        signal_pids(&targets.pids, libc::SIGKILL)?;
         let survivors = linux_scope_pids(scope)?;
-        if survivors.is_empty() {
-            return Ok(());
+        if survivors.pids.is_empty() {
+            return Ok(scope_cleanup_report(targets, survivors, true));
         }
         if Instant::now() >= deadline {
             let owner = owner_pid
@@ -1138,7 +1197,7 @@ fn terminate_linux_scope_members(
             return Err(Error::internal_unexpected(format!(
                 "owned process scope{owner} did not exit within {} ms; surviving pids: {}",
                 timeout.as_millis(),
-                join_pids(&survivors)
+                join_pids(&survivors.pids)
             )));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -1146,29 +1205,40 @@ fn terminate_linux_scope_members(
 }
 
 #[cfg(target_os = "linux")]
-fn terminate_linux_scope_members_with_grace(scope: &str, grace: Duration) -> Result<bool> {
+fn terminate_linux_scope_members_with_grace(
+    scope: &str,
+    grace: Duration,
+) -> Result<ProcessContainmentCleanup> {
     let targets = linux_scope_pids(scope)?;
-    signal_pids(&targets, libc::SIGTERM)?;
+    signal_pids(&targets.pids, libc::SIGTERM)?;
     if wait_for_linux_scope_exit(scope, grace)? {
-        return Ok(false);
+        return Ok(scope_cleanup_report(
+            targets,
+            linux_scope_pids(scope)?,
+            false,
+        ));
     }
     let survivors = linux_scope_pids(scope)?;
-    signal_pids(&survivors, libc::SIGKILL)?;
+    signal_pids(&survivors.pids, libc::SIGKILL)?;
     if !wait_for_linux_scope_exit(scope, SIGKILL_REAP_GRACE)? {
         let survivors = linux_scope_pids(scope)?;
         // Errors when anything outlived SIGKILL; returns Ok once the scope is
         // empty. Either way this path did escalate, so the caller is told the
         // grace period was not enough.
-        ensure_sigkill_reaped("owned process scope", 0, &survivors)?;
+        ensure_sigkill_reaped("owned process scope", 0, &survivors.pids)?;
     }
-    Ok(true)
+    Ok(scope_cleanup_report(
+        targets,
+        linux_scope_pids(scope)?,
+        true,
+    ))
 }
 
 #[cfg(target_os = "linux")]
 fn wait_for_linux_scope_exit(scope: &str, grace: Duration) -> Result<bool> {
     let deadline = Instant::now() + grace;
     loop {
-        if linux_scope_pids(scope)?.is_empty() {
+        if linux_scope_pids(scope)?.pids.is_empty() {
             return Ok(true);
         }
         let now = Instant::now();
@@ -1176,6 +1246,32 @@ fn wait_for_linux_scope_exit(scope: &str, grace: Duration) -> Result<bool> {
             return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn scope_cleanup_report(
+    targets: LinuxScopeDiscovery,
+    survivors: LinuxScopeDiscovery,
+    forced: bool,
+) -> ProcessContainmentCleanup {
+    let unreadable = targets
+        .unreadable_environments
+        .max(survivors.unreadable_environments);
+    let complete = !targets.pids.is_empty() && unreadable == 0;
+    let detail = (!complete).then(|| {
+        if unreadable > 0 {
+            format!(
+                "process-scope discovery was incomplete: {unreadable} /proc environment entries could not be read"
+            )
+        } else {
+            "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
+        }
+    });
+    ProcessContainmentCleanup {
+        forced,
+        complete,
+        detail,
     }
 }
 
@@ -1523,12 +1619,19 @@ fn linux_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_scope_pids(scope: &str) -> Result<Vec<u32>> {
+struct LinuxScopeDiscovery {
+    pids: Vec<u32>,
+    unreadable_environments: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
     let entries = std::fs::read_dir("/proc").map_err(|error| {
         Error::internal_unexpected(format!("inspect owned process scope: {error}"))
     })?;
     let expected = format!("{PROCESS_SCOPE_ENV}={scope}");
     let mut pids = Vec::new();
+    let mut unreadable_environments = 0;
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else {
@@ -1537,8 +1640,12 @@ fn linux_scope_pids(scope: &str) -> Result<Vec<u32>> {
         let Ok(pid) = name.parse::<u32>() else {
             continue;
         };
-        let Ok(environment) = std::fs::read(entry.path().join("environ")) else {
-            continue;
+        let environment = match std::fs::read(entry.path().join("environ")) {
+            Ok(environment) => environment,
+            Err(_) => {
+                unreadable_environments += 1;
+                continue;
+            }
         };
         if environment_contains_assignment(&environment, expected.as_bytes()) && pid_is_running(pid)
         {
@@ -1546,7 +1653,10 @@ fn linux_scope_pids(scope: &str) -> Result<Vec<u32>> {
         }
     }
     pids.sort_unstable();
-    Ok(pids)
+    Ok(LinuxScopeDiscovery {
+        pids,
+        unreadable_environments,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1632,6 +1742,44 @@ mod tests {
             environment,
             b"HOMEBOY_DAEMON_STARTUP_TOKEN=lease"
         ));
+    }
+
+    #[test]
+    fn scope_cleanup_reports_omitted_or_unreadable_marker_discovery() {
+        let omitted = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 0,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 0,
+            },
+            false,
+        );
+        assert!(!omitted.complete);
+        assert!(omitted
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no marker-owned process")));
+
+        let unreadable = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            true,
+        );
+        assert!(!unreadable.complete);
+        assert!(unreadable.forced);
+        assert!(unreadable
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("could not be read")));
     }
 
     #[test]
