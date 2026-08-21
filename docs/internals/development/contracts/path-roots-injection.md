@@ -258,6 +258,60 @@ fn test_roots() -> homeboy_core::paths::PathRoots {
 This is not a loophole. The test genuinely is the entry point for its unit of
 work. What matters is that the *production* path below it resolves nothing.
 
+## What actually gates `with_isolated_home`
+
+Ambient-resolution counts are the intermediate measure. The number #7505 asks
+about is `with_isolated_home`: ~2,529 call sites, each taking a process-global
+mutex, which is why the suite serializes.
+
+A test can drop the wrapper only when **everything it reaches** takes explicit
+roots. That is a transitive property, and it is not visible from the test body.
+Measuring which core helper each block depends on, over 2,322 analysable
+blocks:
+
+| blocker referenced directly | blocks | share |
+|---|---|---|
+| `ObservationStore::open_initialized` | 359 | 15% |
+| `engine::temp` / `RunDir::create` | 93 | 4% |
+| `defaults::load_config` / `save_config` | 57 | 2% |
+| `paths::*` directly | 51 | 2% |
+| `component`/`project`/`server` loaders | 25 | 1% |
+| `config::*` entity CRUD | 3 | 0% |
+| **no direct reference** — reaches one transitively | **1,764** | **76%** |
+
+Two things follow.
+
+**`ObservationStore::open_initialized` is the single highest-leverage target.**
+It is referenced directly by 359 test blocks and has 504 call sites overall.
+Nothing else comes close.
+
+**The 76% is the real shape of the problem.** Most tests do not name a blocker;
+they call something that calls something that resolves. `RunDir::create()` is
+the clearest example — it looks inert, and it reaches
+`engine::temp::ensure_runtime_tmp_dir` → `paths::homeboy_data()`. Every test
+that builds a `RunDir` is pinned to the ambient home by a call two frames down
+with no path in its name.
+
+### Do not bulk-edit off a scan here
+
+A regex over test bodies cannot answer "does this reach the filesystem through
+an ambient root". Both directions fail:
+
+- **False positives.** A body mentioning `store` may only be using an injected
+  one.
+- **False negatives.** A test calling `install_for_component(...)` names no
+  blocker and writes half the config root.
+
+A scan of `homeboy-extension` and `homeboy-deploy` for blocks with "no
+blocker" returned 97 candidates, and spot-checking found tests that plainly
+install extensions into `<config>/extensions`. The list was noise.
+
+Free a test only when the call graph proves it, one at a time. #12774 freed two
+`OperationRecordStore` tests on that basis: every call went through a store
+bound to a data root, and every path it touched was a `*_in_roots` join below
+it. That is the standard of proof this needs — the same standard that keeps
+being right about dead wrappers, and the same one that catches the scans.
+
 ## Reporting progress
 
 Raw `from_environment()` counts are a misleading headline, because a correct
