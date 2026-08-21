@@ -271,3 +271,66 @@ impl Drop for RunnerContinuationTestGuard {
         clear_runner_continuation_provider_for_test();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct LegacyProvider {
+        runner_exists: bool,
+    }
+
+    impl RunnerContinuationProvider for LegacyProvider {
+        fn runner_job_log_snapshot(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+        ) -> Result<RunnerJobLogSnapshot> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn is_runner_connected(&self, _runner_id: &str) -> bool {
+            false
+        }
+
+        fn runner_exists(&self, _runner_id: &str) -> bool {
+            self.runner_exists
+        }
+
+        fn run_continuation_exec(
+            &self,
+            _runner_id: &str,
+            _cwd: &str,
+            _command: &[String],
+            _run_id: &str,
+        ) -> Result<i32> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn submit_reverse_broker_job(
+            &self,
+            _runner_id: &str,
+            _request: RemoteRunnerJobRequest,
+        ) -> Result<Job> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+    }
+
+    #[test]
+    fn legacy_runner_exists_cannot_prove_a_runner_was_removed() {
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: true,
+            }
+            .runner_authority("legacy-runner"),
+            RunnerAuthority::Configured
+        );
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: false,
+            }
+            .runner_authority("legacy-runner"),
+            RunnerAuthority::Unknown
+        );
+    }
+}
