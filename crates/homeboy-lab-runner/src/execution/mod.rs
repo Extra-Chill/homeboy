@@ -336,18 +336,6 @@ impl RunnerExecOptions {
         self.print_handoff = false;
         self
     }
-
-    /// Mark this exec as a read-only retrieval of retained runner evidence. The
-    /// read routes to the generation that still owns the retained run/artifact
-    /// and never rotates the shared admission tunnel, so a stale admission
-    /// daemon does not block hydrating a completed run's artifacts
-    /// (Extra-Chill/homeboy#9420).
-    pub(crate) fn read_only_artifact_access(mut self) -> Self {
-        self.read_only_artifact_access = true;
-        self.mirror_evidence = false;
-        self.print_handoff = false;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -31,9 +31,6 @@ pub(crate) enum WorkspaceCleanupPolicy {
     /// Reap the workspace when the run succeeds; preserve it on failure so
     /// post-mortem evidence survives on the lab through its registered TTL.
     PreserveOnFailure,
-    /// Never auto-reap; rely entirely on the operator-driven
-    /// `runner workspace prune` CLI (the legacy behavior).
-    PreserveAlways,
 }
 
 impl WorkspaceCleanupPolicy {
@@ -41,7 +38,6 @@ impl WorkspaceCleanupPolicy {
         match self {
             Self::DeleteAlways => "delete-on-terminal",
             Self::PreserveOnFailure => "preserve-on-failure",
-            Self::PreserveAlways => "preserve-always",
         }
     }
 }
@@ -164,7 +160,6 @@ impl MaterializedWorkspace {
         }
         match self.policy {
             WorkspaceCleanupPolicy::DeleteAlways => true,
-            WorkspaceCleanupPolicy::PreserveAlways => false,
             WorkspaceCleanupPolicy::PreserveOnFailure => {
                 self.outcome == WorkspaceTerminalOutcome::Success
             }
