@@ -1215,6 +1215,7 @@ fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_ident
         let ready = std::cell::Cell::new(false);
         let ready_after_wait = &ready;
         crate::commands::deferred_workload::run_worker_with(
+            &homeboy::core::paths::homeboy().expect("config root"),
             "worker-token",
             || {
                 Ok(ready.get().then(|| {

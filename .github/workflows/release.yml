@@ -1167,6 +1167,30 @@ jobs:
         run: |
           set -euo pipefail
           COMMIT="$(git rev-parse "${RELEASE_TAG}^{}")"
+
+          # Declare a sha256 for every asset (#12701 follow-up).
+          #
+          # This emitted `{path: .}` and nothing else, so every artifact in the
+          # manifest carried a null sha256. `validate_recovery_artifact` requires
+          # a 64-hex digest for each one and rejected the first it read, which is
+          # why v0.350.27 failed with "Recovered release asset
+          # 'dist-manifest.json' is missing a valid sha256" -- that asset is
+          # simply first in the sorted expected set, not special. The manifest
+          # and its validator had disagreed since the manifest was introduced;
+          # nothing reached the validator before, because the asset-completeness
+          # gate failed earlier in the job.
+          #
+          # The bytes are already in `artifacts/`: the preceding preserve step
+          # placed them, and `set -euo pipefail` makes a missing file fail this
+          # step loudly rather than emit a manifest with a hole in it.
+          artifacts_json="$(
+            while IFS= read -r name; do
+              jq -n --arg path "${name}" \
+                    --arg sha256 "$(sha256sum "artifacts/${name}" | cut -d' ' -f1)" \
+                    '{path: $path, sha256: $sha256}'
+            done < <(jq -r '.[]' <<< "${EXPECTED_ASSETS}") | jq -sc '.'
+          )"
+
           jq -n \
             --arg schema homeboy.package-recovery \
             --argjson schema_version 1 \
@@ -1174,8 +1198,8 @@ jobs:
             --arg tag "${RELEASE_TAG}" \
             --arg version "${RELEASE_VERSION}" \
             --arg commit "${COMMIT}" \
-            --argjson expected_assets "${EXPECTED_ASSETS}" \
-            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: [$expected_assets[] | {path: .}]}' > artifacts/manifest.json
+            --argjson artifacts "${artifacts_json}" \
+            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: $artifacts}' > artifacts/manifest.json
 
       - name: Reconcile rebuilt recovery assets
         if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'

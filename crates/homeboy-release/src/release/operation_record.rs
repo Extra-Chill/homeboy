@@ -48,38 +48,43 @@ impl OperationRecord {
     }
 }
 
-pub struct OperationRecordStore;
+/// Durable operation records below one explicitly injected data root.
+///
+/// Stateful on purpose. A single release workspace lifecycle writes this store
+/// roughly a dozen times — publish ownership, record the provisioned path,
+/// mark a failed verification, claim finalization, complete it — and the
+/// ambient form resolved a data root independently for every one of them.
+/// Binding the root once at construction is what makes those writes provably
+/// the same home's, rather than incidentally so (#7505).
+pub struct OperationRecordStore {
+    data_root: PathBuf,
+}
 
 impl OperationRecordStore {
-    pub fn create(record: &OperationRecord) -> Result<OperationRecord> {
-        Self::update(&record.owner_run_ref, |_| Ok(record.clone()))
+    /// Bind the store to the data root its caller already resolved.
+    pub fn in_roots(roots: &paths::PathRoots) -> Self {
+        Self {
+            data_root: roots.data().to_path_buf(),
+        }
+    }
+
+    pub fn create(&self, record: &OperationRecord) -> Result<OperationRecord> {
+        self.update(&record.owner_run_ref, |_| Ok(record.clone()))
     }
 
     /// Compare/update is serialized across processes and atomically replaces the
     /// record, so a recovered finalizer cannot race a still-running owner.
-    pub fn update(
-        owner_run_ref: &str,
-        update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
-    ) -> Result<OperationRecord> {
-        Self::update_in_roots(
-            paths::PathRoots::from_environment()?.data(),
-            owner_run_ref,
-            update,
-        )
-    }
-
-    /// [`update`](Self::update) against an explicitly injected data root.
     ///
-    /// The lock and the record path are now derived from one resolution. The
-    /// ambient form resolved the data root twice — once inside `lock()` and
-    /// again inside `record_path()` — so a repoint between them could have
-    /// serialized against one home's `.lock` while replacing the other home's
-    /// record (#7505).
-    fn update_in_roots(
-        data_root: &Path,
+    /// The lock and the record path derive from one root. The ambient form
+    /// resolved the data root twice — once inside `lock()` and again inside
+    /// `record_path()` — so a repoint between them could have serialized
+    /// against one home's `.lock` while replacing the other home's record.
+    pub fn update(
+        &self,
         owner_run_ref: &str,
         update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
     ) -> Result<OperationRecord> {
+        let data_root = self.data_root.as_path();
         let _lock = lock_in_roots(data_root)?;
         let path = record_path_in_roots(data_root, owner_run_ref);
         let current = read_path(&path)?;
@@ -104,19 +109,19 @@ impl OperationRecordStore {
         Ok(next)
     }
 
-    pub fn load(owner_run_ref: &str) -> Result<Option<OperationRecord>> {
-        let roots = paths::PathRoots::from_environment()?;
-        let _lock = lock_in_roots(roots.data())?;
-        read_path(&record_path_in_roots(roots.data(), owner_run_ref))
+    pub fn load(&self, owner_run_ref: &str) -> Result<Option<OperationRecord>> {
+        let data_root = self.data_root.as_path();
+        let _lock = lock_in_roots(data_root)?;
+        read_path(&record_path_in_roots(data_root, owner_run_ref))
     }
 
     /// Claims finalization before an external provider call. A live lease is
     /// never stolen; only a bounded stale lease can be retried.
-    pub fn claim_finalization(owner_run_ref: &str) -> Result<FinalizationClaim> {
+    pub fn claim_finalization(&self, owner_run_ref: &str) -> Result<FinalizationClaim> {
         const STALE_LEASE_MS: u128 = 5 * 60 * 1000;
         let now = now_ms();
         let candidate_lease = uuid::Uuid::new_v4().to_string();
-        Self::update(owner_run_ref, |record| {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -157,8 +162,12 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn complete_finalization(owner_run_ref: &str, lease: &str) -> Result<OperationRecord> {
-        Self::update(owner_run_ref, |record| {
+    pub fn complete_finalization(
+        &self,
+        owner_run_ref: &str,
+        lease: &str,
+    ) -> Result<OperationRecord> {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -182,11 +191,12 @@ impl OperationRecordStore {
     }
 
     pub fn fail_finalization(
+        &self,
         owner_run_ref: &str,
         lease: &str,
         error: String,
     ) -> Result<OperationRecord> {
-        Self::update(owner_run_ref, |record| {
+        self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "owner_run_ref",
@@ -207,18 +217,23 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn pending_for_subject(operation: &str, subject: &str) -> Result<Vec<OperationRecord>> {
-        Self::for_subject(operation, subject, true)
+    pub fn pending_for_subject(
+        &self,
+        operation: &str,
+        subject: &str,
+    ) -> Result<Vec<OperationRecord>> {
+        self.for_subject(operation, subject, true)
     }
 
     pub fn for_subject(
+        &self,
         operation: &str,
         subject: &str,
         pending_only: bool,
     ) -> Result<Vec<OperationRecord>> {
-        let roots = paths::PathRoots::from_environment()?;
-        let _lock = lock_in_roots(roots.data())?;
-        let dir = store_dir_in_roots(roots.data());
+        let data_root = self.data_root.as_path();
+        let _lock = lock_in_roots(data_root)?;
+        let dir = store_dir_in_roots(data_root);
         let mut records = Vec::new();
         if !dir.exists() {
             return Ok(records);
@@ -318,6 +333,16 @@ mod tests {
         Arc, Barrier,
     };
 
+    /// The record store for the isolated home each test below installs.
+    ///
+    /// `with_isolated_home` establishes the home; this binds a store to it once,
+    /// the same way the release boundary binds one for a whole command (#7505).
+    fn test_store() -> OperationRecordStore {
+        OperationRecordStore::in_roots(
+            &homeboy_core::paths::PathRoots::from_environment().expect("path roots"),
+        )
+    }
+
     fn record() -> OperationRecord {
         OperationRecord {
             owner_run_ref: "release/test-owner".to_string(),
@@ -343,25 +368,26 @@ mod tests {
     fn persists_reloads_and_compare_updates_operation_records() {
         with_isolated_home(|_| {
             let record = record();
-            OperationRecordStore::create(&record).expect("persist");
-            let reloaded = OperationRecordStore::load(&record.owner_run_ref)
+            test_store().create(&record).expect("persist");
+            let reloaded = test_store()
+                .load(&record.owner_run_ref)
                 .expect("load")
                 .expect("record");
             assert_eq!(reloaded, record);
-            let updated = OperationRecordStore::update(&record.owner_run_ref, |current| {
-                let mut current = current.expect("record");
-                current.attempt_count += 1;
-                current.finalization_status = "completed".to_string();
-                Ok(current)
-            })
-            .expect("atomic update");
+            let updated = test_store()
+                .update(&record.owner_run_ref, |current| {
+                    let mut current = current.expect("record");
+                    current.attempt_count += 1;
+                    current.finalization_status = "completed".to_string();
+                    Ok(current)
+                })
+                .expect("atomic update");
             assert_eq!(updated.attempt_count, 1);
-            assert!(
-                !OperationRecordStore::pending_for_subject("provider_workspace", "component")
-                    .expect("pending")
-                    .iter()
-                    .any(|record| record.owner_run_ref == "release/test-owner")
-            );
+            assert!(!test_store()
+                .pending_for_subject("provider_workspace", "component")
+                .expect("pending")
+                .iter()
+                .any(|record| record.owner_run_ref == "release/test-owner"));
         });
     }
 
@@ -369,7 +395,7 @@ mod tests {
     fn concurrent_finalizers_claim_one_provider_effect() {
         with_isolated_home(|_| {
             let record = record();
-            OperationRecordStore::create(&record).expect("persist");
+            test_store().create(&record).expect("persist");
             let barrier = Arc::new(Barrier::new(2));
             let effects = Arc::new(AtomicUsize::new(0));
             let workers = (0..2)
@@ -380,11 +406,12 @@ mod tests {
                     std::thread::spawn(move || {
                         barrier.wait();
                         if let FinalizationClaim::Claimed { lease, .. } =
-                            OperationRecordStore::claim_finalization(&owner).expect("claim")
+                            test_store().claim_finalization(&owner).expect("claim")
                         {
                             // This is the provider-effect boundary: only a claimant may cross it.
                             effects.fetch_add(1, Ordering::SeqCst);
-                            OperationRecordStore::complete_finalization(&owner, &lease)
+                            test_store()
+                                .complete_finalization(&owner, &lease)
                                 .expect("complete");
                         }
                     })
@@ -394,12 +421,14 @@ mod tests {
                 worker.join().expect("finalizer thread");
             }
             assert_eq!(effects.load(Ordering::SeqCst), 1);
-            let completed = OperationRecordStore::load(&record.owner_run_ref)
+            let completed = test_store()
+                .load(&record.owner_run_ref)
                 .expect("load")
                 .expect("record");
             assert_eq!(completed.finalization_status, "completed");
             assert!(matches!(
-                OperationRecordStore::claim_finalization(&record.owner_run_ref)
+                test_store()
+                    .claim_finalization(&record.owner_run_ref)
                     .expect("completed claim"),
                 FinalizationClaim::AlreadyCompleted(_)
             ));

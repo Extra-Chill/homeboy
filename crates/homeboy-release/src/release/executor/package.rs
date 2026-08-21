@@ -36,26 +36,6 @@ pub(crate) struct PackageRequest<'a> {
 /// Invoke the `release.package` action on every extension that provides it,
 /// parse the emitted artifacts, and stash them in [`ReleaseState::artifacts`]
 /// for downstream publish targets and for the GitHub Release step.
-pub(crate) fn run_package(
-    extensions: &[ExtensionManifest],
-    state: &mut ReleaseState,
-    component: &Component,
-    component_id: &str,
-    component_local_path: &str,
-    request: PackageRequest<'_>,
-) -> Result<ReleaseStepResult> {
-    run_package_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        extensions,
-        state,
-        component,
-        component_id,
-        component_local_path,
-        request,
-    )
-}
-
-/// [`run_package`] against explicitly injected roots.
 ///
 /// Both halves of this step are Homeboy state and both are injected together,
 /// on purpose. The durable artifact copies land under `roots.artifacts()` and
@@ -67,7 +47,7 @@ pub(crate) fn run_package(
 /// and `run_package_action_with_retry` hand work to a *subprocess* — the
 /// component's own build script and the extension's `release.package` action.
 /// Those children read their own environment by design and must keep doing so.
-pub(crate) fn run_package_in_roots(
+pub(crate) fn run_package(
     roots: &homeboy_core::paths::PathRoots,
     extensions: &[ExtensionManifest],
     state: &mut ReleaseState,

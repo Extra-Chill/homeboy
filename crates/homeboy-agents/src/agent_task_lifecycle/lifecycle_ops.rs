@@ -1708,10 +1708,9 @@ pub(crate) fn project_runner_execution_context(
     Ok(())
 }
 
-pub(crate) fn persist_controller_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    persist_controller_plan_in_store(&lifecycle_store, run_id, plan)
-}
+// The ambient `persist_controller_plan()` shim that used to sit above this is
+// gone. Its last caller was the Cook retry boundary, which now persists the
+// controller plan into the same store it reserved the successor in (#7505).
 
 pub(crate) fn persist_controller_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -4637,17 +4636,9 @@ pub(crate) fn record_metadata_value_in_store(
     lifecycle_store.record_metadata_value(run_id, key, value)
 }
 
-/// Reserve one successor for the complete retry lineage before admitting it.
-/// The advisory lock spans processes, so a lost CLI response can be retried
-/// without creating a second queued controller run.
-pub fn retry_with_force(
-    run_id: &str,
-    requested_run_id: Option<&str>,
-    force: bool,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    retry_with_force_in_store(&lifecycle_store, run_id, requested_run_id, force)
-}
+// The ambient `retry_with_force()` shim that used to sit above this is gone.
+// Its last caller was the Cook retry boundary, which now reserves the successor
+// in the store it holds for the whole lineage (#7505).
 
 /// Reserve one successor for the complete retry lineage inside an explicitly
 /// rooted store. The advisory lock is taken beside that store's own run
@@ -5014,27 +5005,16 @@ fn persist_retry_lineage_in_store(
     Ok(())
 }
 
-/// Find the one lifecycle-first Cook retry reservation that can be bound to an
-/// unbound recipe attempt. The `retry_of` lookup is backed by the observation
-/// metadata index; the plan and attempt-shaped run id prevent adoption of an
-/// unrelated retry from the same source.
-pub fn find_unbound_cook_retry_successor(
-    source_run_id: &str,
-    cook_id: &str,
-    attempt: u32,
-    plan: &AgentTaskPlan,
-) -> Result<Option<AgentTaskRunRecord>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    find_unbound_cook_retry_successor_in_store(
-        &lifecycle_store,
-        source_run_id,
-        cook_id,
-        attempt,
-        plan,
-    )
-}
+// The ambient `find_unbound_cook_retry_successor()` shim that used to sit
+// above this is gone. Its last caller was the Cook retry boundary, which now
+// looks the successor up in the store it reserved it in (#7505).
 
-/// Find the Cook retry reservation inside an explicitly rooted store.
+/// Find the one lifecycle-first Cook retry reservation that can be bound to an
+/// unbound recipe attempt, inside an explicitly rooted store.
+///
+/// The `retry_of` lookup is backed by the observation metadata index; the plan
+/// and attempt-shaped run id prevent adoption of an unrelated retry from the
+/// same source.
 ///
 /// The caller treats `None` as authority to create a reservation, so this read
 /// has to come from the store the reservation was made in. Answered ambiently it

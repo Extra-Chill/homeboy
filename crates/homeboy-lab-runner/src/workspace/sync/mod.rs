@@ -3515,6 +3515,9 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
         );
     };
     let mut seen = 0usize;
+    // Processes owned by another user (#12715). Counted, reported, and stepped
+    // over -- see the note on `PermissionDenied` below.
+    let mut foreign = 0usize;
     for process in processes.flatten() {
         let pid = process.file_name();
         if pid.to_string_lossy().parse::<u32>().is_err() {
@@ -3525,14 +3528,36 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
             return liveness("unknown", vec!["process_probe_process_limit".to_string()]);
         }
         let process_path = process.path();
+        // `PermissionDenied` is not an inconclusive read of a relevant process.
+        // It is the kernel stating this process belongs to another user, and a
+        // process running as another UID cannot have entered a workspace root
+        // it has no traverse permission on.
+        //
+        // Conflating it with a genuine probe failure did not fail closed, it
+        // failed SHUT: on any host where the caller is not root, the first
+        // foreign process returned `unknown` and no workspace was ever
+        // classified as prunable. Measured on one host, same kernel, only the
+        // UID differing -- root read 187 of 188 `cwd` links, an unprivileged
+        // user read 1 and got EACCES on 186. `homeboy runner workspace prune`
+        // was therefore inoperative for every non-root user, reporting zero
+        // candidates and exiting 0, and it took out fourteen prune tests on
+        // every CI run because CI is not root either.
         let cwd = match fs::read_link(process_path.join("cwd")) {
             Ok(cwd) => cwd,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                foreign += 1;
+                continue;
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_cwd_failed".to_string()]),
         };
         let command = match fs::read(process_path.join("cmdline")) {
             Ok(command) => command,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                foreign += 1;
+                continue;
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_argv_failed".to_string()]),
         };
         if cwd.starts_with(path) || String::from_utf8_lossy(&command).contains(target.as_ref()) {
@@ -3541,6 +3566,10 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
         let fds = match fs::read_dir(process_path.join("fd")) {
             Ok(fds) => fds,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                foreign += 1;
+                continue;
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_fd_failed".to_string()]),
         };
         for (index, fd) in fds.flatten().enumerate() {
@@ -3558,6 +3587,16 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
             }
         }
     }
+    // Deliberately NOT reported as an observation.
+    //
+    // Recording "skipped N foreign processes" here is tempting for
+    // transparency, but `observations` is an evidence contract that callers and
+    // tests compare by exact equality, and the count varies with whatever else
+    // happens to be running on the host. That would make a delete-decision
+    // record non-deterministic across machines and turn every such assertion
+    // into a flake. The skip is a property of the caller's privileges, not of
+    // this workspace.
+    let _ = foreign;
     liveness("inactive", Vec::new())
 }
 
