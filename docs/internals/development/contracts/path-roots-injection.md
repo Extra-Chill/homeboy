@@ -100,6 +100,60 @@ could not have called `from_environment()?` itself. The ambient
 `Result` out of sight. An ambient wrapper hanging off an infallible function is
 a strong signal that resolution belongs further up.
 
+## Migrate top-down, never bottom-up
+
+The instinct is to attack the crate with the most ambient calls. That is
+backwards, and the codebase punishes it twice over.
+
+An ambient wrapper can only be deleted when its callers can supply a root. If
+they cannot, "converting" the callee just relocates the resolution outward and
+multiplies it:
+
+| target | ambient calls in the callee | call sites that would have to resolve instead |
+|---|---|---|
+| `config::*` entity CRUD | 17 | **61** |
+| `defaults::load_config` | 6 | **113** |
+| `OperationRecordStore` | 3 | 14 |
+
+Converting `config.rs` today would turn 17 ambient resolutions into 61. That is
+not progress measured badly; it is a regression.
+
+So the ordering law is:
+
+```text
+process boundary  (main.rs -> CliRuntime::run_from_args)
+      |  resolve here first
+      v
+command entry     (commands/<name>::run)
+      v
+subsystem entry   (orchestrator::run_with_plan, workflow::run_command_*)
+      v
+stateful stores   (OperationRecordStore, ReleaseWorkspace)
+      v
+leaf helpers / core primitives   (config::*, defaults::*, paths::*)
+      ^  delete these wrappers LAST
+```
+
+Each layer can only shed its wrappers after the layer above it holds roots.
+`OperationRecordStore` demonstrated this: it was untouchable until
+`workflow::run_command_with_workspace` resolved, and then it fell in one pass.
+
+`homeboy-core` therefore looks like the biggest prize (96 ambient calls) and is
+actually the **last** work, not the first. Its `_in_root` siblings already
+exist for essentially every ambient function; nothing is blocked on designing
+them. What is blocked is the callers.
+
+### How to pick the next increment
+
+Look for a file where the ambient wrappers' callers are **already at or near a
+boundary**. `commands/deferred_workload.rs` qualified: five wrappers, each with
+exactly one caller, and those callers were `run()` (a command entry),
+`cli_runtime.rs` (the process boundary itself), and one sibling command. All
+five collapsed in a single pass, net −22 lines.
+
+A file whose wrappers have dozens of scattered callers is not ready yet. Leave
+it and come back once the layer above has been rooted.
+
 ## Tests are a boundary too
 
 Tests that construct a carrier by hand, or call a rooted function directly,
