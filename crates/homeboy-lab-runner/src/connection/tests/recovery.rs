@@ -426,10 +426,12 @@ fn live_exact_owner_with_dead_listener_selects_bounded_replacement() {
     status.endpoint_probe_error = Some("curl timed out".to_string());
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&session),
             &status,
             session.homeboy_build_identity.as_deref().expect("identity"),
+            "<runner-id>",
+            None
         )
         .expect("exact idle recovery"),
         RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner
@@ -547,10 +549,12 @@ fn replaces_idle_stale_daemon_when_typed_jobs_are_zero_without_lease_recovery_ev
     let status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&direct_ssh_session("lease-stale")),
             &status,
             "homeboy 0.289.0+configured",
+            "<runner-id>",
+            None
         )
         .expect("bounded stale replacement"),
         RemoteDaemonConnectAction::ReplaceIdleStale,
@@ -724,11 +728,15 @@ fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let typed_unknown = idle_stale_status(RemoteDaemonWorkEvidence::Unknown);
 
     for status in [freshness_active, typed_active, typed_unknown] {
-        assert!(
-            remote_daemon_connect_action_with_controller_identity(None, &status, configured)
-                .expect_err("unsafe evidence fails closed")
-                .contains("runner ownership is not proven")
-        );
+        assert!(remote_daemon_connect_action_for_runner(
+            None,
+            &status,
+            configured,
+            "<runner-id>",
+            None
+        )
+        .expect_err("unsafe evidence fails closed")
+        .contains("runner ownership is not proven"));
     }
 }
 
@@ -737,10 +745,12 @@ fn idle_stale_replacement_refuses_unreachable_daemon_evidence() {
     let mut status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
     status.reachable = false;
 
-    assert!(remote_daemon_connect_action_with_controller_identity(
+    assert!(remote_daemon_connect_action_for_runner(
         None,
         &status,
         "homeboy 0.289.0+configured",
+        "<runner-id>",
+        None
     )
     .expect_err("unreachable evidence must fail closed")
     .contains("unreachable"));
@@ -757,10 +767,12 @@ fn reconnect_converges_to_configured_identity_and_repeated_recovery_reattaches()
     status.stale_reason_code = None;
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&direct_ssh_session("lease-stale")),
             &status,
             "homeboy 0.289.0+configured",
+            "<runner-id>",
+            None
         )
         .expect("converged daemon reattaches"),
         RemoteDaemonConnectAction::Reattach,

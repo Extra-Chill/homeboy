@@ -510,29 +510,6 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
     })
 }
 
-/// Decide whether to hydrate and, when applicable, run hydration for a
-/// materialized Lab workspace command.
-///
-/// Hydration is skipped when the operator passes `--skip-deps-hydration`.
-/// Runner-resident commands do not call this path because they do not
-/// materialize a source workspace.
-pub(crate) fn hydrate_for_lab_workspace_exec(
-    skip_deps_hydration: bool,
-    runner_id: &str,
-    local_path: &str,
-    remote_path: &str,
-    plan: HomeboyPlan,
-) -> Result<LabOffloadDependencyHydration> {
-    hydrate_for_lab_workspace_exec_internal(
-        skip_deps_hydration,
-        runner_id,
-        local_path,
-        remote_path,
-        plan,
-        None,
-    )
-}
-
 fn hydrate_for_lab_workspace_exec_internal(
     skip_deps_hydration: bool,
     runner_id: &str,
@@ -725,12 +702,13 @@ mod tests {
 
     #[test]
     fn explicit_skip_is_a_completed_no_op_without_runner_access() {
-        let hydration = hydrate_for_lab_workspace_exec(
+        let hydration = hydrate_for_lab_workspace_exec_internal(
             true,
             "unreachable-runner",
             "/missing/controller-workspace",
             "/missing/runner-workspace",
             HomeboyPlan::for_description(homeboy_core::plan::PlanKind::LabOffload, "hydration"),
+            None,
         )
         .expect("skip does not detect or execute dependencies");
 
@@ -1014,12 +992,13 @@ mod tests {
             std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
                 .expect("remote provider manifest");
 
-            let result = hydrate_for_lab_workspace_exec(
+            let result = hydrate_for_lab_workspace_exec_internal(
                 false,
                 "lab-local",
                 &project.path().display().to_string(),
                 &remote.path().display().to_string(),
                 base_lab_plan(None),
+                None,
             )
             .expect("workspace command hydrates");
 
@@ -1148,12 +1127,13 @@ mod tests {
     /// even for a materialized workspace job.
     #[test]
     fn hydration_skipped_when_opt_out_flag_set() {
-        let result = hydrate_for_lab_workspace_exec(
+        let result = hydrate_for_lab_workspace_exec_internal(
             true,
             "unused-runner",
             "/unused/local",
             "/unused/remote",
             base_lab_plan(None),
+            None,
         )
         .expect("opt-out path does not hydrate");
 

@@ -1208,22 +1208,10 @@ pub(super) fn remote_daemon_connect_action(
     previous_session: Option<&RunnerSession>,
     status: &RemoteDaemonStatus,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
-    remote_daemon_connect_action_with_controller_identity(
-        previous_session,
-        status,
-        &homeboy_product_identity::build_identity().display,
-    )
-}
-
-pub(super) fn remote_daemon_connect_action_with_controller_identity(
-    previous_session: Option<&RunnerSession>,
-    status: &RemoteDaemonStatus,
-    expected_identity: &str,
-) -> std::result::Result<RemoteDaemonConnectAction, String> {
     remote_daemon_connect_action_for_runner(
         previous_session,
         status,
-        expected_identity,
+        &homeboy_product_identity::build_identity().display,
         "<runner-id>",
         None,
     )

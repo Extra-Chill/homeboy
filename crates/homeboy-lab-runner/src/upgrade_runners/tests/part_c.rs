@@ -577,13 +577,7 @@ fn realigns_stale_source_checkout_homeboy_path_after_upgrade_failure() {
     let mut commands = Vec::new();
     let mut path_updates = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
-        &[runner],
-        false,
-        None,
-        None,
-        &[],
-        |runner_id, options| {
+    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(&[runner], false, None, None, &[], |runner_id, options| {
             commands.push(options.command.clone());
             let (stdout, stderr, exit_code) = match commands.len() {
                 1 => ("homeboy 0.229.11\n", "", 0),
@@ -601,14 +595,10 @@ fn realigns_stale_source_checkout_homeboy_path_after_upgrade_failure() {
                 exec_output(runner_id, options.command, stdout, stderr, exit_code),
                 exit_code,
             ))
-        },
-        runner_status,
-        |_runner, _path| unreachable!("source materialization not used"),
-        |runner_id, homeboy_path| {
+        }, runner_status, |_runner, _path| unreachable!("source materialization not used"), |runner_id, homeboy_path| {
             path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
             Ok(())
-        },
-    );
+        }, None);
 
     assert!(skipped.is_empty());
     assert_eq!(updated.len(), 1);
@@ -663,13 +653,7 @@ fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
     let mut commands = Vec::new();
     let mut path_updates = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
-        &[runner],
-        false,
-        None,
-        None,
-        &[],
-        |runner_id, options| {
+    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(&[runner], false, None, None, &[], |runner_id, options| {
             commands.push(options.command.clone());
             let stdout = match commands.len() {
                 1 => "homeboy 0.229.1\n",
@@ -680,14 +664,10 @@ fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
                 _ => "",
             };
             Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
-        },
-        runner_status,
-        |_runner, _path| unreachable!("source materialization not used"),
-        |runner_id, homeboy_path| {
+        }, runner_status, |_runner, _path| unreachable!("source materialization not used"), |runner_id, homeboy_path| {
             path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
             Ok(())
-        },
-    );
+        }, None);
 
     assert!(skipped.is_empty());
     assert_eq!(updated.len(), 1);

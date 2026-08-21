@@ -451,16 +451,6 @@ fn placement_readiness_with_transport(
     ))
 }
 
-fn placement_readiness_from_status(
-    request: &PlacementReadinessRequest,
-    status: &RunnerStatusReport,
-    capacity: Option<usize>,
-    mode: RunnerTunnelMode,
-    capability: super::LabRunnerGateDecision,
-) -> PlacementReadiness {
-    placement_readiness_from_status_with_catalog(request, status, capacity, mode, capability, None)
-}
-
 fn placement_readiness_from_status_with_catalog(
     request: &PlacementReadinessRequest,
     status: &RunnerStatusReport,
@@ -788,21 +778,6 @@ fn loopback_direct_ssh_transport_for_preflight(
     }
 }
 
-pub(super) fn preflight_lab_runner_availability_from_status(
-    selection: &LabRunnerSelection,
-    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
-    capacity: Option<usize>,
-    connect_authority: Option<&RunnerConnectReport>,
-) -> Result<(RunnerAvailability, RunnerStatusReport)> {
-    preflight_lab_runner_availability_from_status_with_transport(
-        selection,
-        status_fn,
-        capacity,
-        connect_authority,
-        false,
-    )
-}
-
 pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
@@ -824,13 +799,6 @@ pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
         capacity,
     );
     Ok((availability, status))
-}
-
-pub(super) fn authoritative_status_for_preflight(
-    status: RunnerStatusReport,
-    connect_authority: Option<&RunnerConnectReport>,
-) -> Result<RunnerStatusReport> {
-    authoritative_status_for_preflight_with_transport(status, connect_authority, false)
 }
 
 pub(super) fn authoritative_status_for_preflight_with_transport(
@@ -2174,7 +2142,9 @@ mod placement_readiness_tests {
         mode: RunnerTunnelMode,
         capability: super::super::LabRunnerGateDecision,
     ) -> PlacementReadiness {
-        placement_readiness_from_status(request, status, capacity, mode, capability)
+        placement_readiness_from_status_with_catalog(
+            request, status, capacity, mode, capability, None,
+        )
     }
 
     #[test]
@@ -2468,11 +2438,12 @@ mod placement_readiness_tests {
             "reverse runner identity cannot be verified".to_string(),
         ));
 
-        let (availability, _) = preflight_lab_runner_availability_from_status(
+        let (availability, _) = preflight_lab_runner_availability_from_status_with_transport(
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
             None,
+            false,
         )
         .expect("preflight");
 
@@ -2528,11 +2499,12 @@ mod placement_readiness_tests {
             Some("homeboy 0.0.1+new".to_string()),
         ));
 
-        let (availability, _) = preflight_lab_runner_availability_from_status(
+        let (availability, _) = preflight_lab_runner_availability_from_status_with_transport(
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
             None,
+            false,
         )
         .expect("preflight");
 
