@@ -1180,7 +1180,6 @@
         "dead_code::crates/homeboy-rig/src/lint.rs::UnreferencedExport",
         "dead_code::crates/homeboy-rig/src/pipeline/host_mutation_step.rs::UnusedParameter",
         "dead_code::tests/core/rig/support.rs::DeadCodeMarker",
-        "dead_code::tests/refactor_transform_test.rs::DeadCodeMarker",
         "direct_aggregate_construction::crates/contracts/homeboy-lifecycle-contract/src/artifact_contract.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-agents/src/agent_task/outcome.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-agents/src/agent_task/request.rs::DirectAggregateConstruction",
