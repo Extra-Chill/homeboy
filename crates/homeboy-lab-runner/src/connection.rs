@@ -60,9 +60,7 @@ use connection_daemon::{
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
-pub(crate) use stop_transport_recovery::{
-    disconnect_with_force, disconnect_with_session, recorded_session,
-};
+pub(crate) use stop_transport_recovery::{disconnect_with_session, recorded_session};
 
 use super::daemon_http_get::daemon_get;
 
@@ -2340,47 +2338,6 @@ pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
     Ok(report)
 }
 
-/// Recover only this controller's lost direct SSH projection. The remote daemon
-/// selection remains in `connect`: it revalidates the persisted lease and PID
-/// before opening a fresh tunnel, and refuses every unproven replacement.
-fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) -> Result<()> {
-    let Some(session) = session else {
-        return Ok(());
-    };
-    if session.mode != RunnerTunnelMode::DirectSsh || session_is_live(session) {
-        return Ok(());
-    }
-
-    // Share one reconnect across concurrent readers. The winner rechecks the
-    // persisted projection while holding the compatible writer lease; waiters
-    // then observe that projection instead of opening another tunnel.
-    let _lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
-        "runner direct SSH tunnel recovery",
-        runner_id.to_string(),
-        DIRECT_TUNNEL_RECOVERY_WAIT,
-        super::lab_selection::emit_runtime_promotion_wait,
-    )?;
-    if read_session_or_live_peer(runner_id)?
-        .as_ref()
-        .is_some_and(session_is_live)
-    {
-        return Ok(());
-    }
-
-    let (report, exit_code) = connect(runner_id)?;
-    if report.connected && exit_code == 0 {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "reconnect",
-        report
-            .failure_message
-            .unwrap_or_else(|| "tunnel-only recovery returned no ready session".to_string()),
-        Some(runner_id.to_string()),
-        None,
-    ))
-}
-
 /// Reopen a tunnel to the durable generation which owns `job_id`.
 ///
 /// This deliberately never tests the recorded local port: a dead controller
@@ -2974,19 +2931,6 @@ pub(crate) fn authoritative_zero_active_jobs(report: &RunnerStatusReport) -> boo
     })
 }
 
-fn runner_daemon_freshness(
-    runner: &Runner,
-    session: Option<&RunnerSession>,
-    connected: bool,
-) -> Result<Option<homeboy_core::daemon::DaemonFreshnessReport>> {
-    runner_daemon_freshness_until(
-        runner,
-        session,
-        connected,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
-}
-
 fn runner_daemon_freshness_until(
     runner: &Runner,
     session: Option<&RunnerSession>,
@@ -3251,19 +3195,6 @@ fn runner_jobs_with_client(
         });
     }
     result
-}
-
-fn orphaned_child_run_jobs(
-    runner_id: &str,
-    session: &RunnerSession,
-    active_jobs: &[ActiveRunnerJobSummary],
-) -> Vec<ActiveRunnerJobSummary> {
-    orphaned_child_run_jobs_until(
-        runner_id,
-        session,
-        active_jobs,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn orphaned_child_run_jobs_until(
@@ -3841,16 +3772,6 @@ fn broker_client(action: &str) -> Result<Client> {
 
 pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<String, String> {
     daemon_http_identity(local_url)
-}
-
-pub(crate) fn local_live_session(
-    runner_id: &str,
-    timeout: Duration,
-) -> Result<Option<RunnerSession>> {
-    let Some(session) = read_session_or_live_peer(runner_id)? else {
-        return Ok(None);
-    };
-    Ok(session_is_live_with_timeout(&session, timeout).then_some(session))
 }
 
 /// A connected reverse session has no controller-side identity probe.

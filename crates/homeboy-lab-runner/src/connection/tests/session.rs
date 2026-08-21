@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 

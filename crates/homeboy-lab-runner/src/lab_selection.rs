@@ -1487,34 +1487,6 @@ fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<
     )
 }
 
-pub(super) fn resolve_lab_runner_selection(
-    command: &LabOffloadCommand,
-    explicit_runner: Option<&str>,
-    placement: homeboy_lab_runner_contract::Placement,
-) -> Result<Option<LabRunnerSelection>> {
-    let config = homeboy_core::defaults::load_config();
-    let deny_local_bench = config.bench.local_execution.is_denied();
-    let release_gate_local_hot_allowed =
-        homeboy_core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
-    let default_runner = if explicit_runner.is_none()
-        && command.is_portable()
-        && (command.routing_policy.default_lab_offload || placement.requests_lab())
-    {
-        super::resolve_default_lab_runner()?
-    } else {
-        None
-    };
-
-    resolve_lab_runner_selection_from_placement(
-        command,
-        explicit_runner,
-        placement,
-        deny_local_bench,
-        release_gate_local_hot_allowed,
-        default_runner,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_lab_runner_selection_from_placement(
     command: &LabOffloadCommand,

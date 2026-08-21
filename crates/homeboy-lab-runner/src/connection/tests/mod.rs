@@ -3,10 +3,6 @@
 mod recovery;
 mod session;
 
-use clap::Parser;
-use std::collections::HashMap;
-use std::io::{Read, Write};
-
 use super::*;
 
 #[cfg(unix)]
