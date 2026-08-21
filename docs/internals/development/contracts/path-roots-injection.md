@@ -145,14 +145,55 @@ them. What is blocked is the callers.
 
 ### How to pick the next increment
 
-Look for a file where the ambient wrappers' callers are **already at or near a
-boundary**. `commands/deferred_workload.rs` qualified: five wrappers, each with
-exactly one caller, and those callers were `run()` (a command entry),
-`cli_runtime.rs` (the process boundary itself), and one sibling command. All
-five collapsed in a single pass, net −22 lines.
+The readiness test is **not** how many ambient calls a file has, and it is not
+how many callers those wrappers have. It is:
 
-A file whose wrappers have dozens of scattered callers is not ready yet. Leave
-it and come back once the layer above has been rooted.
+> Does a root already reach the callee — either because a carrier struct passes
+> through it, or because its caller is itself a boundary?
+
+Measure the **depth from the wrapper to the nearest thing that holds, or can
+trivially hold, a root**:
+
+| depth | meaning | example | verdict |
+|---|---|---|---|
+| 0 | a carrier struct already threads through the callee | `ReleaseExecutionContext`, `ReleaseWorkspace` | ready |
+| 1 | the wrapper's caller is a command or process entry | `commands/deferred_workload.rs` | ready |
+| many | intermediate functions with no other reason to know about paths | `agent_task/fanout.rs`, below | **not ready** |
+
+`commands/deferred_workload.rs` was depth 1: five wrappers, one caller each, and
+those callers were `run()` (a command entry), `cli_runtime.rs` (the process
+boundary itself), and one sibling command. All five collapsed in one pass.
+
+### The counter-example: agent_task/fanout.rs
+
+Fanout looks like an easy target by every surface metric — two ambient wrappers,
+and only two production callers between them. It is not ready, and the reason is
+depth:
+
+```text
+fanout()                                  <- the only real boundary
+  -> cook_batch / run_batch_cook_fanout
+    -> cook_batch_inner / run_batch_cook_fanout_plan
+      -> run_batch_cook_fanout_plan_with_executor
+        -> run_batch_cook_fanout_plan_with_executor_claim
+          -> claim_fanout_run_batch_coordinator
+            -> persist_fanout_run_batch_record
+              -> secure_batch_plan_execution
+                -> private_batch_plan_path        <- the ambient call
+```
+
+Rooting this means adding a `data_root: &Path` parameter to eight functions
+whose job has nothing to do with paths, plus a `pub(crate)` signature with an
+external caller in `commands/infra/route.rs` — to remove **one** duplicate
+resolution per command. That is the definition of adding plumbing.
+
+Leave it. Either a carrier appears as the layer above is rooted, or the
+duplicate resolution falls out when one does. **Low caller count is not low
+depth, and only depth predicts whether the change is net-negative.**
+
+What *was* safe to take here: `private_batch_plan_dir()` had exactly one caller
+and it was a test. A wrapper whose last non-test caller has already disappeared
+is dead weight regardless of depth — delete it on sight.
 
 ## Tests are a boundary too
 

@@ -2970,12 +2970,6 @@ fn private_batch_plan_path_in_roots(data_root: &Path, fanout_id: &str) -> PathBu
     ))
 }
 
-fn private_batch_plan_dir() -> Result<PathBuf> {
-    Ok(private_batch_plan_dir_in_roots(
-        &homeboy::core::paths::homeboy_data()?,
-    ))
-}
-
 fn private_batch_plan_dir_in_roots(data_root: &Path) -> PathBuf {
     data_root.join("agent-task").join("private-batch-plans")
 }
@@ -4904,7 +4898,9 @@ mod tests {
     #[test]
     fn private_plan_temp_and_parent_are_owner_only_before_write() {
         with_isolated_home(|_| {
-            let parent = private_batch_plan_dir().expect("private plan dir");
+            let parent = private_batch_plan_dir_in_roots(
+                &homeboy::core::paths::homeboy_data().expect("data root"),
+            );
             fs::create_dir_all(&parent).expect("create parent");
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
                 .expect("make parent permissive for repair test");
