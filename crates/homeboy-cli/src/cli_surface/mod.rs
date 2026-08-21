@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn generated_cook_continuation_commands_parse_against_the_live_cli() {
-        use homeboy_agents::agent_task_service::cook_continue_command;
+        use homeboy_agents::agent_task_service::{cook_continue_command, cook_recovery_command};
 
         for command in [
             cook_continue_command(None, "cook-1", false, None),
@@ -1167,6 +1167,10 @@ mod tests {
                 "cook-1-attempt-2",
                 false,
                 None,
+            ),
+            cook_recovery_command(
+                "cook-1-attempt-2",
+                &["finalize-pr", "--recover", "cook-1-attempt-2"],
             ),
         ] {
             let argv =

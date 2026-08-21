@@ -2153,6 +2153,28 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
             .unwrap();
     }
 
+    left_lifecycle_store
+        .mutate_record(run_id, |record| {
+            let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            };
+            record.metadata["execution_placement_decision"] = serde_json::to_value(
+                homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                    "fixture",
+                    "v1",
+                    identity,
+                    homeboy_lab_runner_contract::Placement::Local,
+                ),
+            )
+            .unwrap();
+            true
+        })
+        .unwrap();
+
     let left =
         moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)
             .unwrap()
@@ -2167,6 +2189,14 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
 
     assert_eq!(left.blocker, "left blocker");
     assert_eq!(right.blocker, "right blocker");
+    assert_eq!(
+        left.continuation,
+        format!("homeboy --placement local agent-task cook-continue {run_id}")
+    );
+    assert_eq!(
+        right.continuation,
+        format!("homeboy agent-task cook-continue {run_id}")
+    );
     assert_ne!(
         left_lifecycle_store.run_dir(run_id),
         right_lifecycle_store.run_dir(run_id)

@@ -961,7 +961,7 @@ fn retryable_cook_attempt(
             Some(source.run_id.clone()),
             Some(vec![format!(
                 "Continue the owning Cook with: {}",
-                super::cook_continue_command(None, cook_id, false, None)
+                super::cook_continue_command(None, &source.run_id, false, None)
             )]),
         ));
     };

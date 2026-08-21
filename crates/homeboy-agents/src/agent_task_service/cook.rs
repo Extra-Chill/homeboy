@@ -79,10 +79,12 @@ pub fn cook_continue_command(
     rearm: bool,
     artifact_id: Option<&str>,
 ) -> String {
-    let executable = executable.unwrap_or("homeboy");
+    let executable = executable
+        .map(quote_arg)
+        .unwrap_or_else(|| cook_recovery_command_prefix(cook_or_attempt_id));
     let mut command = format!(
         "{} agent-task cook-continue {}",
-        quote_arg(executable),
+        executable,
         quote_arg(cook_or_attempt_id)
     );
     if rearm {
@@ -91,6 +93,74 @@ pub fn cook_continue_command(
     if let Some(artifact_id) = artifact_id {
         command.push_str(" --artifact-id ");
         command.push_str(&quote_arg(artifact_id));
+    }
+    command
+}
+
+/// Render the executable and global flags authorized by this exact durable Cook
+/// attempt. Callers append `agent-task` and the lifecycle subcommand.
+///
+/// A local prefix is only recovered from an explicit, durable override. Other
+/// controller-local attempts remain subject to current resource policy instead
+/// of turning ownership evidence into a new global authorization.
+pub fn cook_recovery_command_prefix(run_id: &str) -> String {
+    let decision = agent_task_lifecycle::exact_record(run_id)
+        .ok()
+        .and_then(|record| cook_recovery_placement_decision(&record));
+    cook_recovery_command_prefix_for_decision(decision.as_ref())
+}
+
+/// Render the recovery prefix from an already-loaded durable attempt record.
+/// This keeps callers with an injected lifecycle store from reading ambient
+/// placement state while constructing a follow-up command.
+pub fn cook_recovery_command_prefix_for_record(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> String {
+    let decision = cook_recovery_placement_decision(record);
+    cook_recovery_command_prefix_for_decision(decision.as_ref())
+}
+
+fn cook_recovery_placement_decision(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    serde_json::from_value(record.metadata["execution_placement_decision"].clone()).ok()
+}
+
+fn cook_recovery_command_prefix_for_decision(
+    decision: Option<&homeboy_lab_runner_contract::ExecutionPlacementDecision>,
+) -> String {
+    match decision {
+        Some(decision)
+            if decision.requested == homeboy_lab_runner_contract::Placement::Local
+                && decision.override_authorization.authorized =>
+        {
+            "homeboy --placement local".to_string()
+        }
+        Some(decision)
+            if decision.selected
+                == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab =>
+        {
+            decision.runner.as_ref().map_or_else(
+                || "homeboy".to_string(),
+                |runner| format!("homeboy --runner {}", quote_arg(&runner.runner_id)),
+            )
+        }
+        _ => "homeboy".to_string(),
+    }
+}
+
+/// Build an owner-bound recovery command from the durable placement decision.
+pub fn cook_recovery_command(run_id: &str, args: &[&str]) -> String {
+    let prefix = cook_recovery_command_prefix(run_id);
+    cook_recovery_command_with_prefix(&prefix, args)
+}
+
+/// Build a recovery command from a previously resolved durable prefix.
+pub fn cook_recovery_command_with_prefix(prefix: &str, args: &[&str]) -> String {
+    let mut command = format!("{prefix} agent-task");
+    for arg in args {
+        command.push(' ');
+        command.push_str(&quote_arg(arg));
     }
     command
 }
@@ -1408,7 +1478,7 @@ pub fn cook_completion(
         .flatten()
         .map(|run_id| AgentTaskCookRecoveryAction {
             action: "finalize_pr".to_string(),
-            command: format!("homeboy agent-task finalize-pr --recover {run_id}"),
+            command: cook_recovery_command(&run_id, &["finalize-pr", "--recover", &run_id]),
         });
     Some(AgentTaskCookCompletion {
         schema: "homeboy/agent-task-cook-completion/v1",
@@ -1927,6 +1997,70 @@ impl serde::Serialize for AgentTaskCookBatchReport {
 #[cfg(test)]
 mod run_lifecycle_projection_tests {
     use super::*;
+
+    #[test]
+    fn recovery_prefix_preserves_only_explicit_local_authority() {
+        let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            repository: "fixture".to_string(),
+            workspace: "fixture".to_string(),
+            task: "task".to_string(),
+            candidate: None,
+            base: None,
+        };
+        let local = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            "fixture",
+            "v1",
+            identity.clone(),
+            homeboy_lab_runner_contract::Placement::Local,
+        );
+        let automatic = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            "fixture",
+            "v1",
+            identity,
+            homeboy_lab_runner_contract::Placement::Auto,
+        );
+
+        assert_eq!(
+            cook_recovery_command_prefix_for_decision(Some(&local)),
+            "homeboy --placement local"
+        );
+        assert_eq!(
+            cook_recovery_command_prefix_for_decision(Some(&automatic)),
+            "homeboy"
+        );
+        let lab = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "fixture",
+            "v1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            },
+            homeboy_lab_runner_contract::Placement::Lab,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            Some(
+                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                    runner_id: "lab-fixture".to_string(),
+                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Explicit,
+                },
+            ),
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        assert_eq!(
+            cook_recovery_command_prefix_for_decision(Some(&lab)),
+            "homeboy --runner lab-fixture"
+        );
+    }
 
     fn report(status: &str, disposition: CookDisposition) -> AgentTaskCookReport {
         AgentTaskCookReport {
@@ -5731,8 +5865,9 @@ fn run_cook_spine(
                                 "status": "awaiting_acceptance",
                                 "reason": error.message,
                                 "run_id": run_id,
-                                "status_command": format!(
-                                    "homeboy agent-task status {run_id} --full"
+                                "status_command": cook_recovery_command(
+                                    &run_id,
+                                    &["status", &run_id, "--full"],
                                 ),
                             })),
                             stop_reason: Some(
@@ -6985,7 +7120,9 @@ fn record_active_cook_worktree_warning(options: &AgentTaskCookServiceOptions) ->
             "schema": "homeboy/cook-active-worktree-warning/v1",
             "canonical_worktree": target,
             "active_run_ids": run_ids,
-            "status_commands": active.iter().map(|record| format!("homeboy agent-task status {}", record.run_id)).collect::<Vec<_>>(),
+            "status_commands": active.iter().map(|record| {
+                cook_recovery_command(&record.run_id, &["status", &record.run_id])
+            }).collect::<Vec<_>>(),
         }),
     )?;
     Ok(())

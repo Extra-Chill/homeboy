@@ -193,6 +193,8 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         Err(error) => return Err(error),
     };
     let record = durable_read.record;
+    let recovery_prefix =
+        agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     let runner_probe = runner_probe_projection(&agent_task_lifecycle::runner_probe_plan(
         &record,
         agent_task_lifecycle::AgentTaskStatusOptions {
@@ -266,7 +268,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         attach_full_status_candidate(&mut value, aggregate.as_ref(), run_id);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
-        preserve_controller_owner_placement(&mut value, run_id);
+        preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
         if args.bounded {
             value = bounded_full_status(value, run_id);
         }
@@ -282,7 +284,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     }
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
-    preserve_controller_owner_placement(&mut summary, run_id);
+    preserve_controller_owner_placement_with_prefix(&mut summary, run_id, &recovery_prefix);
     let summary = enforce_compact_status_budget(summary);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
@@ -1647,14 +1649,23 @@ fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMeta
     }
 }
 
-/// Follow-up lifecycle commands must retain the controller-local ownership of
-/// the record even when a default Lab runner becomes available between reads.
+/// Follow-up lifecycle commands retain the exact durable placement decision
+/// that authorized their owning Cook attempt.
 fn preserve_controller_owner_placement(value: &mut Value, run_id: &str) {
+    let recovery_prefix = agent_task_service_direct::cook_recovery_command_prefix(run_id);
+    preserve_controller_owner_placement_with_prefix(value, run_id, &recovery_prefix);
+}
+
+fn preserve_controller_owner_placement_with_prefix(
+    value: &mut Value,
+    run_id: &str,
+    recovery_prefix: &str,
+) {
     match value {
         Value::String(command) => {
-            let prefix = "homeboy agent-task ";
+            let command_prefix = "homeboy agent-task ";
             let lifecycle_command = command
-                .strip_prefix(prefix)
+                .strip_prefix(command_prefix)
                 .and_then(|rest| rest.split_whitespace().next())
                 .is_some_and(|operation| {
                     matches!(
@@ -1668,20 +1679,23 @@ fn preserve_controller_owner_placement(value: &mut Value, run_id: &str) {
                             | "retry"
                             | "reconcile"
                             | "cancel"
+                            | "cook-continue"
+                            | "finalize-pr"
                     )
                 });
             if lifecycle_command && command.contains(run_id) {
-                *command = command.replacen(prefix, "homeboy --placement local agent-task ", 1);
+                *command =
+                    command.replacen(command_prefix, &format!("{recovery_prefix} agent-task "), 1);
             }
         }
         Value::Array(values) => {
             for value in values {
-                preserve_controller_owner_placement(value, run_id);
+                preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
             }
         }
         Value::Object(values) => {
             for value in values.values_mut() {
-                preserve_controller_owner_placement(value, run_id);
+                preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
             }
         }
         _ => {}
@@ -1948,7 +1962,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         runner_cancellation.is_some(),
         current_lifecycle_diagnostic.is_some(),
     );
-    preserve_controller_owner_placement(&mut value, run_id);
+    let recovery_prefix =
+        agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
+    preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
     Ok((value, 0))
 }
 
@@ -6526,6 +6542,29 @@ fn diagnose_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_rewrite_threads_one_resolved_prefix_through_nested_commands() {
+        let mut value = json!({
+            "command": "homeboy agent-task status cook-1 --full",
+            "nested": ["homeboy agent-task finalize-pr --recover cook-1"],
+        });
+
+        preserve_controller_owner_placement_with_prefix(
+            &mut value,
+            "cook-1",
+            "homeboy --placement local",
+        );
+
+        assert_eq!(
+            value["command"],
+            "homeboy --placement local agent-task status cook-1 --full"
+        );
+        assert_eq!(
+            value["nested"][0],
+            "homeboy --placement local agent-task finalize-pr --recover cook-1"
+        );
+    }
 
     #[test]
     fn actionable_diagnostics_outrank_a_successful_provider_process_exit() {
