@@ -13,7 +13,7 @@ pub fn record_pre_execution_failure(
     record_pre_execution_failure_in_store(&lifecycle_store, run_id, plan, phase, error)
 }
 
-pub(crate) fn record_pre_execution_failure_in_store(
+pub fn record_pre_execution_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,

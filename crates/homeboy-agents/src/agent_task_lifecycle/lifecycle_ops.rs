@@ -1956,7 +1956,7 @@ pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
 /// Load the controller-owned plan from an explicitly rooted store. Both halves
 /// follow the injected root: the Cook alias is resolved against that store's
 /// own index, and the plan is read from that store's own run directory.
-pub(crate) fn load_controller_plan_in_store(
+pub fn load_controller_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskPlan> {

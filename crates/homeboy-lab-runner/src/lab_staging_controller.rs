@@ -982,6 +982,10 @@ fn submit_detached_staging_with_daemon_ensure<Ensure>(
 where
     Ensure: FnOnce() -> Result<homeboy_core::daemon::DaemonStartResult>,
 {
+    // One store: the controller plan read and the staging job recorded against
+    // it are one submission (#7505).
+    let lab_lifecycle_store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     if !routing_ready() {
         return Err(Error::validation_invalid_argument(
             "lab_staging_adapter",
@@ -1013,7 +1017,10 @@ where
     let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
         LabStagingRecipe,
     >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
-    let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)?;
+    let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan_in_store(
+        &lab_lifecycle_store,
+        run_id,
+    )?;
     let envelope = LabStagingDispatchEnvelope::new(
         run_id,
         runner_id,
@@ -1051,8 +1058,11 @@ where
     let job = create;
     validate_controller_job(&job)?;
     let job_id = job.id.to_string();
-    homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_job(
-        run_id, runner_id, &job_id,
+    homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_job_in_store(
+        &lab_lifecycle_store,
+        run_id,
+        runner_id,
+        &job_id,
     )?;
 
     let started = post_controller_job_with_retries(
@@ -4158,6 +4168,10 @@ impl LabStagingDispatchDriver {
         job: ControllerJobHandle,
         resume: bool,
     ) -> Result<Value> {
+        // One store: the staging-controller failure and the pre-execution failure
+        // beside it describe one checkpoint (#7505).
+        let lab_lifecycle_store =
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         checkpoint.validate()?;
         let adapter = require_production_adapter()?;
         let request = match &checkpoint.input {
@@ -4181,16 +4195,14 @@ impl LabStagingDispatchDriver {
         };
         let checkpoint = result.inspect_err(|error| {
             if !job.is_cancelled()
-                && homeboy_agents::agent_task_lifecycle::record_pre_execution_failure(
-                    &request.recipe.run_id,
+                && homeboy_agents::agent_task_lifecycle::record_pre_execution_failure_in_store(&lab_lifecycle_store, &request.recipe.run_id,
                     &request.durable_agent_task_plan,
                     "lab_staging_controller",
                     error,
                 )
                 .is_ok()
             {
-                let _ = homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure(
-                    &request.recipe.run_id,
+                let _ = homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure_in_store(&lab_lifecycle_store, &request.recipe.run_id,
                     &format!("{:?}", expected_identity.phase),
                     &job.job_id(),
                 );
