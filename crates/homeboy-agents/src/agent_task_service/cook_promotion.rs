@@ -28,7 +28,8 @@ use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -607,22 +608,30 @@ pub fn record_replacement_gate_proof(
     }
     let same_candidate = replacement.provenance.get("candidate")
         == original.provenance.get("candidate")
-        && replacement.provenance.get("candidate_checkout")
-            == original.provenance.get("candidate_checkout");
-    if replacement.source.run_id.as_deref() != Some(run_id)
-        || replacement.target != original.target
-        || replacement.to_worktree != original.to_worktree
-        || replacement.patch_artifact != original.patch_artifact
-        || replacement.changed_files != original.changed_files
-        || replacement.verified_base != original.verified_base
-        || !same_candidate
+        && (original.provenance.get("candidate_checkout").is_none()
+            || replacement.provenance.get("candidate_checkout")
+                == original.provenance.get("candidate_checkout"));
+    let drifted = serde_json::json!({
+        "run_id": replacement.source.run_id.as_deref() != Some(run_id),
+        "target": replacement.target.worktree != original.target.worktree || replacement.target.path != original.target.path,
+        "worktree": replacement.to_worktree != original.to_worktree,
+        "artifact": replacement.patch_artifact.id != original.patch_artifact.id || replacement.patch_artifact.kind != original.patch_artifact.kind || replacement.patch_artifact.sha256 != original.patch_artifact.sha256,
+        "changed_files": replacement.changed_files != original.changed_files,
+        "verified_base": replacement.verified_base != original.verified_base,
+        "candidate": !same_candidate,
+    });
+    if drifted
+        .as_object()
+        .is_some_and(|fields| fields.values().any(|value| value.as_bool() == Some(true)))
     {
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "replacement_gate_proof",
             "replacement proof drifted from the exact failed promotion candidate, base, target, artifact, or scope",
             Some(run_id.to_string()),
             None,
-        ));
+        );
+        error.details["drift"] = drifted;
+        return Err(error);
     }
     let record = agent_task_lifecycle::status(run_id)?;
     let original_history_index = record
@@ -677,6 +686,249 @@ pub fn record_replacement_gate_proof(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )?;
     Ok(replacement)
+}
+
+/// Execute corrected gates against the exact failed applied candidate and record
+/// the resulting #11290 replacement proof without replaying provider work or
+/// applying the patch again.
+const REPLACEMENT_GATE_PROOF_CLAIM_LEASE: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+const REPLACEMENT_GATE_EXECUTION_FENCES_KEY: &str = "replacement_gate_execution_fences";
+
+pub fn verify_replacement_gates(
+    cook_or_attempt_id: &str,
+    gates: crate::agent_task_gate::VerifyGateOptions,
+    external_authorization: String,
+) -> Result<AgentTaskPromotionReport> {
+    let run_id = super::cook_recipe::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let operation_key = format!("verify-replacement:{run_id}");
+    match lifecycle_store.claim_cook_operation(
+        &run_id,
+        &operation_key,
+        REPLACEMENT_GATE_PROOF_CLAIM_LEASE,
+    )? {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            serde_json::from_value(result).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("deserialize completed replacement gate proof".to_string()),
+                )
+            })
+        }
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            let claim = lifecycle_store.operation_claim(&run_id, &operation_key)?;
+            let mut error = Error::validation_invalid_argument(
+                "replacement_gate_proof",
+                "operation_in_progress",
+                Some(operation_key),
+                Some(vec![format!("homeboy agent-task status {run_id} --full")]),
+            );
+            error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
+            Err(error)
+        }
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let result = verify_replacement_gates_owned(
+                &lifecycle_store,
+                &run_id,
+                gates,
+                external_authorization,
+            );
+            match result {
+                Ok(report) => {
+                    lifecycle_store.complete_cook_operation(
+                        &run_id,
+                        &operation_key,
+                        serde_json::to_value(&report)
+                            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                    )?;
+                    Ok(report)
+                }
+                Err(error) => {
+                    lifecycle_store.fail_cook_operation(
+                        &run_id,
+                        &operation_key,
+                        serde_json::json!({
+                            "code": error.code.as_str(),
+                            "message": error.message.clone(),
+                        }),
+                    )?;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+fn verify_replacement_gates_owned(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    gates: crate::agent_task_gate::VerifyGateOptions,
+    external_authorization: String,
+) -> Result<AgentTaskPromotionReport> {
+    let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "replacement gates require a persisted failed promotion",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    // A process can die after `record_replacement_gate_proof()` commits and
+    // before its operation claim is completed. Recover that durable success
+    // without repeating the gate execution that produced the proof.
+    if original.status == AgentTaskPromotionStatus::Applied
+        && original.provenance.get("replacement_gate_proof").is_some()
+    {
+        return Ok(original);
+    }
+    if replacement_gate_execution_started(lifecycle_store, run_id)? {
+        return Err(interrupted_replacement_gate_execution_error(run_id));
+    }
+    if original.status != AgentTaskPromotionStatus::GateFailed || !original.status.patch_promoted()
+    {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.status",
+            "replacement gates require an already-applied candidate whose original gates failed",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let target_path = original.target.path.as_deref().or_else(|| {
+        original.provenance.get("worktree_path").and_then(Value::as_str)
+    }).map(PathBuf::from).or_else(|| {
+        homeboy_core::worktree::resolve_if_present(&original.to_worktree)
+            .ok()
+            .flatten()
+            .map(|record| PathBuf::from(record.worktree_path))
+    }).ok_or_else(|| Error::validation_invalid_argument(
+        "promotion.target.path",
+        "replacement gates require the failed promotion's durable candidate worktree path or registered worktree handle",
+        Some(run_id.to_string()),
+        None,
+    ))?;
+    let verified_base = original.verified_base.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion.verified_base",
+            "replacement gates require the failed promotion's verified base",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let inputs = original
+        .provenance
+        .pointer("/resume_contract/inputs")
+        .or_else(|| original.provenance.pointer("/resume_inputs"));
+    let (source, source_path) = promotion_source(&run_id)?;
+    let observation_store = lifecycle_store.open_observation_initialized()?;
+    // This fence is deliberately irreversible. Shell gates can have external
+    // side effects, so a dead owner after this point must recover with external
+    // candidate-bound proof rather than replaying an unknown partial execution.
+    mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
+    let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(run_id.to_string()),
+            source_path,
+            source_worktree_path: None,
+            base_ref: Some(verified_base.base.clone()),
+            task_base_sha: inputs
+                .and_then(|value| value.get("task_base_sha"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            candidate_ref: inputs
+                .and_then(|value| value.get("candidate_ref"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            to_worktree: original.to_worktree.clone(),
+            task_id: Some(original.source.task_id.clone()),
+            artifact_id: Some(original.patch_artifact.id.clone()),
+            dry_run: false,
+            gates,
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &target_path,
+        &serde_json::to_value(&original)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        &observation_store,
+    )?;
+    // #11290's import boundary requires command evidence for each green gate.
+    // The shared gate runner retains that evidence in detailed gate reports, so
+    // project it into the typed promotion command-evidence view before recording.
+    replacement.command_evidence.extend(
+        replacement
+            .deterministic_gates
+            .iter()
+            .filter(|gate| gate.exit_code == 0)
+            .map(
+                |gate| crate::agent_task_promotion::AgentTaskPromotionCommandReport {
+                    command: gate.command.clone(),
+                    exit_code: gate.exit_code,
+                    stdout: gate.stdout.clone(),
+                    stderr: gate.stderr.clone(),
+                    capture: Default::default(),
+                },
+            ),
+    );
+    record_replacement_gate_proof(&run_id, replacement, Some(external_authorization))
+}
+
+fn replacement_gate_execution_started(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    Ok(lifecycle_store
+        .read_record(run_id)?
+        .metadata
+        .pointer(&format!(
+            "/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement"
+        ))
+        .is_some())
+}
+
+pub(crate) fn mark_replacement_gate_execution_started(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    lifecycle_store.mutate_record(run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let fences = metadata
+            .entry(REPLACEMENT_GATE_EXECUTION_FENCES_KEY.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !fences.is_object() {
+            *fences = serde_json::json!({});
+        }
+        if fences.get("verify-replacement").is_some() {
+            return false;
+        }
+        fences["verify-replacement"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-execution-fence/v1",
+            "state": "started",
+        });
+        true
+    })?;
+    Ok(())
+}
+
+fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "replacement_gate_proof",
+        "replacement gate execution was interrupted after its durable start fence; Homeboy will not rerun shell gates automatically",
+        Some(run_id.to_string()),
+        Some(vec![format!(
+            "Run homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization> with candidate-bound external proof."
+        )]),
+    );
+    error.details["recovery"] = serde_json::json!({
+        "kind": "external_candidate_bound_proof_required",
+        "run_id": run_id,
+        "command": format!(
+            "homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization>"
+        ),
+    });
+    error
 }
 
 /// Older applied reports lost the post-apply baseline when the final gate

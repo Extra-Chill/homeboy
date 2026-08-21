@@ -915,6 +915,11 @@ const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
 
 const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
+        &["verify-replacement"],
+        mutating_safety(),
+        "executes operator-supplied deterministic shell gates and records durable replacement proof",
+    ),
+    paths_safety(
         &["promote"],
         with_dry_run(mutating_safety(), "--dry-run"),
         "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
@@ -1152,5 +1157,18 @@ mod tests {
 
         assert!(safety.safety.mutates);
         assert!(!safety.safety.operator);
+    }
+
+    #[test]
+    fn verify_replacement_is_declared_mutating_shell_execution() {
+        let agent_task = registered_command("agent-task").expect("agent-task command spec");
+        let safety = agent_task
+            .path_safety(&["verify-replacement"])
+            .expect("verify-replacement safety");
+
+        assert!(safety.safety.mutates);
+        assert!(safety
+            .output_notes
+            .is_some_and(|notes| notes.contains("shell gates")));
     }
 }

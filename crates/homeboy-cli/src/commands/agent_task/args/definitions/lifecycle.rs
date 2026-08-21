@@ -590,6 +590,17 @@ pub struct RecordReplacementGateProofArgs {
     pub authorize_external_proof: Option<String>,
 }
 #[derive(Args, Debug)]
+pub struct VerifyReplacementArgs {
+    /// Durable Cook id or exact attempt whose applied candidate has failed gates.
+    #[arg(value_name = "COOK_OR_ATTEMPT_ID")]
+    pub cook_or_attempt_id: String,
+    /// Explicit operator authorization for the replacement proof recorded by this command.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_external_proof: String,
+    #[command(flatten)]
+    pub gates: VerifyGateArgs,
+}
+#[derive(Args, Debug)]
 pub struct GateFeedbackArgs {
     /// Promotion report as a JSON spec: inline JSON, `@FILE` to read a file, or
     /// `-` to read stdin. A bare path is NOT accepted — use

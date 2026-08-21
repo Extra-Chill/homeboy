@@ -44,7 +44,7 @@ pub use args::{
     PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -312,6 +312,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::RecordReplacementGateProof(args) => {
             review::record_replacement_gate_proof(args)
         }
+        AgentTaskCommand::VerifyReplacement(args) => review::verify_replacement(args),
         AgentTaskCommand::Accept(args) => {
             let verdict = if args.verdict == "accepted" {
                 homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Accepted
