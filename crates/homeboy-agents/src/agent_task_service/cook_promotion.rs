@@ -923,7 +923,9 @@ pub(crate) fn moving_base_recovery_for_run_with_stores(
             // Recoveries written before scoped continuation used `run-next`.
             // The run ID remains authoritative, so expose the safe command
             // without requiring an unsafe migration of historical records.
-            recovery.continuation = super::cook_continue_command(None, run_id, false, None);
+            let prefix = super::cook_recovery_command_prefix_for_record(&record);
+            recovery.continuation =
+                super::cook_recovery_command_with_prefix(&prefix, &["cook-continue", run_id]);
             Ok(Some(recovery))
         })
 }
@@ -961,7 +963,7 @@ pub(crate) fn moving_base_recovery_from_promotion(
         blocker: String::new(),
         // This recovery belongs to one immutable Cook attempt. `run-next` is a
         // global scheduler operation and must never be offered as its recovery.
-        continuation: super::cook_continue_command(None, run_id, false, None),
+        continuation: super::cook_recovery_command(run_id, &["cook-continue", run_id]),
         base_movements: 0,
     }
 }
@@ -3696,17 +3698,17 @@ fn cook_recovery_actions(
     let mut actions = vec![
         super::AgentTaskCookRecoveryAction {
             action: "status".to_string(),
-            command: format!("homeboy agent-task status {run_id} --full"),
+            command: super::cook_recovery_command(run_id, &["status", run_id, "--full"]),
         },
         super::AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
-            command: format!("homeboy agent-task diagnose {run_id}"),
+            command: super::cook_recovery_command(run_id, &["diagnose", run_id]),
         },
     ];
     if blocking_claim {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "reconcile".to_string(),
-            command: format!("homeboy agent-task reconcile {run_id} --dry-run"),
+            command: super::cook_recovery_command(run_id, &["reconcile", run_id, "--dry-run"]),
         });
     }
     if exact_checkpoint_candidate_mismatch {
@@ -3715,19 +3717,28 @@ fn cook_recovery_actions(
         // can safely continue against a diverged worktree.
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "fork_replacement".to_string(),
-            command: format!("homeboy agent-task retry {run_id} --run"),
+            command: super::cook_recovery_command(run_id, &["retry", run_id, "--run"]),
         });
     } else if !ambiguous_artifact_ids.is_empty() {
         actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
             super::AgentTaskCookRecoveryAction {
                 action: "resume_with_artifact".to_string(),
-                command: super::cook_continue_command(None, run_id, true, Some(&artifact_id)),
+                command: super::cook_recovery_command(
+                    run_id,
+                    &[
+                        "cook-continue",
+                        run_id,
+                        "--rearm",
+                        "--artifact-id",
+                        &artifact_id,
+                    ],
+                ),
             }
         }));
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
-            command: super::cook_continue_command(None, run_id, false, None),
+            command: super::cook_recovery_command(run_id, &["cook-continue", run_id]),
         });
     }
     let next_actions = actions.clone();

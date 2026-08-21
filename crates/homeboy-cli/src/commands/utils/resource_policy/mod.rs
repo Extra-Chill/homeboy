@@ -1576,6 +1576,34 @@ mod tests {
     }
 
     #[test]
+    fn warm_machine_accepts_emitted_local_finalize_recovery_without_argument_surgery() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
+        let command = homeboy_agents::agent_task_service::cook_recovery_command_with_prefix(
+            "homeboy --placement local",
+            &["finalize-pr", "--recover", "cook-local-finalize"],
+        );
+        let argv = shlex::split(&command).expect("emitted local recovery command is shell-safe");
+        let cli = Cli::try_parse_from(argv).expect("emitted local recovery command parses");
+        let warning = evaluate(
+            lab_supported_hot("agent-task finalize-pr"),
+            &resources(ResourceRecommendation::Warm),
+        )
+        .expect("warm machines require placement admission");
+
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
+        assert!(non_interactive_preflight_error(
+            &warning,
+            cli.placement == crate::cli_surface::Placement::Local,
+            false,
+            None,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn portable_refusal_rerun_uses_eligible_lab_runner() {
         let rerun = rerun_command(
             lab_supported_hot("audit"),
