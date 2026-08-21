@@ -16,9 +16,9 @@ mod child;
 mod errors;
 mod runtime;
 pub use child::{
-    cleanup_invocation_children, cleanup_invocation_children_in_root, cleanup_stale_child_records,
-    cleanup_stale_child_records_in_root, register_child_process, register_child_process_in_root,
-    InvocationChildGuard, InvocationChildRecord,
+    cleanup_invocation_children_in_root, cleanup_stale_child_records_in_root,
+    register_child_process, register_child_process_in_root, InvocationChildGuard,
+    InvocationChildRecord,
 };
 pub use runtime::{
     enforce_path_budget, invocation_runtime_root, short_invocation_id,

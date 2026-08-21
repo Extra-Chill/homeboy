@@ -55,7 +55,7 @@ fn proof_fails_before_dispatch_on_missing_secret_with_fix_command() {
 
         let (value, exit_code) = controller_proof_with_test_executor(
             proof_args("example-proof", "homeboy-lab", Some(&registry), false),
-            NeverDispatchExecutor,
+            Arc::new(NeverDispatchExecutor),
         )
         .expect("proof command runs");
 
@@ -84,7 +84,7 @@ fn proof_fails_before_dispatch_without_profile_registry() {
     with_temp_home(|| {
         let error = controller_proof_with_test_executor(
             proof_args("example-proof", "homeboy-lab", None, false),
-            NeverDispatchExecutor,
+            Arc::new(NeverDispatchExecutor),
         )
         .expect_err("missing registry is a hard error");
         assert!(error.message.contains("no proof profile registry"));
@@ -108,7 +108,7 @@ fn proof_passes_preflight_and_composes_identity_and_policy() {
 
         let (value, exit_code) = controller_proof_with_test_executor(
             proof_args("example-proof", "homeboy-lab", Some(&registry), true),
-            NeverDispatchExecutor,
+            Arc::new(NeverDispatchExecutor),
         )
         .expect("proof command runs");
 

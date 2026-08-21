@@ -244,7 +244,7 @@ jobs:
     # partitioning coverage), #402 (immutable extension revisions), and #405
     # (downloaded Test archives stay out of consumer Git state). Refs
     # #10997 and #11751 W1-2, W1-7, W1-10.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@ae5161e2ce2d5818c41a4b09ae811d1521bb4f95
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@4327685846f05b1a82babb29cbb61adc9a88eada
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which

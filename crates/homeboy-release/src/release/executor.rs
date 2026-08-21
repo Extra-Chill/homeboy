@@ -37,8 +37,7 @@ pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;
 pub(crate) use github_release::run_github_release;
 pub(crate) use package::{
-    build_release_payload, run_extension_release_preflight, run_package, run_package_in_roots,
-    PackageRequest,
+    build_release_payload, run_extension_release_preflight, run_package, PackageRequest,
 };
 pub(crate) use publish::{publish_response_output, run_publish};
 pub(crate) use tagging::{
@@ -361,25 +360,13 @@ pub(crate) fn run_git_commit(
 
 /// Delete release-generated artifact directories. Skipped when the caller chose
 /// `--deploy` so the deploy step can still find the artifact.
-pub(crate) fn run_cleanup(
-    component: &Component,
-    state: &ReleaseState,
-) -> Result<ReleaseStepResult> {
-    run_cleanup_in_roots(
-        homeboy_core::paths::PathRoots::from_environment()?.data(),
-        component,
-        state,
-    )
-}
-
-/// [`run_cleanup`] against an explicitly injected data root.
 ///
 /// Reading the failed-attempt ownership record and acknowledging it are one
 /// transaction over one file. The ambient form resolved the data root once per
 /// call, so a repoint between them could have removed paths recorded in one
 /// home and then acknowledged a record in another, permanently stranding the
 /// first home's entries (#7505).
-pub(crate) fn run_cleanup_in_roots(
+pub(crate) fn run_cleanup(
     data_root: &std::path::Path,
     component: &Component,
     state: &ReleaseState,
@@ -554,6 +541,16 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 /// forward so the default payload is unchanged.
 #[cfg(test)]
 mod tests {
+    /// The isolated home each test below installs, named as roots.
+    ///
+    /// These tests are their own boundary: `with_isolated_home` establishes the
+    /// home, and this resolves it once so the call under test receives roots
+    /// the same way `execute_plan_steps_at_source` hands them to a real step.
+    /// Production code in this module no longer resolves anything (#7505).
+    fn test_roots() -> homeboy_core::paths::PathRoots {
+        homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+    }
+
     use super::package::store_artifacts_from_output;
     use super::{github_release, package_preflight, run_cleanup, run_package, PackageRequest};
     use crate::release::types::ReleaseState;
@@ -746,7 +743,7 @@ mod tests {
             ..ReleaseState::default()
         };
 
-        let result = run_cleanup(&component, &state).expect("cleanup");
+        let result = run_cleanup(test_roots().data(), &component, &state).expect("cleanup");
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(!build_dir.exists());
@@ -767,7 +764,7 @@ mod tests {
         };
         let state = ReleaseState::default();
 
-        let result = run_cleanup(&component, &state).expect("cleanup");
+        let result = run_cleanup(test_roots().data(), &component, &state).expect("cleanup");
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(build_dir.exists());
@@ -785,7 +782,7 @@ mod tests {
             ..Component::default()
         };
 
-        run_cleanup(&component, &ReleaseState::default()).expect("cleanup");
+        run_cleanup(test_roots().data(), &component, &ReleaseState::default()).expect("cleanup");
 
         assert!(temp.path().join("build/user.txt").is_file());
         assert!(temp.path().join("fixture-1.2.3.tgz").is_file());
@@ -951,6 +948,7 @@ mod tests {
                 ..ReleaseState::default()
             };
             let result = run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &component_config,
@@ -985,7 +983,7 @@ mod tests {
             assert!(repair.create_command.contains(durable_path));
 
             let build_dir = component.path().join("build");
-            run_cleanup(&component_config, &state).expect("cleanup");
+            run_cleanup(test_roots().data(), &component_config, &state).expect("cleanup");
 
             assert!(!build_dir.exists());
             assert!(std::path::Path::new(durable_path).is_file());
@@ -1020,6 +1018,7 @@ mod tests {
                 ..ReleaseState::default()
             };
             run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &component,
@@ -1078,6 +1077,7 @@ mod tests {
             };
 
             let result = run_package(
+                &test_roots(),
                 &[],
                 &mut state,
                 &component,
@@ -1147,6 +1147,7 @@ mod tests {
             homeboy_extension::save_manifest(&package).expect("save package extension");
 
             let error = run_package(
+                &test_roots(),
                 &[package],
                 &mut ReleaseState::default(),
                 &Component::default(),
@@ -1315,6 +1316,7 @@ mod tests {
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
+                &test_roots(),
                 &[package_a, non_package_extension("docs"), package_b],
                 &mut state,
                 &Component::default(),
@@ -1353,6 +1355,7 @@ mod tests {
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &Component::default(),
@@ -1457,6 +1460,7 @@ mod tests {
 
             let mut state = ReleaseState::default();
             let err = run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &Component::default(),
@@ -1492,6 +1496,7 @@ mod tests {
 
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
+                &test_roots(),
                 &[package_a, package_b],
                 &mut state,
                 &Component::default(),
@@ -1533,6 +1538,7 @@ mod tests {
 
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &Component::default(),
@@ -1588,6 +1594,7 @@ mod tests {
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
+                &test_roots(),
                 &[package],
                 &mut state,
                 &Component::default(),

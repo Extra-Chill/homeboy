@@ -11,6 +11,7 @@ use crate::component::Component;
 use crate::engine::template;
 use crate::error::{Error, Result};
 use crate::server::{execute_local_command_in_dir, SshClient};
+use homeboy_extension_contract::ExtensionManifest;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -53,14 +54,41 @@ pub enum HookFailureMode {
 /// A configured extension is part of the component's declared behavior. Failing
 /// to load it must fail hook resolution rather than silently changing the plan.
 pub fn resolve_hooks(component: &Component, event: &str) -> Result<Vec<String>> {
-    let mut commands = Vec::new();
-
-    // Extension hooks first
+    let mut manifests = Vec::new();
     if let Some(ref extensions) = component.extensions {
         let mut extension_ids: Vec<_> = extensions.keys().collect();
         extension_ids.sort();
         for extension_id in extension_ids {
-            let manifest = crate::extension_store::load_extension(extension_id)?;
+            manifests.push(crate::extension_store::load_extension(extension_id)?);
+        }
+    }
+    resolve_hooks_with_extensions(component, &manifests, event)
+}
+
+/// Resolve hooks from manifests the caller has already loaded and validated.
+pub fn resolve_hooks_with_extensions(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    event: &str,
+) -> Result<Vec<String>> {
+    let mut commands = Vec::new();
+
+    if let Some(configured) = component.extensions.as_ref() {
+        let mut extension_ids: Vec<_> = configured.keys().collect();
+        extension_ids.sort();
+        for extension_id in extension_ids {
+            let manifest = extensions
+                .iter()
+                .find(|extension| extension.id == *extension_id)
+                .ok_or_else(|| {
+                    Error::extension_not_found(
+                        extension_id.to_string(),
+                        extensions
+                            .iter()
+                            .map(|extension| extension.id.clone())
+                            .collect(),
+                    )
+                })?;
             if let Some(extension_commands) = manifest.hooks.get(event) {
                 commands.extend(extension_commands.clone());
             }
@@ -306,6 +334,15 @@ mod tests {
                 resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap(),
                 vec!["echo alpha", "echo zebra"]
             );
+            let manifests = vec![
+                crate::extension_store::load_extension("zebra").unwrap(),
+                crate::extension_store::load_extension("alpha").unwrap(),
+            ];
+            assert_eq!(
+                resolve_hooks_with_extensions(&component, &manifests, events::PRE_VERSION_BUMP)
+                    .unwrap(),
+                vec!["echo alpha", "echo zebra"]
+            );
 
             component
                 .extensions
@@ -313,6 +350,12 @@ mod tests {
                 .unwrap()
                 .insert("missing".to_string(), ScopedExtensionConfig::default());
             assert!(resolve_hooks(&component, events::PRE_VERSION_BUMP).is_err());
+            assert!(resolve_hooks_with_extensions(
+                &component,
+                &manifests,
+                events::PRE_VERSION_BUMP
+            )
+            .is_err());
         });
     }
 

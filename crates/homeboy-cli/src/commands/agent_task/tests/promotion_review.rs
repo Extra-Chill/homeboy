@@ -10,8 +10,12 @@ fn promotion_source_resolves_completed_run_id() {
     with_temp_home(|| {
         let run_id = "run-promotion-source";
 
-        run_loaded_plan(test_plan(), Some(run_id), InspectingExecutor::noop(run_id))
-            .expect("run completed");
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(InspectingExecutor::noop(run_id)),
+        )
+        .expect("run completed");
 
         let (raw, path) = review::read_promotion_source(run_id).expect("promotion source resolved");
 
@@ -105,7 +109,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
         run_loaded_plan(
             test_plan(),
             Some("run-review-completed"),
-            ApplyArtifactExecutor,
+            Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
 
@@ -158,7 +162,7 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
         run_loaded_plan(
             test_plan(),
             Some("run-review-default-bounded"),
-            ApplyArtifactExecutor,
+            Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
 
@@ -291,18 +295,22 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         run_loaded_plan(
             test_plan(),
             Some(candidate_run_id),
-            PatchExecutor {
+            Arc::new(PatchExecutor {
                 path: patch.path().display().to_string(),
                 run_id: candidate_run_id.to_string(),
                 size_bytes: patch_contents.len() as u64,
                 sha256: homeboy_engine_primitives::content_hash::sha256_hex(
                     patch_contents.as_bytes(),
                 ),
-            },
+            }),
         )
         .expect("substantive candidate completed");
-        run_loaded_plan(test_plan(), Some(retry_run_id), NoChangeReviewExecutor)
-            .expect("intentional no-change retry completed");
+        run_loaded_plan(
+            test_plan(),
+            Some(retry_run_id),
+            Arc::new(NoChangeReviewExecutor),
+        )
+        .expect("intentional no-change retry completed");
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, candidate_run_id)
             .expect("record substantive candidate");
         agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
@@ -569,13 +577,13 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
         run_loaded_plan(
             test_plan(),
             Some(cook_id),
-            InspectingExecutor::noop(cook_id),
+            Arc::new(InspectingExecutor::noop(cook_id)),
         )
         .expect("initial Cook record completed");
         run_loaded_plan(
             test_plan(),
             Some(retry_run_id),
-            InspectingExecutor::noop(retry_run_id),
+            Arc::new(InspectingExecutor::noop(retry_run_id)),
         )
         .expect("retry Cook record completed");
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, cook_id)
@@ -806,7 +814,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 acceptance_policy: None,
                 repository_identity: None,
             },
-            ExtensionProviderAgentTaskExecutor::default(),
+            Arc::new(ExtensionProviderAgentTaskExecutor::default()),
         )
         .expect("cook reported controlled failure");
 
@@ -932,7 +940,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
 /// the completed aggregate is written under the controller-owned attempt id.
 #[derive(Debug, Clone)]
 struct MirroredAttemptDispatcher {
-    executor: CommittingExecutor,
+    executor: Arc<CommittingExecutor>,
     prepared: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1116,9 +1124,9 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         )
         .expect("write promotion provider");
 
-        let executor = CommittingExecutor {
+        let executor = Arc::new(CommittingExecutor {
             workspace: target.clone(),
-        };
+        });
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {

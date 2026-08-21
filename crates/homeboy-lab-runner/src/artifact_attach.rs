@@ -29,26 +29,19 @@ pub struct RunnerAttachSource {
 }
 
 /// Resolve and, for SSH runners, download the runner-side artifact into a temp
-/// location under the artifact root.
-pub fn copy_runner_artifact_source(
-    runner: &Runner,
-    path: &str,
-) -> homeboy_core::Result<RunnerAttachSource> {
-    copy_runner_artifact_source_in_roots(
-        homeboy_core::paths::PathRoots::from_environment()?.artifacts(),
-        runner,
-        path,
-    )
-}
-
-/// [`copy_runner_artifact_source`] against an explicitly injected artifact root.
+/// location under an explicitly supplied artifact root.
+///
+/// The caller supplies the root because the downloaded path is handed straight
+/// to `ObservationStore::record_artifact*`. Resolving it here, independently of
+/// the store the record lands in, meant the bytes and the row indexing them
+/// agreed only by coincidence (#7505).
 ///
 /// Only the download destination is rooted, because only the download
 /// destination is Homeboy state: the artifact type probe and the transfer both
 /// address the *runner* filesystem through an SSH client. The one remaining
 /// ambient reach on this path is `server::load`, which resolves the config root
 /// inside `homeboy-core` and is out of this crate's reach (#7505).
-pub fn copy_runner_artifact_source_in_roots(
+pub fn copy_runner_artifact_source(
     artifact_root: &Path,
     runner: &Runner,
     path: &str,

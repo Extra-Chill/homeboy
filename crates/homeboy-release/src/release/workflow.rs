@@ -51,6 +51,12 @@ pub fn run_command_with_workspace(
     mut input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
+    // One resolution for an entire release command. The readiness operation
+    // record, the dry-run preflight plan, recovery reconciliation, and the
+    // release pipeline itself all receive it, so a single invocation cannot
+    // spread its durable state across two homes (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let store = super::operation_record::OperationRecordStore::in_roots(&roots);
     let readiness_owner_run_ref = if let Some(readiness) = input.readiness.as_mut() {
         let owner_run_ref = format!("release-readiness-{}", uuid::Uuid::new_v4());
         let operation_ref = format!("operation://{owner_run_ref}");
@@ -66,37 +72,32 @@ pub fn run_command_with_workspace(
                 gate.evidence_refs.push(operation_ref.clone());
             }
         }
-        super::operation_record::OperationRecordStore::create(
-            &super::operation_record::OperationRecord {
-                owner_run_ref: owner_run_ref.clone(),
-                operation: "release_readiness".to_string(),
-                subject: input.component_id.clone(),
-                provider: readiness
-                    .runner_id
-                    .clone()
-                    .unwrap_or_else(|| "controller".to_string()),
-                handle: readiness.source.commit.clone(),
-                path: None,
-                source_sha: readiness.source.commit.clone(),
-                cleanup_policy: "retain".to_string(),
-                lifecycle_state: "running".to_string(),
-                terminal_disposition: None,
-                finalization_status: "pending".to_string(),
-                finalization_lease: None,
-                finalization_lease_started_ms: None,
-                attempt_count: 1,
-                continuation_evidence: readiness.evidence_refs.clone(),
-                attributes: serde_json::Map::from_iter([(
-                    "readiness".to_string(),
-                    serde_json::to_value(&*readiness).map_err(|error| {
-                        Error::internal_json(
-                            error.to_string(),
-                            Some("release readiness".to_string()),
-                        )
-                    })?,
-                )]),
-            },
-        )?;
+        store.create(&super::operation_record::OperationRecord {
+            owner_run_ref: owner_run_ref.clone(),
+            operation: "release_readiness".to_string(),
+            subject: input.component_id.clone(),
+            provider: readiness
+                .runner_id
+                .clone()
+                .unwrap_or_else(|| "controller".to_string()),
+            handle: readiness.source.commit.clone(),
+            path: None,
+            source_sha: readiness.source.commit.clone(),
+            cleanup_policy: "retain".to_string(),
+            lifecycle_state: "running".to_string(),
+            terminal_disposition: None,
+            finalization_status: "pending".to_string(),
+            finalization_lease: None,
+            finalization_lease_started_ms: None,
+            attempt_count: 1,
+            continuation_evidence: readiness.evidence_refs.clone(),
+            attributes: serde_json::Map::from_iter([(
+                "readiness".to_string(),
+                serde_json::to_value(&*readiness).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some("release readiness".to_string()))
+                })?,
+            )]),
+        })?;
         Some(owner_run_ref)
     } else {
         None
@@ -115,6 +116,7 @@ pub fn run_command_with_workspace(
         );
         if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
             complete_readiness_operation(
+                &store,
                 owner_run_ref,
                 false,
                 serde_json::json!({ "error": error.to_string() }),
@@ -125,10 +127,11 @@ pub fn run_command_with_workspace(
         }
         return Err(error);
     }
-    match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
+    match run_command_with_workspace_inner(&roots, input, recovery_owner_run_ref) {
         Ok((mut output, exit_code)) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
                 complete_readiness_operation(
+                    &store,
                     owner_run_ref,
                     readiness_succeeded,
                     serde_json::json!({
@@ -143,6 +146,7 @@ pub fn run_command_with_workspace(
         Err(error) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
                 complete_readiness_operation(
+                    &store,
                     owner_run_ref,
                     readiness_succeeded,
                     serde_json::json!({ "error": error.to_string() }),
@@ -157,11 +161,12 @@ pub fn run_command_with_workspace(
 }
 
 fn complete_readiness_operation(
+    store: &super::operation_record::OperationRecordStore,
     owner_run_ref: &str,
     succeeded: bool,
     downstream_release: serde_json::Value,
 ) -> Result<()> {
-    super::operation_record::OperationRecordStore::update(owner_run_ref, |record| {
+    store.update(owner_run_ref, |record| {
         let mut record = record.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "owner_run_ref",
@@ -183,6 +188,7 @@ fn complete_readiness_operation(
 }
 
 fn run_command_with_workspace_inner(
+    roots: &homeboy_core::paths::PathRoots,
     input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
@@ -200,7 +206,7 @@ fn run_command_with_workspace_inner(
             super::preflight_identity::revalidate(&component, &readiness.source)?;
             super::executor::package_preflight::run_package_preflight(&component.local_path)?;
         }
-        return run_recover(&input, recovery_owner_run_ref).map(
+        return run_recover(roots, &input, recovery_owner_run_ref).map(
             |(result, workspace, exit_code)| {
                 (
                     ReleaseWorkspaceCommandResult { result, workspace },
@@ -404,7 +410,7 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        let dry_run_preflight = run_dry_run_preflights(&input.component_id, &options)?;
+        let dry_run_preflight = run_dry_run_preflights(roots, &input.component_id, &options)?;
         if let Some(run) = dry_run_preflight {
             let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
             let release_summary = release_summary_from_run(&run);
@@ -473,7 +479,7 @@ fn run_command_with_workspace_inner(
     }
 
     let (plan, run_result, workspace) =
-        super::pipeline::run_with_plan(&input.component_id, &options)?;
+        super::pipeline::run_with_plan(roots, &input.component_id, &options)?;
     display_release_summary(&run_result);
 
     let new_version = if input.pipeline.head {
@@ -627,7 +633,13 @@ fn prepared_tag_publish_recovery_decision(
     }
 }
 
+/// Run the dry-run preflight plan against roots resolved by the caller.
+///
+/// Dry run is its own entry into plan execution — it never reaches
+/// `orchestrator::run_with_plan` — so it receives roots from the workflow
+/// boundary rather than letting individual steps rediscover a home (#7505).
 fn run_dry_run_preflights(
+    roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<Option<ReleaseRun>> {
@@ -636,6 +648,7 @@ fn run_dry_run_preflights(
     let preflight_plan = super::execution_plan::build_dry_run_preflight_plan(component_id, options);
     let mut results = Vec::new();
     let stopped = super::execution_plan::execute_plan_steps(
+        roots,
         &preflight_plan.plan.steps,
         component_id,
         options,
@@ -1108,6 +1121,17 @@ pub fn run_batch(
 mod tests {
     use super::*;
     use crate::release::types::ReleasePhase;
+
+    /// The record store for the isolated home each test below installs.
+    ///
+    /// `with_isolated_home` establishes the home; this binds a store to it once,
+    /// the same way the release boundary binds one for a whole command (#7505).
+    fn test_store() -> crate::release::operation_record::OperationRecordStore {
+        crate::release::operation_record::OperationRecordStore::in_roots(
+            &homeboy_core::paths::PathRoots::from_environment().expect("path roots"),
+        )
+    }
+
     use crate::release::{
         ReleasePreflightPlacement, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
         ReleaseReadinessGateResult, ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult,
@@ -1207,15 +1231,12 @@ mod tests {
             )
             .expect_err("failed readiness must stop release before controller mutation");
 
-            let record = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "fixture",
-                false,
-            )
-            .expect("list readiness records")
-            .into_iter()
-            .find(|record| record.source_sha == source)
-            .expect("readiness record is retained");
+            let record = test_store()
+                .for_subject("release_readiness", "fixture", false)
+                .expect("list readiness records")
+                .into_iter()
+                .find(|record| record.source_sha == source)
+                .expect("readiness record is retained");
             let owner = record.owner_run_ref.clone();
             assert_eq!(error.code.as_str(), "validation.invalid_argument");
             assert!(error.message.contains("invalid selected gate evidence"));
@@ -1253,12 +1274,9 @@ mod tests {
                 .expect_err("failed readiness blocks before component resolution");
             }
 
-            let records = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "fixture",
-                false,
-            )
-            .expect("list records");
+            let records = test_store()
+                .for_subject("release_readiness", "fixture", false)
+                .expect("list records");
             assert_eq!(records.len(), 2);
             assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
             assert!(records.iter().all(|record| {
@@ -1294,12 +1312,9 @@ mod tests {
                 worker.join().expect("worker succeeds");
             }
 
-            let records = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "fixture",
-                false,
-            )
-            .expect("list records");
+            let records = test_store()
+                .for_subject("release_readiness", "fixture", false)
+                .expect("list records");
             assert_eq!(records.len(), 2);
             assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
             assert!(records.iter().all(|record| {
@@ -1314,8 +1329,8 @@ mod tests {
     fn readiness_succeeds_when_downstream_release_is_intentionally_skipped() {
         with_isolated_home(|_| {
             let owner = "release-readiness-skip";
-            super::super::operation_record::OperationRecordStore::create(
-                &super::super::operation_record::OperationRecord {
+            test_store()
+                .create(&super::super::operation_record::OperationRecord {
                     owner_run_ref: owner.to_string(),
                     operation: "release_readiness".to_string(),
                     subject: "fixture".to_string(),
@@ -1332,20 +1347,18 @@ mod tests {
                     attempt_count: 1,
                     continuation_evidence: Vec::new(),
                     attributes: Default::default(),
-                },
-            )
-            .expect("create readiness");
+                })
+                .expect("create readiness");
 
             complete_readiness_operation(
+                &test_store(),
                 owner,
                 true,
                 serde_json::json!({ "exit_code": SKIPPED_RELEASE_EXIT_CODE, "status": "skipped" }),
             )
             .expect("complete readiness");
 
-            let record = super::super::operation_record::OperationRecordStore::load(owner)
-                .expect("load")
-                .expect("record");
+            let record = test_store().load(owner).expect("load").expect("record");
             assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
             assert_eq!(
                 record.attributes["downstream_release"]["exit_code"],
@@ -1368,14 +1381,11 @@ mod tests {
                 None,
             )
             .expect_err("failed readiness blocks dry-run planning");
-            let record = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "fixture",
-                false,
-            )
-            .expect("records")
-            .pop()
-            .expect("record");
+            let record = test_store()
+                .for_subject("release_readiness", "fixture", false)
+                .expect("records")
+                .pop()
+                .expect("record");
             assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
             assert!(record.attributes["downstream_release"]["error"].is_string());
         });
@@ -1393,14 +1403,11 @@ mod tests {
                 None,
             )
             .expect_err("missing component is downstream of validated readiness");
-            let record = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "missing-component",
-                false,
-            )
-            .expect("records")
-            .pop()
-            .expect("record");
+            let record = test_store()
+                .for_subject("release_readiness", "missing-component", false)
+                .expect("records")
+                .pop()
+                .expect("record");
             assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
             assert!(record.attributes["downstream_release"]["error"].is_string());
         });
@@ -1425,14 +1432,11 @@ mod tests {
                     None,
                 )
                 .expect_err("invalid readiness blocks before component mutation");
-                let record = super::super::operation_record::OperationRecordStore::for_subject(
-                    "release_readiness",
-                    source,
-                    false,
-                )
-                .expect("records")
-                .pop()
-                .expect("record");
+                let record = test_store()
+                    .for_subject("release_readiness", source, false)
+                    .expect("records")
+                    .pop()
+                    .expect("record");
                 assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
             }
         });
@@ -1454,14 +1458,11 @@ mod tests {
                 None,
             )
             .expect_err("downstream component error follows authorized skipped readiness");
-            let record = super::super::operation_record::OperationRecordStore::for_subject(
-                "release_readiness",
-                "missing-component",
-                false,
-            )
-            .expect("records")
-            .pop()
-            .expect("record");
+            let record = test_store()
+                .for_subject("release_readiness", "missing-component", false)
+                .expect("records")
+                .pop()
+                .expect("record");
             assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
         });
     }

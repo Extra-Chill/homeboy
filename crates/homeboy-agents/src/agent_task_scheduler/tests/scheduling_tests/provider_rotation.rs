@@ -9,6 +9,7 @@ mod provider_rotation_tests {
     struct DirtyCandidateThenSuccessExecutor {
         observed_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
         calls: AtomicUsize,
+        declared_mismatched_patch: bool,
     }
 
     struct AdoptionExecutor {
@@ -175,6 +176,25 @@ mod provider_rotation_tests {
                 fs::write(root.join("candidate.txt"), "candidate\n").expect("candidate edit");
                 let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
                 outcome.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+                if self.declared_mismatched_patch {
+                    let patch_path = root.join("reported.patch");
+                    fs::write(&patch_path, "not the candidate patch\n").expect("mismatched patch");
+                    outcome.artifacts.push(AgentTaskArtifact {
+                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                        id: "mismatched-patch".to_string(),
+                        kind: "patch".to_string(),
+                        name: Some("reported.patch".to_string()),
+                        label: None,
+                        role: Some("patch".to_string()),
+                        semantic_key: None,
+                        path: Some(patch_path.display().to_string()),
+                        url: None,
+                        mime: Some("text/x-patch".to_string()),
+                        size_bytes: None,
+                        sha256: None,
+                        metadata: Value::Null,
+                    });
+                }
                 return outcome;
             }
             assert!(
@@ -233,7 +253,7 @@ mod provider_rotation_tests {
     fn total_execution_budget_of_one_prevents_provider_rotation() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         plan.options.execution_budget = AgentTaskExecutionBudget {
@@ -258,7 +278,7 @@ mod provider_rotation_tests {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let observed = Arc::clone(&executor.observed);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("primary-model".to_string());
         plan.options.rotation = Some(rotation_policy(vec![
@@ -329,7 +349,7 @@ mod provider_rotation_tests {
     #[test]
     fn same_backend_model_rotation_announces_and_records_the_producing_model() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.backend = "opencode".to_string();
         plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
@@ -359,9 +379,9 @@ mod provider_rotation_tests {
 
     #[test]
     fn rotation_records_a_provider_reported_model_that_differs_from_the_attempted_model() {
-        let scheduler = AgentTaskScheduler::new(ProviderReportedRotationExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(ProviderReportedRotationExecutor {
             calls: AtomicUsize::new(0),
-        });
+        }));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
         plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
@@ -382,16 +402,26 @@ mod provider_rotation_tests {
     }
 
     #[test]
-    fn rotation_preserves_uncommitted_candidate_and_dispatches_next_provider_from_clean_baseline() {
+    fn rotation_compacts_exact_recoverable_patch() {
+        rotation_compacts_only_exact_recoverable_patch(false);
+    }
+
+    #[test]
+    fn rotation_retains_mismatched_recoverable_patch() {
+        rotation_compacts_only_exact_recoverable_patch(true);
+    }
+
+    fn rotation_compacts_only_exact_recoverable_patch(declared_mismatched_patch: bool) {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
         let observed_roots = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(DirtyCandidateThenSuccessExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenSuccessExecutor {
             observed_roots: Arc::clone(&observed_roots),
             calls: AtomicUsize::new(0),
-        })
+            declared_mismatched_patch,
+        }))
         .with_run_id("cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874");
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
@@ -437,7 +467,14 @@ mod provider_rotation_tests {
         let candidate = aggregate.outcomes[0]
             .artifacts
             .iter()
-            .find(|artifact| artifact.id == "task-1-attempt-1-uncommitted-changes")
+            .find(|artifact| {
+                artifact.id
+                    == if declared_mismatched_patch {
+                        "mismatched-patch"
+                    } else {
+                        "task-1-attempt-1-uncommitted-changes"
+                    }
+            })
             .expect("failed attempt patch candidate is retained for promotion");
         assert_eq!(candidate.kind, "patch");
         assert_eq!(candidate.metadata["producer_attempt"], 1);
@@ -455,18 +492,23 @@ mod provider_rotation_tests {
         assert_eq!(candidate.metadata["task_id"], "task-1");
         let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))
             .expect("candidate patch remains available");
-        assert!(patch.contains("diff --git a/candidate.txt b/candidate.txt"));
+        if declared_mismatched_patch {
+            assert_eq!(patch, "not the candidate patch\n");
+        } else {
+            assert!(patch.contains("diff --git a/candidate.txt b/candidate.txt"));
+        }
         assert!(candidate
             .path
             .as_deref()
             .is_some_and(|path| path.contains("agent-task/attempt-patches/cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874/task-1")));
-        // The first attempt left an uncommitted candidate (captured above as a
-        // promoted patch artifact), so scheduler cleanup retains its checkout for
-        // lifecycle cleanup rather than force-removing it (#8579). The second,
-        // cleanly-succeeding attempt holds no work and its checkout is retired.
-        assert!(
+        // The first attempt left an uncommitted candidate, but the finalized
+        // durable patch byte-for-byte proves the staged checkout against base.
+        // Rotation can therefore unregister it without retaining multi-GB
+        // build state; the second clean attempt is retired normally.
+        assert_eq!(
             roots[0].exists(),
-            "attempt with a retained uncommitted candidate keeps its checkout for lifecycle cleanup"
+            declared_mismatched_patch,
+            "only an exactly represented candidate may retain its checkout"
         );
         assert!(
             !roots[1].exists(),
@@ -525,11 +567,11 @@ mod provider_rotation_tests {
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit run");
-        let aggregate = AgentTaskScheduler::new(DirtyCandidateThenTerminalExecutor {
+        let aggregate = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenTerminalExecutor {
             calls: AtomicUsize::new(0),
             terminal,
             terminal_outputs,
-        })
+        }))
         .with_run_id(run_id)
         .run(plan);
 
@@ -607,7 +649,7 @@ mod provider_rotation_tests {
         // has to exist before the scheduler dispatches it.
         crate::agent_task_lifecycle::submit_plan(&plan, Some("run-adopt"))
             .expect("durable run record");
-        let aggregate = AgentTaskScheduler::new(scheduler)
+        let aggregate = AgentTaskScheduler::new(Arc::new(scheduler))
             .with_run_id("run-adopt")
             .run(plan);
 
@@ -654,9 +696,9 @@ mod provider_rotation_tests {
         fs::write(&patch_path, &patch).expect("persist candidate patch");
         let expected_fingerprint = fingerprint(patch.as_bytes());
         let observed = Arc::new(Mutex::new(None));
-        let scheduler = AgentTaskScheduler::new(AdoptionExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(AdoptionExecutor {
             observed: Arc::clone(&observed),
-        });
+        }));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.tasks[0].workspace.attempt = Some(crate::agent_task::AgentTaskAttemptWorkspace {
@@ -698,7 +740,7 @@ mod provider_rotation_tests {
     fn primary_success_does_not_rotate() {
         let executor = RotationScriptedExecutor::new(vec![success()]);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
@@ -722,7 +764,7 @@ mod provider_rotation_tests {
         // finalization after publishing a PR.
         let executor = RotationScriptedExecutor::new(vec![success()]);
         let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         assert!(
             plan.tasks[0].executor.model.is_none(),
@@ -754,7 +796,7 @@ mod provider_rotation_tests {
         // the request wins over the configured entry default.
         let executor = RotationScriptedExecutor::new(vec![success()]);
         let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("explicit-cli-model".to_string());
         plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
@@ -781,7 +823,7 @@ mod provider_rotation_tests {
     fn one_provider_execution_budget_never_rotates() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget = AgentTaskExecutionBudget {
             version: AgentTaskExecutionBudget::VERSION,
@@ -826,7 +868,7 @@ mod provider_rotation_tests {
             let executor =
                 RotationScriptedExecutor::new(vec![(status, Some(classification)), success()]);
             let calls = Arc::clone(&executor.calls);
-            let scheduler = AgentTaskScheduler::new(executor);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
             let mut plan = plan_with_tasks(1);
             plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
             enable_rotation(&mut plan);
@@ -893,14 +935,14 @@ mod provider_rotation_tests {
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
         let (cancellation, cancellation_receiver) = std::sync::mpsc::channel();
         let cancel_calls = Arc::new(AtomicUsize::new(0));
-        let scheduler = AgentTaskScheduler::new(TimeoutThenSuccessExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(TimeoutThenSuccessExecutor {
             calls: AtomicUsize::new(0),
             cancellation,
             cancel_calls: Arc::clone(&cancel_calls),
             cancellation_receiver: Mutex::new(cancellation_receiver),
             scratch_index: scratch_index.clone(),
             scratch_roots: Arc::clone(&scratch_roots),
-        })
+        }))
         .with_run_id(run_id);
         let mut plan = plan_with_tasks(1);
         // The first worker returns only after the scheduler reaches the normal
@@ -950,7 +992,7 @@ mod provider_rotation_tests {
                 success(),
             ]);
             let calls = Arc::clone(&executor.calls);
-            let scheduler = AgentTaskScheduler::new(executor);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
             let mut plan = plan_with_tasks(1);
             plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
             enable_rotation(&mut plan);
@@ -982,7 +1024,7 @@ mod provider_rotation_tests {
     fn rotation_exhausts_entries_and_records_attempt_sequence_in_order() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
         let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![
             entry("fallback-backend-a"),
@@ -1019,7 +1061,7 @@ mod provider_rotation_tests {
     fn rotation_respects_configured_max_attempts_bound() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
@@ -1048,7 +1090,7 @@ mod provider_rotation_tests {
     fn request_metadata_rotation_overrides_plan_policy() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![entry("plan-fallback")]));
         enable_rotation(&mut plan);
@@ -1069,7 +1111,7 @@ mod provider_rotation_tests {
     fn no_rotation_policy_keeps_single_attempt_behavior_unchanged() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
         let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
 

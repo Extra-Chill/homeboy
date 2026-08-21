@@ -374,17 +374,6 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
     },
     GateLayerSite {
         file: ".github/ci-required-gates-executed.sh",
-        decision: "exit 1",
-        basis: MeasurementBasis::Projection,
-        renders_skip: false,
-        fixture: None,
-        note: "NO FIXTURE: every non-executed outcome is a refusal: absent or unreadable input, \
-               no declared contexts, a skipped dependency, a missing job, or a non-success \
-               conclusion. This terminal exit cannot manufacture a green verdict; it is \
-               registered so the scan records the script's complete terminal contract.",
-    },
-    GateLayerSite {
-        file: ".github/ci-required-gates-executed.sh",
         decision: "exit 0",
         basis: MeasurementBasis::PerUnitEvaluation,
         renders_skip: false,
@@ -397,7 +386,10 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
         basis: MeasurementBasis::Projection,
         renders_skip: false,
         fixture: None,
-        note: "NO FIXTURE: projects a refusal after the script establishes an inactive run, missing context, skipped dependency, or non-successful gate. A non-zero exit cannot manufacture a pass.",
+        note: "NO FIXTURE: every non-executed outcome is a refusal: absent or unreadable input, \
+               no declared contexts, a skipped dependency, a missing job, or a non-success \
+               conclusion. This terminal exit cannot manufacture a green verdict; it is \
+               registered so the scan records the script's complete terminal contract.",
     },
     GateLayerSite {
         file: ".github/release-asset-completeness.sh",

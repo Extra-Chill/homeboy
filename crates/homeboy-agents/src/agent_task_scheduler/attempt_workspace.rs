@@ -167,8 +167,22 @@ impl AttemptWorkspace {
                 unpushed.trim()
             ));
         }
-        let remove = Command::new("git")
-            .args(["worktree", "remove"])
+        self.remove(false)
+    }
+
+    /// The scheduler calls this only after durable artifact provenance and the
+    /// exact staged-patch proof authorize reclaiming a dirty checkout.
+    pub(super) fn cleanup_verified_recoverable_patch(&self) -> Result<(), String> {
+        self.remove(true)
+    }
+
+    fn remove(&self, force: bool) -> Result<(), String> {
+        let mut command = Command::new("git");
+        command.args(["worktree", "remove"]);
+        if force {
+            command.arg("--force");
+        }
+        let remove = command
             .arg(&self.root)
             .current_dir(&self.source_root)
             .status()
