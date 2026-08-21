@@ -1555,6 +1555,98 @@ mod tests {
         assert!(output.stderr.contains("Homeboy command timed out"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_reaps_session_escaping_pipe_holders_before_returning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        let command = format!(
+            "setsid sh -c 'printf %s $$ > {pid}; sleep 30' & while [ ! -s {pid} ]; do :; done; printf '{{\"status\":\"passed\"}}\\n'",
+            pid = homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy())
+        );
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let extension_path = dir.path().to_path_buf();
+        let run = std::thread::spawn(move || {
+            let output = execute_capability_script(
+                &extension_path,
+                "unused.sh",
+                &[],
+                &[],
+                None,
+                Some(&command),
+                CapabilityScriptOptions {
+                    passthrough: false,
+                    stderr_passthrough: false,
+                    timeout: Some(Duration::from_secs(5)),
+                },
+            );
+            let _ = sent.send(output);
+        });
+
+        let output = received
+            .recv_timeout(Duration::from_secs(3))
+            .expect("capability owner must not wait on an escaped descendant's output pipe")
+            .expect("script should run");
+        run.join().expect("capability execution");
+        assert!(output.success, "script failed: {}", output.stderr);
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !homeboy_core::process::pid_is_running(pid),
+            "session-escaping descendant {pid} outlived its capability owner"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_returns_partial_output_when_an_escapee_removes_its_scope_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        let command = format!(
+            "env -u HOMEBOY_PROCESS_SCOPE setsid sh -c 'printf %s $$ > {pid}; sleep 30' & while [ ! -s {pid} ]; do :; done; printf '{{\"status\":\"passed\"}}\\n'",
+            pid = homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy())
+        );
+        let extension_path = dir.path().to_path_buf();
+        let started = std::time::Instant::now();
+        let output = execute_capability_script(
+            &extension_path,
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some(&command),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_secs(5)),
+            },
+        )
+        .expect("script should run");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "an unverified descendant must not hold capability completion open"
+        );
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        assert!(!output.success);
+        assert!(output.timed_out);
+        assert!(output.stderr.contains("containment cleanup was incomplete"));
+        assert!(output.stderr.contains("output pipes remained open"));
+        assert!(
+            homeboy_core::process::pid_is_running(pid as u32),
+            "fixture escapee must outlive marker cleanup to prove incomplete discovery"
+        );
+
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     fn lint_execution_context() -> crate::ExtensionExecutionContext {
         crate::ExtensionExecutionContext {
             component: Component::new(

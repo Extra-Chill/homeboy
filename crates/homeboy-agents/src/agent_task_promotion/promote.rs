@@ -127,7 +127,7 @@ pub fn resume_promoted_patch(
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
-    resume_promoted_patch_internal(options, target_path, previous, None)
+    resume_promoted_patch_internal(options, target_path, previous, None, false)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -136,7 +136,30 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    resume_promoted_patch_internal(options, target_path, previous, Some(observation_store))
+    resume_promoted_patch_internal(
+        options,
+        target_path,
+        previous,
+        Some(observation_store),
+        false,
+    )
+}
+
+/// Re-run corrected gates against an already-applied candidate while preserving
+/// all candidate, base, target, source, and artifact resume validation.
+pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionReport> {
+    resume_promoted_patch_internal(
+        options,
+        target_path,
+        previous,
+        Some(observation_store),
+        true,
+    )
 }
 
 fn resume_promoted_patch_internal(
@@ -144,6 +167,7 @@ fn resume_promoted_patch_internal(
     target_path: &Path,
     previous: &Value,
     observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    replacement_gates: bool,
 ) -> Result<AgentTaskPromotionReport> {
     validate_resume_provenance(&options, target_path, previous)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
@@ -169,7 +193,14 @@ fn resume_promoted_patch_internal(
         )
     })?;
     validate_artifact_content(&artifact, &patch)?;
-    validate_resume_candidate(&options, target_path, previous, &outcome, &artifact)?;
+    validate_resume_candidate(
+        &options,
+        target_path,
+        previous,
+        &outcome,
+        &artifact,
+        replacement_gates,
+    )?;
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let command_evidence = vec![verify_patch_is_present(
         target_path,
@@ -316,6 +347,7 @@ fn validate_resume_candidate(
     previous: &Value,
     outcome: &AgentTaskOutcome,
     artifact: &AgentTaskArtifact,
+    replacement_gates: bool,
 ) -> Result<()> {
     if previous.pointer("/source/task_id").and_then(Value::as_str) != Some(&outcome.task_id)
         || previous
@@ -357,16 +389,18 @@ fn validate_resume_candidate(
             None,
         ));
     }
-    if let Some(recorded_gates) = previous.pointer("/provenance/resume_contract/gates") {
-        let actual_gates = serde_json::to_value(&options.gates)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        if recorded_gates != &actual_gates {
-            return Err(Error::validation_invalid_argument(
-                "promotion",
-                "promotion resume deterministic gate contract does not match the durable post-apply promotion",
-                None,
-                None,
-            ));
+    if !replacement_gates {
+        if let Some(recorded_gates) = previous.pointer("/provenance/resume_contract/gates") {
+            let actual_gates = serde_json::to_value(&options.gates)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+            if recorded_gates != &actual_gates {
+                return Err(Error::validation_invalid_argument(
+                    "promotion",
+                    "promotion resume deterministic gate contract does not match the durable post-apply promotion",
+                    None,
+                    None,
+                ));
+            }
         }
     }
     let status = std::process::Command::new("git")

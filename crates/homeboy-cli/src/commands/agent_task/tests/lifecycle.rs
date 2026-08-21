@@ -1227,6 +1227,201 @@ fn diagnose_full_preserves_durable_promotion_io_details() {
 }
 
 #[test]
+fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_failure() {
+    with_temp_home(|| {
+        let cook_id = "cook-diagnose-current-gate";
+        let run_id = "run-cli-diagnose-current-gate";
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: test_plan(),
+            to_worktree: "fixture@diagnose-current-gate".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 2,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Diagnose current gate".to_string(),
+            commit_message: "Diagnose current gate".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id))
+            .expect("persist initial controller attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("record Cook attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_controller_failure"] = json!({
+                "code": "provider.to_worktree_failed",
+                "message": "the original provider could not resolve the worktree"
+            });
+        })
+        .expect("persist original controller failure");
+
+        // The repaired continuation applied its candidate, then a later gate
+        // denial became the durable lifecycle authority.
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "patch_artifact": { "sha256": "candidate" }
+            }),
+        )
+        .expect("persist applied candidate");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "patch_artifact": { "sha256": "candidate" },
+                "deterministic_gates": [{
+                    "name": "cargo test -p homeboy-cli",
+                    "status": "failed",
+                    "message": "gate proof failed"
+                }]
+            }),
+        )
+        .expect("persist gate failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose current lifecycle denial");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.promotion_gate_failed"
+        );
+        assert_eq!(diagnosis["root_cause"]["message"], "gate proof failed");
+        assert!(diagnosis["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|diagnostic| diagnostic["class"] == "provider.to_worktree_failed"));
+        assert_eq!(
+            diagnosis["next_commands"],
+            json!([
+                format!("homeboy --placement local agent-task status {run_id} --full"),
+                format!("homeboy --placement local agent-task review {run_id}"),
+                format!("homeboy agent-task cook-continue {run_id}"),
+            ])
+        );
+        assert!(diagnosis["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .any(
+                |action| action["command"] == format!("homeboy agent-task cook-continue {run_id}")
+            ));
+    });
+}
+
+#[test]
+fn diagnose_reads_no_change_gate_results_as_the_current_denial() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-no-change-gate";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_controller_failure"] = json!({
+                "code": "provider.stale_failure",
+                "message": "resolved controller failure"
+            });
+        })
+        .expect("persist stale controller failure");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "no_changes_gate_failed",
+                "gate_results": [{
+                    "id": "gate-1",
+                    "name": "cargo test --locked",
+                    "kind": "command",
+                    "status": "failed",
+                    "message": "no-change gate proof failed"
+                }]
+            }),
+        )
+        .expect("persist no-change gate failure");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose no-change gate failure");
+
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.promotion_gate_failed"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "no-change gate proof failed"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["gate_results"][0]["id"],
+            "gate-1"
+        );
+    });
+}
+
+#[test]
+fn diagnose_prioritizes_current_finalization_failure_over_controller_history() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-finalization-failure";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_controller_failure"] = json!({
+                "code": "provider.to_worktree_failed",
+                "message": "resolved controller failure"
+            });
+            record.metadata["latest_promotion"] = json!({ "status": "applied" });
+            record.metadata["cook_finalization"] = json!({
+                "status": "failed",
+                "code": "finalization.pr_create_failed",
+                "message": "pull request creation was denied"
+            });
+        })
+        .expect("persist finalization failure");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose finalization failure");
+
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "finalization.pr_create_failed"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "pull request creation was denied"
+        );
+        assert!(diagnosis["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|diagnostic| diagnostic["class"] == "provider.to_worktree_failed"));
+    });
+}
+
+#[test]
 fn diagnose_projects_missing_runner_pid_without_an_aggregate_and_keeps_replay_readiness() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-missing-runner-pid";
@@ -3769,6 +3964,73 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
         args.authorize_external_proof.as_deref(),
         Some("Chris approved durable evidence")
     );
+}
+
+#[test]
+fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "verify-replacement",
+        "cook-12788",
+        "--verify",
+        "cargo test exact::replacement",
+        "--authorize-external-proof",
+        "Chris approved corrected gate evidence",
+    ])
+    .expect("replacement verification command parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::VerifyReplacement(args) = args.command else {
+        panic!("replacement verification command");
+    };
+    assert_eq!(args.cook_or_attempt_id, "cook-12788");
+    assert_eq!(args.gates.verify, ["cargo test exact::replacement"]);
+    assert_eq!(
+        args.authorize_external_proof,
+        "Chris approved corrected gate evidence"
+    );
+}
+
+#[test]
+fn verify_replacement_file_gates_are_snapshotted_before_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let public = temp.path().join("public-gate.sh");
+    let private = temp.path().join("private-gate.sh");
+    std::fs::write(&public, "test -f Cargo.toml\n").expect("write public gate");
+    std::fs::write(&private, "test -n \"$TOKEN\"\n").expect("write private gate");
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "verify-replacement",
+        "cook-12788",
+        "--verify-file",
+        public.to_str().expect("public path"),
+        "--private-verify-file",
+        private.to_str().expect("private path"),
+        "--authorize-external-proof",
+        "Chris approved corrected gate evidence",
+    ])
+    .expect("replacement verification command parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::VerifyReplacement(mut args) = args.command else {
+        panic!("replacement verification command");
+    };
+    args.gates
+        .snapshot_file_inputs()
+        .expect("snapshot gate files");
+    std::fs::write(&public, "exit 1\n").expect("mutate public gate");
+    std::fs::write(&private, "exit 1\n").expect("mutate private gate");
+
+    assert_eq!(args.gates.verify, ["test -f Cargo.toml\n"]);
+    assert_eq!(args.gates.private_verify, ["test -n \"$TOKEN\"\n"]);
+    assert!(args.gates.verify_file.is_empty());
+    assert!(args.gates.private_verify_file.is_empty());
+    assert_eq!(args.gates.input_sources[0].source_kind, "file");
+    assert_eq!(args.gates.input_sources[1].path, None);
 }
 
 #[test]

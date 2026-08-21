@@ -89,6 +89,7 @@ fn persisted_linux_starttime_fails_closed_without_proc_identity() {
     let mut owner = read_run_owner(&path).expect("owner");
     owner.owner_pid = std::process::id();
     owner.linux_starttime_ticks = Some(1);
+    owner.process_start_identity = None;
     owner.created_at = "2000-01-01T00:00:00Z".to_string();
     write_run_owner(&path, &owner).expect("write owner");
     drop(pin);
@@ -208,8 +209,8 @@ fn stale_heartbeat_cannot_steal_live_cleanup_lock() {
     use std::sync::mpsc;
 
     let root = tempfile::tempdir().expect("tempdir");
-    let first =
-        super::super::cleanup_support::acquire_cleanup_lock(root.path()).expect("first lock");
+    let first = super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.live-owner")
+        .expect("first lock");
     let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
     let mut owner: RuntimeTempCleanupLockOwner =
         serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
@@ -219,8 +220,11 @@ fn stale_heartbeat_cannot_steal_live_cleanup_lock() {
     let path = root.path().to_path_buf();
     let (tx, rx) = mpsc::channel();
     let contender = std::thread::spawn(move || {
-        tx.send(super::super::cleanup_support::acquire_cleanup_lock(&path))
-            .expect("send result");
+        tx.send(super::super::cleanup_support::acquire_cleanup_lock(
+            &path,
+            "test.contender",
+        ))
+        .expect("send result");
     });
 
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -231,6 +235,256 @@ fn stale_heartbeat_cannot_steal_live_cleanup_lock() {
         .expect("second lock");
     drop(second);
     contender.join().expect("contender join");
+}
+
+#[test]
+fn live_cleanup_lock_timeout_reports_typed_owner_and_remediation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let _first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.live-owner")
+            .expect("first lock");
+
+    let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.contender",
+        1,
+        Duration::from_secs(300),
+    )
+    .expect_err("live owner blocks contender");
+
+    assert!(error.message.contains("test.live-owner"));
+    assert!(error.message.contains("linux_starttime_ticks"));
+    assert!(error.message.contains("acquisition_age_ms"));
+    assert!(error.message.contains("lease_deadline_unix_ms"));
+    assert!(error.message.contains("status_command"));
+    assert!(error.message.contains("watch_command"));
+    assert!(error.message.contains("do not delete the lock manually"));
+}
+
+#[test]
+fn cleanup_lock_guidance_shell_quotes_metacharacter_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("runtime $; quote' tick`");
+    fs::create_dir(&root).expect("runtime root");
+    let _first = super::super::cleanup_support::acquire_cleanup_lock(&root, "test.owner")
+        .expect("first lock");
+
+    let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        &root,
+        "test.contender",
+        1,
+        Duration::from_secs(300),
+    )
+    .expect_err("live owner blocks contender");
+    let owner_path = root.join(CLEANUP_LOCK_DIR).join(CLEANUP_LOCK_OWNER_FILE);
+    let quoted = crate::engine::shell::quote_arg(&owner_path.display().to_string());
+    assert!(error
+        .message
+        .contains(&format!("cat {}", quoted.replace('\\', "\\\\"))));
+}
+
+#[test]
+fn cleanup_lock_owner_uses_cross_platform_start_identity() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let lock = super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.owner")
+        .expect("first lock");
+    let owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(lock.path.join(CLEANUP_LOCK_OWNER_FILE)).expect("owner"))
+            .expect("owner json");
+    assert_eq!(
+        owner.process_start_identity,
+        crate::process::process_start_identity(std::process::id())
+            .expect("inspect current process")
+    );
+}
+
+#[test]
+fn legacy_cleanup_lock_owner_uses_lease_window_for_retry_guidance() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first = super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.owner")
+        .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    fs::write(
+        &owner_path,
+        format!(
+            r#"{{"token":"legacy","pid":{},"linux_starttime_ticks":null,"heartbeat_unix_ms":{}}}"#,
+            std::process::id(),
+            super::super::cleanup_support::unix_time_ms(),
+        ),
+    )
+    .expect("legacy owner");
+    std::mem::forget(first);
+
+    let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.contender",
+        1,
+        Duration::from_secs(300),
+    )
+    .expect_err("legacy live owner blocks contender");
+    assert!(!error.message.contains("\"retry_after_ms\":20"));
+    assert!(error.message.contains("\"lease_deadline_unix_ms\":"));
+}
+
+#[test]
+fn concurrent_stale_reclaimers_leave_one_live_owner() {
+    use std::sync::{mpsc, Barrier};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.exited-owner")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+    owner.pid = exited_pid();
+    owner.linux_starttime_ticks = None;
+    owner.process_start_identity = None;
+    owner.heartbeat_unix_ms = 0;
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("stale owner");
+    std::mem::forget(first);
+
+    let barrier = std::sync::Arc::new(Barrier::new(2));
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..2 {
+        let root = root.path().to_path_buf();
+        let barrier = barrier.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            tx.send(
+                super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+                    &root,
+                    "test.reclaimer",
+                    2,
+                    Duration::from_secs(1),
+                ),
+            )
+            .expect("send result");
+        });
+    }
+    drop(tx);
+    let results = rx.into_iter().collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+}
+
+#[test]
+fn stale_reclaimer_cannot_remove_a_lock_reacquired_during_claim() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.exited-owner")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+    owner.pid = exited_pid();
+    owner.linux_starttime_ticks = None;
+    owner.process_start_identity = None;
+    owner.heartbeat_unix_ms = 0;
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("stale owner");
+    std::mem::forget(first);
+
+    let claim = FsIndexLock::acquire_in(root.path(), CLEANUP_LOCK_CLAIM).expect("hold claim");
+    let contender_root = root.path().to_path_buf();
+    let contender = std::thread::spawn(move || {
+        super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+            &contender_root,
+            "test.reclaimer",
+            1,
+            Duration::from_secs(1),
+        )
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let lock_path = root.path().join(CLEANUP_LOCK_DIR);
+    fs::remove_dir_all(&lock_path).expect("release old lock");
+    fs::create_dir(&lock_path).expect("reacquire lock");
+    let live = RuntimeTempCleanupLockOwner {
+        schema: "homeboy/runtime-temp-cleanup-lock-owner/v1".to_string(),
+        token: "reacquired".to_string(),
+        pid: std::process::id(),
+        linux_starttime_ticks: crate::process::linux_process_starttime_ticks(std::process::id())
+            .ok()
+            .flatten(),
+        process_start_identity: crate::process::process_start_identity(std::process::id())
+            .ok()
+            .flatten(),
+        operation: "test.reacquired".to_string(),
+        acquired_unix_ms: super::super::cleanup_support::unix_time_ms(),
+        heartbeat_unix_ms: super::super::cleanup_support::unix_time_ms(),
+        lease_deadline_unix_ms: u64::MAX,
+        progress: 0,
+    };
+    super::super::cleanup_support::write_cleanup_lock_owner(
+        &lock_path.join(CLEANUP_LOCK_OWNER_FILE),
+        &live,
+    )
+    .expect("live owner");
+    drop(claim);
+
+    assert!(contender.join().expect("contender join").is_err());
+    assert!(lock_path.join(CLEANUP_LOCK_OWNER_FILE).exists());
+}
+
+#[test]
+fn abandoned_allocation_staging_is_reclaimed_after_staleness() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    let staging = root
+        .path()
+        .join(format!("{ALLOCATION_STAGING_PREFIX}abandoned"));
+    fs::create_dir(&staging).expect("staging directory");
+    fs::write(staging.join("payload"), b"payload").expect("payload");
+    fs::File::open(&staging)
+        .expect("open staging")
+        .set_modified(SystemTime::now() - CLEANUP_LOCK_STALE_AFTER - Duration::from_secs(1))
+        .expect("backdate staging");
+
+    let mut options = bounded_options(true, None);
+    options.older_than_days = 0;
+    let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
+    assert_eq!(output.removed_count, 1);
+    assert!(!staging.exists());
+    env::remove_var(runtime_tmpdir_env());
+}
+
+#[test]
+fn stale_cleanup_lock_from_exited_owner_is_reclaimed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.exited-owner")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
+    owner.pid = exited_pid();
+    owner.linux_starttime_ticks = None;
+    owner.process_start_identity = None;
+    owner.heartbeat_unix_ms = 0;
+    owner.lease_deadline_unix_ms = 0;
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("stale owner");
+    std::mem::forget(first);
+
+    let reclaimed = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.reclaimer",
+        2,
+        Duration::from_secs(1),
+    )
+    .expect("reclaim exited stale owner");
+    drop(reclaimed);
+}
+
+fn exited_pid() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn short-lived process");
+    let pid = child.id();
+    child.wait().expect("wait short-lived process");
+    pid
 }
 
 #[cfg(unix)]

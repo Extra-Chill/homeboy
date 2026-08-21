@@ -23,12 +23,22 @@ pub(crate) fn configure_process_group_cleanup(cmd: &mut Command) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_process_scope_cleanup(
+    cmd: &mut Command,
+) -> crate::error::Result<crate::process::ProcessContainment> {
+    install_process_cleanup_signal_handlers();
+    crate::process::ProcessContainment::prepare(cmd)
+}
+
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group_cleanup(_cmd: &mut Command) {}
 
 pub(crate) struct ProcessGroupCleanupGuard {
     #[cfg(unix)]
     pgid: Option<libc::pid_t>,
+    #[cfg(target_os = "linux")]
+    containment: Option<crate::process::ProcessContainment>,
 }
 
 impl ProcessGroupCleanupGuard {
@@ -37,7 +47,11 @@ impl ProcessGroupCleanupGuard {
         {
             let pgid = Some(root_pid as libc::pid_t);
             ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
-            Self { pgid }
+            Self {
+                pgid,
+                #[cfg(target_os = "linux")]
+                containment: None,
+            }
         }
 
         #[cfg(not(unix))]
@@ -47,12 +61,31 @@ impl ProcessGroupCleanupGuard {
         }
     }
 
-    pub(crate) fn cleanup(mut self) {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_containment(
+        root_pid: u32,
+        containment: crate::process::ProcessContainment,
+    ) -> Self {
+        ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
+        Self {
+            pgid: Some(root_pid as libc::pid_t),
+            containment: Some(containment),
+        }
+    }
+
+    pub(crate) fn cleanup(mut self) -> Option<String> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
-            cleanup_process_group(pgid);
+            let detail = cleanup_process_group(
+                pgid,
+                #[cfg(target_os = "linux")]
+                self.containment.as_ref(),
+            );
             self.pgid = None;
+            return detail;
         }
+
+        None
     }
 
     #[cfg(unix)]
@@ -70,7 +103,11 @@ impl Drop for ProcessGroupCleanupGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid.take() {
-            cleanup_process_group(pgid);
+            cleanup_process_group(
+                pgid,
+                #[cfg(target_os = "linux")]
+                self.containment.as_ref(),
+            );
         }
     }
 }
@@ -122,7 +159,28 @@ pub(crate) fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) 
 }
 
 #[cfg(unix)]
-fn cleanup_process_group(pgid: libc::pid_t) {
+fn cleanup_process_group(
+    pgid: libc::pid_t,
+    #[cfg(target_os = "linux")] containment: Option<&crate::process::ProcessContainment>,
+) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    if let Some(containment) = containment {
+        match containment.cleanup_with_grace(Duration::from_millis(200), false) {
+            Ok(cleanup) if cleanup.complete => return None,
+            Ok(cleanup) => return cleanup.detail,
+            Err(error) => {
+                cleanup_process_group_fallback(pgid);
+                return Some(format!("process containment cleanup failed: {error}"));
+            }
+        }
+    }
+
+    cleanup_process_group_fallback(pgid);
+    None
+}
+
+#[cfg(unix)]
+fn cleanup_process_group_fallback(pgid: libc::pid_t) {
     unsafe {
         libc::kill(-pgid, libc::SIGTERM);
     }
@@ -149,5 +207,20 @@ mod tests {
         assert!(stderr.contains("runner output"));
         assert!(stderr.contains("Homeboy interrupted by signal 15"));
         assert!(stderr.contains("terminated child process group"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn containment_guard_clears_a_stale_cleanup_signal() {
+        ACTIVE_CLEANUP_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
+        let mut command = Command::new("sh");
+        let containment =
+            crate::process::ProcessContainment::prepare(&mut command).expect("prepare containment");
+        let mut guard = ProcessGroupCleanupGuard::with_containment(0, containment);
+
+        assert_eq!(active_cleanup_signal(), None);
+
+        // This is a construction-only test; avoid signaling a process group on drop.
+        guard.pgid = None;
     }
 }

@@ -38,7 +38,7 @@ use super::super::CmdResult;
 use super::candidate::{canonical_candidate_projection, classify_candidates};
 use super::{
     AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
-    RecordReplacementGateProofArgs, ReviewArgs,
+    RecordReplacementGateProofArgs, ReviewArgs, VerifyReplacementArgs,
 };
 
 #[derive(Args, Debug)]
@@ -729,6 +729,26 @@ pub(crate) fn record_replacement_gate_proof(
         args.authorize_external_proof,
     )?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
+pub(crate) fn verify_replacement(mut args: VerifyReplacementArgs) -> CmdResult<Value> {
+    args.gates.snapshot_file_inputs()?;
+    let report = agent_task_service::verify_replacement_gates(
+        &args.cook_or_attempt_id,
+        args.gates.into(),
+        args.authorize_external_proof,
+    )?;
+    let run_id = report.source.run_id.clone().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "replacement proof report is missing its durable source run id".to_string(),
+        )
+    })?;
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    value["handoff"] = serde_json::json!({
+        "next_command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
+        "status_command": format!("homeboy agent-task status {run_id} --full"),
+    });
+    Ok((value, 0))
 }
 
 fn should_persist_manual_preflight_intent(

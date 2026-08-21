@@ -442,4 +442,28 @@ mod tests {
         assert_eq!(output.status, "busy");
         assert!(!data.path().join(STATE_FILE).exists());
     }
+
+    #[test]
+    fn runtime_temp_busy_pass_reports_resume_diagnostics() {
+        let _serial = TEST_SERIAL
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let data = TempDir::new().unwrap();
+        let _admission = IN_PROCESS_ADMISSION
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+
+        let output = run_automatic_runtime_temp_retention_in(
+            &enabled_retention(),
+            data.path(),
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(output.status, "busy");
+        assert!(output.state_path.ends_with(RUNTIME_TMP_STATE_FILE));
+        assert_eq!(output.resume_command, "homeboy cleanup automatic-retention");
+    }
 }

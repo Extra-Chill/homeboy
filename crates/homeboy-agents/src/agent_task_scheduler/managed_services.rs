@@ -294,9 +294,9 @@ impl AgentTaskServiceSupervisor {
         {
             let cleanup = containment
                 .cleanup_with_grace(Duration::from_millis(spec.cleanup_deadline_ms), false);
-            // A successful containment cleanup waits for its owned leader and
+            // A complete containment cleanup verifies its owned leader and
             // descendants before returning.
-            let reaped = cleanup.is_ok();
+            let reaped = cleanup.as_ref().is_ok_and(|cleanup| cleanup.complete);
             record.state = "failed".to_string();
             record.cleanup = Some("terminated_after_readiness_failure".to_string());
             record.cleanup_outcome = Some(cleanup_outcome(cleanup));
@@ -359,7 +359,8 @@ impl AgentTaskServiceSupervisor {
                             exited,
                         );
                         let child_reaped = service.child.wait().is_ok();
-                        let reaped = cleanup.is_ok() || child_reaped;
+                        let reaped =
+                            cleanup.as_ref().is_ok_and(|cleanup| cleanup.complete) || child_reaped;
                         (cleanup, reaped)
                     })
                 })
@@ -380,12 +381,20 @@ impl AgentTaskServiceSupervisor {
         for (service, (cleanup, reaped)) in self.services.iter_mut().zip(cleanups) {
             service.record.state = "stopped".to_string();
             service.record.cleanup_outcome = Some(match &cleanup {
-                Ok(false) => "graceful".to_string(),
-                Ok(true) => "deadline_escalation_forced".to_string(),
+                Ok(cleanup) if !cleanup.complete => format!(
+                    "incomplete:{}",
+                    cleanup.detail.as_deref().unwrap_or("unknown")
+                ),
+                Ok(cleanup) if cleanup.forced => "deadline_escalation_forced".to_string(),
+                Ok(_) => "graceful".to_string(),
                 Err(_) => "failed".to_string(),
             });
             service.record.cleanup = Some(match cleanup {
-                Ok(_) => format!("cleaned_up:{reason}"),
+                Ok(cleanup) if cleanup.complete => format!("cleaned_up:{reason}"),
+                Ok(cleanup) => format!(
+                    "cleanup_incomplete:{reason}:{}",
+                    cleanup.detail.unwrap_or_else(|| "unknown".to_string())
+                ),
                 Err(error) => format!("cleanup_failed:{reason}:{}", error.message),
             });
             service.record.cleanup_reaped = Some(reaped);
@@ -402,10 +411,16 @@ impl AgentTaskServiceSupervisor {
     }
 }
 
-fn cleanup_outcome(cleanup: Result<bool, homeboy_core::Error>) -> String {
+fn cleanup_outcome(
+    cleanup: Result<homeboy_core::process::ProcessContainmentCleanup, homeboy_core::Error>,
+) -> String {
     match cleanup {
-        Ok(false) => "graceful".to_string(),
-        Ok(true) => "deadline_escalation_forced".to_string(),
+        Ok(cleanup) if !cleanup.complete => format!(
+            "incomplete:{}",
+            cleanup.detail.unwrap_or_else(|| "unknown".to_string())
+        ),
+        Ok(cleanup) if cleanup.forced => "deadline_escalation_forced".to_string(),
+        Ok(_) => "graceful".to_string(),
         Err(_) => "failed".to_string(),
     }
 }

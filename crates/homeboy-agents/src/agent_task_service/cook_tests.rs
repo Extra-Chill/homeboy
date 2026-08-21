@@ -14,13 +14,14 @@ use super::super::cook_promotion::{
     cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
     finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
     finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
-    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
-    prepare_manual_finalization_identity, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, selected_candidate_task_id_in_store, CookReportInput,
+    mark_replacement_gate_execution_started, moving_base_recovery_for_run,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
+    record_replacement_gate_proof, recover_cook_pr_with_backend,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
     MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
@@ -11165,6 +11166,193 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
 }
 
 #[test]
+fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("candidate");
+        std::fs::create_dir(&source).expect("create source");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("run git")
+                .success());
+        }
+        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .expect("stage base")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(&source)
+            .status()
+            .expect("commit base")
+            .success());
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "cook-candidate"])
+            .arg(&target)
+            .current_dir(&source)
+            .status()
+            .expect("create candidate")
+            .success());
+        std::fs::write(target.join("tracked.txt"), "promoted\n").expect("write candidate");
+
+        let mut options = batch_cook_options(
+            "cook-verify-replacement",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = "run-verify-replacement".to_string();
+        options.to_worktree = "fixture@cook-candidate".to_string();
+        options.source_worktree_path = Some(target.clone());
+        persist_initial_recipe(&options).expect("persist recipe");
+        record_tracked_promotion_continuation(&options, &target);
+        agent_task_lifecycle::record_cook_attempt(
+            "cook-verify-replacement",
+            1,
+            "run-verify-replacement",
+        )
+        .expect("link attempt");
+
+        let patch_path = target
+            .parent()
+            .expect("candidate parent")
+            .join("candidate.patch");
+        let patch = std::fs::read_to_string(&patch_path).expect("read candidate patch");
+        seed_patch_alias_aggregate(
+            "run-verify-replacement",
+            &options.initial_plan,
+            &[("patch", &patch_path, &patch)],
+        );
+        let mut failed = serde_json::to_value(
+            persisted_promotion_for_attempt("run-verify-replacement")
+                .expect("read failed promotion")
+                .expect("failed promotion"),
+        )
+        .expect("serialize failed promotion");
+        failed["source"]["task_id"] =
+            serde_json::json!(options.initial_plan.tasks[0].task_id.clone());
+        failed["target"]["dirty"] = serde_json::json!(true);
+        agent_task_lifecycle::record_promotion("run-verify-replacement", failed)
+            .expect("align source task evidence");
+
+        let gate_log = temp.path().join("replacement-gate-runs");
+        let gate = format!(
+            "test \"$(cat tracked.txt)\" = promoted; printf ran >> {}",
+            gate_log.display()
+        );
+        let replacement = verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![gate.clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+        )
+        .expect("replacement gates complete");
+
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(replacement.deterministic_gates.len(), 1);
+        assert_eq!(
+            replacement.deterministic_gates[0].command,
+            vec!["sh".to_string(), "-lc".to_string(), gate]
+        );
+        let replay = verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![replacement.deterministic_gates[0].command[2].clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+        )
+        .expect("completed replacement proof replays without rerunning gates");
+        assert_eq!(replay.status, replacement.status);
+        assert_eq!(replay.command_evidence, replacement.command_evidence);
+        assert_eq!(
+            std::fs::read_to_string(gate_log).expect("read gate log"),
+            "ran"
+        );
+        let record = agent_task_lifecycle::status("run-verify-replacement").expect("read record");
+        assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            agent_task_lifecycle::operation_claim(
+                "run-verify-replacement",
+                "verify-replacement:run-verify-replacement"
+            )
+            .expect("read replacement claim")
+            .expect("replacement claim")
+            .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
+                ["original_history"]["status"],
+            "gate_failed"
+        );
+    });
+}
+
+#[test]
+fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-replacement-fence";
+        let run_id = "run-replacement-fence";
+        let target = tempfile::tempdir().expect("target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link attempt");
+
+        let mut failed = promotion_with_existing_path(run_id, target.path());
+        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        failed.deterministic_gates[0].exit_code = 1;
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(failed).unwrap())
+            .expect("record failed promotion");
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        mark_replacement_gate_execution_started(&lifecycle_store, run_id)
+            .expect("persist start fence");
+
+        let gate_log = target.path().join("must-not-run");
+        let error = verify_replacement_gates(
+            cook_id,
+            VerifyGateOptions {
+                verify: vec![format!("printf ran > {}", gate_log.display())],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+        )
+        .expect_err("interrupted execution must fail closed");
+
+        assert!(error.message.contains("will not rerun shell gates"));
+        assert_eq!(
+            error.details["recovery"]["kind"],
+            "external_candidate_bound_proof_required"
+        );
+        assert!(!gate_log.exists());
+        assert!(
+            agent_task_lifecycle::operation_claim(
+                run_id,
+                "verify-replacement:run-replacement-fence"
+            )
+            .expect("read claim")
+            .expect("claim retained")
+            .state
+                == agent_task_lifecycle::ClaimState::Failed
+        );
+    });
+}
+
+#[test]
 fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = durable_cook_0_328_fixture();
@@ -11422,9 +11610,22 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         assert_eq!(fixture.continuation_record.state, "partial_failure");
 
+        let before_preflight =
+            serde_json::to_value(agent_task_lifecycle::status(&historical.initial_run_id).unwrap())
+                .unwrap();
+        assert!(
+            authenticated_historical_review_form_workspace_with_trace(&historical, false).unwrap(),
+            "the exact dirty candidate authorizes only this historical continuation"
+        );
+        assert_eq!(
+            serde_json::to_value(agent_task_lifecycle::status(&historical.initial_run_id).unwrap())
+                .unwrap(),
+            before_preflight,
+            "read-only admission must not persist a continuation trace"
+        );
         assert!(
             authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "the exact dirty candidate authorizes only this historical continuation"
+            "execution records its exact admission trace"
         );
         historical.attempt_dispatcher = None;
         let executions = Arc::new(AtomicUsize::new(0));

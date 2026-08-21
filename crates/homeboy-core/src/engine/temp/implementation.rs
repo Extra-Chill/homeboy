@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::output::{OutputBudget, OutputPresentation, OutputTruncation};
 use crate::paths;
+use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -23,9 +24,26 @@ mod contract {
     pub(super) const CLEANUP_LOCK_ATTEMPTS: usize = 100;
     pub(super) const CLEANUP_LOCK_SLEEP: Duration = Duration::from_millis(20);
     pub(super) const CLEANUP_LOCK_OWNER_FILE: &str = "owner.json";
+    pub(super) const ALLOCATION_STAGING_PREFIX: &str = ".homeboy-runtime-temp-allocating-";
     pub(super) const CORRUPT_OWNER_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 }
 use contract::*;
+
+const RUN_OWNER_LOCK: FsIndexLockConfig = FsIndexLockConfig {
+    name: ".owner.lock",
+    stale_after: Duration::from_secs(30),
+    attempts: 100,
+    sleep: Duration::from_millis(20),
+    subject: "runtime run owner",
+};
+
+const CLEANUP_LOCK_CLAIM: FsIndexLockConfig = FsIndexLockConfig {
+    name: ".cleanup.lock.claim",
+    stale_after: Duration::from_secs(30),
+    attempts: 100,
+    sleep: Duration::from_millis(20),
+    subject: "runtime cleanup lock claim",
+};
 
 /// A process-owned pin which prevents runtime-temp cleanup from removing its directory.
 #[derive(Debug)]
@@ -154,6 +172,8 @@ struct RuntimeRunOwner {
     owner_pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     linux_starttime_ticks: Option<u64>,
+    #[serde(default)]
+    process_start_identity: Option<crate::process::ProcessStartIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -196,6 +216,7 @@ struct ManagedRunInspection {
     metadata_warning: Option<String>,
 }
 
+#[derive(Debug)]
 struct RuntimeTempCleanupLock {
     path: PathBuf,
     token: String,
@@ -203,14 +224,32 @@ struct RuntimeTempCleanupLock {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeTempCleanupLockOwner {
+    #[serde(default)]
+    schema: String,
     token: String,
     pid: u32,
     linux_starttime_ticks: Option<u64>,
+    #[serde(default)]
+    process_start_identity: Option<crate::process::ProcessStartIdentity>,
+    #[serde(default)]
+    operation: String,
+    #[serde(default)]
+    acquired_unix_ms: u64,
     heartbeat_unix_ms: u64,
+    #[serde(default)]
+    lease_deadline_unix_ms: u64,
+    #[serde(default)]
+    progress: u64,
 }
 
 impl Drop for RuntimeTempCleanupLock {
     fn drop(&mut self) {
+        let Some(root) = self.path.parent() else {
+            return;
+        };
+        let Ok(_claim) = FsIndexLock::acquire_in(root, CLEANUP_LOCK_CLAIM) else {
+            return;
+        };
         let owner_path = self.path.join(CLEANUP_LOCK_OWNER_FILE);
         let owned = fs::read_to_string(&owner_path)
             .ok()
@@ -242,6 +281,10 @@ impl RuntimeTempCleanupLock {
             ));
         }
         owner.heartbeat_unix_ms = unix_time_ms();
+        owner.lease_deadline_unix_ms = owner
+            .heartbeat_unix_ms
+            .saturating_add(CLEANUP_LOCK_STALE_AFTER.as_millis() as u64);
+        owner.progress = owner.progress.saturating_add(1);
         write_cleanup_lock_owner(&owner_path, &owner)
     }
 }
@@ -313,9 +356,14 @@ pub(crate) fn managed_run_temp_dir_for_producer(
     producer: Option<&str>,
 ) -> Result<(PathBuf, RuntimeTempPin)> {
     let root = ensure_runtime_tmp_dir()?;
-    let _lock = acquire_cleanup_lock(&root)?;
     let path = root.join(unique_name(prefix, ""));
-    fs::create_dir(&path).map_err(|error| {
+    // Cleanup ignores this short-lived staging name. Renaming after durable owner
+    // metadata and a live pin exist prevents cleanup from observing a half-owned run.
+    let staging = root.join(format!(
+        "{ALLOCATION_STAGING_PREFIX}{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&staging).map_err(|error| {
         Error::internal_io(error.to_string(), Some(format!("create temp dir {prefix}")))
     })?;
     let owner = RuntimeRunOwner {
@@ -323,6 +371,9 @@ pub(crate) fn managed_run_temp_dir_for_producer(
         owner_id: uuid::Uuid::new_v4().to_string(),
         owner_pid: std::process::id(),
         linux_starttime_ticks: crate::process::linux_process_starttime_ticks(std::process::id())
+            .ok()
+            .flatten(),
+        process_start_identity: crate::process::process_start_identity(std::process::id())
             .ok()
             .flatten(),
         run_id: None,
@@ -333,14 +384,28 @@ pub(crate) fn managed_run_temp_dir_for_producer(
         reason: None,
         producer: producer.map(str::to_string),
     };
-    if let Err(error) = write_run_owner(&path, &owner) {
-        let _ = fs::remove_dir_all(&path);
+    if let Err(error) = write_run_owner(&staging, &owner) {
+        let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    match pin_runtime_temp_dir(&path) {
-        Ok(pin) => Ok((path, pin)),
+    match pin_runtime_temp_dir(&staging) {
+        Ok(_) => match fs::rename(&staging, &path) {
+            Ok(()) => Ok((
+                path.clone(),
+                RuntimeTempPin {
+                    path: path.join(RUNTIME_TEMP_PIN_FILE),
+                },
+            )),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("publish temp dir {prefix}")),
+                ))
+            }
+        },
         Err(error) => {
-            let _ = fs::remove_dir_all(&path);
+            let _ = fs::remove_dir_all(&staging);
             Err(error)
         }
     }
@@ -359,7 +424,7 @@ pub(crate) fn bind_run_dir_owner(
     run_id: Option<&str>,
     invocation_id: Option<&str>,
 ) -> Result<()> {
-    let root = path.parent().ok_or_else(|| {
+    path.parent().ok_or_else(|| {
         Error::validation_invalid_argument(
             "runDir",
             "managed run directory has no runtime root",
@@ -367,7 +432,13 @@ pub(crate) fn bind_run_dir_owner(
             None,
         )
     })?;
-    let _lock = acquire_cleanup_lock(root)?;
+    let _lock = FsIndexLock::acquire_in(path, RUN_OWNER_LOCK).map_err(|error| {
+        Error::internal_unexpected(format!(
+            "bind runtime run owner {}: {}",
+            path.display(),
+            error
+        ))
+    })?;
     let mut owner = read_run_owner(path)?;
     if let Some(run_id) = run_id {
         owner.run_id = Some(run_id.to_string());
@@ -387,10 +458,10 @@ mod owner_support {
         if !path.exists() {
             return;
         }
-        let Some(root) = path.parent() else {
+        let Some(_root) = path.parent() else {
             return;
         };
-        let Ok(_lock) = acquire_cleanup_lock(root) else {
+        let Ok(_lock) = FsIndexLock::acquire_in(path, RUN_OWNER_LOCK) else {
             return;
         };
         let Ok(mut owner) = read_run_owner(path) else {
@@ -544,16 +615,14 @@ mod owner_support {
     }
 
     pub(super) fn owner_process_identity_matches(owner: &RuntimeRunOwner) -> bool {
-        if !crate::process::pid_is_running(owner.owner_pid) {
-            return false;
-        }
-        match owner.linux_starttime_ticks {
-            Some(expected) => crate::process::linux_process_starttime_ticks(owner.owner_pid)
-                .ok()
-                .flatten()
-                .is_some_and(|actual| actual == expected),
-            None => !cfg!(target_os = "linux"),
-        }
+        matches!(
+            crate::process::process_identity_state_with_start_identity(
+                owner.owner_pid,
+                owner.linux_starttime_ticks,
+                owner.process_start_identity.as_ref(),
+            ),
+            crate::process::ProcessIdentityState::Live
+        )
     }
 
     pub(super) fn managed_deletion_protection(
@@ -910,6 +979,12 @@ pub fn cleanup_runtime_tmp_bounded(
     cleanup_runtime_tmp_bounded_with_remover(options, remove_runtime_tmp_entry)
 }
 
+/// Read the current global cleanup owner without acquiring the cleanup lock.
+/// This is used when capacity admission must explain why reclamation is busy.
+pub fn runtime_temp_cleanup_lock_status() -> Option<serde_json::Value> {
+    cleanup_support::cleanup_lock_status(&runtime_root().ok()?, CLEANUP_LOCK_STALE_AFTER)
+}
+
 /// Sweep the active runtime-temp root, then drain every superseded root.
 ///
 /// #11125 moved the default root from the config volume to the data volume.
@@ -980,7 +1055,7 @@ fn cleanup_runtime_tmp_root(
     options: RuntimeTempCleanupOptions<'_>,
     remover: RuntimeTempEntryRemover,
 ) -> Result<RuntimeTempCleanupOutput> {
-    let lock = acquire_cleanup_lock(&root)?;
+    let lock = acquire_cleanup_lock(&root, "runtime-temp.cleanup")?;
     let mut output = RuntimeTempCleanupOutput {
         command: "self.cleanup-runtime-tmp",
         dry_run: !options.apply,
@@ -1029,8 +1104,23 @@ fn cleanup_runtime_tmp_root(
     let mut managed = Vec::new();
     let mut unmanaged = Vec::new();
     for entry in entries {
-        if entry.file_name() == CLEANUP_LOCK_DIR {
+        let name = entry.file_name();
+        if name == CLEANUP_LOCK_DIR || name == CLEANUP_LOCK_CLAIM.name {
             continue;
+        }
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(ALLOCATION_STAGING_PREFIX))
+        {
+            let fresh = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age <= CLEANUP_LOCK_STALE_AFTER);
+            if fresh {
+                continue;
+            }
         }
         if entry.path().join(RUN_OWNER_FILE).is_file() {
             managed.push(entry);
@@ -1118,6 +1208,7 @@ fn cleanup_runtime_tmp_root(
                     owner_id: format!("corrupt:{name}"),
                     owner_pid: 0,
                     linux_starttime_ticks: None,
+                    process_start_identity: None,
                     run_id: None,
                     invocation_ids: Vec::new(),
                     state: "corrupt".to_string(),
@@ -1501,7 +1592,24 @@ mod cleanup_support {
         }
     }
 
-    pub(super) fn acquire_cleanup_lock(root: &Path) -> Result<RuntimeTempCleanupLock> {
+    pub(super) fn acquire_cleanup_lock(
+        root: &Path,
+        operation: &str,
+    ) -> Result<RuntimeTempCleanupLock> {
+        acquire_cleanup_lock_with_policy(
+            root,
+            operation,
+            CLEANUP_LOCK_ATTEMPTS,
+            CLEANUP_LOCK_STALE_AFTER,
+        )
+    }
+
+    pub(super) fn acquire_cleanup_lock_with_policy(
+        root: &Path,
+        operation: &str,
+        attempts: usize,
+        stale_after: Duration,
+    ) -> Result<RuntimeTempCleanupLock> {
         fs::create_dir_all(root).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -1510,10 +1618,18 @@ mod cleanup_support {
         })?;
         let path = root.join(CLEANUP_LOCK_DIR);
         let token = uuid::Uuid::new_v4().to_string();
-        for _ in 0..CLEANUP_LOCK_ATTEMPTS {
+        for _ in 0..attempts {
+            let _claim = FsIndexLock::acquire_in(root, CLEANUP_LOCK_CLAIM).map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "claim runtime cleanup lock {}: {error}",
+                    root.display()
+                ))
+            })?;
             match fs::create_dir(&path) {
                 Ok(()) => {
+                    let acquired_unix_ms = unix_time_ms();
                     let owner = RuntimeTempCleanupLockOwner {
+                        schema: "homeboy/runtime-temp-cleanup-lock-owner/v1".to_string(),
                         token: token.clone(),
                         pid: std::process::id(),
                         linux_starttime_ticks: crate::process::linux_process_starttime_ticks(
@@ -1521,7 +1637,17 @@ mod cleanup_support {
                         )
                         .ok()
                         .flatten(),
-                        heartbeat_unix_ms: unix_time_ms(),
+                        process_start_identity: crate::process::process_start_identity(
+                            std::process::id(),
+                        )
+                        .ok()
+                        .flatten(),
+                        operation: operation.to_string(),
+                        acquired_unix_ms,
+                        heartbeat_unix_ms: acquired_unix_ms,
+                        lease_deadline_unix_ms: acquired_unix_ms
+                            .saturating_add(stale_after.as_millis() as u64),
+                        progress: 0,
                     };
                     if let Err(error) =
                         write_cleanup_lock_owner(&path.join(CLEANUP_LOCK_OWNER_FILE), &owner)
@@ -1542,14 +1668,14 @@ mod cleanup_support {
                         });
                     let stale = owner.as_ref().is_some_and(|owner| {
                         unix_time_ms().saturating_sub(owner.heartbeat_unix_ms)
-                            > CLEANUP_LOCK_STALE_AFTER.as_millis() as u64
-                            && !process_identity_matches(owner.pid, owner.linux_starttime_ticks)
+                            > stale_after.as_millis() as u64
+                            && process_identity_is_stale(owner)
                     }) || owner.is_none()
                         && fs::metadata(&path)
                             .ok()
                             .and_then(|metadata| metadata.modified().ok())
                             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                            .is_some_and(|age| age > CLEANUP_LOCK_STALE_AFTER);
+                            .is_some_and(|age| age > stale_after);
                     if stale {
                         let observed_token = owner
                             .as_ref()
@@ -1564,6 +1690,7 @@ mod cleanup_support {
                             let _ = fs::remove_dir_all(quarantine);
                         }
                     } else {
+                        drop(_claim);
                         std::thread::sleep(CLEANUP_LOCK_SLEEP);
                     }
                 }
@@ -1575,23 +1702,110 @@ mod cleanup_support {
                 }
             }
         }
-        Err(Error::internal_unexpected(format!(
-            "timed out acquiring runtime cleanup lock {}",
-            path.display()
-        )))
+        Err(cleanup_lock_timeout(&path, stale_after))
     }
 
-    fn process_identity_matches(pid: u32, expected_starttime: Option<u64>) -> bool {
-        if !crate::process::pid_is_running(pid) {
-            return false;
-        }
-        match expected_starttime {
-            Some(expected) => crate::process::linux_process_starttime_ticks(pid)
-                .ok()
-                .flatten()
-                .is_some_and(|actual| actual == expected),
-            None => !cfg!(target_os = "linux"),
-        }
+    fn cleanup_lock_timeout(path: &Path, stale_after: Duration) -> Error {
+        let now = unix_time_ms();
+        let owner_path = path.join(CLEANUP_LOCK_OWNER_FILE);
+        let owner = fs::read_to_string(&owner_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<RuntimeTempCleanupLockOwner>(&raw).ok());
+        let owner = owner.map(|owner| {
+            let lease_deadline_unix_ms = if owner.lease_deadline_unix_ms == 0 {
+                owner
+                    .heartbeat_unix_ms
+                    .saturating_add(stale_after.as_millis() as u64)
+            } else {
+                owner.lease_deadline_unix_ms
+            };
+            serde_json::json!({
+                "schema": owner.schema,
+                "pid": owner.pid,
+                "linux_starttime_ticks": owner.linux_starttime_ticks,
+                "process_start_identity": owner.process_start_identity,
+                "operation": owner.operation,
+                "acquired_unix_ms": owner.acquired_unix_ms,
+                "acquisition_age_ms": now.saturating_sub(owner.acquired_unix_ms),
+                "heartbeat_unix_ms": owner.heartbeat_unix_ms,
+                "heartbeat_age_ms": now.saturating_sub(owner.heartbeat_unix_ms),
+                "lease_deadline_unix_ms": lease_deadline_unix_ms,
+                "progress": owner.progress,
+                "identity_state": format!("{:?}", process_identity_state(&owner)),
+            })
+        });
+        let retry_after_ms = owner
+            .as_ref()
+            .and_then(|owner| owner["lease_deadline_unix_ms"].as_u64())
+            .map(|deadline| {
+                deadline
+                    .saturating_sub(now)
+                    .max(CLEANUP_LOCK_SLEEP.as_millis() as u64)
+            })
+            .unwrap_or(stale_after.as_millis() as u64);
+        let quoted_owner_path = crate::engine::shell::quote_arg(&owner_path.display().to_string());
+        let guidance = serde_json::json!({
+            "lock_path": path,
+            "owner": owner,
+            "status_command": format!("cat {quoted_owner_path}"),
+            "watch_command": format!("while :; do cat {quoted_owner_path}; sleep 1; done"),
+            "retry_after_ms": retry_after_ms,
+            "remediation": "Homeboy reclaims the lock automatically after its lease is stale and the recorded process identity has exited; do not delete the lock manually.",
+        });
+        let mut error = Error::internal_unexpected(format!(
+            "timed out acquiring runtime cleanup lock {}; diagnostics={guidance}",
+            path.display()
+        ));
+        error.details["runtime_cleanup_lock"] = guidance;
+        error
+    }
+
+    pub(super) fn cleanup_lock_status(
+        root: &Path,
+        stale_after: Duration,
+    ) -> Option<serde_json::Value> {
+        let path = root.join(CLEANUP_LOCK_DIR);
+        let owner: RuntimeTempCleanupLockOwner =
+            serde_json::from_slice(&fs::read(path.join(CLEANUP_LOCK_OWNER_FILE)).ok()?).ok()?;
+        let now = unix_time_ms();
+        let deadline = if owner.lease_deadline_unix_ms == 0 {
+            owner
+                .heartbeat_unix_ms
+                .saturating_add(stale_after.as_millis() as u64)
+        } else {
+            owner.lease_deadline_unix_ms
+        };
+        Some(serde_json::json!({
+            "status": "busy",
+            "lock_path": path,
+            "owner": {
+                "pid": owner.pid,
+                "process_start_identity": owner.process_start_identity,
+                "operation": owner.operation,
+                "acquired_unix_ms": owner.acquired_unix_ms,
+                "heartbeat_unix_ms": owner.heartbeat_unix_ms,
+                "progress": owner.progress,
+            },
+            "retry_after_ms": deadline.saturating_sub(now).max(CLEANUP_LOCK_SLEEP.as_millis() as u64),
+        }))
+    }
+
+    fn process_identity_state(
+        owner: &RuntimeTempCleanupLockOwner,
+    ) -> crate::process::ProcessIdentityState {
+        crate::process::process_identity_state_with_start_identity(
+            owner.pid,
+            owner.linux_starttime_ticks,
+            owner.process_start_identity.as_ref(),
+        )
+    }
+
+    fn process_identity_is_stale(owner: &RuntimeTempCleanupLockOwner) -> bool {
+        matches!(
+            process_identity_state(owner),
+            crate::process::ProcessIdentityState::Dead
+                | crate::process::ProcessIdentityState::IdentityMismatch
+        )
     }
 
     pub(super) fn unix_time_ms() -> u64 {
@@ -1752,8 +1966,33 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
         "runtime temporary storage",
         crate::capacity::CapacityReserve::configured_for_path(&runtime_dir),
     );
-    if preflight.status != crate::capacity::CapacityStatus::Ok {
-        crate::cleanup::run_automatic_runtime_temp_retention()?;
+    if preflight.is_exhausted() {
+        match crate::cleanup::run_automatic_runtime_temp_retention() {
+            Ok(output) if output.status == "busy" => {
+                let mut exhausted = preflight.error().expect("exhausted preflight has an error");
+                exhausted.details["runtime_cleanup"] = serde_json::json!({
+                    "status": "busy",
+                    "state_path": output.state_path,
+                    "resume_command": output.resume_command,
+                    "lock": runtime_temp_cleanup_lock_status(),
+                });
+                exhausted = exhausted.with_hint(
+                    "Automatic runtime retention is busy. Retry after the reported cleanup lease deadline; Homeboy did not allocate new temporary storage.",
+                );
+                return Err(exhausted);
+            }
+            Ok(_) => {}
+            Err(error) if error.details.get("runtime_cleanup_lock").is_some() => {
+                let mut exhausted = preflight.error().expect("exhausted preflight has an error");
+                exhausted.details["runtime_cleanup"] =
+                    error.details["runtime_cleanup_lock"].clone();
+                exhausted = exhausted.with_hint(
+                    "Runtime cleanup is busy; retry after the reported lease deadline. Capacity remains exhausted, so Homeboy did not allocate new temporary storage.",
+                );
+                return Err(exhausted);
+            }
+            Err(error) => return Err(error),
+        }
     }
     crate::capacity::preflight_capacity(
         &runtime_dir,
@@ -1843,6 +2082,7 @@ mod tests {
             owner_id: uuid::Uuid::new_v4().to_string(),
             owner_pid: u32::MAX,
             linux_starttime_ticks: None,
+            process_start_identity: None,
             run_id: None,
             invocation_ids: Vec::new(),
             state: state.to_string(),
