@@ -271,18 +271,17 @@ pub(crate) fn preview_cook(
     let (evidence, evidence_provenance) = if !args.provider_evidence_inputs.is_empty() {
         let mut dispatch = dispatch_args_for_cook(&args);
         resolve_dispatch_prompt(&mut dispatch)?;
-        let admitted_evidence = admit_provider_evidence_inputs(
-            &args.provider_evidence_inputs,
-            dispatch.prompt.as_deref(),
-        )?;
+        let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
         compile_args.dispatch.prompt = dispatch.prompt;
         let evidence =
             projected_provider_evidence(&args.provider_evidence_inputs, Some(&workspace))?;
+        let projected_paths = projected_provider_evidence_paths(&evidence);
         rewrite_provider_evidence_prompt(
             &mut compile_args.dispatch.prompt,
             &args.provider_evidence_inputs,
             &admitted_evidence,
             Some(&workspace),
+            &projected_paths,
         )?;
         (
             Some(evidence),
@@ -3324,8 +3323,7 @@ pub(crate) fn compile_cook_plan(
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
     dispatch.workspace = workspace.clone();
-    let admitted_evidence =
-        admit_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
+    let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
     let evidence = if let Some(workspace) = workspace.as_deref() {
         project_admitted_provider_evidence_inputs(
             &args.provider_evidence_inputs,
@@ -3335,11 +3333,13 @@ pub(crate) fn compile_cook_plan(
     } else {
         Vec::new()
     };
+    let projected_paths = projected_provider_evidence_paths(&evidence);
     rewrite_provider_evidence_prompt(
         &mut dispatch.prompt,
         &args.provider_evidence_inputs,
         &admitted_evidence,
         workspace.as_deref(),
+        &projected_paths,
     )?;
     if let Some(workspace) = workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
@@ -3399,12 +3399,17 @@ pub(crate) fn validate_provider_evidence_inputs(
     inputs: &[AgentTaskProviderEvidenceInput],
     prompt: Option<&str>,
 ) -> homeboy::core::Result<()> {
-    admit_provider_evidence_inputs(inputs, prompt).map(|_| ())
+    admit_provider_evidence_inputs(inputs)?;
+    // A workspace-derived allowlist is not available during argument parsing.
+    // Cook validates declared paths after rewriting them to their projections.
+    if inputs.is_empty() {
+        validate_provider_evidence_prompt(prompt, &std::collections::BTreeSet::new())?;
+    }
+    Ok(())
 }
 
 pub(crate) fn admit_provider_evidence_inputs(
     inputs: &[AgentTaskProviderEvidenceInput],
-    prompt: Option<&str>,
 ) -> homeboy::core::Result<Vec<AdmittedProviderEvidenceSource>> {
     let mut ids = std::collections::BTreeSet::new();
     let mut sources = std::collections::BTreeSet::new();
@@ -3446,18 +3451,20 @@ pub(crate) fn admit_provider_evidence_inputs(
         }
         admitted_sources.push(source);
     }
-    if let Some(prompt) = prompt {
-        for path in absolute_host_paths_in_provider_prompt(prompt)? {
-            if !is_projected_provider_evidence_path(&path)
-                && !admitted_sources
-                    .iter()
-                    .any(|source| provider_evidence_paths_equivalent(&path, source))
-            {
-                return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
-            }
+    Ok(admitted_sources)
+}
+
+fn validate_provider_evidence_prompt(
+    prompt: Option<&str>,
+    projected_paths: &std::collections::BTreeSet<String>,
+) -> homeboy::core::Result<()> {
+    let Some(prompt) = prompt else { return Ok(()) };
+    for path in absolute_host_paths_in_provider_prompt(prompt)? {
+        if !is_projected_provider_evidence_path(&path, projected_paths) {
+            return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
         }
     }
-    Ok(admitted_sources)
+    Ok(())
 }
 
 const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
@@ -3540,8 +3547,11 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
     Ok(paths)
 }
 
-fn is_projected_provider_evidence_path(path: &str) -> bool {
-    path.contains("/.homeboy/evidence/")
+fn is_projected_provider_evidence_path(
+    path: &str,
+    projected_paths: &std::collections::BTreeSet<String>,
+) -> bool {
+    projected_paths.contains(path)
 }
 
 #[derive(Debug, Clone)]
@@ -3738,13 +3748,24 @@ pub(crate) fn projected_provider_evidence(
     })).collect())
 }
 
+pub(crate) fn projected_provider_evidence_paths(
+    evidence: &[Value],
+) -> std::collections::BTreeSet<String> {
+    evidence
+        .iter()
+        .filter_map(|input| input["path"].as_str().map(str::to_string))
+        .collect()
+}
+
 pub(crate) fn project_provider_evidence_inputs(
     inputs: &[AgentTaskProviderEvidenceInput],
     workspace: &Path,
     prompt: Option<&str>,
 ) -> homeboy::core::Result<Vec<Value>> {
-    let admitted = admit_provider_evidence_inputs(inputs, prompt)?;
-    project_admitted_provider_evidence_inputs(inputs, &admitted, workspace)
+    let admitted = admit_provider_evidence_inputs(inputs)?;
+    let projected = project_admitted_provider_evidence_inputs(inputs, &admitted, workspace)?;
+    validate_provider_evidence_prompt(prompt, &projected_provider_evidence_paths(&projected))?;
+    Ok(projected)
 }
 
 pub(crate) fn project_admitted_provider_evidence_inputs(
@@ -4036,6 +4057,7 @@ pub(crate) fn rewrite_provider_evidence_prompt(
     inputs: &[AgentTaskProviderEvidenceInput],
     admitted: &[AdmittedProviderEvidenceSource],
     workspace: Option<&str>,
+    projected_paths: &std::collections::BTreeSet<String>,
 ) -> homeboy::core::Result<()> {
     let Some(prompt) = prompt else { return Ok(()) };
     let Some(workspace) = workspace else {
@@ -4054,7 +4076,7 @@ pub(crate) fn rewrite_provider_evidence_prompt(
         }
     }
     *prompt = rewritten;
-    Ok(())
+    validate_provider_evidence_prompt(Some(prompt.as_str()), projected_paths)
 }
 
 #[cfg(test)]
@@ -4103,10 +4125,16 @@ mod provider_evidence_tests {
         );
 
         let mut prompt = Some(format!("Read {} before editing.", source.display()));
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
-            .expect("admit evidence");
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
-            .expect("rewrite evidence prompt");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
+        let projected_paths = projected_provider_evidence_paths(&projected);
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input],
+            &admitted,
+            workspace.to_str(),
+            &projected_paths,
+        )
+        .expect("rewrite evidence prompt");
         assert_eq!(
             prompt.expect("rewritten prompt"),
             format!("Read {} before editing.", path.display())
@@ -4140,11 +4168,29 @@ mod provider_evidence_tests {
             );
         }
 
-        validate_provider_evidence_inputs(
-            &[],
-            Some("Read https://example.test/evidence.json and /.homeboy/evidence/source/evidence.json"),
+        validate_provider_evidence_inputs(&[], Some("Read https://example.test/evidence.json"))
+            .expect("HTTPS URLs are not host evidence");
+    }
+
+    #[test]
+    fn accepts_only_exact_admitted_projected_evidence_paths() {
+        let admitted = std::collections::BTreeSet::from([
+            "/workspace/.homeboy/evidence/issue/context.json".to_string(),
+        ]);
+        validate_provider_evidence_prompt(
+            Some("Read /workspace/.homeboy/evidence/issue/context.json"),
+            &admitted,
         )
-        .expect("HTTPS URLs and projected evidence paths are not host evidence");
+        .expect("exact admitted projection is allowed");
+
+        for path in [
+            "/tmp/.homeboy/evidence/secret",
+            "/workspace/.homeboy/evidence/issue/context.json.backup",
+        ] {
+            let error = validate_provider_evidence_prompt(Some(&format!("Read {path}")), &admitted)
+                .expect_err("unadmitted projected-looking path is rejected");
+            assert_eq!(error.details["field"], "prompt");
+        }
     }
 
     #[test]
@@ -4165,10 +4211,20 @@ mod provider_evidence_tests {
             source.display(),
             source.display(),
         ));
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+        let admitted = admit_provider_evidence_inputs(&[input.clone()])
             .expect("admit declared path spellings");
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
-            .expect("rewrite declared paths");
+        let projected_paths = projected_provider_evidence_paths(
+            &projected_provider_evidence(&[input.clone()], workspace.to_str())
+                .expect("derive projected path"),
+        );
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input],
+            &admitted,
+            workspace.to_str(),
+            &projected_paths,
+        )
+        .expect("rewrite declared paths");
         let rewritten = prompt.expect("rewritten prompt");
         let destination = workspace.join(".homeboy/evidence/source/source.json");
         assert!(!rewritten.contains(&source.display().to_string()));
@@ -4238,8 +4294,7 @@ mod provider_evidence_tests {
         assert!(projected[0].get("supplied_path").is_none());
         assert!(projected[0].get("canonical_path").is_none());
         assert!(projected[0].get("approved_root").is_none());
-        let admitted =
-            admit_provider_evidence_inputs(&[input.clone()], None).expect("admit evidence");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
         let provenance =
             provider_evidence_controller_provenance_from_admitted(&[input.clone()], &admitted);
         assert_eq!(provenance[0]["supplied_path"], "[redacted]");
@@ -4251,10 +4306,16 @@ mod provider_evidence_tests {
         );
 
         let mut prompt = Some(format!("Read {}", canonical_source.display()));
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
-            .expect("admit evidence");
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
-            .expect("rewrite evidence prompt");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
+        let projected_paths = projected_provider_evidence_paths(&projected);
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input],
+            &admitted,
+            workspace.to_str(),
+            &projected_paths,
+        )
+        .expect("rewrite evidence prompt");
         assert_eq!(
             prompt,
             Some(format!(
@@ -4301,10 +4362,16 @@ mod provider_evidence_tests {
         assert!(!encoded_config.contains(&prompt_source));
 
         let mut prompt = Some(format!("Read {prompt_source}"));
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
-            .expect("admit evidence");
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
-            .expect("rewrite evidence prompt");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
+        let projected_paths = projected_provider_evidence_paths(&projected);
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input],
+            &admitted,
+            workspace.to_str(),
+            &projected_paths,
+        )
+        .expect("rewrite evidence prompt");
         let rewritten = prompt.expect("rewritten prompt");
         assert_eq!(
             rewritten,
@@ -4496,8 +4563,8 @@ mod provider_evidence_tests {
             id: "source".to_string(),
             source: source.display().to_string(),
         };
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], None)
-            .expect("validate and admit source");
+        let admitted =
+            admit_provider_evidence_inputs(&[input.clone()]).expect("validate and admit source");
         std::fs::remove_file(&source).expect("remove admitted source");
 
         let error = project_admitted_provider_evidence_inputs(&[input], &admitted, &workspace)
@@ -4522,13 +4589,22 @@ mod provider_evidence_tests {
             source: source.display().to_string(),
         };
         let mut prompt = Some(format!("Read {}", source.display()));
-        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
-            .expect("validate and admit source");
+        let admitted =
+            admit_provider_evidence_inputs(&[input.clone()]).expect("validate and admit source");
         std::fs::rename(&replacement, &source).expect("replace admitted source");
 
-        let error =
-            rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
-                .expect_err("replaced source aborts rewrite");
+        let projected_paths = projected_provider_evidence_paths(
+            &projected_provider_evidence(&[input.clone()], workspace.to_str())
+                .expect("derive projected path"),
+        );
+        let error = rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input],
+            &admitted,
+            workspace.to_str(),
+            &projected_paths,
+        )
+        .expect_err("replaced source aborts rewrite");
         assert!(error.message.contains("identity changed after validation"));
         assert_eq!(prompt, Some(format!("Read {}", source.display())));
     }

@@ -3519,15 +3519,14 @@ impl BatchCookSpec {
         let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
         let mut provider_config = self.provider_config.clone();
         if let Some(workspace) = workspace_root {
-            let admitted_evidence = super::run::admit_provider_evidence_inputs(
-                &self.provider_evidence_inputs,
-                prompt.as_deref(),
-            )?;
+            let admitted_evidence =
+                super::run::admit_provider_evidence_inputs(&self.provider_evidence_inputs)?;
             let evidence = super::run::project_admitted_provider_evidence_inputs(
                 &self.provider_evidence_inputs,
                 &admitted_evidence,
                 Path::new(workspace),
             )?;
+            let projected_paths = super::run::projected_provider_evidence_paths(&evidence);
             if !evidence.is_empty() {
                 let raw = provider_config.as_deref().unwrap_or("{}");
                 let mut config: Value = homeboy::core::config::read_json_spec_to_string(raw)
@@ -3545,6 +3544,7 @@ impl BatchCookSpec {
                 &self.provider_evidence_inputs,
                 &admitted_evidence,
                 Some(workspace),
+                &projected_paths,
             )?;
         }
         let dispatch = AgentTaskDispatchCommand {
