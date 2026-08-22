@@ -19,7 +19,9 @@ use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionSt
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
-use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
+use crate::agent_task_timeout::{
+    capture_cook_deadline, current_cook_deadline, expired_cook_deadline, now_unix_ms, CookDeadline,
+};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
@@ -449,6 +451,11 @@ const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Poll durable provider state between samples so post-provider artifact work
 /// does not hold the foreground liveness loop for a full heartbeat interval.
 const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Resolve is read-only. Give a transient provider timeout one bounded retry
+/// before Cook can start any provider mutation or execution.
+const COOK_PROVIDER_RESOLVE_ATTEMPTS: u32 = 2;
+const COOK_PROVIDER_RESOLVE_BACKOFF: Duration = Duration::from_millis(100);
+const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(90);
 
 /// One Cook progress event, as delivered to a foreground observer.
 ///
@@ -4511,7 +4518,7 @@ fn run_cook_spine(
             });
             let result = homeboy_core::worktree_providers::with_worktree_provider_command_control(
                 lookup_control,
-                || materialize_pending_cook_workspace(lifecycle_store, &mut options),
+                || materialize_pending_cook_workspace_with_retry(lifecycle_store, &mut options),
             );
             let _ = lookup_stop.send(());
             result
@@ -6735,6 +6742,221 @@ fn materialize_pending_cook_workspace(
     )
 }
 
+/// Retry only supervised, read-only resolve timeouts. Not-found, malformed, and
+/// every mutation-path failure remain a single fail-closed provider call.
+fn materialize_pending_cook_workspace_with_retry(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
+    let cook_deadline_ms = current_cook_deadline().map(|deadline| deadline.deadline_unix_ms());
+    let deadline_ms = cook_deadline_ms.unwrap_or_else(|| {
+        now_unix_ms().saturating_add(COOK_PROVIDER_RESOLVE_DEADLINE.as_millis() as u64)
+    });
+
+    for attempt in 1..=COOK_PROVIDER_RESOLVE_ATTEMPTS {
+        let remaining_ms = deadline_ms.saturating_sub(now_unix_ms());
+        if remaining_ms == 0 {
+            let mut error = Error::validation_invalid_argument(
+                "to_worktree",
+                "Cook pre-execution deadline expired before worktree provider resolve could start",
+                Some(options.to_worktree.clone()),
+                None,
+            );
+            error.retryable = Some(true);
+            error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+            error.details["worktree_provider_call_classification"] =
+                Value::String("timeout".to_string());
+            error.details["worktree_provider_phase"] =
+                Value::String("worktree_provider_resolve_identity".to_string());
+            error.details["cook_pre_execution_deadline_unix_ms"] = Value::from(deadline_ms);
+            record_provider_resolve_evidence(
+                lifecycle_store,
+                options,
+                attempt,
+                deadline_ms,
+                remaining_ms,
+                None,
+                None,
+            )?;
+            return Err(error);
+        }
+        record_provider_resolve_evidence(
+            lifecycle_store,
+            options,
+            attempt,
+            deadline_ms,
+            remaining_ms,
+            None,
+            None,
+        )?;
+        match materialize_pending_cook_workspace(lifecycle_store, options) {
+            Ok(()) => return Ok(()),
+            Err(mut error)
+                if provider_resolve_timeout(&error) && attempt < COOK_PROVIDER_RESOLVE_ATTEMPTS =>
+            {
+                let next_retry_ms =
+                    now_unix_ms().saturating_add(COOK_PROVIDER_RESOLVE_BACKOFF.as_millis() as u64);
+                let recovery = known_cwd_recovery_command(options);
+                record_provider_resolve_evidence(
+                    lifecycle_store,
+                    options,
+                    attempt,
+                    deadline_ms,
+                    deadline_ms.saturating_sub(now_unix_ms()),
+                    Some(next_retry_ms),
+                    recovery.as_deref(),
+                )?;
+                error.details["cook_provider_resolve_retry"] = serde_json::json!({
+                    "attempt": attempt,
+                    "next_retry_unix_ms": next_retry_ms,
+                    "deadline_unix_ms": deadline_ms,
+                });
+                std::thread::sleep(COOK_PROVIDER_RESOLVE_BACKOFF.min(Duration::from_millis(
+                    deadline_ms.saturating_sub(now_unix_ms()),
+                )));
+            }
+            Err(mut error) => {
+                let recovery = known_cwd_recovery_command(options);
+                record_provider_resolve_evidence(
+                    lifecycle_store,
+                    options,
+                    attempt,
+                    deadline_ms,
+                    deadline_ms.saturating_sub(now_unix_ms()),
+                    None,
+                    recovery.as_deref(),
+                )?;
+                if let Some(recovery) = recovery {
+                    error.details["worktree_provider_cwd_recovery_command"] =
+                        Value::String(recovery);
+                }
+                return Err(error);
+            }
+        }
+    }
+    unreachable!("bounded provider resolve retry returns on success or failure")
+}
+
+fn provider_resolve_timeout(error: &Error) -> bool {
+    error.details["worktree_provider_lookup"] == "timed_out"
+        && error.details["worktree_provider_call_classification"] == "timeout"
+        && error.details["worktree_provider_operation"]
+            .as_str()
+            .is_some_and(|operation| operation.starts_with("resolve"))
+}
+
+fn known_cwd_recovery_command(options: &AgentTaskCookServiceOptions) -> Option<String> {
+    let path = options
+        .source_worktree_path
+        .clone()
+        .or_else(|| {
+            options
+                .initial_plan
+                .tasks
+                .first()?
+                .workspace
+                .root
+                .as_ref()
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            options
+                .initial_plan
+                .metadata
+                .pointer("/cook_provision/workspace_identity/path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })?;
+    let path = std::fs::canonicalize(path).ok()?;
+    Some(format!(
+        "homeboy agent-task cook --cwd {} --to-worktree {}",
+        quote_arg(&path.display().to_string()),
+        quote_arg(&options.to_worktree),
+    ))
+}
+
+fn record_provider_resolve_evidence(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+    attempt: u32,
+    deadline_ms: u64,
+    remaining_ms: u64,
+    next_retry_ms: Option<u64>,
+    recovery_command: Option<&str>,
+) -> Result<()> {
+    let recovery_command = recovery_command.map(str::to_string).or_else(|| {
+        lifecycle_store
+            .read_controller_plan(&options.initial_run_id)
+            .ok()
+            .and_then(|plan| {
+                plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    });
+    let timeout_ms = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/worktree_provider_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            options
+                .initial_plan
+                .metadata
+                .pointer("/cook_provision/workspace_identity/provider_id")
+                .and_then(Value::as_str)
+        })
+        .and_then(|provider_id| {
+            homeboy_core::defaults::load_config()
+                .worktree_providers
+                .get(provider_id)
+                .map(|provider| provider.lookup_timeout_ms)
+        });
+    let mut events = lifecycle_store
+        .read_record(&options.initial_run_id)
+        .ok()
+        .and_then(|record| {
+            record.metadata["worktree_provider_resolve"]["events"]
+                .as_array()
+                .cloned()
+        })
+        .unwrap_or_default();
+    events.push(serde_json::json!({
+        "attempt": attempt,
+        "phase": "worktree_provider_lookup",
+        "timeout_ms": timeout_ms,
+        "next_retry_unix_ms": next_retry_ms,
+    }));
+    let evidence = serde_json::json!({
+        "schema": "homeboy/cook-worktree-provider-resolve/v1",
+        "phase": "worktree_provider_lookup",
+        "attempt": attempt,
+        "max_attempts": COOK_PROVIDER_RESOLVE_ATTEMPTS,
+        "deadline_unix_ms": deadline_ms,
+        "remaining_ms": remaining_ms,
+        "timeout_ms": timeout_ms,
+        "next_retry_unix_ms": next_retry_ms,
+        "cwd_recovery_command": recovery_command,
+        "events": events,
+    });
+    lifecycle_store.record_metadata_value(
+        &options.initial_run_id,
+        "worktree_provider_resolve",
+        evidence.clone(),
+    )?;
+    // The controller plan is rewritten when resolve succeeds. Keep the same
+    // evidence there so later lifecycle materialization cannot erase it.
+    let mut plan = lifecycle_store.read_controller_plan(&options.initial_run_id)?;
+    plan.metadata["worktree_provider_resolve"] = evidence;
+    options.initial_plan.metadata["worktree_provider_resolve"] =
+        plan.metadata["worktree_provider_resolve"].clone();
+    agent_task_lifecycle::persist_controller_plan_in_store(
+        lifecycle_store,
+        &options.initial_run_id,
+        &plan,
+    )
+}
+
 /// A deferred provider lookup can prove absence only after Cook owns a durable
 /// identity. In that case, execute the unchanged configured ensure contract and
 /// resolve its postcondition through the same provider boundary.
@@ -7278,5 +7500,25 @@ mod cook_deadline_tests {
         .stop_reason
         .expect("a stop reason");
         assert!(reason.contains("run its gates"), "{reason}");
+    }
+
+    #[test]
+    fn nonretryable_provider_failures_cannot_enter_the_resolve_retry_path() {
+        let mut malformed = Error::validation_invalid_argument(
+            "to_worktree",
+            "provider returned malformed output",
+            None,
+            None,
+        );
+        malformed.details["worktree_provider_lookup"] = Value::String("malformed".to_string());
+        malformed.details["worktree_provider_call_classification"] =
+            Value::String("malformed".to_string());
+        malformed.details["worktree_provider_operation"] =
+            Value::String("resolve_identity".to_string());
+        assert!(!provider_resolve_timeout(&malformed));
+
+        let mut not_found = malformed.clone();
+        not_found.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+        assert!(!provider_resolve_timeout(&not_found));
     }
 }
