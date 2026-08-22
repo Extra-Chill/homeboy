@@ -99,6 +99,16 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
 /// separately budgeted pass (`run_automatic_cargo_retention`) and must not
 /// enter the aggregate sweep. `repo-artifacts` is likewise driven separately,
 /// by `try_run_automatic_artifact_retention_in_root` over registered workspace roots.
+/// Read only by
+/// `every_cleanup_category_is_either_swept_unattended_or_held_out_with_a_reason`,
+/// which partitions `CleanupCategoryArg` across this table and
+/// `AUTOMATIC_RETENTION_CATEGORIES`. It is a specification the test enforces
+/// against a live enum, not unreached code: deleting it would let a fourteenth
+/// category ship with no unattended-retention decision recorded (#11131).
+#[allow(
+    dead_code,
+    reason = "Partition table asserted by every_cleanup_category_is_either_swept_unattended_or_held_out_with_a_reason."
+)]
 const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
     (
         CleanupCategoryArg::RunnerDownloads,
@@ -451,20 +461,6 @@ fn compact_cleanup_job(job: &homeboy::core::api_jobs::Job, command: &'static str
         "progress": job.pointer("/metadata/progress").cloned().unwrap_or(Value::Null),
         "status_command": format!("homeboy cleanup status {}", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
         "evidence_command": format!("homeboy cleanup status {} --full", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
-    })
-}
-
-fn compact_cleanup_result(result: &Value) -> Value {
-    let evidence = result.get("evidence").unwrap_or(&Value::Null);
-    serde_json::json!({
-        "phase": result.get("phase").cloned().unwrap_or(Value::Null),
-        "exit_code": result.get("exit_code").cloned().unwrap_or(Value::Null),
-        "status": evidence.get("status").cloned().unwrap_or(Value::Null),
-        "category_count": evidence.get("category_count").cloned().unwrap_or(Value::Null),
-        "failed_category_count": evidence.get("failed_category_count").cloned().unwrap_or(Value::Null),
-        "candidate_count": evidence.get("candidate_count").cloned().unwrap_or(Value::Null),
-        "applied_count": evidence.get("applied_count").cloned().unwrap_or(Value::Null),
-        "reclaimed_bytes": evidence.get("reclaimed_bytes").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -4340,25 +4336,6 @@ mod tests {
             CleanupJobDriver.public_request(&request).unwrap()["include_untagged"],
             serde_json::Value::Bool(true)
         );
-    }
-
-    #[test]
-    fn durable_cleanup_status_is_compact_while_terminal_evidence_is_retained() {
-        let result = serde_json::json!({
-            "phase": "completed",
-            "exit_code": 0,
-            "evidence": {
-                "status": "completed",
-                "category_count": 1,
-                "categories": [{ "category": "runtime_tmp", "paths": ["/private/full/evidence"] }]
-            }
-        });
-
-        let compact = compact_cleanup_result(&result);
-        assert_eq!(compact["category_count"], 1);
-        assert!(compact.get("evidence").is_none());
-        assert!(compact.get("categories").is_none());
-        assert_eq!(CleanupJobDriver.public_result(&result).unwrap(), result);
     }
 
     #[test]

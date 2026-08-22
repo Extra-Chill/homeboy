@@ -57,53 +57,6 @@ fn healthy_session_health_probe_is_observational() {
 }
 
 #[test]
-fn daemon_exec_probe_reports_structured_failure() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-    let addr = listener.local_addr().expect("addr");
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut buffer = [0; 4096];
-        let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
-        let body = serde_json::json!({
-            "success": false,
-            "data": {
-                "error": "validation.invalid_argument",
-                "message": "Invalid argument 'runner': stale daemon session"
-            },
-            "error": {
-                "error": "validation.invalid_argument",
-                "message": "Invalid argument 'runner': stale daemon session"
-            }
-        })
-        .to_string();
-        let response = format!(
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
-        );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
-    });
-
-    let check = probes::daemon_exec_check(
-        "homeboy-lab",
-        "/home/user/Developer",
-        &format!("http://{addr}"),
-    );
-
-    assert_eq!(check.id, "daemon.exec");
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert!(check.message.contains("failed the lightweight exec probe"));
-    assert!(check
-        .details
-        .get("response")
-        .expect("response detail")
-        .contains("validation.invalid_argument"));
-    assert!(check
-        .remediation
-        .expect("remediation")
-        .contains("homeboy runner connect homeboy-lab"));
-}
-
-#[test]
 fn stalled_daemon_probe_returns_timeout_reason_code() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
@@ -241,6 +194,7 @@ fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
         success: false,
         exit_code: 255,
         timed_out: false,
+        observation: Default::default(),
         child_resource: None,
     };
 

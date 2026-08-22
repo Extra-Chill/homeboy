@@ -1223,27 +1223,6 @@ impl JobStore {
         Ok(())
     }
 
-    pub(crate) fn renew_remote_runner_claim(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        lease_ms: u64,
-    ) -> Result<Job> {
-        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
-        let now = timestamp_ms();
-        self.durable_transaction(|inner| {
-            let stored = inner
-                .jobs
-                .get_mut(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            stored.job.updated_at_ms = now;
-            stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
-            Ok(())
-        })?;
-        self.get(job_id)
-    }
-
     /// Commit a broker claim renewal and the owner epoch returned by the
     /// authority store together. Callers renew the authority first; this
     /// replacement prevents a stale worker token from being accepted later.

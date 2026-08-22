@@ -1971,10 +1971,11 @@ impl SelectedGateEnvironment {
             .get("CARGO_TARGET_DIR")
             .cloned()
             .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
-        let target = homeboy_core::cleanup::acquire_managed_cargo_target(
-            "agent-task-gate",
+        let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
+            "agent-task-cargo",
             cwd,
             explicit_target.as_deref(),
+            &self.values,
         )?;
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.

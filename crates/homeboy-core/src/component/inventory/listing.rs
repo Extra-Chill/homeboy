@@ -124,6 +124,16 @@ pub fn registered() -> Result<Vec<Component>> {
     registered_core(None)
 }
 
+/// List persisted component registrations without opening their checkouts.
+///
+/// This is the inventory boundary for broad, interactive readers. It only reads
+/// Homeboy's registry files, so a stale mount or a wedged Git helper in one
+/// checkout cannot delay rows for every other registered component. Callers
+/// that need repo-owned portable fields must explicitly use [`registered`].
+pub fn registered_base() -> Result<Vec<Component>> {
+    registered_base_core(None)
+}
+
 /// [`registered`] against an already-resolved config root (#7505).
 pub fn registered_in_root(config_root: &Path) -> Result<Vec<Component>> {
     registered_core(Some(config_root))
@@ -165,6 +175,56 @@ fn registered_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
     }
 
     components.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(components)
+}
+
+fn registered_base_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let projects = projects_at(config_root).unwrap_or_default();
+    let mut components = Vec::new();
+    let mut seen = HashSet::new();
+
+    for project in projects {
+        for attachment in project.components {
+            if seen.insert(attachment.id.clone()) {
+                let mut component = Component::new(
+                    attachment.id,
+                    attachment.local_path,
+                    attachment.remote_path.unwrap_or_default(),
+                    None,
+                );
+                component.deployment_provider = attachment.deployment_provider;
+                components.push(component);
+            }
+        }
+    }
+
+    let dir = components_dir(config_root)?;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if seen.contains(id) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            if let Some(component) = component_from_standalone_config(id, json) {
+                seen.insert(component.id.clone());
+                components.push(component);
+            }
+        }
+    }
+
+    components.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(components)
 }
 

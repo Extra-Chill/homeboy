@@ -13,7 +13,7 @@ use homeboy_core::server::Server;
 use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
 use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, reserve_loopback_port,
-    terminate_pid, wait_for_tcp, RemoteDaemon,
+    wait_for_tcp, RemoteDaemon,
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::daemon_repair;
@@ -441,19 +441,6 @@ fn open_daemon_tunnel(
     ))
 }
 
-fn capture_identity_before_tunnel_readiness<C, W>(
-    pid: Option<u32>,
-    capture: C,
-    readiness: W,
-) -> homeboy_core::error::Result<(Option<RunnerTunnelProcessStartIdentity>, bool)>
-where
-    C: FnOnce(Option<u32>) -> homeboy_core::error::Result<Option<RunnerTunnelProcessStartIdentity>>,
-    W: FnOnce() -> bool,
-{
-    let identity = capture(pid)?;
-    Ok((identity, readiness()))
-}
-
 pub(crate) fn versions_match(left: &str, right: &str) -> bool {
     normalize_homeboy_version(left) == normalize_homeboy_version(right)
 }
@@ -516,26 +503,12 @@ pub(super) fn daemon_lab_handoff_capabilities_from_body(
     })
 }
 
-pub(super) fn daemon_http_runtime_stale_paths(
-    local_url: &str,
-) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
-    let response = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_stale_paths_from_body(&response.body))
-}
-
 pub(super) fn daemon_http_runtime_stale_paths_with_timeout(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
     let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
     Ok(daemon_runtime_stale_paths_from_body(&response.body))
-}
-
-pub(super) fn daemon_http_runtime_loaded_paths(
-    local_url: &str,
-) -> std::result::Result<BTreeMap<String, String>, String> {
-    let response = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_loaded_paths_from_body(&response.body))
 }
 
 pub(super) fn daemon_http_runtime_loaded_paths_with_timeout(
@@ -911,7 +884,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
         DaemonHealthReport {
@@ -1282,40 +1255,6 @@ mod tests {
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn captures_tunnel_identity_before_readiness_reaps_a_fast_exit() {
-        // The child remains live until readiness releases stdin. This removes
-        // scheduler timing from the race while exercising the real identity API.
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("read _; exit 0")
-            .stdin(Stdio::piped())
-            .spawn()
-            .expect("start blocked tunnel child");
-        let pid = child.id();
-
-        let result = capture_identity_before_tunnel_readiness(
-            Some(pid),
-            super::super::capture_tunnel_process_start_identity,
-            || {
-                drop(child.stdin.take());
-                assert!(child.wait().expect("reap tunnel child").success());
-                false
-            },
-        )
-        .expect("identity is captured before readiness reaps the child");
-
-        assert!(result.0.is_some());
-        assert!(!result.1);
-        assert_eq!(
-            homeboy_core::process::process_start_identity(pid)
-                .expect("inspect reaped child identity"),
-            None,
-            "the former post-readiness capture would report the child exited"
-        );
-    }
-
-    #[test]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn durability_check_rejects_a_tunnel_that_exits_after_apparent_readiness() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
@@ -1487,26 +1426,5 @@ mod tests {
             "loopback durability observations must not hang"
         );
         server.join().expect("server");
-    }
-
-    #[test]
-    fn does_not_probe_readiness_when_tunnel_identity_capture_fails() {
-        let mut readiness_called = false;
-
-        let result = capture_identity_before_tunnel_readiness(
-            Some(42),
-            |_| {
-                Err(homeboy_core::error::Error::internal_unexpected(
-                    "child exited",
-                ))
-            },
-            || {
-                readiness_called = true;
-                true
-            },
-        );
-
-        assert!(result.is_err());
-        assert!(!readiness_called);
     }
 }

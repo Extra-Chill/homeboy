@@ -10,6 +10,7 @@
 //! keeps the promote → finalize boundary in one place.
 
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
@@ -28,8 +29,8 @@ use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -197,16 +198,15 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         [] => Ok(None),
         [artifact] => Ok(Some(artifact.id.clone())),
         artifacts => {
-            let choices = artifacts
-                .iter()
-                .map(|artifact| {
-                    json!({
-                        "artifact_id": artifact.id,
-                        "sha256": artifact.sha256,
-                        "command": cook_promotion_command(options, run_id, &outcome.task_id, &artifact.id),
-                    })
-                })
-                .collect::<Vec<_>>();
+            let (choices, comparison) = cook_candidate_comparison(
+                outcome,
+                artifacts,
+                &canonical.patch_contents,
+                canonical.omitted_candidate_count,
+                canonical.omitted_patch_bytes,
+                options,
+                run_id,
+            );
             Err(Error::new(
                 homeboy_core::ErrorCode::ValidationInvalidArgument,
                 "Cook found distinct canonical patch candidates; select one before promotion",
@@ -215,10 +215,259 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
                     "state": "selection_required",
                     "selection_required": true,
                     "choices": choices,
+                    "comparison": comparison,
                 }),
             ))
         }
     }
+}
+
+const CANDIDATE_FILE_LIMIT: usize = 12;
+const CANDIDATE_EVIDENCE_LIMIT: usize = 6;
+const CANDIDATE_DIAGNOSTIC_LIMIT: usize = 6;
+const CANDIDATE_JSON_BYTES_LIMIT: usize = 2048;
+
+/// Project only facts present in canonical patch bytes and durable outcome
+/// evidence. This deliberately does not infer behavior from generated prose.
+fn cook_candidate_comparison(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    artifacts: &[crate::agent_task::AgentTaskArtifact],
+    patches: &BTreeMap<String, String>,
+    omitted_candidate_count: usize,
+    omitted_patch_bytes: u64,
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> (Vec<Value>, Value) {
+    let summaries = artifacts
+        .iter()
+        .map(|artifact| {
+            let patch = patches
+                .get(&artifact.id)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let stats = patch_stats(patch);
+            let (test_evidence, omitted_test_evidence_count) = bounded_test_evidence(artifact);
+            let mut risk_flags = patch_risk_flags(patch, &stats.all_files);
+            if test_evidence.is_empty() {
+                risk_flags.push("missing_test_evidence".to_string());
+            }
+            CandidateSummary {
+                artifact,
+                all_files: stats.all_files,
+                file_count: stats.file_count,
+                insertions: stats.insertions,
+                deletions: stats.deletions,
+                test_evidence,
+                risk_flags,
+                omitted_test_evidence_count,
+            }
+        })
+        .collect::<Vec<_>>();
+    let common_files = summaries
+        .iter()
+        .map(|summary| summary.all_files.clone())
+        .reduce(|left, right| left.intersection(&right).cloned().collect())
+        .unwrap_or_default();
+    let recommendation = deterministic_recommendation(&summaries);
+    let choices = summaries
+        .iter()
+        .map(|summary| {
+            let unique_files = summary
+                .all_files
+                .iter()
+                .filter(|file| !common_files.contains(*file))
+                .cloned()
+                .collect::<Vec<_>>();
+            let rationale = recommendation.as_ref().and_then(|recommended| {
+                (recommended == &summary.artifact.id).then_some(
+                    "Only candidate with recorded test evidence and no artifact-derived risk flags.",
+                )
+            });
+            json!({
+                "artifact_id": summary.artifact.id,
+                "sha256": summary.artifact.sha256,
+                "patch_artifact": {
+                    "path": summary.artifact.path,
+                    "url": summary.artifact.url,
+                },
+                "provider": summary.artifact.metadata.get("provider_backend"),
+                "model": outcome.selected_model(),
+                "attempt": summary.artifact.metadata.get("producer_attempt"),
+                "changed_files": preview(&summary.all_files),
+                "changed_file_count": summary.file_count,
+                "changed_files_omitted_count": summary.file_count.saturating_sub(CANDIDATE_FILE_LIMIT),
+                "line_stats": { "insertions": summary.insertions, "deletions": summary.deletions },
+                "diff_summary": format!(
+                    "{} file(s), {} insertion(s), {} deletion(s)",
+                    summary.file_count, summary.insertions, summary.deletions
+                ),
+                "test_evidence": summary.test_evidence,
+                "test_evidence_omitted_count": summary.omitted_test_evidence_count,
+                "overlap": {
+                    "shared_changed_files": preview(&common_files),
+                    "shared_changed_files_omitted_count": common_files.len().saturating_sub(CANDIDATE_FILE_LIMIT),
+                },
+                "differences": {
+                    "unique_changed_files": preview(&unique_files.into_iter().collect()),
+                    "unique_changed_files_omitted_count": summary.file_count.saturating_sub(common_files.len()).saturating_sub(CANDIDATE_FILE_LIMIT),
+                },
+                "risk_flags": summary.risk_flags,
+                "recommendation": rationale.map(|rationale| json!({ "rationale": rationale })),
+                "command": cook_promotion_command(options, run_id, &outcome.task_id, &summary.artifact.id),
+            })
+        })
+        .collect();
+    let (shared_evidence, omitted_evidence_count) = bounded_shared_evidence(outcome);
+    let (shared_diagnostics, omitted_diagnostic_count) = bounded_diagnostics(outcome);
+    (
+        choices,
+        json!({
+            "shared_outcome_evidence": shared_evidence,
+            "shared_outcome_evidence_omitted_count": omitted_evidence_count,
+            "shared_outcome_diagnostics": shared_diagnostics,
+            "shared_outcome_diagnostics_omitted_count": omitted_diagnostic_count,
+            "omitted_candidate_count": omitted_candidate_count,
+            "omitted_patch_bytes": omitted_patch_bytes,
+        }),
+    )
+}
+
+struct CandidateSummary<'a> {
+    artifact: &'a crate::agent_task::AgentTaskArtifact,
+    all_files: BTreeSet<String>,
+    file_count: usize,
+    insertions: usize,
+    deletions: usize,
+    test_evidence: Vec<Value>,
+    risk_flags: Vec<String>,
+    omitted_test_evidence_count: usize,
+}
+
+struct PatchStats {
+    all_files: BTreeSet<String>,
+    file_count: usize,
+    insertions: usize,
+    deletions: usize,
+}
+
+fn patch_stats(patch: &str) -> PatchStats {
+    let mut all_files = BTreeSet::new();
+    let mut insertions = 0;
+    let mut deletions = 0;
+    for line in patch.lines() {
+        if let Some(path) = line
+            .strip_prefix("diff --git a/")
+            .and_then(|line| line.split_once(" b/").map(|(_, path)| path))
+        {
+            all_files.insert(path.to_string());
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            insertions += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions += 1;
+        }
+    }
+    let file_count = all_files.len();
+    PatchStats {
+        all_files,
+        file_count,
+        insertions,
+        deletions,
+    }
+}
+
+fn bounded_test_evidence(artifact: &crate::agent_task::AgentTaskArtifact) -> (Vec<Value>, usize) {
+    let evidence = artifact
+        .metadata
+        .get("test_evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    bounded_json_values(evidence, CANDIDATE_EVIDENCE_LIMIT)
+}
+
+fn bounded_shared_evidence(outcome: &crate::agent_task::AgentTaskOutcome) -> (Vec<Value>, usize) {
+    bounded_json_values(
+        outcome.evidence_refs.iter().map(|evidence| {
+            json!({ "kind": evidence.kind, "uri": evidence.uri, "label": evidence.label })
+        }).collect(),
+        CANDIDATE_EVIDENCE_LIMIT,
+    )
+}
+
+fn bounded_diagnostics(outcome: &crate::agent_task::AgentTaskOutcome) -> (Vec<Value>, usize) {
+    bounded_json_values(
+        outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| json!({ "class": diagnostic.class, "message": diagnostic.message }))
+            .collect(),
+        CANDIDATE_DIAGNOSTIC_LIMIT,
+    )
+}
+
+fn bounded_json_values(values: Vec<Value>, limit: usize) -> (Vec<Value>, usize) {
+    let omitted = values.len().saturating_sub(limit);
+    (
+        values
+            .into_iter()
+            .take(limit)
+            .map(bounded_json_value)
+            .collect(),
+        omitted,
+    )
+}
+
+fn bounded_json_value(value: Value) -> Value {
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    (bytes.len() <= CANDIDATE_JSON_BYTES_LIMIT)
+        .then_some(value)
+        .unwrap_or_else(|| {
+            json!({
+                "omitted": "json_value_exceeds_byte_limit",
+                "size_bytes": bytes.len(),
+            })
+        })
+}
+
+fn preview(files: &BTreeSet<String>) -> Vec<String> {
+    files.iter().take(CANDIDATE_FILE_LIMIT).cloned().collect()
+}
+
+fn patch_risk_flags(patch: &str, files: &BTreeSet<String>) -> Vec<String> {
+    let mut flags = BTreeSet::new();
+    if files.iter().any(|file| {
+        file.starts_with(".github/workflows/")
+            || file.ends_with("/Dockerfile")
+            || file == "Dockerfile"
+    }) {
+        flags.insert("security_sensitive_automation_change");
+    }
+    if patch
+        .lines()
+        .any(|line| line.starts_with("new file mode 100755"))
+    {
+        flags.insert("new_executable_file");
+    }
+    if patch.lines().any(|line| {
+        line.starts_with('+')
+            && !line.starts_with("+++")
+            && ["-----BEGIN", "AKIA", "password=", "secret=", "token="]
+                .iter()
+                .any(|pattern| line.contains(pattern))
+    }) {
+        flags.insert("sensitive_literal_pattern_added");
+    }
+    flags.into_iter().map(str::to_string).collect()
+}
+
+fn deterministic_recommendation(summaries: &[CandidateSummary<'_>]) -> Option<String> {
+    let eligible = summaries
+        .iter()
+        .filter(|summary| !summary.test_evidence.is_empty() && summary.risk_flags.is_empty())
+        .collect::<Vec<_>>();
+    (eligible.len() == 1).then(|| eligible[0].artifact.id.clone())
 }
 
 /// Render an explicit promotion command from Cook's durable execution contract.
@@ -2300,6 +2549,14 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
+    if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
+        promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
+            && promotion.changed_files.is_empty()
+    }) {
+        if let Some(receipt) = recover_verified_no_change_finalization(&recipe, &run_id)? {
+            return Ok(receipt);
+        }
+    }
     let promotion = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
@@ -2314,12 +2571,15 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     // accept_inherited_failures rather than requiring a green-gate Applied.
     let recovery_outcome = promotion.gate_outcome();
     if recovery_outcome.status != AgentTaskPromotionStatus::Applied
+        && !(recovery_outcome.status == AgentTaskPromotionStatus::VerifiedNoChanges
+            && !promotion.changed_files.is_empty()
+            && promotion.finalization_eligible(options.gates.accept_inherited_failures))
         && !(recovery_outcome.status == AgentTaskPromotionStatus::GateFailed
             && promotion.finalization_eligible(options.gates.accept_inherited_failures))
     {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
-            "recovery requires an applied promotion with green gates or an explicitly accepted inherited baseline failure",
+            "recovery requires an applied promotion, a verified existing-candidate delta, or an explicitly accepted inherited baseline failure",
             Some(run_id),
             None,
         ));
@@ -2341,6 +2601,181 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+/// Finalize a verified no-change Cook without routing it through patch publication.
+/// The candidate is still re-read exactly: a no-change declaration authorizes no
+/// publication only for the clean, bound candidate that deterministic gates checked.
+fn recover_verified_no_change_finalization(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    let Some(promotion) = persisted_promotion_for_attempt(run_id)? else {
+        return Ok(None);
+    };
+    if promotion.status != AgentTaskPromotionStatus::VerifiedNoChanges {
+        return Ok(None);
+    }
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id)?;
+    let declaration = super::cook::intentional_no_change_from_aggregate(&aggregate).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "intentional_no_change",
+            "verified no-change recovery requires the attempt's durable intentional-no-change declaration",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let options = super::cook_recipe::reconstruct_adoption_options(recipe)?;
+    let _verified_base = promotion
+        .verified_base
+        .as_ref()
+        .filter(|base| base.base == options.base && !base.sha.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.verified_base",
+                "verified no-change recovery requires the Cook's declared immutable base snapshot",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if !promotion.finalization_eligible(false) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion",
+            "verified no-change recovery requires green deterministic gates",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let selection = canonical_cook_candidate(&recipe.cook_id)
+        .filter(|candidate| {
+            candidate["incomplete"] != true && candidate["run_id"].as_str() == Some(run_id)
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_or_cook_id",
+                "verified no-change recovery requires the exact Cook-bound candidate",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if selection["selected_task_id"].as_str() != Some(promotion.source.task_id.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.source.task_id",
+            "verified no-change recovery requires the promotion source task to match the Cook-bound candidate",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let expected: AgentTaskPromotionCandidate = serde_json::from_value(
+        promotion
+            .provenance
+            .get("candidate")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|_| {
+        Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "verified no-change recovery requires a durable Git candidate fingerprint",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let AgentTaskPromotionCandidate::Git { .. } = &expected else {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "verified no-change recovery requires a durable Git candidate fingerprint",
+            Some(run_id.to_string()),
+            None,
+        ));
+    };
+    let path = promotion
+        .provenance
+        .pointer("/worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.provenance.worktree_path",
+                "verified no-change recovery requires the verified candidate worktree path",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let actual = candidate_fingerprint(path)?;
+    if !verified_no_change_candidate_is_valid(&expected, &actual) {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "verified no-change recovery requires the exact clean candidate checked by deterministic gates",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    let receipt = json!({
+        "schema": "homeboy/agent-task-cook-no-change-finalization/v1",
+        "run_id": run_id,
+        "status": "intentional_no_change_finalized",
+        "disposition": "no_change_finalized",
+        "publication": { "action": "none", "committed": false, "pushed": false, "published": false },
+        "source_attempt": { "cook_id": recipe.cook_id, "run_id": run_id, "candidate": selection },
+        "intentional_no_change": declaration,
+        "gate_results": promotion.gate_outcome().gate_results,
+    });
+    // A completed receipt makes recovery idempotent without inventing a patch publication.
+    agent_task_lifecycle::record_cook_finalization(run_id, receipt.clone())?;
+    Ok(Some(receipt))
+}
+
+fn verified_no_change_candidate_is_valid(
+    expected: &AgentTaskPromotionCandidate,
+    actual: &AgentTaskPromotionCandidate,
+) -> bool {
+    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
+        return false;
+    };
+    expected == actual && fingerprint.changed_files.is_empty()
+}
+
+#[cfg(test)]
+mod no_change_recovery_tests {
+    use super::*;
+
+    fn candidate(head: &str, changed_files: &[&str]) -> AgentTaskPromotionCandidate {
+        serde_json::from_value(json!({
+            "kind": "git",
+            "fingerprint": {
+                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                "target_path": "/fixture",
+                "head": head,
+                "base": "parent-head",
+                "sha256": "candidate-sha",
+                "tree": "candidate-tree",
+                "changed_files": changed_files
+            }
+        }))
+        .expect("candidate fixture")
+    }
+
+    #[test]
+    fn verified_no_change_candidate_requires_exact_clean_binding() {
+        let bound = candidate("candidate-head", &[]);
+        assert!(verified_no_change_candidate_is_valid(&bound, &bound,));
+
+        assert!(!verified_no_change_candidate_is_valid(
+            &candidate("candidate-head", &["dirty.rs"]),
+            &candidate("candidate-head", &["dirty.rs"])
+        ));
+        assert!(!verified_no_change_candidate_is_valid(
+            &bound,
+            &candidate("different-head", &[])
+        ));
+        assert!(!verified_no_change_candidate_is_valid(
+            &candidate("candidate-head", &[]),
+            &serde_json::from_value(
+                json!({ "kind": "non_git", "disposition": "not_a_git_worktree" })
+            )
+            .expect("unbound candidate fixture")
+        ));
+    }
 }
 
 pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
@@ -2450,6 +2885,9 @@ fn completed_finalization_receipt_for_recovery(
         let Some(value) = record.metadata.get("cook_finalization") else {
             continue;
         };
+        if value["status"].as_str() == Some("intentional_no_change_finalized") {
+            return Ok(Some(value.clone()));
+        }
         if !matches!(
             value["status"].as_str(),
             Some("review_ready" | "draft_published")

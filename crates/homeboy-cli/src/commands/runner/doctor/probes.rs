@@ -1652,19 +1652,6 @@ pub fn connected_daemon_health_checks_with_timeout(
     }
 }
 
-pub(super) fn daemon_exec_check(
-    runner_id: &str,
-    workspace_root: &str,
-    local_url: &str,
-) -> RunnerCheck {
-    daemon_exec_check_with_timeout(
-        runner_id,
-        workspace_root,
-        local_url,
-        std::time::Duration::from_secs(5),
-    )
-}
-
 pub(super) fn daemon_exec_check_with_timeout(
     runner_id: &str,
     workspace_root: &str,

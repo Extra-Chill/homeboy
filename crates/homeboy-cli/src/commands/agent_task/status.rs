@@ -52,6 +52,9 @@ const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 const COMPACT_MANDATORY_SCALAR_BYTE_LIMIT: usize = 512;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 const STATUS_WATCH_BYTE_LIMIT: usize = 32 * 1024;
+const STATUS_WATCH_CHANGE_BYTE_LIMIT: usize = 8 * 1024;
+const STATUS_WATCH_EVENT_BYTE_LIMIT: usize = 4 * 1024;
+const STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT: usize = 2 * 1024;
 const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
@@ -322,7 +325,9 @@ fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
         },
         std::thread::sleep,
         || started.elapsed(),
-        |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
+        |(snapshot, _), poll| {
+            progress.observe(snapshot, poll, args.full, |line| eprintln!("{line}"))
+        },
     )?;
     Ok(watch_status_output(&args, result, progress))
 }
@@ -335,7 +340,7 @@ struct StatusWatchProgress {
 }
 
 impl StatusWatchProgress {
-    fn observe(&mut self, snapshot: &Value, poll: u64, mut emit: impl FnMut(String)) {
+    fn observe(&mut self, snapshot: &Value, poll: u64, full: bool, mut emit: impl FnMut(String)) {
         let change = status_change_projection(snapshot);
         if self.last_change.as_ref() == Some(&change) {
             return;
@@ -344,50 +349,148 @@ impl StatusWatchProgress {
         emit(emit_status_change_event(
             snapshot,
             poll,
+            full,
             self.changes.len() >= STATUS_WATCH_CHANGE_LIMIT,
         ));
         if self.changes.len() < STATUS_WATCH_CHANGE_LIMIT {
-            self.changes
-                .push(json!({ "poll": poll, "status": snapshot }));
+            self.changes.push(status_watch_change(snapshot, poll, full));
         } else {
             self.omitted += 1;
         }
     }
 }
 
-fn emit_status_change_event(snapshot: &Value, poll: u64, retained_limit_reached: bool) -> String {
+fn emit_status_change_event(
+    snapshot: &Value,
+    poll: u64,
+    full: bool,
+    retained_limit_reached: bool,
+) -> String {
     let run_id = snapshot.get("run_id").and_then(Value::as_str).or_else(|| {
         snapshot
             .pointer("/identity/resolved_run_id")
             .and_then(Value::as_str)
     });
-    serde_json::to_string(&json!({
-        "schema": "homeboy/agent-task-status-watch-event/v1",
+    let mut event = json!({
+        "schema": "homeboy/agent-task-status-watch-event/v2",
         "event": "status_changed",
         "run_id": run_id,
         "state": snapshot.get("state"),
         "poll": poll,
-        "latest": snapshot,
+        "change": status_watch_change(snapshot, poll, full),
         "retained_limit_reached": retained_limit_reached,
         "continuation_command": run_id.map(|run_id| format!(
             "homeboy agent-task status {} --watch", quote_arg(run_id)
         )),
-    }))
-    .expect("status watch JSONL event serializes")
+    });
+    if serialized_len(&event) > STATUS_WATCH_EVENT_BYTE_LIMIT {
+        event["change"] = json!({
+            "run_id": run_id,
+            "state": snapshot.get("state"),
+            "change_basis": status_change_digest_projection(snapshot),
+            "full_status_ref": snapshot.get("full_command"),
+        });
+    }
+    let line = serde_json::to_string(&event).expect("status watch JSONL event serializes");
+    if line.len() <= STATUS_WATCH_EVENT_BYTE_LIMIT {
+        return line;
+    }
+    event["change"] = json!({
+        "run_id": run_id,
+        "state": snapshot.get("state"),
+        "full_status_ref": snapshot.get("full_command"),
+    });
+    serde_json::to_string(&event).expect("bounded status watch JSONL event serializes")
 }
 
-/// Watch output follows lifecycle progress rather than volatile read metadata
-/// such as timestamps. The complete status remains in each emitted/final snapshot.
+/// Default watch output carries durable state and stable recovery references;
+/// `--full` is the lossless record stream for machine consumers.
+fn status_watch_change(snapshot: &Value, poll: u64, full: bool) -> Value {
+    let mut change = json!({
+        "poll": poll,
+        "run_id": snapshot.get("run_id").or_else(|| snapshot.pointer("/identity/resolved_run_id")),
+        "state": snapshot.get("state"),
+        "status": snapshot.get("status"),
+        "terminal_status": snapshot.get("terminal_status"),
+        "child_run_state": snapshot.get("child_run_state"),
+        "totals": snapshot.get("totals"),
+        "cook": compact_fields(snapshot.get("cook").unwrap_or(&Value::Null), &["phase", "state", "status", "terminal_status"]),
+        "reconciled": snapshot.get("reconciled"),
+        "runner_probe": snapshot.get("runner_probe"),
+        "diagnostic_summary": snapshot.get("diagnostic_summary"),
+        "change_basis": status_change_projection(snapshot),
+        "full_command": snapshot.get("full_command"),
+    });
+    if full {
+        change["full_status_ref"] = json!({
+            "run_id": snapshot.get("run_id"),
+            "command": snapshot.get("full_command"),
+        });
+    }
+    if serialized_len(&change) > STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT {
+        return json!({
+            "poll": poll,
+            "run_id": snapshot.get("run_id"),
+            "state": snapshot.get("state"),
+            "change_basis": status_change_digest_projection(snapshot),
+            "full_status_ref": {
+                "run_id": snapshot.get("run_id"),
+                "command": snapshot.get("full_command"),
+            },
+        });
+    }
+    change
+}
+
+/// Watch output follows lifecycle progress rather than volatile read metadata.
+/// This exact projection is carried in each event so consumers can see why it
+/// was emitted without receiving a nested durable record.
 fn status_change_projection(status: &Value) -> Value {
+    let tasks = status.get("tasks").and_then(Value::as_array).map(|tasks| {
+        Value::Array(
+            tasks
+                .iter()
+                .take(COMPACT_TASK_LIMIT)
+                .map(|task| compact_fields(task, &["task_id", "state", "status", "phase"]))
+                .collect(),
+        )
+    });
+    let task_state_digest = status.get("tasks").and_then(Value::as_array).map(|tasks| {
+        content_hash::sha256_hex(
+            serde_json::to_vec(
+                &tasks
+                    .iter()
+                    .map(|task| compact_fields(task, &["task_id", "state", "status", "phase"]))
+                    .collect::<Vec<_>>(),
+            )
+            .as_deref()
+            .unwrap_or_default(),
+        )
+    });
     json!({
         "state": status.get("state"),
         "terminal_status": status.get("terminal_status"),
         "child_run_state": status.get("child_run_state"),
         "totals": status.get("totals"),
-        "tasks": status.get("tasks"),
-        "progress": status.get("progress"),
-        "liveness": status.get("liveness"),
-        "normalized_events": status.get("normalized_events"),
+        "tasks": tasks,
+        "tasks_omitted": status.get("tasks").and_then(Value::as_array).map(|tasks| tasks.len().saturating_sub(COMPACT_TASK_LIMIT)),
+        "task_state_digest": task_state_digest,
+        "progress": bounded_value(status.get("progress").unwrap_or(&Value::Null)),
+        "liveness": compact_fields(status.get("liveness").unwrap_or(&Value::Null), &["state", "status", "reason"]),
+        "normalized_event_count": status.get("normalized_events").and_then(Value::as_array).map(Vec::len),
+    })
+}
+
+fn status_change_digest_projection(status: &Value) -> Value {
+    let basis = status_change_projection(status);
+    json!({
+        "state": basis.get("state"),
+        "terminal_status": basis.get("terminal_status"),
+        "child_run_state": basis.get("child_run_state"),
+        "totals": basis.get("totals"),
+        "task_count": status.get("tasks").and_then(Value::as_array).map(Vec::len),
+        "task_state_digest": basis.get("task_state_digest"),
+        "normalized_event_count": basis.get("normalized_event_count"),
     })
 }
 
@@ -424,7 +527,8 @@ fn watch_status_output(
     progress: StatusWatchProgress,
 ) -> (Value, i32) {
     let timed_out = result.conclusion == WatchConclusion::TimedOut;
-    let (latest, status_exit) = result.item;
+    let terminal = result.conclusion == WatchConclusion::Terminal;
+    let (observed_latest, status_exit) = result.item;
     let continuation = format!(
         "homeboy agent-task status {} --watch --interval {} --timeout {}",
         quote_arg(&args.run_id),
@@ -440,7 +544,7 @@ fn watch_status_output(
         total_changes,
         OutputBudget {
             max_items: STATUS_WATCH_CHANGE_LIMIT,
-            max_bytes: STATUS_WATCH_BYTE_LIMIT,
+            max_bytes: STATUS_WATCH_CHANGE_BYTE_LIMIT,
             max_events: None,
             max_seconds: None,
         },
@@ -450,25 +554,25 @@ fn watch_status_output(
             quote_arg(&args.run_id)
         ),
     );
-    let latest = if serialized_len(&latest) <= COMPACT_STATUS_BYTE_LIMIT {
-        latest
-    } else {
-        enforce_compact_status_budget(compact_status_summary(&latest, &args.run_id))
-    };
-    let output = json!({
-        "schema": "homeboy/agent-task-status-watch/v1",
+    let latest = status_watch_latest(&observed_latest, &args.run_id, args.full);
+    let terminal_summary =
+        terminal.then(|| status_watch_terminal_summary(&observed_latest, &args.run_id));
+    let mut output = json!({
+        "schema": "homeboy/agent-task-status-watch/v2",
         "command": "agent-task.status.watch",
         "run_id": args.run_id,
-        "terminal": !timed_out,
+        "terminal": terminal,
         "timed_out": timed_out,
         "poll_count": result.poll_count,
         "waited_secs": result.waited.as_secs(),
         "changes": changes,
         "changes_omitted": budget.omitted_items,
         "latest": latest,
+        "terminal_summary": terminal_summary,
         "continuation_command": continuation,
         "output_budget": budget,
     });
+    enforce_watch_output_budget(&mut output, &continuation);
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
     } else if status_is_failure(&output["latest"]) {
@@ -477,6 +581,91 @@ fn watch_status_output(
         status_exit
     };
     (output, exit_code)
+}
+
+fn status_watch_latest(snapshot: &Value, run_id: &str, full: bool) -> Value {
+    let mut latest = json!({
+        "schema": "homeboy/agent-task-status-watch-latest/v2",
+        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
+        "state": snapshot.get("state"),
+        "status": snapshot.get("status"),
+        "terminal_status": snapshot.get("terminal_status"),
+        "child_run_state": snapshot.get("child_run_state"),
+        "totals": snapshot.get("totals"),
+        "cook": compact_fields(snapshot.get("cook").unwrap_or(&Value::Null), &["phase", "state", "status", "terminal_status"]),
+        "reconciled": snapshot.get("reconciled"),
+        "runner_probe": snapshot.get("runner_probe"),
+        "full_command": snapshot.get("full_command").cloned().unwrap_or_else(|| json!(format!("homeboy agent-task status {} --full", quote_arg(run_id)))),
+    });
+    if full {
+        latest["full_status_ref"] = json!({
+            "run_id": run_id,
+            "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)),
+        });
+    }
+    latest
+}
+
+/// Keep the final stdout object bounded as a whole, not merely its changes.
+fn enforce_watch_output_budget(output: &mut Value, continuation: &str) {
+    while serialized_len(output) > STATUS_WATCH_BYTE_LIMIT {
+        let removed_change = output
+            .get_mut("changes")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop)
+            .is_some();
+        if !removed_change {
+            if output["terminal_summary"].is_object()
+                && output["terminal_summary"]["schema"]
+                    != "homeboy/agent-task-status-watch-terminal-ref/v2"
+            {
+                output["terminal_summary"] = json!({
+                    "schema": "homeboy/agent-task-status-watch-terminal-ref/v2",
+                    "run_id": output["run_id"],
+                    "state": output["latest"]["state"],
+                    "command": format!("homeboy agent-task status {} --full", quote_arg(output["run_id"].as_str().unwrap_or_default())),
+                });
+                continue;
+            }
+            if output["latest"].is_object()
+                && output["latest"]["schema"] != "homeboy/agent-task-status-watch-latest-ref/v2"
+            {
+                output["latest"] = json!({
+                    "schema": "homeboy/agent-task-status-watch-latest-ref/v2",
+                    "run_id": output["run_id"],
+                    "state": output["latest"]["state"],
+                    "command": format!("homeboy agent-task status {} --full", quote_arg(output["run_id"].as_str().unwrap_or_default())),
+                });
+                continue;
+            }
+            break;
+        }
+        let omitted = output["changes_omitted"].as_u64().unwrap_or_default() + 1;
+        output["changes_omitted"] = json!(omitted);
+        output["output_budget"]["truncated"] = json!(true);
+        output["output_budget"]["continuation_command"] = json!(continuation);
+    }
+}
+
+fn status_watch_terminal_summary(snapshot: &Value, run_id: &str) -> Value {
+    enforce_compact_status_budget(json!({
+        "schema": "homeboy/agent-task-status-watch-terminal/v1",
+        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
+        "state": snapshot.get("state"),
+        "status": snapshot.get("status"),
+        "terminal_status": snapshot.get("terminal_status"),
+        "child_run_state": snapshot.get("child_run_state"),
+        "totals": snapshot.get("totals"),
+        "tasks": snapshot.get("tasks"),
+        "tasks_omitted": snapshot.get("tasks_omitted"),
+        "cook": compact_fields(snapshot.get("cook").unwrap_or(&Value::Null), &["phase", "state", "status", "detail", "terminal_status"]),
+        "diagnostic_summary": snapshot.get("diagnostic_summary"),
+        "failure_reasons": snapshot.get("failure_reasons"),
+        "reconciled": snapshot.get("reconciled"),
+        "runner_probe": snapshot.get("runner_probe"),
+        "actionable": snapshot.get(ACTIONABLE_METADATA_KEY),
+        "full_command": snapshot.get("full_command").cloned().unwrap_or_else(|| json!(format!("homeboy agent-task status {} --full", quote_arg(run_id)))),
+    }))
 }
 
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
@@ -1312,37 +1501,43 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
 }
 
 fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
-    let mut metadata = CommandActionableMetadata {
-        refs: CommandResultRefs {
-            agent_tasks: vec![agent_task_ref(run_id)],
-            ..Default::default()
-        },
-        next_actions: vec![
-            CommandNextAction::new(
-                "show status",
-                format!("homeboy agent-task status {run_id} --full"),
-            )
-            .with_kind(CommandNextActionKind::Show),
-            CommandNextAction::new("show logs", format!("homeboy agent-task logs {run_id}"))
-                .with_kind(CommandNextActionKind::Show),
-            CommandNextAction::new(
-                "list artifacts",
-                format!("homeboy agent-task artifacts {run_id}"),
-            )
-            .with_kind(CommandNextActionKind::Artifacts),
-        ],
-        ..Default::default()
-    };
-
-    if cook_requires_action(value) {
-        metadata.next_actions.push(
+    let blocked = cook_requires_action(value);
+    let mut next_actions = Vec::new();
+    if blocked {
+        // Logs only contain transport output for some controller failures. Start
+        // with the durable diagnostic that carries the causal phase instead.
+        next_actions.push(
             CommandNextAction::new(
                 "diagnose blocked Cook",
                 format!("homeboy agent-task diagnose {run_id} --full"),
             )
             .with_kind(CommandNextActionKind::Show),
         );
-    } else if classify_candidates(value).state().is_available() {
+    }
+    next_actions.extend([
+        CommandNextAction::new(
+            "show status",
+            format!("homeboy agent-task status {run_id} --full"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new("show logs", format!("homeboy agent-task logs {run_id}"))
+            .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            "list artifacts",
+            format!("homeboy agent-task artifacts {run_id}"),
+        )
+        .with_kind(CommandNextActionKind::Artifacts),
+    ]);
+    let mut metadata = CommandActionableMetadata {
+        refs: CommandResultRefs {
+            agent_tasks: vec![agent_task_ref(run_id)],
+            ..Default::default()
+        },
+        next_actions,
+        ..Default::default()
+    };
+
+    if !blocked && classify_candidates(value).state().is_available() {
         let review_command = format!("homeboy agent-task review {run_id}");
         metadata.next_actions.push(
             CommandNextAction::new("review run", review_command)
@@ -2541,18 +2736,20 @@ mod watch_tests {
         let running = json!({ "run_id": "run-1", "state": "running", "progress": 1 });
         let succeeded = json!({ "run_id": "run-1", "state": "succeeded", "progress": 2 });
 
-        progress.observe(&running, 1, |line| emitted.push(line));
-        progress.observe(&running, 2, |line| emitted.push(line));
-        progress.observe(&succeeded, 3, |line| emitted.push(line));
+        progress.observe(&running, 1, false, |line| emitted.push(line));
+        progress.observe(&running, 2, false, |line| emitted.push(line));
+        progress.observe(&succeeded, 3, false, |line| emitted.push(line));
 
         let first: Value = serde_json::from_str(&emitted[0]).expect("first JSONL event");
         let second: Value = serde_json::from_str(&emitted[1]).expect("second JSONL event");
-        assert_eq!(first["schema"], "homeboy/agent-task-status-watch-event/v1");
+        assert_eq!(first["schema"], "homeboy/agent-task-status-watch-event/v2");
         assert_eq!(first["event"], "status_changed");
         assert_eq!(first["poll"], 1);
         assert_eq!(first["run_id"], "run-1");
         assert_eq!(first["state"], "running");
-        assert_eq!(first["latest"], running);
+        assert_eq!(first["change"]["state"], "running");
+        assert_eq!(first["change"]["change_basis"]["state"], "running");
+        assert!(first["change"]["status"].is_null());
         assert_eq!(
             first["continuation_command"],
             "homeboy agent-task status run-1 --watch"
@@ -2571,11 +2768,13 @@ mod watch_tests {
         progress.observe(
             &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:00Z" }),
             1,
+            false,
             |line| emitted.push(line),
         );
         progress.observe(
             &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:01Z" }),
             2,
+            false,
             |line| emitted.push(line),
         );
 
@@ -2590,6 +2789,7 @@ mod watch_tests {
             progress.observe(
                 &json!({ "run_id": "run-1", "state": "running", "progress": poll }),
                 poll,
+                false,
                 |line| emitted.push(line),
             );
         }
@@ -2597,6 +2797,7 @@ mod watch_tests {
         progress.observe(
             &json!({ "run_id": "run-1", "state": "succeeded", "progress": terminal_poll }),
             terminal_poll,
+            false,
             |line| emitted.push(line),
         );
 
@@ -2606,10 +2807,8 @@ mod watch_tests {
         let first_overflow: Value = serde_json::from_str(&emitted[STATUS_WATCH_CHANGE_LIMIT])
             .expect("first overflow event");
         assert_eq!(first_overflow["poll"], STATUS_WATCH_CHANGE_LIMIT as u64 + 1);
-        assert_eq!(
-            first_overflow["latest"]["progress"],
-            STATUS_WATCH_CHANGE_LIMIT as u64 + 1
-        );
+        assert_eq!(first_overflow["change"]["state"], "running");
+        assert!(first_overflow["change"]["change_basis"].is_object());
         let overflow: Value =
             serde_json::from_str(emitted.last().unwrap()).expect("overflow event");
         assert_eq!(overflow["retained_limit_reached"], true);
@@ -2633,14 +2832,163 @@ mod watch_tests {
                 waited: Duration::from_secs(1),
             },
             StatusWatchProgress {
-                changes: vec![json!({ "poll": 1, "status": oversized })],
+                changes: vec![status_watch_change(&oversized, 1, false)],
                 ..Default::default()
             },
         );
 
-        assert!(serialized_len(&output) < STATUS_WATCH_BYTE_LIMIT + COMPACT_STATUS_BYTE_LIMIT);
-        assert_eq!(output["output_budget"]["truncated"], true);
+        assert!(serialized_len(&output) <= STATUS_WATCH_BYTE_LIMIT);
+        assert_eq!(output["output_budget"]["truncated"], false);
         assert_eq!(output["latest"]["state"], "running");
+        assert!(output["terminal_summary"].is_null());
+    }
+
+    #[test]
+    fn terminal_summary_uses_terminal_durable_state_counts_and_diagnostic() {
+        let terminal = json!({
+            "run_id": "run-1",
+            "state": "cancelled",
+            "totals": { "planned": 1, "attempted": 1 },
+            "tasks": [{ "task_id": "task-1", "status": "cancelled" }],
+            "diagnostic_summary": { "class": "controller_preflight", "message": "workspace is unavailable" },
+            "metadata": { "large": "x".repeat(COMPACT_STATUS_BYTE_LIMIT) },
+        });
+        let (output, exit) = watch_status_output(
+            &args(),
+            WatchResult {
+                item: (terminal.clone(), 0),
+                conclusion: WatchConclusion::Terminal,
+                poll_count: 2,
+                waited: Duration::from_secs(1),
+            },
+            StatusWatchProgress {
+                changes: vec![status_watch_change(&terminal, 1, false)],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(exit, 1);
+        assert_eq!(output["terminal_summary"]["state"], "cancelled");
+        assert_eq!(output["terminal_summary"]["totals"]["planned"], 1);
+        assert_eq!(output["terminal_summary"]["totals"]["attempted"], 1);
+        assert_eq!(
+            output["terminal_summary"]["diagnostic_summary"]["class"],
+            "controller_preflight"
+        );
+        assert!(serialized_len(&output) <= STATUS_WATCH_BYTE_LIMIT);
+    }
+
+    #[test]
+    fn full_watch_retains_changed_status_records() {
+        let snapshot =
+            json!({ "run_id": "run-1", "state": "failed", "metadata": { "reason": "full" } });
+        let mut progress = StatusWatchProgress::default();
+        progress.observe(&snapshot, 1, true, |_| {});
+
+        assert_eq!(progress.changes[0]["full_status_ref"]["run_id"], "run-1");
+        assert!(progress.changes[0]["status"].is_null());
+    }
+
+    #[test]
+    fn full_watch_events_and_retained_records_have_a_fixed_size_bound() {
+        let snapshot = json!({
+            "run_id": "run-1",
+            "state": "failed",
+            "diagnostic_summary": "x".repeat(STATUS_WATCH_EVENT_BYTE_LIMIT * 2),
+        });
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        progress.observe(&snapshot, 1, true, |line| emitted.push(line));
+
+        assert!(emitted[0].len() <= STATUS_WATCH_EVENT_BYTE_LIMIT);
+        assert!(serialized_len(&progress.changes[0]) <= STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT);
+        assert_eq!(progress.changes[0]["full_status_ref"]["run_id"], "run-1");
+    }
+
+    #[test]
+    fn task_changes_beyond_the_compact_page_emit_a_new_event() {
+        let tasks = (0..=COMPACT_TASK_LIMIT)
+            .map(|index| json!({ "task_id": format!("task-{index}"), "state": "queued" }))
+            .collect::<Vec<_>>();
+        let mut changed_tasks = tasks.clone();
+        changed_tasks[COMPACT_TASK_LIMIT]["state"] = json!("failed");
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        progress.observe(
+            &json!({ "run_id": "run-1", "state": "running", "tasks": tasks }),
+            1,
+            false,
+            |line| emitted.push(line),
+        );
+        progress.observe(
+            &json!({ "run_id": "run-1", "state": "running", "tasks": changed_tasks }),
+            2,
+            false,
+            |line| emitted.push(line),
+        );
+
+        assert_eq!(emitted.len(), 2);
+        let second: Value = serde_json::from_str(&emitted[1]).expect("task change event");
+        assert!(second["change"]["change_basis"]["task_state_digest"].is_string());
+    }
+
+    #[test]
+    fn fixed_watch_sections_fall_back_to_typed_refs_within_total_budget() {
+        let mut output = json!({
+            "run_id": "run-1",
+            "changes": [],
+            "changes_omitted": 0,
+            "latest": { "schema": "homeboy/agent-task-status-watch-latest/v2", "state": "failed", "detail": "x".repeat(STATUS_WATCH_BYTE_LIMIT) },
+            "terminal_summary": { "schema": "homeboy/agent-task-status-watch-terminal/v1", "detail": "x".repeat(STATUS_WATCH_BYTE_LIMIT) },
+            "output_budget": {},
+        });
+        enforce_watch_output_budget(&mut output, "homeboy agent-task status run-1 --watch");
+
+        assert!(serialized_len(&output) <= STATUS_WATCH_BYTE_LIMIT);
+        assert_eq!(
+            output["terminal_summary"]["schema"],
+            "homeboy/agent-task-status-watch-terminal-ref/v2"
+        );
+        assert_eq!(
+            output["latest"]["schema"],
+            "homeboy/agent-task-status-watch-latest-ref/v2"
+        );
+    }
+
+    #[test]
+    fn full_watch_retention_remains_bounded_with_an_omission_count() {
+        let mut progress = StatusWatchProgress::default();
+        for poll in 1..=(STATUS_WATCH_CHANGE_LIMIT as u64 + 1) {
+            progress.observe(
+                &json!({ "run_id": "run-1", "state": "running", "progress": poll }),
+                poll,
+                true,
+                |_| {},
+            );
+        }
+
+        assert_eq!(progress.changes.len(), STATUS_WATCH_CHANGE_LIMIT);
+        assert_eq!(progress.omitted, 1);
+    }
+
+    #[test]
+    fn blocked_cook_status_puts_diagnosis_before_logs() {
+        let mut status = json!({
+            "cook": { "phase": "terminal", "publication": "not_started" },
+        });
+        attach_agent_task_status_actionable(&mut status, "run-1");
+
+        let actions = status[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("next actions");
+        assert_eq!(
+            actions[0]["command"],
+            "homeboy agent-task diagnose run-1 --full"
+        );
+        assert_eq!(
+            actions[1]["command"],
+            "homeboy agent-task status run-1 --full"
+        );
     }
 
     struct ScriptedStatusPoller {
@@ -2691,7 +3039,9 @@ mod watch_tests {
             },
             |duration| clock.set(clock.get() + duration),
             || clock.get(),
-            |(snapshot, _), poll| progress.observe(snapshot, poll, |line| emitted.push(line)),
+            |(snapshot, _), poll| {
+                progress.observe(snapshot, poll, false, |line| emitted.push(line))
+            },
         )
         .expect("scripted status watch");
         let (output, exit) = watch_status_output(&args(), result, progress);
@@ -2803,8 +3153,10 @@ mod watch_tests {
             "reconciled": true,
             "normalized_events": [{ "type": "agent_task.state_changed" }]
         });
+        let mut full_args = args();
+        full_args.full = true;
         let (output, exit) = watch_status_output(
-            &args(),
+            &full_args,
             WatchResult {
                 item: (bridge.clone(), 0),
                 conclusion: WatchConclusion::Terminal,
@@ -2819,7 +3171,7 @@ mod watch_tests {
 
         assert_eq!(exit, 0);
         assert_eq!(output["latest"]["reconciled"], true);
-        assert!(output["latest"]["normalized_events"].is_array());
+        assert_eq!(output["latest"]["full_status_ref"]["run_id"], "run-1");
     }
 
     #[test]

@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
+use std::time::Instant;
 
 use homeboy::core::component::{self, Component};
 use homeboy::core::project::{self, Project};
@@ -122,8 +123,12 @@ enum ComponentCommand {
         /// New component ID (should match repository directory name)
         new_id: String,
     },
-    /// List all available components
-    List,
+    /// List registered components without opening their checkouts
+    List {
+        /// Enrich every row from its checkout, including portable and Git metadata
+        #[arg(long)]
+        full: bool,
+    },
     /// List projects using this component
     Projects {
         /// Component ID
@@ -199,6 +204,24 @@ pub struct ComponentExtra {
     pub projects: Option<Vec<Project>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared: Option<std::collections::HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<ComponentInventorySummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentInventorySummary {
+    pub status: String,
+    pub registered_count: usize,
+    pub enriched_count: usize,
+    pub omitted_enrichment_count: usize,
+    pub phases: Vec<ComponentInventoryPhase>,
+    pub continue_command: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentInventoryPhase {
+    pub name: String,
+    pub elapsed_ms: u128,
 }
 
 pub type ComponentOutput = EntityCrudOutput<Value, ComponentExtra>;
@@ -345,7 +368,7 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
         ),
         ComponentCommand::Delete { id } => delete(&id),
         ComponentCommand::Rename { id, new_id } => rename(&id, &new_id),
-        ComponentCommand::List => list(),
+        ComponentCommand::List { full } => list(full),
         ComponentCommand::Projects { id } => projects(&id),
         ComponentCommand::Shared { id } => shared(id.as_deref()),
         ComponentCommand::Env { id, path } => env::env(id.as_deref(), path.as_deref()),
@@ -768,16 +791,68 @@ fn rename(id: &str, new_id: &str) -> CmdResult<ComponentOutput> {
     ))
 }
 
-fn list() -> CmdResult<ComponentOutput> {
-    let components: Vec<Value> = component::inventory()?
+fn list(full: bool) -> CmdResult<ComponentOutput> {
+    let started = Instant::now();
+    let components = if full {
+        component::inventory()?
+    } else {
+        component::inventory::registered_base()?
+    };
+    let discovery_elapsed_ms = started.elapsed().as_millis();
+    let component_count = components.len();
+    let rendering_started = Instant::now();
+    let components: Vec<Value> = components
         .into_iter()
-        .map(|component| component_discovery_value(&component, None))
+        .map(|component| {
+            let mut value = component_discovery_value_with_diagnostics(&component, None, full)?;
+            if let Value::Object(ref mut map) = value {
+                map.insert(
+                    "inventory_enrichment".to_string(),
+                    if full {
+                        serde_json::json!({ "status": "complete" })
+                    } else {
+                        serde_json::json!({
+                            "status": "omitted",
+                            "reason": "default_bounded_inventory",
+                            "continue_command": "homeboy component list --full"
+                        })
+                    },
+                );
+            }
+            Ok(value)
+        })
         .collect::<homeboy::core::Result<Vec<Value>>>()?;
+    let rendering_elapsed_ms = rendering_started.elapsed().as_millis();
 
     Ok((
         ComponentOutput {
             command: "component.list".to_string(),
             entities: components,
+            hint: (!full).then(|| {
+                "Registry rows are shown without checkout enrichment; run `homeboy component list --full` for portable and Git metadata."
+                    .to_string()
+            }),
+            extra: ComponentExtra {
+                inventory: Some(ComponentInventorySummary {
+                    status: if full { "complete" } else { "partial" }.to_string(),
+                    registered_count: component_count,
+                    enriched_count: if full { component_count } else { 0 },
+                    omitted_enrichment_count: if full { 0 } else { component_count },
+                    phases: vec![
+                        ComponentInventoryPhase {
+                            name: if full { "discovery_and_enrichment" } else { "registry_rows" }
+                                .to_string(),
+                            elapsed_ms: discovery_elapsed_ms,
+                        },
+                        ComponentInventoryPhase {
+                            name: "render_rows".to_string(),
+                            elapsed_ms: rendering_elapsed_ms,
+                        },
+                    ],
+                    continue_command: "homeboy component list --full".to_string(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         },
         0,
@@ -787,6 +862,14 @@ fn list() -> CmdResult<ComponentOutput> {
 fn component_discovery_value(
     component: &Component,
     drift_files: Option<Vec<String>>,
+) -> homeboy::core::Result<Value> {
+    component_discovery_value_with_diagnostics(component, drift_files, true)
+}
+
+fn component_discovery_value_with_diagnostics(
+    component: &Component,
+    drift_files: Option<Vec<String>>,
+    include_diagnostics: bool,
 ) -> homeboy::core::Result<Value> {
     let mut value = serde_json::to_value(component).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
@@ -800,19 +883,21 @@ fn component_discovery_value(
         map.insert("id".to_string(), Value::String(component.id.clone()));
         // Always surface remote_owner so missing config is visible (#602).
         map.entry("remote_owner".to_string()).or_insert(Value::Null);
-        let local_path_diagnostic = component::inventory::local_path_diagnostic(component);
-        if local_path_diagnostic.status != "ok" {
-            map.insert(
-                "local_path_diagnostic".to_string(),
-                serde_json::to_value(local_path_diagnostic).map_err(|error| {
-                    homeboy::core::Error::validation_invalid_argument(
-                        "component",
-                        "Failed to serialize local_path diagnostic",
-                        Some(error.to_string()),
-                        None,
-                    )
-                })?,
-            );
+        if include_diagnostics {
+            let local_path_diagnostic = component::inventory::local_path_diagnostic(component);
+            if local_path_diagnostic.status != "ok" {
+                map.insert(
+                    "local_path_diagnostic".to_string(),
+                    serde_json::to_value(local_path_diagnostic).map_err(|error| {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "component",
+                            "Failed to serialize local_path diagnostic",
+                            Some(error.to_string()),
+                            None,
+                        )
+                    })?,
+                );
+            }
         }
         summarize_large_component_metadata(map);
         if let Some(drift_files) = drift_files {
@@ -966,6 +1051,17 @@ mod tests {
             }
             _ => panic!("expected component show command"),
         }
+    }
+
+    #[test]
+    fn parses_component_list_full_flag() {
+        let cli = TestCli::try_parse_from(["component", "list", "--full"])
+            .expect("component list --full should parse");
+
+        assert!(matches!(
+            cli.component.command,
+            ComponentCommand::List { full: true }
+        ));
     }
 
     #[test]

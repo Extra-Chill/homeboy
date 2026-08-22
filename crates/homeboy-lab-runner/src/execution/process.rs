@@ -1429,7 +1429,11 @@ pub(super) fn command_output_until_cancelled_with_progress(
     )?;
     let output = measured.output;
     Ok(ProcessOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stdout: crate::progress::remove_child_progress_lines(
+            &String::from_utf8_lossy(&output.stdout),
+            env,
+            secret_env_names,
+        ),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code().unwrap_or(1),
         metrics: Some(measured.metrics),

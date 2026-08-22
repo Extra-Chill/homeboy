@@ -314,6 +314,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     )
     .expect("disable host-capacity admission for fixture worktree");
     let cook_id = "local-detach-materializes-attempt";
+    let output_path = context.root().join("local-detach-handoff.json");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command.args([
         "--placement",
@@ -338,10 +339,17 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         "--max-attempts",
         "1",
         "--no-finalize",
+        "--output",
+        output_path.to_str().expect("handoff output path"),
     ]);
     let output = bounded_output(command);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&output_path).expect("read atomic handoff output"),
+        stdout,
+        "stdout and --output must receive the identical terminal handoff envelope"
+    );
     let handoff: serde_json::Value = serde_json::from_str(
         &stdout[stdout
             .find('{')

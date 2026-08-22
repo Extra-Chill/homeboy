@@ -1474,56 +1474,6 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Project a runner handoff envelope into a core `RunnerExecutionRecord`.
-///
-/// This conversion produces core execution types from the lab-contract handoff
-/// envelope. It lives in the CLI/commands layer (which legally depends on both
-/// core and command_contract) rather than on the contract type itself, so the
-/// lab-contract type layer carries no upward dependency on core's runner
-/// execution / run-outcome envelopes.
-fn handoff_runner_execution_record(
-    handoff: &crate::command_contract::LabRunnerHandoffEnvelope,
-) -> RunnerExecutionRecord {
-    let record = if handoff.status == "running" {
-        RunnerExecutionRecord::in_flight(
-            handoff.job_id.clone(),
-            handoff.runner_id.clone(),
-            "daemon",
-        )
-    } else {
-        RunnerExecutionRecord::terminal(
-            handoff.job_id.clone(),
-            handoff.runner_id.clone(),
-            "daemon",
-            if handoff.status == "succeeded" { 0 } else { 1 },
-        )
-    };
-    record
-        .with_job_id(handoff.job_id.clone())
-        .with_mirror_run_id(
-            handoff
-                .mirror_run_id
-                .clone()
-                .or_else(|| handoff.persisted_run_id.clone())
-                .or_else(|| handoff.durable_run_id.clone()),
-        )
-        .with_path_materialization_plan(handoff.path_materialization_plan.clone())
-        .with_artifact_refs(handoff.evidence.artifact_refs.iter().cloned())
-        .with_next_actions(handoff.evidence.next_commands.iter().map(|command| {
-            crate::core::runner_execution_envelope::RunnerExecutionNextAction {
-                label: command.label.clone(),
-                command: command.command.clone(),
-            }
-        }))
-}
-
-/// Project a runner handoff envelope into a core `RunOutcomeEnvelope`.
-fn handoff_run_outcome_envelope(
-    handoff: &crate::command_contract::LabRunnerHandoffEnvelope,
-) -> RunOutcomeEnvelope {
-    RunOutcomeEnvelope::from_runner_execution_record(&handoff_runner_execution_record(handoff))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2106,44 +2056,6 @@ mod tests {
         assert_eq!(output.run_id.as_deref(), Some("run-1"));
         assert_eq!(output.runner_id.as_deref(), Some("lab-a"));
         assert_eq!(output.exit_code, Some(0));
-    }
-
-    #[test]
-    fn lab_runner_handoff_sample_projects_to_execution_record_and_outcome_refs() {
-        let handoff: crate::command_contract::LabRunnerHandoffEnvelope =
-            serde_json::from_value(lab_runner_handoff_example()).expect("runner handoff sample");
-
-        let record = handoff_runner_execution_record(&handoff);
-        let outcome = handoff_run_outcome_envelope(&handoff);
-
-        assert_eq!(record.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
-        assert_eq!(record.execution_id, "job-1");
-        assert_eq!(record.runner_id, "runner-1");
-        assert_eq!(record.transport, "daemon");
-        assert_eq!(record.status, "succeeded");
-        assert_eq!(record.job_id.as_deref(), Some("job-1"));
-        assert_eq!(record.remote_run_id.as_deref(), Some("run-1"));
-        assert_eq!(record.artifact_refs[0].id, "artifact_manifest");
-        assert_eq!(record.next_actions[0].label, "runner_job_logs");
-        assert_eq!(
-            record
-                .path_materialization_plan
-                .as_ref()
-                .expect("path materialization plan")
-                .entries[0]
-                .remote_path,
-            "/home/runner/workspace"
-        );
-
-        assert_eq!(outcome.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
-        assert_eq!(outcome.status, "succeeded");
-        assert_eq!(outcome.run_id.as_deref(), Some("run-1"));
-        assert_eq!(outcome.runner_id.as_deref(), Some("runner-1"));
-        assert_eq!(outcome.artifact_refs[0].id, "artifact_manifest");
-        assert_eq!(
-            outcome.evidence_refs[0].target,
-            "homeboy://run/run-1/artifact/artifact_manifest"
-        );
     }
 
     #[test]

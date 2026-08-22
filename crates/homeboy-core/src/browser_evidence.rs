@@ -103,15 +103,6 @@ pub(crate) struct BrowserPhaseMark {
     pub start_time_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BrowserPhaseWindow {
-    pub start_time_ms: f64,
-    #[serde(default)]
-    pub end_time_ms: Option<f64>,
-    pub duration_ms: f64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BrowserArtifactMetadata {

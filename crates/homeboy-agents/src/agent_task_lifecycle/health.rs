@@ -139,6 +139,40 @@ pub fn reconcile_record_health(dry_run: bool) -> Result<AgentTaskRecordReconcili
     reconcile_record_health_in_store(&lifecycle_store, dry_run)
 }
 
+/// Quarantine only records whose durable plan and accepted handoff prove they
+/// came from the in-tree fixture executor. This deliberately does not migrate
+/// legacy records or touch unknown runner ownership: target-version bootstrap
+/// recovery may repair proven test residue, never ambiguous live work.
+pub fn quarantine_verified_fixture_runner_records() -> Result<usize> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let mut quarantined = 0;
+    for run in lifecycle_store.observation_runs()? {
+        let Ok(record) = diagnose_run(&run) else {
+            continue;
+        };
+        let Some(plan) = lifecycle_store.read_controller_plan(&run.id).ok() else {
+            continue;
+        };
+        let Some(provenance) = fixture_runner_provenance(&record, &plan) else {
+            continue;
+        };
+        quarantine_in_store(
+            &lifecycle_store,
+            &run,
+            &AgentTaskRecordHealthItem {
+                run_id: run.id.clone(),
+                reason: AgentTaskRecordHealthReason::FixtureRunnerProvenance,
+                quarantined: false,
+                remediation: format!(
+                    "verified target-version bootstrap recovery quarantined fixture runner provenance: {provenance}"
+                ),
+            },
+        )?;
+        quarantined += 1;
+    }
+    Ok(quarantined)
+}
+
 /// [`reconcile_record_health`] against explicitly injected durable lifecycle
 /// roots.
 ///

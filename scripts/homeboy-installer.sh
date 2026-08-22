@@ -8,12 +8,15 @@ ARCH="$(uname -m)"
 case "${OS}-${ARCH}" in
   linux-x86_64) ASSET="homeboy-x86_64-unknown-linux-gnu.tar.xz" ;;
   linux-aarch64|linux-arm64) ASSET="homeboy-aarch64-unknown-linux-gnu.tar.xz" ;;
-  darwin-x86_64) ASSET="homeboy-x86_64-apple-darwin.tar.xz" ;;
+  # darwin-x86_64 is intentionally unmapped: `x86_64-apple-darwin` was dropped
+  # from `dist-workspace.toml`, so releases publish no Intel macOS tarball.
   darwin-aarch64|darwin-arm64) ASSET="homeboy-aarch64-apple-darwin.tar.xz" ;;
+  darwin-x86_64) echo "Homeboy no longer publishes an Intel macOS (x86_64-apple-darwin) binary. Build from source: cargo install --git https://github.com/Extra-Chill/homeboy" >&2; exit 1 ;;
   *) echo "Unsupported platform: ${OS}-${ARCH}" >&2; exit 1 ;;
 esac
 
 TAG="${HOMEBOY_UPGRADE_RELEASE_TAG:-latest}"
+TARGET_VERSION="${HOMEBOY_UPGRADE_RELEASE_VERSION:-}"
 if [ "$TAG" = latest ]; then
   BASE_URL="https://github.com/Extra-Chill/homeboy/releases/latest/download"
 else
@@ -88,10 +91,26 @@ EXTRACTED_BIN="$TMP_DIR/homeboy"
 }
 chmod 0755 "$EXTRACTED_BIN"
 
-# The staged candidate owns admission; any failure exits before the installed
-# controller is written. Its report binds the candidate decision to legacy identity.
+# A checksum authenticates the archive; this exact version check binds the
+# extracted executable to the selected target before it can repair ownership.
+if [ -n "$TARGET_VERSION" ]; then
+  CANDIDATE_VERSION="$($EXTRACTED_BIN --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//; s/+.*$//')"
+  if [ "$CANDIDATE_VERSION" != "$TARGET_VERSION" ]; then
+    echo "Target-version bootstrap recovery refused: verified archive candidate reports ${CANDIDATE_VERSION:-unverifiable}, expected $TARGET_VERSION." >&2
+    echo "Retry with matching release inputs: HOMEBOY_UPGRADE_RELEASE_TAG=v$TARGET_VERSION HOMEBOY_UPGRADE_RELEASE_VERSION=$TARGET_VERSION sh homeboy-installer.sh" >&2
+    exit 1
+  fi
+fi
+
+# The checksum- and version-verified staged candidate owns bounded recovery and
+# admission; any failure exits before the installed controller is written.
 LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
-"$EXTRACTED_BIN" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+# `set --` preserves the legacy identity as one argv element without an eval.
+set -- self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+if [ -n "$TARGET_VERSION" ]; then
+  set -- "$@" --target-version "$TARGET_VERSION"
+fi
+"$EXTRACTED_BIN" "$@"
 
 if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" != true ] && { [ -w "$BIN_PATH" ] || [ -w "$BIN_DIR" ]; }; then
   install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
