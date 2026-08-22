@@ -1665,10 +1665,15 @@ fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
 
     let response = route_with_job_store_and_body_and_runner_and_auth(
         "POST",
-        "/files/download",
+        "/files/upload-chunk",
         Some(serde_json::json!({
             "runner_id": "file-lab",
             "path": "report.json",
+            "upload_id": uuid::Uuid::new_v4().to_string(),
+            "offset": 0,
+            "content_base64": "",
+            "final": false,
+            "size_bytes": 1,
         })),
         &JobStore::default(),
         UnsupportedAnalysisJobRunner,
@@ -1681,6 +1686,25 @@ fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
 
     assert_eq!(response.status_code, 401);
     assert_eq!(response.body["error"], "broker.auth_denied");
+}
+
+#[test]
+fn upload_chunk_network_reader_rejects_oversized_body_before_allocating_it() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("listener address");
+    let client = std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(address).expect("connect");
+        stream
+            .write_all(b"POST /files/upload-chunk HTTP/1.1\r\nContent-Length: 98305\r\n\r\n")
+            .expect("write headers");
+    });
+    let (mut stream, _) = listener.accept().expect("accept");
+    let error = read_http_request(&mut stream).expect_err("body cap");
+    client.join().expect("client");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]

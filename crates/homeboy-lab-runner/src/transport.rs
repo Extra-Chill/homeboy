@@ -407,12 +407,21 @@ impl RunnerFileTransfer {
                     None,
                 ));
             }
-            self.http_post_json(
+            let upload = self.http_post_json(
                 "/files/upload-chunk",
                 json!({"runner_id": &self.runner_id, "path": remote_path, "workspace_root": &self.workspace_root, "upload_id": upload_id, "offset": offset, "content_base64": base64::engine::general_purpose::STANDARD.encode(&buffer[..read]), "final": final_chunk, "sha256": final_chunk.then_some(sha256), "size_bytes": size, "private": true}),
                 "private evidence upload",
                 remote_path,
-            )?;
+            );
+            if let Err(error) = upload {
+                let _ = self.http_post_json(
+                    "/files/upload-chunk/abort",
+                    json!({"runner_id": &self.runner_id, "workspace_root": &self.workspace_root, "upload_id": upload_id}),
+                    "private evidence upload abort",
+                    remote_path,
+                );
+                return Err(error);
+            }
             offset += read as u64;
             if final_chunk {
                 return Ok(());

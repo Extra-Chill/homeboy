@@ -56,8 +56,8 @@ pub use control::{
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 use patch_capture::{capture_baseline, capture_patch_report};
 use runner_files::{
-    create_runner_file_directory, download_runner_file, upload_runner_file,
-    upload_runner_file_chunk,
+    abort_runner_file_chunk_upload, create_runner_file_directory, download_runner_file,
+    reap_expired_uploads, upload_runner_file, upload_runner_file_chunk,
 };
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
@@ -953,6 +953,14 @@ pub(super) struct FileUploadChunkRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(super) struct FileUploadAbortRequest {
+    runner_id: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    upload_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct LifecycleStopRequest {
     lease_id: String,
     #[serde(default)]
@@ -1695,6 +1703,7 @@ where
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
+    reap_expired_uploads();
     match (method, path.split('?').next().unwrap_or(path)) {
         ("GET", "/lifecycle/identity") => match daemon_endpoint_identity(path) {
             Ok(body) => HttpResponse {
@@ -1863,6 +1872,12 @@ where
             Ok(body) => daemon_endpoint_response("files.upload_chunk", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
+        ("POST", "/files/upload-chunk/abort") => {
+            match abort_runner_file_chunk_upload(body, &broker_auth) {
+                Ok(body) => daemon_endpoint_response("files.upload_chunk.abort", body),
+                Err(err) => remote_runner::auth_or_bad_request(err),
+            }
+        }
         ("POST", "/files/download") => match download_runner_file(body, &broker_auth) {
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
@@ -1897,6 +1912,7 @@ where
         ("GET", "/files/mkdir")
         | ("GET", "/files/upload")
         | ("GET", "/files/upload-chunk")
+        | ("GET", "/files/upload-chunk/abort")
         | ("GET", "/files/download") => method_not_allowed(),
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs/reconcile")
@@ -6234,6 +6250,7 @@ pub fn handle_reverse_broker_test_connection(
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    const MAX_UPLOAD_CHUNK_BODY_BYTES: usize = 96 * 1024;
     let mut request = Vec::new();
     let mut buffer = [0; 8 * 1024];
     let headers_end = loop {
@@ -6249,6 +6266,16 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 
     let headers = String::from_utf8_lossy(&request[..headers_end]);
     let content_length = http_content_length(&headers).unwrap_or(0);
+    let upload_chunk_request = headers
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("POST /files/upload-chunk "));
+    if upload_chunk_request && content_length > MAX_UPLOAD_CHUNK_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "upload chunk request body exceeds the 96 KiB limit",
+        ));
+    }
     let body_start = headers_end + 4;
     let body_bytes = request.len().saturating_sub(body_start);
     let remaining = content_length.saturating_sub(body_bytes);
