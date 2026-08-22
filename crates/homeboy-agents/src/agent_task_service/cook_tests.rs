@@ -4681,7 +4681,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 
 #[cfg(unix)]
 #[test]
-fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_timeout() {
+fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -4735,7 +4735,17 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         let workspace = workspace.canonicalize().expect("canonical workspace");
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let provider = provider_dir.path().join("provider");
-        std::fs::write(&provider, format!("#!/bin/sh\nsleep 1\n")).expect("write provider");
+        let first_resolve = provider_dir.path().join("first-resolve");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nif test \"$1\" = identity; then\n  if test ! -f '{}'; then : > '{}'; sleep 1; fi\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\nelse\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'\nfi\n",
+                first_resolve.display(),
+                first_resolve.display(),
+                workspace.display(),
+            ),
+        )
+        .expect("write provider");
         let mut permissions = std::fs::metadata(&provider)
             .expect("provider metadata")
             .permissions();
@@ -4749,7 +4759,7 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
                 enabled: true,
                 kind: homeboy_core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
-                lookup_timeout_ms: 25,
+                lookup_timeout_ms: 250,
                 mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
@@ -4796,97 +4806,51 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         });
         let exact_handle = options.to_worktree.clone();
 
+        options.source_worktree_path = Some(workspace.clone());
         let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
-            .expect("Cook records lookup failure");
+            .expect("Cook retries and materializes the provider workspace");
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
         assert_eq!(result.value.cook_id, cook_id);
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
-        assert_eq!(result.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status(run_id).expect("durable failed lookup");
-        assert_eq!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Failed
-        );
+        let record = agent_task_lifecycle::status(run_id).expect("durable lookup record");
+        let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
+            persisted_plan.metadata["worktree_provider_resolve"]["phase"],
             "worktree_provider_lookup"
         );
         assert_eq!(
-            record.metadata["pre_execution_failure"]["retryable"], true,
-            "{}",
-            record.metadata
+            persisted_plan.metadata["worktree_provider_resolve"]["attempt"],
+            2
         );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["failure_classification"],
-            "transient"
+        assert!(
+            persisted_plan.metadata["worktree_provider_resolve"]["deadline_unix_ms"]
+                .as_u64()
+                .expect("deadline")
+                > 0
         );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_lookup"],
-            "timed_out"
+        assert!(
+            persisted_plan.metadata["worktree_provider_resolve"]["events"]
+                .as_array()
+                .expect("durable resolve events")
+                .iter()
+                .any(|event| event["attempt"] == 1 && event["next_retry_unix_ms"].is_number())
         );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]
-                ["worktree_provider_call_classification"],
-            "timeout"
+        assert!(
+            persisted_plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"]
+                .as_str()
+                .expect("cwd recovery command")
+                .contains(&format!("--cwd {}", workspace.display()))
         );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_phase"],
-            "worktree_provider_resolve_identity"
-        );
-        assert!(record.metadata["pre_execution_failure"]["details"]
-            ["worktree_provider_replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains(provider.to_string_lossy().as_ref()));
         let recipe = super::super::load_recipe(cook_id).expect("durable Cook identity");
         assert_eq!(recipe.attempts[0].run_id, run_id);
-        let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
         assert_eq!(
             persisted_plan.metadata["cook_provision"]["handle"],
             exact_handle
         );
-        assert_eq!(persisted_plan.tasks[0].workspace.root, None);
-        assert!(persisted_plan.metadata["cook_provision"]["workspace_identity"].is_null());
-        assert!(persisted_plan.tasks[0]
-            .metadata
-            .get("cook_workspace_identity")
-            .is_none());
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nif test \"$1\" = identity; then printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; else printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
-                workspace.display()
-            ),
-        )
-        .expect("recover provider");
-        std::fs::set_permissions(&provider, permissions).expect("restore executable provider");
-
-        let retry = crate::agent_task_service::retry(run_id, None, false, false)
-            .expect("reserve a Cook-owned retry successor");
-        assert_eq!(retry.record.metadata["retry_of"], run_id);
-        assert_eq!(retry.record.metadata["cook_id"], cook_id);
-        assert_eq!(retry.record.metadata["cook_attempt"], 2);
-        let recipe = super::super::load_recipe(cook_id).expect("same Cook recipe owns retry");
-        assert_eq!(recipe.attempts.len(), 2);
-        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
-
-        let mut resumed_options = super::super::reconstruct_options_with_dispatcher(
-            &recipe,
-            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
-        )
-        .expect("reconstruct Cook-owned retry");
-        resumed_options.initial_run_id = retry.record.run_id.clone();
-        resumed_options.initial_plan =
-            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("load durable retry plan");
-        let resumed = run_cook(CookContext::new(resumed_options, Arc::new(UnusedExecutor)))
-            .expect("same Cook retry materializes its recovered provider workspace");
-        assert_eq!(resumed.value.cook_id, cook_id);
-        let resumed_plan =
-            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("materialized retry plan");
         assert_eq!(
-            resumed_plan.tasks[0].workspace.root.as_deref(),
+            persisted_plan.tasks[0].workspace.root.as_deref(),
             Some(workspace.to_str().expect("utf8 workspace"))
         );
     });
