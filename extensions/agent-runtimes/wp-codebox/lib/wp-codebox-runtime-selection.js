@@ -25,18 +25,22 @@ function selectWpCodeboxRuntime(options = {}) {
     settings.wp_codebox_bin,
     settings.wpCodeboxBin,
   );
-  const managed = path.join(env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox'), 'source', 'packages', 'cli', 'dist', 'index.js');
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  const managedSource = path.join(installDir, 'source');
+  const managed = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
     configured: candidate(configured, 'configured', options),
     managed: candidate(managed, 'managed', options),
     path: candidate(pathCandidate, 'path', options),
   };
-  // The managed runtime is the reproducible default. Explicit configuration is
-  // used only when that managed build is unavailable.
-  const selected = options.strictBin && configured
+  // A configured runtime is an exact pin. An incomplete managed source cache
+  // is also a Homeboy-owned prerequisite, not permission to use PATH instead.
+  const selected = configured
     ? candidates.configured
-    : [candidates.configured, candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
+    : directoryExists(managedSource, options)
+      ? candidates.managed
+      : [candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
   return { candidates, selected };
 }
 
@@ -45,6 +49,9 @@ function preflightWpCodeboxRuntime(options = {}) {
   const requiredVersion = options.requiredVersion || REQUIRED_WP_CODEBOX_VERSION;
   if (!selection.selected.path) {
     return failure(selection, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
+  }
+  if (!selection.selected.available) {
+    return failure(selection, requiredVersion, '', `wp_codebox_${selection.selected.source}_binary_missing`, 'homeboy extension setup wordpress');
   }
   const invocation = wpCodeboxCommand(selection.selected.path);
   const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, '--version'], {
@@ -125,6 +132,14 @@ function executableFile(filePath, options = {}) {
     if (/\.(?:js|cjs|mjs)$/.test(filePath)) return true;
     fileSystem.accessSync(filePath, fs.constants.X_OK);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function directoryExists(directoryPath, options = {}) {
+  try {
+    return (options.fs || fs).statSync(directoryPath).isDirectory();
   } catch {
     return false;
   }

@@ -34,15 +34,20 @@ try {
 
   const dangling = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_WP_CODEBOX_BIN: path.join(temp, 'missing'), PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(dangling.ready, false);
-  assert.equal(dangling.classification, 'wp_codebox_version_too_old');
+  assert.equal(dangling.classification, 'wp_codebox_configured_binary_missing');
   assert.equal(dangling.remediation, 'homeboy extension setup wordpress');
+  assert.equal(dangling.identity.executable, path.join(temp, 'missing'));
+  assert.equal(dangling.identity.source, 'configured');
+  assert.equal(dangling.identity.version, '');
   assert.equal(dangling.candidates.configured.path, path.join(temp, 'missing'));
   assert.equal(dangling.candidates.managed.path, path.join(incomplete, 'source/packages/cli/dist/index.js'));
   assert.equal(dangling.candidates.path.path, stale);
 
   const incompleteResult = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_WP_CODEBOX_BIN: '', PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(incompleteResult.ready, false);
-  assert.equal(incompleteResult.classification, 'wp_codebox_version_too_old');
+  assert.equal(incompleteResult.classification, 'wp_codebox_managed_binary_missing');
+  assert.equal(incompleteResult.identity.executable, path.join(incomplete, 'source/packages/cli/dist/index.js'));
+  assert.equal(incompleteResult.identity.source, 'managed');
 
   const healthy = path.join(temp, 'healthy');
   const managedCli = path.join(healthy, 'source/packages/cli/dist/index.js');
