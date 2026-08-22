@@ -5852,6 +5852,7 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// Prevent a recovery from observing idle work and then racing a new durable
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
+#[cfg(target_os = "linux")]
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
     acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
 }
@@ -5863,6 +5864,7 @@ pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>
 
 enum DaemonAdmissionLockMode {
     Shared,
+    #[cfg(target_os = "linux")]
     Exclusive,
 }
 
@@ -5895,6 +5897,7 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             std::os::fd::AsRawFd::as_raw_fd(&file),
             match mode {
                 DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
+                #[cfg(target_os = "linux")]
                 DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
             },
         )
@@ -5908,12 +5911,13 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::LockFileEx;
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
         let flags = match mode {
             DaemonAdmissionLockMode::Shared => 0,
+            #[cfg(target_os = "linux")]
             DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
         };
         if unsafe {
@@ -6013,8 +6017,10 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(super) struct DaemonAdmissionFence(File);
 
+#[cfg(target_os = "linux")]
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]

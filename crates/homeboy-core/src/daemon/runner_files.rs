@@ -323,6 +323,14 @@ pub(super) fn upload_runner_file_chunk(
             )
         })?;
     broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
+    if !request.private {
+        return Err(Error::validation_invalid_argument(
+            "private",
+            "runner file chunk uploads must use the private upload protocol",
+            None,
+            None,
+        ));
+    }
     let upload_id = uuid::Uuid::parse_str(&request.upload_id).map_err(|_| {
         Error::validation_invalid_argument(
             "upload_id",
@@ -1057,6 +1065,19 @@ mod tests {
             json!(base64::engine::general_purpose::STANDARD.encode(vec![0; MAX_CHUNK_BYTES + 1]));
         decoded["size_bytes"] = json!((MAX_CHUNK_BYTES + 1) as u64);
         assert!(upload_runner_file_chunk(Some(decoded), &trusted()).is_err());
+    }
+
+    #[test]
+    fn chunk_upload_requires_private_protocol() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runner = format!("chunk-private-{}", uuid::Uuid::new_v4());
+        let mut body = request(workspace.path(), &runner, uuid::Uuid::new_v4());
+        body["private"] = json!(false);
+
+        let error = upload_runner_file_chunk(Some(body), &trusted())
+            .expect_err("non-private chunk upload is rejected");
+
+        assert_eq!(error.details["field"], "private");
     }
 
     #[test]
