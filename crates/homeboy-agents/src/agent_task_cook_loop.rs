@@ -23,8 +23,8 @@ const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
 /// A review form is metadata, not a coding attempt. Callers may lower this via
 /// `metadata.cook_loop.review_form_timeout_ms`; the cap keeps it bounded.
-const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 60_000;
-const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 300_000;
+const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -1874,11 +1874,13 @@ mod tests {
 
     #[test]
     fn review_form_timeout_is_configurable_but_capped() {
+        assert_eq!(review_form_timeout_ms(&source_request()), 300_000);
+
         let mut request = source_request();
         request.metadata = json!({
             "cook_loop": { "review_form_timeout_ms": MAX_REVIEW_FORM_TIMEOUT_MS + 1 }
         });
-        assert_eq!(review_form_timeout_ms(&request), MAX_REVIEW_FORM_TIMEOUT_MS);
+        assert_eq!(review_form_timeout_ms(&request), 600_000);
 
         request.metadata["cook_loop"]["review_form_timeout_ms"] = json!(5_000);
         assert_eq!(review_form_timeout_ms(&request), 5_000);
