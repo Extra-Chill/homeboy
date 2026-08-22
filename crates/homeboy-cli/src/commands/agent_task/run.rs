@@ -4211,9 +4211,10 @@ fn validate_provider_evidence_prompt(
 
 const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
 
-/// Extract Unix absolute paths from the bounded provider prompt surface. The
-/// scanner recognizes paths after punctuation and file URIs without treating
-/// ordinary HTTPS URLs as host paths.
+/// Extract concrete Unix absolute paths from the bounded provider prompt
+/// surface. A path must begin at a syntax boundary and contain at least two
+/// segments or resolve locally, so prose such as `core/html` and `/endpoint`
+/// is not evidence.
 fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
     if prompt.len() > MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -4238,13 +4239,21 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
                 rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
             };
         }
-        let bytes = candidate.as_bytes();
         let mut offset = 0;
-        while offset < bytes.len() {
+        while offset < candidate.len() {
             let Some(relative) = candidate[offset..].find('/') else {
                 break;
             };
             let start = offset + relative;
+            if start != 0
+                && !matches!(
+                    candidate[..start].chars().next_back(),
+                    Some('=' | ':' | '(' | '[' | '{' | '<' | '\'' | '"' | '`')
+                )
+            {
+                offset = start + 1;
+                continue;
+            }
             let path = &candidate[start..];
             let end = path.find(|character: char| {
                 character.is_whitespace()
@@ -4254,10 +4263,11 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
                     )
             });
             let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
+            let trimmed = path.trim_start_matches('/');
+            let segments = trimmed.split('/').count();
             if path.starts_with('/')
-                && path
-                    .trim_start_matches('/')
-                    .contains(|character: char| character != '/')
+                && !trimmed.is_empty()
+                && (segments >= 2 || Path::new(path).exists())
             {
                 paths.insert(path.to_string());
             }
@@ -5034,6 +5044,57 @@ mod provider_evidence_tests {
 
         validate_provider_evidence_inputs(&[], Some("Read https://example.test/evidence.json"))
             .expect("HTTPS URLs are not host evidence");
+    }
+
+    #[test]
+    fn ignores_prompt_prose_that_uses_slashes_without_naming_local_evidence() {
+        let prompt = r#"
+Use core/html with direct/staged and model/tool modes, then move [queued/running] work.
+Route requests through /response, /startup, /sw.js, and /wp-codebox.
+Use / as a separator and retain https://example.test/response plus `// NOTE: implementation`.
+"#;
+
+        assert_eq!(
+            absolute_host_paths_in_provider_prompt(prompt).expect("scan prose"),
+            Vec::<String>::new()
+        );
+        validate_provider_evidence_inputs(&[], Some(prompt))
+            .expect("slash-delimited prose is not filesystem evidence");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scans_an_existing_single_segment_root_path() {
+        assert_eq!(
+            absolute_host_paths_in_provider_prompt("Read /tmp.").expect("scan real path"),
+            vec!["/tmp".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_all_concrete_undeclared_prompt_evidence_paths() {
+        let error = validate_provider_evidence_inputs(
+            &[],
+            Some(
+                "Read /private/evidence.json, file:///private/other.json, \
+                 [more](/tmp/evidence.txt), and //srv/evidence.log.",
+            ),
+        )
+        .expect_err("concrete local paths require declared evidence");
+
+        assert_eq!(error.details["field"], "prompt");
+        for path in [
+            "/private/evidence.json",
+            "/private/other.json",
+            "/tmp/evidence.txt",
+            "//srv/evidence.log",
+        ] {
+            assert!(
+                error.message.contains(path),
+                "missing {path}: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
