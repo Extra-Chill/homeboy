@@ -20,7 +20,9 @@ use crate::observation::{
     RunRecord, RunStatus,
 };
 use crate::test_support::{with_isolated_home, HermeticTestContext};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 struct XdgGuard {
     prior: Option<String>,
@@ -207,6 +209,90 @@ mod store_init_tests {
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
             assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
         }
+    }
+
+    /// Separate test processes exercise the filesystem initialization lease;
+    /// threads alone would share the old process-local migration mutex.
+    #[test]
+    fn initialization_and_status_are_safe_under_concurrent_processes() {
+        const WORKER: &str = "HOMEBOY_OBSERVATION_INIT_WORKER";
+        const TRIGGER: &str = "HOMEBOY_OBSERVATION_INIT_TRIGGER";
+
+        if let Some(worker) = std::env::var_os(WORKER) {
+            let trigger = std::path::PathBuf::from(std::env::var_os(TRIGGER).expect("trigger"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !trigger.exists() {
+                assert!(Instant::now() < deadline, "parent did not release workers");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if worker == "initialize" {
+                let store =
+                    ObservationStore::open_initialized_for_lifecycle().expect("process init");
+                assert_eq!(
+                    store.status().expect("status").schema_version,
+                    CURRENT_SCHEMA_VERSION
+                );
+            } else {
+                for _ in 0..25 {
+                    let status = store::status().expect("concurrent read-only status");
+                    assert!(status.schema_version <= CURRENT_SCHEMA_VERSION);
+                }
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let data_dir = directory.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let database = data_dir.join("homeboy.sqlite");
+        let setup = rusqlite::Connection::open(&database).expect("create rollback-journal store");
+        setup
+            .execute_batch("PRAGMA journal_mode=DELETE;")
+            .expect("set rollback journal mode");
+        drop(setup);
+        let trigger = directory.path().join("start");
+        let executable = std::env::current_exe().expect("test executable");
+        let test_name = "observation::store::store_test::store_init_tests::initialization_and_status_are_safe_under_concurrent_processes";
+        let workers = ["initialize", "status"]
+            .into_iter()
+            .flat_map(|role| std::iter::repeat_n(role, 4))
+            .map(|role| {
+                Command::new(&executable)
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(WORKER, role)
+                    .env(crate::paths::HOMEBOY_DATA_DIR_ENV, &data_dir)
+                    .env(TRIGGER, &trigger)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("start observation worker")
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(&trigger, "start").expect("release workers");
+
+        for worker in workers {
+            let output = worker
+                .wait_with_output()
+                .expect("wait for observation worker");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "observation worker failed: {stderr}"
+            );
+            for forbidden in ["database is locked", "observation_store.busy", "IO error"] {
+                assert!(
+                    !stderr.contains(forbidden),
+                    "observation worker reported {forbidden}: {stderr}"
+                );
+            }
+        }
+
+        let store = ObservationStore::open_initialized_for_lifecycle_at(database)
+            .expect("open initialized store");
+        assert_eq!(
+            store.status().expect("final status").migration_count,
+            CURRENT_MIGRATION_COUNT
+        );
     }
 
     #[test]
