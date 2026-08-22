@@ -3086,7 +3086,6 @@ impl JobHandle {
         &self,
         reservation_id: &str,
         runner_id: &str,
-        durable_run_id: &str,
         context_id: &str,
     ) -> Result<Value> {
         let inner = self.store.inner.lock().expect("job store mutex poisoned");
@@ -3114,7 +3113,6 @@ impl JobHandle {
             || local_child.process.is_none()
             || local_child.reservation_id != reservation_id
             || local_runner.runner_id != runner_id
-            || stored_job_durable_run_id(stored).as_deref() != Some(durable_run_id)
         {
             return Err(Error::validation_invalid_argument(
                 "runner_execution_context",
@@ -3123,7 +3121,7 @@ impl JobHandle {
                 None,
             ));
         }
-        stored
+        let evidence = stored
             .events
             .iter()
             .rev()
@@ -3148,7 +3146,21 @@ impl JobHandle {
                     Some(context_id.to_string()),
                     None,
                 )
-            })
+            })?;
+        if evidence
+            .get("context")
+            .and_then(|context| context.get("controller_run_id"))
+            .and_then(Value::as_str)
+            != stored_job_durable_run_id(stored).as_deref()
+        {
+            return Err(Error::validation_invalid_argument(
+                "runner_execution_context",
+                "daemon job execution context does not match its durable run identity",
+                Some(self.job_id.to_string()),
+                None,
+            ));
+        }
+        Ok(evidence)
     }
 
     pub(crate) fn start_with_reserved_child_identity(

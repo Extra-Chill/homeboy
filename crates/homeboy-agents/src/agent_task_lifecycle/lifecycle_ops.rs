@@ -2349,7 +2349,6 @@ where
         metadata["runner_id"] = json!(runner_id);
         if let Some(execution_context) =
             homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::from_direct_daemon_child_environment(
-                &run_id,
                 runner_id,
             )?
         {

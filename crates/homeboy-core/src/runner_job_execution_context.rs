@@ -317,12 +317,10 @@ impl RunnerJobExecutionContext {
     }
 
     /// Resolve authority inherited by a daemon-local child against the durable
-    /// job store. The environment identifies the claim; the persisted running
-    /// job, reservation, and verified context establish it.
-    pub fn from_direct_daemon_child_environment(
-        expected_run_id: &str,
-        expected_runner_id: &str,
-    ) -> Result<Option<Self>> {
+    /// job store. The environment identifies the runner job; its persisted
+    /// running record, reservation, and verified context establish both the
+    /// runner-job and controller-run identities.
+    pub fn from_direct_daemon_child_environment(expected_runner_id: &str) -> Result<Option<Self>> {
         let reservation_id = std::env::var(RUNNER_CHILD_RESERVATION_ENV).ok();
         let context_id = std::env::var(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV).ok();
         if reservation_id.is_none() && context_id.is_none() {
@@ -343,12 +341,11 @@ impl RunnerJobExecutionContext {
             .accepted_local_child_execution_context(
                 &reservation_id,
                 expected_runner_id,
-                expected_run_id,
                 &context_id,
             )?;
         let asserted = Self::from_evidence_record(&evidence)?;
         let accepted = Self::direct_daemon_with_dispatch_metadata(
-            Some(expected_run_id),
+            Some(&asserted.controller_run_id),
             Some(&asserted.controller_attempt_id),
             Some(&asserted.accepted_handoff_id),
             expected_runner_id,
@@ -629,20 +626,21 @@ mod tests {
     }
 
     #[test]
-    fn daemon_child_environment_resolves_only_the_accepted_running_job() {
+    fn daemon_child_environment_resolves_runner_job_with_distinct_durable_and_attempt_ids() {
         with_isolated_home(|_| {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(
                 crate::paths::daemon_jobs_file().expect("jobs path"),
             )
             .expect("job store");
-            let run_id = "runner-local-run";
+            let durable_run_id = "controller-cook-run";
+            let child_run_id = "controller-cook-attempt";
             let runner_id = "runner-1";
             let job = store.create_test_local_runner_job(Some(LocalRunnerJob {
                 runner_id: runner_id.to_string(),
                 command: vec!["homeboy".to_string()],
                 cwd: None,
                 lifecycle: Some(RunnerJobLifecycleMetadata {
-                    durable_run_id: Some(run_id.to_string()),
+                    durable_run_id: Some(durable_run_id.to_string()),
                     ..RunnerJobLifecycleMetadata::default()
                 }),
                 workspace_claim_binding: None,
@@ -659,7 +657,7 @@ mod tests {
             let handle = store.handle(job.id);
             let reservation_id = handle.local_child_reservation_id().expect("reservation id");
             let context = RunnerJobExecutionContext::direct_daemon(
-                Some(run_id),
+                Some(durable_run_id),
                 runner_id,
                 &job.id.to_string(),
                 "homeboy",
@@ -686,17 +684,24 @@ mod tests {
             let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, &reservation_id);
             let _context = EnvVarGuard::set(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV, context.id());
             let resolved =
-                RunnerJobExecutionContext::from_direct_daemon_child_environment(run_id, runner_id)
+                RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id)
                     .expect("resolve accepted authority")
                     .expect("direct daemon authority");
             assert_eq!(resolved.id(), context.id());
             assert_eq!(resolved.runner_job_id(), job.id.to_string());
+            assert_ne!(child_run_id, durable_run_id);
+            assert_ne!(job.id.to_string(), durable_run_id);
+            assert_ne!(job.id.to_string(), child_run_id);
+            assert_eq!(
+                resolved.evidence_record().expect("resolved evidence")["context"]
+                    ["controller_run_id"],
+                durable_run_id
+            );
             assert!(resolved.verify_integrity().is_ok());
 
             let _forged = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, "forged-reservation");
             assert!(
-                RunnerJobExecutionContext::from_direct_daemon_child_environment(run_id, runner_id,)
-                    .is_err()
+                RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id).is_err()
             );
         });
     }
