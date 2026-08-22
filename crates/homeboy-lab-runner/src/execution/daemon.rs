@@ -247,9 +247,13 @@ pub(super) fn exec_via_daemon(
     // The renewal also sits inside the `while !job.status.is_terminal()` poll
     // below, so a five-minute daemon exec opened SQLite and walked the
     // migration ladder roughly 1,500 times to renew a lease it already held.
+    // The lease below and the evidence mirror further down describe the same
+    // run, so one resolution serves both rather than each reading the
+    // environment on its own (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let lease_store = run_id
         .as_deref()
-        .map(|_| ObservationStore::open_initialized())
+        .map(|_| ObservationStore::open_initialized_in_roots(&roots))
         .transpose()?;
     let foreground_source_lease = run_id
         .as_deref()
@@ -408,7 +412,7 @@ pub(super) fn exec_via_daemon(
         } else {
             request
         };
-        mirror_daemon_evidence(request).map_err(|error| {
+        mirror_daemon_evidence(request, &roots).map_err(|error| {
             if run_id_owns_generic_exec {
                 if let Some(run_id) = run_id.as_deref() {
                     let _ =
