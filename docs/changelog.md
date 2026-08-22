@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.354.2] - 2026-08-22
+
+### Changed
+- model fail-closed procfs cleanup
+
+### Fixed
+- compare Test candidates to base
+- keep default prompt path-neutral
+- converge concurrent startup waits
+
 ## [0.354.1] - 2026-08-22
 
 ### Fixed
