@@ -1198,7 +1198,7 @@ mod tests {
                     "tasks": [{
                         "task_id": "task",
                         "executor": {"backend": "fixture", "config": {
-                            "evidence_inputs": [{"path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc"}]
+                            "evidence_inputs": [{"id":"fixture","path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc", "size_bytes": 4194304, "transport":"content-addressed-blob/v1", "artifact":{"digest":"sha256:abc","size_bytes":4194304}, "visibility":"private", "redaction":"withhold-content"}]
                         }}
                     }]
                 })
@@ -1211,6 +1211,10 @@ mod tests {
                 "/workspace/.homeboy/evidence/one/input.json".to_string(),
                 "sha256:abc".to_string()
             )])
+        );
+        assert!(
+            !args[3].contains("fixture bytes"),
+            "Lab plan carries the artifact reference, not binary content"
         );
 
         let plan_equals = vec![

@@ -926,8 +926,9 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
-    /// Read-only external file projected into `.homeboy/evidence/<id>/` in the
-    /// Cook workspace. Repeat for each source the provider may read.
+    /// Read-only external file streamed into a private, digest-addressed
+    /// projection in `.homeboy/evidence/<id>/` (64 MiB maximum per file).
+    /// Repeat for each source the provider may read.
     #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle

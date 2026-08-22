@@ -2,8 +2,9 @@
 //! resume, and retry.
 
 use serde_json::Value;
+use sha2::Digest;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -34,7 +35,10 @@ use super::args::{
 use super::gate_contract::validate_gate_contracts;
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
+/// Provider evidence is streamed into an immutable, digest-addressed projection.
+/// This ceiling bounds both controller disk use and Lab transport without putting
+/// fixture bytes in Cook command state or JSON output.
+const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
@@ -3471,7 +3475,19 @@ pub(crate) fn project_provider_evidence_inputs(
         let (bytes, digest) =
             secure_provider_evidence_copy(Path::new(&input.source), &destination)?;
         projection["size_bytes"] = serde_json::json!(bytes);
-        projection["sha256"] = serde_json::json!(digest);
+        projection["sha256"] = serde_json::json!(&digest);
+        projection["transport"] = serde_json::json!("content-addressed-blob/v1");
+        projection["artifact"] = serde_json::json!({
+            "digest": digest,
+            "size_bytes": bytes,
+        });
+        // Do not persist a controller-local source path in the provider plan.
+        projection["provenance"] = serde_json::json!({
+            "kind": "controller-file",
+            "source_name": Path::new(&input.source).file_name().unwrap_or_default().to_string_lossy(),
+        });
+        projection["visibility"] = serde_json::json!("private");
+        projection["redaction"] = serde_json::json!("withhold-content");
     }
     Ok(projected)
 }
@@ -3481,7 +3497,15 @@ fn secure_provider_evidence_copy(
     source: &Path,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
-    use std::io::{Read, Write};
+    secure_provider_evidence_copy_with_limit(source, destination, MAX_PROVIDER_EVIDENCE_BYTES)
+}
+
+#[cfg(unix)]
+fn secure_provider_evidence_copy_with_limit(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+) -> homeboy::core::Result<(u64, String)> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     fn directory(path: &Path, create: bool) -> homeboy::core::Result<std::fs::File> {
@@ -3568,27 +3592,19 @@ fn secure_provider_evidence_copy(
     let metadata = input.metadata().map_err(|error| {
         homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
     })?;
-    if !metadata.is_file() || metadata.len() > MAX_PROVIDER_EVIDENCE_BYTES {
+    if !metadata.is_file() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
-            "provider evidence must be a bounded regular file",
+            "provider evidence must be a regular file",
             Some(source.display().to_string()),
             None,
         ));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    input
-        .take(MAX_PROVIDER_EVIDENCE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
-        })?;
-    if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "provider-evidence",
-            "provider evidence exceeds the maximum size",
-            Some(source.display().to_string()),
-            None,
+    if metadata.len() > max_bytes {
+        return Err(provider_evidence_size_error(
+            source,
+            metadata.len(),
+            max_bytes,
         ));
     }
     let parent = directory(destination.parent().expect("destination parent"), true)?;
@@ -3616,15 +3632,37 @@ fn secure_provider_evidence_copy(
         ));
     }
     let mut output = unsafe { std::fs::File::from_raw_fd(fd) };
-    output
-        .write_all(&bytes)
-        .and_then(|_| output.sync_all())
-        .map_err(|error| {
+    let mut input = input;
+    let mut digest = sha2::Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > max_bytes {
+            drop(output);
+            unsafe { libc::unlinkat(parent.as_raw_fd(), temporary_name.as_ptr(), 0) };
+            return Err(provider_evidence_size_error(source, total, max_bytes));
+        }
+        output.write_all(&buffer[..read]).map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
                 Some(destination.display().to_string()),
             )
         })?;
+        sha2::Digest::update(&mut digest, &buffer[..read]);
+    }
+    output.sync_all().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(destination.display().to_string()),
+        )
+    })?;
     if unsafe {
         libc::renameat(
             parent.as_raw_fd(),
@@ -3640,11 +3678,8 @@ fn secure_provider_evidence_copy(
         ));
     }
     Ok((
-        bytes.len() as u64,
-        format!(
-            "sha256:{}",
-            homeboy_engine_primitives::content_hash::sha256_hex(&bytes)
-        ),
+        total,
+        format!("sha256:{:x}", sha2::Digest::finalize(digest)),
     ))
 }
 
@@ -3653,15 +3688,23 @@ fn secure_provider_evidence_copy(
     source: &Path,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
+    secure_provider_evidence_copy_with_limit(source, destination, MAX_PROVIDER_EVIDENCE_BYTES)
+}
+
+#[cfg(not(unix))]
+fn secure_provider_evidence_copy_with_limit(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+) -> homeboy::core::Result<(u64, String)> {
     let bytes = std::fs::read(source).map_err(|error| {
         homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
     })?;
-    if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "provider-evidence",
-            "provider evidence exceeds the maximum size",
-            Some(source.display().to_string()),
-            None,
+    if bytes.len() as u64 > max_bytes {
+        return Err(provider_evidence_size_error(
+            source,
+            bytes.len() as u64,
+            max_bytes,
         ));
     }
     std::fs::create_dir_all(destination.parent().expect("destination parent")).map_err(
@@ -3687,6 +3730,27 @@ fn secure_provider_evidence_copy(
     ))
 }
 
+fn provider_evidence_size_error(
+    source: &Path,
+    actual_bytes: u64,
+    max_bytes: u64,
+) -> homeboy::core::Error {
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "provider-evidence",
+        format!(
+            "provider evidence is {actual_bytes} bytes; the content-addressed artifact limit is {max_bytes} bytes"
+        ),
+        Some(source.display().to_string()),
+        Some(vec![format!(
+            "Provide a fixture at or below {max_bytes} bytes, then rerun the same `homeboy agent-task cook --provider-evidence ...` command."
+        )]),
+    );
+    error.details["limit_bytes"] = serde_json::json!(max_bytes);
+    error.details["actual_bytes"] = serde_json::json!(actual_bytes);
+    error.details["transport"] = serde_json::json!("content-addressed-blob/v1");
+    error
+}
+
 pub(crate) fn rewrite_provider_evidence_prompt(
     prompt: &mut Option<String>,
     inputs: &[AgentTaskProviderEvidenceInput],
@@ -3708,6 +3772,50 @@ mod provider_evidence_tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn streams_binary_artifacts_at_the_configured_limit_and_rejects_the_next_byte() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let exact = temp.path().join("exact.bin");
+        let above = temp.path().join("above.bin");
+        std::fs::write(&exact, [0u8, 1, 2, 255]).expect("write exact fixture");
+        std::fs::write(&above, [0u8, 1, 2, 255, 3]).expect("write above-limit fixture");
+
+        let destination = temp
+            .path()
+            .join("workspace/.homeboy/evidence/fixture/exact.bin");
+        let (size, digest) = secure_provider_evidence_copy_with_limit(&exact, &destination, 4)
+            .expect("exact boundary is admitted");
+        assert_eq!(size, 4);
+        assert_eq!(
+            digest,
+            "sha256:3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read binary handoff"),
+            [0, 1, 2, 255]
+        );
+
+        let error = secure_provider_evidence_copy_with_limit(
+            &above,
+            &temp
+                .path()
+                .join("workspace/.homeboy/evidence/fixture/above.bin"),
+            4,
+        )
+        .expect_err("one byte above the limit is rejected");
+        assert_eq!(error.details["limit_bytes"], 4);
+        assert_eq!(error.details["actual_bytes"], 5);
+        assert_eq!(error.details["transport"], "content-addressed-blob/v1");
+        assert_eq!(
+            error.details["tried"]
+                .as_array()
+                .expect("remediation")
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn projects_declared_file_and_rewrites_prompt_to_workspace_evidence() {
@@ -3738,6 +3846,13 @@ mod provider_evidence_tests {
             projected[0]["sha256"],
             "sha256:11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
         );
+        assert_eq!(projected[0]["transport"], "content-addressed-blob/v1");
+        assert_eq!(projected[0]["visibility"], "private");
+        assert_eq!(projected[0]["redaction"], "withhold-content");
+        assert_eq!(projected[0]["provenance"]["source_name"], "external.json");
+        assert!(!serde_json::to_string(&projected)
+            .expect("serialize projection")
+            .contains(&source.display().to_string()));
         #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&path)
@@ -3754,6 +3869,45 @@ mod provider_evidence_tests {
             prompt.expect("rewritten prompt"),
             format!("Read {} before editing.", path.display())
         );
+    }
+
+    #[test]
+    fn projected_binary_digest_detects_post_admission_mutation_without_exposing_content() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("fixture.bin");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, [0, 159, 146, 150, 255]).expect("write binary fixture");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "fixture".to_string(),
+            source: source
+                .canonicalize()
+                .expect("canonical source")
+                .display()
+                .to_string(),
+        };
+
+        let projected =
+            project_provider_evidence_inputs(&[input], &workspace, None).expect("project fixture");
+        let path = PathBuf::from(projected[0]["path"].as_str().expect("path"));
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("simulate a controller-side mutation");
+        std::fs::write(&path, b"mutated").expect("mutate after admission");
+        let expected = projected[0]["sha256"]
+            .as_str()
+            .expect("digest")
+            .trim_start_matches("sha256:");
+        let actual = homeboy_engine_primitives::content_hash::sha256_hex(
+            &std::fs::read(&path).expect("read mutated fixture"),
+        );
+        assert_ne!(
+            actual, expected,
+            "Lab handoff verifies this declared digest before publish"
+        );
+        let output = serde_json::to_string(&projected).expect("serialize projection");
+        assert!(!output.contains("\u{0}"));
+        assert!(output.len() < 1_024, "JSON carries refs, not fixture bytes");
     }
 
     #[test]

@@ -259,18 +259,8 @@ impl RunnerFileTransfer {
         remote_path: &str,
         expected_sha256: &str,
     ) -> Result<()> {
-        let content = fs::read(local_path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
-        })?;
-        let actual_sha256 = content_hash::sha256_hex(&content);
-        if actual_sha256 != expected_sha256 {
-            return Err(Error::validation_invalid_argument(
-                "at_file",
-                "private runner file content does not match its declared SHA-256",
-                Some(remote_path.to_string()),
-                None,
-            ));
-        }
+        let content =
+            private_file_bytes_with_expected_digest(local_path, expected_sha256, remote_path)?;
         let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
         let result = match &self.channel {
             RunnerFileChannel::DirectSsh(client) => {
@@ -444,6 +434,47 @@ impl RunnerFileTransfer {
             "private": true,
             "atomic": true,
         })
+    }
+}
+
+fn private_file_bytes_with_expected_digest(
+    local_path: &str,
+    expected_sha256: &str,
+    remote_path: &str,
+) -> Result<Vec<u8>> {
+    let content = fs::read(local_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(format!("read {local_path}"))))?;
+    let actual_sha256 = content_hash::sha256_hex(&content);
+    if actual_sha256 != expected_sha256 {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "private runner file content does not match its declared SHA-256",
+            Some(remote_path.to_string()),
+            None,
+        ));
+    }
+    Ok(content)
+}
+
+#[cfg(test)]
+mod content_addressed_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_mutated_content_addressed_evidence_before_lab_handoff() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary evidence");
+        std::fs::write(temp.path(), b"mutated").expect("write mutated evidence");
+
+        let error = private_file_bytes_with_expected_digest(
+            temp.path().to_str().expect("path"),
+            "5e5d4d3f5d16a48a9d0e8c306cea55f2472d6f6d94393ee9347f0af3545831a6",
+            "/runner/workspace/.homeboy/evidence/fixture/input.bin",
+        )
+        .expect_err("digest mismatch blocks transfer");
+        assert_eq!(error.details["field"], "provider_evidence");
+        assert!(error
+            .message
+            .contains("does not match its declared SHA-256"));
     }
 }
 

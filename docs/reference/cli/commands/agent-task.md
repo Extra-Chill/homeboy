@@ -56,6 +56,7 @@ Run generic agent task plans
 | `homeboy agent-task adopt` | Adopt an immutable commit candidate through a tracked cook's normal gates and finalization |
 | `homeboy agent-task finalize-pr` | Finalize a green run, or recover publication from a durable Cook record |
 | `homeboy agent-task record-replacement-gate-proof` | Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure |
+| `homeboy agent-task verify-replacement` | Run corrected gates against an already-applied failed candidate and record replacement proof |
 | `homeboy agent-task accept` | Record an independent, durable acceptance verdict for a candidate |
 | `homeboy agent-task gate-feedback` | Convert deterministic gate results into a cook retry or stop decision |
 | `homeboy agent-task providers` | List extension-declared executor providers and optional secret/backend readiness |
@@ -129,7 +130,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
 | `--preview` | flag | Resolve the Cook plan and validate static inputs without creating a run or provisioning a worktree. Includes a replayable command |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
-| `--provider-evidence` | `<JSON>` | Read-only external file projected into `.homeboy/evidence/<id>/` in the Cook workspace. Repeat for each source the provider may read |
+| `--provider-evidence` | `<JSON>` | Read-only external file streamed into a private, digest-addressed projection in `.homeboy/evidence/<id>/` (64 MiB maximum per file). Repeat for each source the provider may read |
 | `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. Creating a missing one is not a built-in capability: it requires an enabled worktree provider with a `commands.ensure` argv template, and without one you must create the destination first with `homeboy worktree create`. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through that same configured provider. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
@@ -785,6 +786,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once |
 | `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch — every child, every attempt, and every gate |
 | `--dry-run` | flag | _no help text_ |
+| `--dry-run-planner-timeout-seconds` | `<SECONDS>` | Maximum wall-clock budget for each bounded static dry-run planning phase |
 | `--run-plan` | flag | _no help text_ |
 
 ## `homeboy agent-task fanout plan`
@@ -1057,6 +1059,44 @@ Attach authorized candidate-bound replacement gate proof after an infrastructure
 | --- | --- | --- |
 | `--promotion` | `<JSON|@FILE|->` | Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-` |
 | `--authorize-external-proof` | `<TEXT>` | Explicit operator authorization for externally produced proof |
+
+## `homeboy agent-task verify-replacement`
+
+```sh
+homeboy agent-task verify-replacement [OPTIONS] <COOK_OR_ATTEMPT_ID>
+```
+
+Run corrected gates against an already-applied failed candidate and record replacement proof
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<COOK_OR_ATTEMPT_ID>` | yes | Durable Cook id or exact attempt whose applied candidate has failed gates |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--authorize-external-proof` | `<TEXT>` | Explicit operator authorization for the replacement proof recorded by this command |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
+| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
+| `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
+| `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
+| `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
+| `--gate-heartbeat-interval-seconds` | `<SECONDS>` | How often, in seconds, to emit a heartbeat while a gate runs so long gates are not mistaken for a stalled cook (default 5) |
+| `--gate-no-progress-timeout-seconds` | `<SECONDS>` | Maximum time, in seconds, a gate may run without a structured `HOMEBOY_PROGRESS` marker (default 300 = 5 min) |
+| `--rerun-completed-gates` | flag | Re-run gates that already recorded a passing result on a previous attempt instead of reusing the recorded pass. Off by default |
+| `--accept-inherited-failures` | flag | Finalize only when an inherited required-gate failure was reproduced on the immutable baseline. The gate remains reported as baseline-red |
+| `--gate-environment-mode` | `<MODE>` | Environment for gate commands: `inherit` (default) extends the current environment; `replace` starts from an empty environment plus `--gate-env` Values: `inherit`, `replace`. |
+| `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
+| `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
+| `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-toolchain-spec` | `<JSON>` | Exact toolchain probe contract as JSON. Use when a probe needs arguments other than the `--version` default retained by `--gate-toolchain` |
+| `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
+| `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
+| `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
+| `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
+| `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
+| `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
 
 ## `homeboy agent-task accept`
 
