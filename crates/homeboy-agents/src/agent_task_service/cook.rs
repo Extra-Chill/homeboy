@@ -6656,12 +6656,42 @@ fn explicit_cook_evidence_paths(
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
+    let provision = plan.metadata.get("cook_provision").or_else(|| {
+        plan.tasks
+            .first()
+            .and_then(|task| task.metadata.get("worktree_provision"))
+    });
     matches!(
-        plan.metadata
-            .pointer("/cook_provision/action")
+        provision
+            .and_then(|provision| provision.get("action"))
             .and_then(Value::as_str),
         Some("lookup_pending" | "attestation_pending")
     )
+}
+
+/// Older recipes stored deferred provider provisioning on the task projection
+/// only. Restore that exact record into the plan contract before resolving it;
+/// all provider identity, safety, and workspace checks then use one authority.
+fn restore_legacy_cook_provision(plan: &mut AgentTaskPlan) -> Result<()> {
+    if plan.metadata.get("cook_provision").is_some() {
+        return Ok(());
+    }
+    let provision = plan
+        .tasks
+        .first()
+        .and_then(|task| task.metadata.get("worktree_provision"))
+        .filter(|provision| provision.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_provision",
+                "Cook pending workspace is missing its durable provision record",
+                None,
+                None,
+            )
+        })?;
+    plan.metadata["cook_provision"] = provision;
+    Ok(())
 }
 
 /// A pending lookup carries no provider path. Resolve the declared exact handle
@@ -6671,6 +6701,7 @@ fn materialize_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
 ) -> Result<()> {
+    restore_legacy_cook_provision(&mut options.initial_plan)?;
     let provider_id = options
         .initial_plan
         .metadata

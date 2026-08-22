@@ -4795,7 +4795,7 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         options.initial_run_id = run_id.to_string();
         options.max_attempts = 2;
         options.gates.verify = vec!["npm test".to_string()];
-        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+        options.initial_plan.tasks[0].metadata["worktree_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
             "handle": options.to_worktree,
@@ -4850,11 +4850,11 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         assert_eq!(recipe.attempts[0].run_id, run_id);
         let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
         assert_eq!(
-            persisted_plan.metadata["cook_provision"]["handle"],
+            persisted_plan.tasks[0].metadata["worktree_provision"]["handle"],
             exact_handle
         );
         assert_eq!(persisted_plan.tasks[0].workspace.root, None);
-        assert!(persisted_plan.metadata["cook_provision"]["workspace_identity"].is_null());
+        assert!(persisted_plan.metadata.get("cook_provision").is_none());
         assert!(persisted_plan.tasks[0]
             .metadata
             .get("cook_workspace_identity")
@@ -4896,6 +4896,17 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
             Some(workspace.to_str().expect("utf8 workspace"))
         );
         let workspace_identity = resumed_plan.tasks[0].metadata["cook_workspace_identity"].clone();
+        assert_eq!(
+            resumed_plan.metadata["cook_provision"]["workspace_identity"]["token"],
+            "recovered-identity"
+        );
+        assert_eq!(
+            resumed_plan.metadata["cook_provision"]["action"],
+            "existing"
+        );
+        let resumed_record = agent_task_lifecycle::status(&retry.record.run_id)
+            .expect("resumed Cook remains status-addressable");
+        assert_eq!(resumed_record.metadata["provider_executions_consumed"], 0);
 
         let recipe = super::super::load_recipe(cook_id).expect("same durable Cook recipe");
         let mut repeated_options = super::super::reconstruct_options_with_dispatcher(
