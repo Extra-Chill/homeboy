@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use homeboy_engine_primitives::content_hash;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::remote_runner;
@@ -39,11 +40,23 @@ struct UploadKey {
 
 struct PendingUpload {
     temp: PathBuf,
+    record: PathBuf,
     destination: PathBuf,
     file: fs::File,
     size_bytes: u64,
     reserved_bytes: u64,
     updated_at: Instant,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadRecord {
+    version: u8,
+    runner_id: String,
+    workspace_root: String,
+    destination: String,
+    upload_id: String,
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Default)]
@@ -62,46 +75,36 @@ fn reap_expired_uploads_locked(registry: &mut UploadRegistry) {
             return true;
         }
         let _ = fs::remove_file(&upload.temp);
+        let _ = fs::remove_file(&upload.record);
         false
     });
 }
 
 pub(super) fn reap_expired_uploads() {
+    recover_expired_uploads(SystemTime::now());
     let mut registry = upload_registry().lock().expect("upload registry lock");
     reap_expired_uploads_locked(&mut registry);
 }
 
-/// Recover only files that our chunk naming protocol can have created. This is
-/// safe to run after a daemon restart because it requires a hidden name, a UUID
-/// upload identity, a regular file, and an expired filesystem mtime. The
-/// in-memory quota is intentionally not reconstructed: a restarted daemon
-/// treats surviving partial files as cleanup-only, never as resumable writes.
-fn recover_expired_uploads_in_workspace(workspace: &Path, now: SystemTime) {
-    let Ok(entries) = fs::read_dir(workspace) else {
+/// Partial bytes and their durable ownership records live under daemon state,
+/// never inside a caller-controlled workspace. Restart recovery treats records
+/// as cleanup-only and validates each record before removing its owned payload.
+fn recover_expired_uploads(now: SystemTime) {
+    let Ok(root) = upload_staging_root() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&root) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(stem) = name
-            .strip_prefix('.')
-            .and_then(|name| name.strip_suffix(".upload"))
-        else {
-            continue;
-        };
-        let Some((_, upload_id)) = stem.rsplit_once('.') else {
-            continue;
-        };
-        if uuid::Uuid::parse_str(upload_id).is_err() {
+        let record_path = entry.path();
+        if record_path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        let Ok(metadata) = fs::symlink_metadata(&record_path) else {
             continue;
         };
         if !metadata.file_type().is_file()
-            || metadata.len() > MAX_UPLOAD_BYTES
             || metadata
                 .modified()
                 .ok()
@@ -110,8 +113,72 @@ fn recover_expired_uploads_in_workspace(workspace: &Path, now: SystemTime) {
         {
             continue;
         }
-        let _ = fs::remove_file(path);
+        let Ok(record) = fs::read(&record_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<UploadRecord>(&bytes).ok())
+            .ok_or(())
+        else {
+            continue;
+        };
+        let Ok(upload_id) = uuid::Uuid::parse_str(&record.upload_id) else {
+            continue;
+        };
+        if record.version != 1
+            || record_path.file_stem().and_then(|name| name.to_str()) != Some(&record.upload_id)
+            || !valid_upload_destination(&record)
+        {
+            continue;
+        }
+        let payload = root.join(format!("{upload_id}.payload"));
+        let Ok(payload_metadata) = fs::symlink_metadata(&payload) else {
+            continue;
+        };
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        if !payload_metadata.file_type().is_file() || payload_metadata.len() > MAX_UPLOAD_BYTES || {
+            #[cfg(unix)]
+            {
+                payload_metadata.dev() != record.device || payload_metadata.ino() != record.inode
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        } {
+            continue;
+        }
+        let _ = fs::remove_file(&payload);
+        let _ = fs::remove_file(&record_path);
     }
+}
+
+fn upload_staging_root() -> Result<PathBuf> {
+    let state = crate::paths::daemon_state_file()?;
+    let root = state
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state has no parent"))?
+        .join("runner-file-uploads");
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(root.display().to_string()))
+        })?;
+    }
+    Ok(root)
+}
+
+fn valid_upload_destination(record: &UploadRecord) -> bool {
+    if record.runner_id.is_empty() || record.workspace_root.is_empty() {
+        return false;
+    }
+    let Ok(root) = fs::canonicalize(&record.workspace_root) else {
+        return false;
+    };
+    let destination = canonicalize_existing_prefix(&normalize_path(Path::new(&record.destination)));
+    destination.starts_with(root)
 }
 
 pub(super) fn upload_capabilities() -> serde_json::Value {
@@ -284,11 +351,9 @@ pub(super) fn upload_runner_file_chunk(
         &request.path,
         request.workspace_root.as_deref(),
     )?;
-    // A restart loses the in-memory registry. Recover stale protocol-owned
-    // files before accepting a new chunk upload in this workspace.
-    if let Some(parent) = path.parent() {
-        recover_expired_uploads_in_workspace(parent, SystemTime::now());
-    }
+    // A restart loses the in-memory registry. Recover only daemon-private
+    // record-backed uploads before accepting a new chunk upload.
+    recover_expired_uploads(SystemTime::now());
     // Base64 expands 64 KiB to at most 87384 bytes. Reject before decoding so a
     // JSON client cannot make decoding allocate an arbitrary buffer.
     if request.content_base64.len() > 4 * ((MAX_CHUNK_BYTES + 2) / 3) {
@@ -317,13 +382,6 @@ pub(super) fn upload_runner_file_chunk(
             None,
         ));
     }
-    let requested_temp = path.with_file_name(format!(
-        ".{}.{}.upload",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("upload"),
-        upload_id
-    ));
     let key = UploadKey {
         runner_id: request.runner_id.clone(),
         workspace_root: request.workspace_root.clone(),
@@ -393,12 +451,19 @@ pub(super) fn upload_runner_file_chunk(
                 None,
             ));
         }
+        let (temp, record, file) = create_upload_file(
+            &request.runner_id,
+            request.workspace_root.as_deref(),
+            &path,
+            upload_id,
+        )?;
         registry.uploads.insert(
             key.clone(),
             PendingUpload {
-                temp: requested_temp,
+                temp,
+                record,
                 destination: path.clone(),
-                file: create_upload_file(&path, upload_id, request.private)?,
+                file,
                 size_bytes: current,
                 reserved_bytes: request.size_bytes,
                 updated_at: Instant::now(),
@@ -423,6 +488,12 @@ pub(super) fn upload_runner_file_chunk(
     let upload = registry.uploads.get_mut(&key).expect("upload was inserted");
     upload.size_bytes = size;
     upload.updated_at = Instant::now();
+    write_upload_record(
+        upload,
+        &request.runner_id,
+        request.workspace_root.as_deref(),
+        upload_id,
+    )?;
     if request.final_chunk {
         let expected = request.sha256.as_deref().expect("validated before write");
         let upload = registry.uploads.get_mut(&key).expect("upload was inserted");
@@ -432,6 +503,7 @@ pub(super) fn upload_runner_file_chunk(
             .unwrap_or(false);
         if size != request.size_bytes || !digest_matches {
             let _ = fs::remove_file(&temp);
+            let _ = fs::remove_file(&upload.record);
             registry.uploads.remove(&key);
             return Err(Error::validation_invalid_argument(
                 "provider_evidence",
@@ -442,12 +514,14 @@ pub(super) fn upload_runner_file_chunk(
         }
         if let Err(error) = publish_upload_file(upload) {
             let _ = fs::remove_file(&temp);
+            let _ = fs::remove_file(&upload.record);
             registry.uploads.remove(&key);
             return Err(Error::internal_io(
                 error.to_string(),
                 Some(path.display().to_string()),
             ));
         }
+        let _ = fs::remove_file(&upload.record);
         registry.uploads.remove(&key);
     }
     Ok(
@@ -456,26 +530,20 @@ pub(super) fn upload_runner_file_chunk(
 }
 
 fn create_upload_file(
+    runner_id: &str,
+    workspace_root: Option<&str>,
     destination: &Path,
     upload_id: uuid::Uuid,
-    private: bool,
-) -> Result<fs::File> {
-    let temp = destination.with_file_name(format!(
-        ".{}.{}.upload",
-        destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("upload"),
-        upload_id
-    ));
+) -> Result<(PathBuf, PathBuf, fs::File)> {
+    let root = upload_staging_root()?;
+    let temp = root.join(format!("{upload_id}.payload"));
+    let record = root.join(format!("{upload_id}.json"));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options
-            .custom_flags(libc::O_NOFOLLOW)
-            .mode(if private { 0o600 } else { 0o644 });
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
     }
     let file = options.open(&temp).map_err(|error| {
         Error::internal_io(
@@ -496,7 +564,76 @@ fn create_upload_file(
             None,
         ));
     }
-    Ok(file)
+    let pending = PendingUpload {
+        temp: temp.clone(),
+        record: record.clone(),
+        destination: destination.to_path_buf(),
+        file: file.try_clone().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(temp.display().to_string()))
+        })?,
+        size_bytes: 0,
+        reserved_bytes: 0,
+        updated_at: Instant::now(),
+    };
+    write_upload_record(&pending, runner_id, workspace_root, upload_id)?;
+    Ok((temp, record, file))
+}
+
+fn write_upload_record(
+    upload: &PendingUpload,
+    runner_id: &str,
+    workspace_root: Option<&str>,
+    upload_id: uuid::Uuid,
+) -> Result<()> {
+    let workspace_root = workspace_root
+        .map(PathBuf::from)
+        .or_else(|| upload.destination.parent().map(Path::to_path_buf))
+        .and_then(|path| fs::canonicalize(path).ok())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace_root",
+                "runner upload requires a canonical workspace root",
+                None,
+                None,
+            )
+        })?;
+    let metadata = upload.file.metadata().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(upload.temp.display().to_string()))
+    })?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    let record = UploadRecord {
+        version: 1,
+        runner_id: runner_id.to_string(),
+        workspace_root: workspace_root.display().to_string(),
+        destination: upload.destination.display().to_string(),
+        upload_id: upload_id.to_string(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(not(unix))]
+        device: 0,
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(not(unix))]
+        inode: 0,
+    };
+    let temporary = upload.record.with_extension("json.tmp");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+        })?;
+    file.write_all(&serde_json::to_vec(&record).expect("upload record serializes"))
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+        })?;
+    fs::rename(&temporary, &upload.record).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(upload.record.display().to_string()))
+    })
 }
 
 fn sha256_open_file(file: &mut fs::File) -> std::io::Result<String> {
@@ -516,6 +653,63 @@ fn sha256_open_file(file: &mut fs::File) -> std::io::Result<String> {
 }
 
 fn publish_upload_file(upload: &PendingUpload) -> std::io::Result<()> {
+    // Copy from the verified daemon-private descriptor into a fresh workspace
+    // descriptor. The workspace only sees a publication temporary after the
+    // upload is complete; the long-lived/restart-reaped state stays private.
+    let metadata = upload.file.metadata()?;
+    let staged = fs::symlink_metadata(&upload.temp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !staged.file_type().is_file()
+            || staged.dev() != metadata.dev()
+            || staged.ino() != metadata.ino()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "upload staging path changed identity",
+            ));
+        }
+    }
+    let parent = upload.destination.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "upload destination has no parent",
+        )
+    })?;
+    let temp = parent.join(format!(
+        ".{}.{}.publish",
+        upload
+            .destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("upload"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let mut published = options.open(&temp)?;
+    let mut source = upload.file.try_clone()?;
+    source.seek(SeekFrom::Start(0))?;
+    std::io::copy(&mut source, &mut published)?;
+    published.sync_all()?;
+    publish_upload_file_in_workspace(&PendingUpload {
+        temp,
+        record: upload.record.clone(),
+        destination: upload.destination.clone(),
+        file: published,
+        size_bytes: upload.size_bytes,
+        reserved_bytes: upload.reserved_bytes,
+        updated_at: upload.updated_at,
+    })
+}
+
+fn publish_upload_file_in_workspace(upload: &PendingUpload) -> std::io::Result<()> {
     let metadata = upload.file.metadata()?;
     if !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -918,7 +1112,9 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let body = request(workspace.path(), &runner, id);
         upload_runner_file_chunk(Some(body), &trusted()).expect("create partial upload");
-        let temp = workspace.path().join(format!(".evidence.bin.{id}.upload"));
+        let temp = upload_staging_root()
+            .expect("staging")
+            .join(format!("{id}.payload"));
         assert!(temp.exists());
         abort_runner_file_chunk_upload(
             Some(json!({"runner_id": runner, "workspace_root": workspace.path().display().to_string(), "upload_id": id})),
@@ -933,7 +1129,9 @@ mod tests {
             &trusted(),
         )
         .expect("create expiry candidate");
-        let temp = workspace.path().join(format!(".evidence.bin.{id}.upload"));
+        let temp = upload_staging_root()
+            .expect("staging")
+            .join(format!("{id}.payload"));
         upload_registry()
             .lock()
             .expect("registry")
@@ -966,7 +1164,9 @@ mod tests {
         fs::write(&victim, b"protected").expect("victim");
         symlink(
             &victim,
-            workspace.path().join(format!(".evidence.bin.{id}.upload")),
+            upload_staging_root()
+                .expect("staging")
+                .join(format!("{id}.payload")),
         )
         .expect("plant symlink");
 
@@ -984,7 +1184,9 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         upload_runner_file_chunk(Some(request(workspace.path(), &runner, id)), &trusted())
             .expect("start upload");
-        let temp = workspace.path().join(format!(".evidence.bin.{id}.upload"));
+        let temp = upload_staging_root()
+            .expect("staging")
+            .join(format!("{id}.payload"));
         let other = workspace.path().join("other.bin");
         fs::write(&other, b"unrelated").expect("unrelated file");
 
@@ -1003,21 +1205,25 @@ mod tests {
     }
 
     #[test]
-    fn restart_recovery_reaps_only_expired_protocol_named_uploads() {
+    fn restart_recovery_reaps_only_private_recorded_uploads() {
         let workspace = tempfile::tempdir().expect("workspace");
-        let upload = workspace
+        let upload_id = uuid::Uuid::new_v4();
+        let (upload, record, _file) = create_upload_file(
+            "restart-runner",
+            Some(&workspace.path().display().to_string()),
+            &workspace.path().join("evidence.bin"),
+            upload_id,
+        )
+        .expect("private staged upload");
+        let unrelated = workspace
             .path()
-            .join(format!(".evidence.bin.{}.upload", uuid::Uuid::new_v4()));
-        let unrelated = workspace.path().join(".evidence.bin.not-a-uuid.upload");
-        fs::write(&upload, b"partial").expect("partial upload");
+            .join(format!(".evidence.bin.{upload_id}.upload"));
         fs::write(&unrelated, b"keep").expect("unrelated file");
         // Supplying a future observation time models a daemon restart after the
         // idle window without relying on process-global clock mutation.
-        recover_expired_uploads_in_workspace(
-            workspace.path(),
-            SystemTime::now() + UPLOAD_EXPIRY + Duration::from_secs(1),
-        );
+        recover_expired_uploads(SystemTime::now() + UPLOAD_EXPIRY + Duration::from_secs(1));
         assert!(!upload.exists());
+        assert!(!record.exists());
         assert_eq!(fs::read(unrelated).expect("unrelated survives"), b"keep");
     }
 
@@ -1036,6 +1242,7 @@ mod tests {
         fs::write(&temp, b"attacker replacement").expect("replace staged name");
         let upload = PendingUpload {
             temp,
+            record: workspace.path().join("upload.json"),
             destination: destination.clone(),
             file,
             size_bytes: 0,

@@ -262,13 +262,22 @@ fn prepare_lab_offload_workspace_stage_inner(
     // Compatible snapshots are mutable runner workspaces, not shared immutable
     // source objects. A job-owned execution view must therefore materialize its
     // own checkout instead of borrowing a snapshot another job may reap.
-    let synced = if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
-        reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
-            .map(|snapshot| (snapshot, 0))
-            .unwrap_or(sync_workspace(runner_id, sync_options)?)
-    } else {
-        sync_workspace(runner_id, sync_options)?
-    }
+    let requires_chunk_transfer = !declared_agent_task_evidence_inputs(&offload_args).is_empty();
+    let synced = preflight_before_workspace_sync(
+        requires_chunk_transfer,
+        || lab_runner_file_transfer(runner_id).map(|_| ()),
+        || {
+            Ok(
+                if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
+                    reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
+                        .map(|snapshot| (snapshot, 0))
+                        .unwrap_or(sync_workspace(runner_id, sync_options)?)
+                } else {
+                    sync_workspace(runner_id, sync_options)?
+                },
+            )
+        },
+    )?
     .0;
     sync_mode = synced.sync_mode;
     if sync_mode == RunnerWorkspaceSyncMode::Snapshot
@@ -686,6 +695,20 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+/// Chunk evidence needs the daemon file API, so refuse an old daemon before a
+/// workspace sync creates any remote state. SSH transfer has no daemon chunk
+/// dependency and its preflight is intentionally a no-op.
+fn preflight_before_workspace_sync<T>(
+    requires_chunk_transfer: bool,
+    preflight: impl FnOnce() -> Result<()>,
+    sync: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if requires_chunk_transfer {
+        preflight()?;
+    }
+    sync()
 }
 
 /// Explicitly transfer controller-projected provider evidence into the primary
@@ -1211,8 +1234,45 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    #[test]
+    fn old_daemon_evidence_refusal_precedes_workspace_sync() {
+        let synced = Cell::new(false);
+        let error = preflight_before_workspace_sync(
+            true,
+            || {
+                Err(Error::internal_unexpected(
+                    "old daemon refuses chunk upload",
+                ))
+            },
+            || {
+                synced.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("old daemon must refuse before sync");
+
+        assert!(error.message.contains("old daemon"));
+        assert!(!synced.get(), "workspace sync must not run after refusal");
+    }
+
+    #[test]
+    fn no_evidence_skips_chunk_preflight_before_workspace_sync() {
+        let synced = Cell::new(false);
+        preflight_before_workspace_sync(
+            false,
+            || Err(Error::internal_unexpected("must not probe")),
+            || {
+                synced.set(true);
+                Ok(())
+            },
+        )
+        .expect("ordinary sync");
+        assert!(synced.get());
+    }
 
     #[test]
     fn discovers_only_declared_provider_evidence_from_cook_attempt_plan() {
