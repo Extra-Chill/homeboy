@@ -380,6 +380,24 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
 #[test]
 fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let remote = temp.path().join("origin.git");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("create target");
+    git(&target, &["init", "--initial-branch=main"]);
+    git(&target, &["config", "user.email", "test@example.com"]);
+    git(&target, &["config", "user.name", "Test"]);
+    std::fs::write(target.join("base.txt"), "base\n").expect("write base");
+    git(&target, &["add", "base.txt"]);
+    git(&target, &["commit", "-m", "base"]);
+    git(
+        temp.path(),
+        &["init", "--bare", "--initial-branch=main", "origin.git"],
+    );
+    git(
+        &target,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&target, &["push", "-u", "origin", "main"]);
     let patch_path = temp.path().join("follow-up.patch");
     std::fs::write(&patch_path, VALID_PATCH).expect("write follow-up patch");
     let prior_sha256 = "b".repeat(64);
@@ -409,7 +427,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     })
     .to_string();
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().to_path_buf()),
+        workspace_path: Some(target),
         ..Default::default()
     };
 
