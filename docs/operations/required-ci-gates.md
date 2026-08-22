@@ -1,5 +1,30 @@
 # Required CI Gates
 
+> [!IMPORTANT]
+> **Branch protection deliberately requires NO status checks (2026-08-22).**
+>
+> The `main` ruleset (`13680120`) carries only `deletion` and
+> `non_fast_forward`. Making the eight contexts below *required* was an
+> unwanted change: with 35 pre-existing test failures on `main`, `homeboy /
+> Test` fails on every pull request, so a required-checks rule blocks the
+> entire merge queue rather than protecting it.
+>
+> **Do not reconcile the live ruleset to the declaration in
+> `.github/required-gates-ruleset.json`.** That is exactly what #12904 added
+> and why it was reverted — its own live verification re-added the rule 75
+> minutes after it was deliberately removed, and the merge queue stopped again.
+>
+> The declaration below is retained as a *description of which contexts CI
+> emits*, which is what `validate-required-gates.sh --report` measures and what
+> `required-gates-executed` enforces inside a run. Neither makes GitHub require
+> anything, and `--report` is non-blocking by construction
+> (`reporting_never_blocks_a_pull_request`). Reporting `unenforced` is the
+> intended steady state, not drift to repair.
+>
+> Re-enabling required checks is a deliberate decision that belongs to the
+> repository owner, and it should follow a green suite, not precede one.
+
+
 Three different things can be true or false here, and conflating them is what
 caused #11084 and #12573:
 
@@ -105,24 +130,8 @@ without wiring it into the terminal job turns `Required Gates Declaration` red.
 ## Apply And Verify
 
 The GitHub ruleset is repository state, so it cannot be changed by a pull
-request. `Required Gates Ruleset` audits the existing ruleset every hour from
-`main`, fails on drift, and uploads its before/desired/after evidence. It does
-not create another ruleset. Configure the `main-ruleset-administration`
-environment with required reviewers and a repository-administration token named
-`HOMEBOY_RULESET_ADMIN_TOKEN`; only the approved manual reconciliation job can
-use that credential.
-
-After reviewing the audit artifact, dispatch reconciliation from `main`:
-
-```bash
-gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main \
-  -f operation=reconcile
-```
-
-The reconciliation job applies the versioned payload only when the existing
-ruleset differs, records the before/desired/after documents, and fails unless
-they exactly match. It then runs the same fail-closed effective-enforcement
-verification used below. For an administrator recovery outside Actions:
+request. A repository administrator applies the versioned payload to the
+existing `main` ruleset and verifies the result:
 
 ```bash
 gh api --method PUT repos/Extra-Chill/homeboy/rulesets/13680120 \
