@@ -183,6 +183,43 @@ jq -e '.data.test_counts.total == 4' "${tmp}/candidate-replay-output/review-test
 jq -e '.data.shard_plan_digest == $digest' --arg digest "${plan_digest}" "${tmp}/candidate-replay-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not preserve immutable plan identity\n'; exit 1; }
 jq -e '."review test" == "pass"' "${tmp}/candidate-output/results.json" >/dev/null
 jq -e '.data.test_counts.total == 4' "${tmp}/candidate-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not sum actual structured shard counts\n'; exit 1; }
+
+# The producing shard validates its own uploaded terminal provenance after
+# publication. Only a coherent, complete pass remains green; all other cases
+# fail locally while the aggregate can still consume the uploaded artifact.
+terminal_root="${tmp}/terminal/candidate"
+mkdir -p "${terminal_root}/homeboy-ci-results"
+jq -cn --arg inventory "${inventory_digest}" --arg plan "${plan_digest}" \
+  '{phase:"candidate",command:"review test",shard_id:"shard-1",inventory_digest:$inventory,plan_digest:$plan,run_attempt:2,results:{"review test":"pass"}}' > "${terminal_root}/manifest.json"
+terminal_total="$(jq -r '.shards[] | select(.id == "shard-1") | .tests | length' "${tmp}/one.json")"
+jq -n --argjson total "${terminal_total}" '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:$total,failed:0,skipped:0,total:$total}}}' > "${terminal_root}/homeboy-ci-results/review-test.json"
+validate_terminal() {
+  TEST_SHARD_TERMINAL_ROOT="${terminal_root}" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_ID=shard-1 RUN_ATTEMPT=2 \
+    bash "${ROOT}/scripts/core/shard-tests.sh" validate-terminal
+}
+validate_terminal || { printf 'FAIL: validated passing shard terminal provenance did not remain green\n'; exit 1; }
+jq '.results["review test"] = "fail"' "${terminal_root}/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${terminal_root}/manifest.json"
+jq '.success = false | .status = "failed" | .exit_code = 1 | .data.test_counts.failed = 1 | .data.test_counts.passed -= 1' "${terminal_root}/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${terminal_root}/homeboy-ci-results/review-test.json"
+if validate_terminal >/dev/null 2>&1; then
+  printf 'FAIL: green action step with failed structured shard result remained green\n'; exit 1
+fi
+jq '.results["review test"] = "pass"' "${terminal_root}/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${terminal_root}/manifest.json"
+if validate_terminal >/dev/null 2>&1; then
+  printf 'FAIL: contradictory passing manifest and failed structured result remained green\n'; exit 1
+fi
+printf '%s\n' '{malformed' > "${terminal_root}/homeboy-ci-results/review-test.json"
+if validate_terminal >/dev/null 2>&1; then
+  printf 'FAIL: malformed shard terminal result remained green\n'; exit 1
+fi
+rm "${terminal_root}/homeboy-ci-results/review-test.json"
+if validate_terminal >/dev/null 2>&1; then
+  printf 'FAIL: missing shard terminal result remained green\n'; exit 1
+fi
+printf 'PASS: shard terminal provenance only permits validated pass evidence\n'
+
 mkdir -p "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/homeboy-ci-results"
 cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/homeboy-ci-results/review-test.json"
 jq '.run_attempt = 1 | .results["review test"] = "timeout"' "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json" > "${tmp}/artifacts/candidate-shard-1-attempt-1/candidate/manifest.json"
@@ -338,6 +375,12 @@ grep -F 'resolve-run-artifact.sh homeboy-test-archive' "${WORKFLOW}" >/dev/null 
 # shellcheck disable=SC2016
 grep -F 'name: ${{ steps.test-plan-artifact.outputs.artifact-name }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: shard jobs do not consume the resolved plan artifact\n'; exit 1; }
 grep -F "needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate shard work can start without a successful inventory plan\n'; exit 1; }
+aggregate_condition="$(grep -A3 '^  candidate-test-result:' "${WORKFLOW}" | grep '^    if:')"
+printf '%s\n' "${aggregate_condition}" | grep -q 'always()' || { printf 'FAIL: candidate shard aggregation does not run after a failed producing shard\n'; exit 1; }
+if printf '%s\n' "${aggregate_condition}" | grep -q 'needs.candidate-test-shards.result'; then
+  printf 'FAIL: candidate shard aggregation is gated on the producing shard result\n'
+  exit 1
+fi
 grep -F 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not report candidate inventory generation failures\n'; exit 1; }
 grep -F "if: needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }
 grep -F "Candidate Test inventory generation failed; shard execution was not started" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory producer is not terminal\n'; exit 1; }

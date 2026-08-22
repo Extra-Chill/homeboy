@@ -155,6 +155,49 @@ aggregate() (
   printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
 )
 
+# Validate one uploaded shard before its producing job publishes a verdict. This
+# intentionally accepts valid failed and timed-out evidence, then returns
+# non-zero so only a validated pass can leave the candidate shard green.
+validate_terminal() (
+  local root="${TEST_SHARD_TERMINAL_ROOT:?TEST_SHARD_TERMINAL_ROOT is required}"
+  local plan="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
+  local phase="${TEST_SHARD_PHASE:?TEST_SHARD_PHASE is required}"
+  local command="${TEST_SHARD_COMMAND:?TEST_SHARD_COMMAND is required}"
+  local id="${TEST_SHARD_ID:?TEST_SHARD_ID is required}"
+  local attempt="${RUN_ATTEMPT:?RUN_ATTEMPT is required}"
+  local manifest="${root}/manifest.json"
+  local inventory_digest plan_digest status payload expected_total
+
+  [ -f "${manifest}" ] || fail "${phase} shard ${id} terminal provenance manifest is missing."
+  inventory_digest="$(jq -r .inventory_digest "${plan}")"
+  plan_digest="$(jq -r .plan_digest "${plan}")"
+  jq -e --arg phase "${phase}" --arg command "${command}" --arg id "${id}" --arg inventory_digest "${inventory_digest}" --arg plan_digest "${plan_digest}" --argjson attempt "${attempt}" '
+    .phase == $phase and .command == $command and .shard_id == $id and .inventory_digest == $inventory_digest and .plan_digest == $plan_digest
+    and .run_attempt == $attempt
+    and (.results[$command] == "pass" or .results[$command] == "fail" or .results[$command] == "timeout")
+  ' "${manifest}" >/dev/null || fail "${phase} shard ${id} terminal provenance manifest is malformed or contradicts its immutable plan."
+
+  status="$(jq -r --arg command "${command}" '.results[$command]' "${manifest}")"
+  payload="${root}/homeboy-ci-results/$(command_result_filename "${command}")"
+  [ -f "${payload}" ] || fail "${phase} shard ${id} terminal structured result is missing."
+  expected_total="$(jq -r --arg id "${id}" '.shards[] | select(.id == $id) | .tests | length' "${plan}")"
+  jq -e --arg root "${command%% *}" --arg status "${status}" --argjson expected_total "${expected_total}" '
+    .schema == "homeboy/command-result/v3" and .command == $root
+    and (.success | type == "boolean") and (.status | type == "string")
+    and (.exit_code | type == "number" and floor == .)
+    and (if $status == "timeout" then
+      .success == false and .status == "failed" and .exit_code == 124
+    else
+      (if .success then .status == "succeeded" and .exit_code == 0 else .status == "failed" and .exit_code != 0 end)
+      and (.data.test_counts | type == "object")
+      and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.skipped, .data.test_counts.total; type == "number" and . >= 0 and floor == .)
+      and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)
+      and (if $status == "pass" then .success == true and .data.test_counts.failed == 0 and .data.test_counts.total == $expected_total else .success == false end)
+    end)
+  ' "${payload}" >/dev/null || fail "${phase} shard ${id} terminal structured result is malformed or contradicts its manifest."
+  [ "${status}" = pass ] || fail "${phase} shard ${id} reported terminal ${status} evidence."
+)
+
 attach_budget() {
   local plan="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
   local budget="${TEST_SCOPE_BUDGET_FILE:?TEST_SCOPE_BUDGET_FILE is required}"
@@ -167,4 +210,4 @@ attach_budget() {
   rm -f "${plan}.tmp"
 }
 
-case "${1:-}" in plan) plan ;; aggregate) aggregate ;; attach-budget) attach_budget ;; *) echo "usage: $0 plan|aggregate|attach-budget" >&2; exit 2 ;; esac
+case "${1:-}" in plan) plan ;; aggregate) aggregate ;; validate-terminal) validate_terminal ;; attach-budget) attach_budget ;; *) echo "usage: $0 plan|aggregate|validate-terminal|attach-budget" >&2; exit 2 ;; esac
