@@ -3390,6 +3390,8 @@ pub(crate) fn validate_provider_evidence_inputs(
 ) -> homeboy::core::Result<()> {
     let mut ids = std::collections::BTreeSet::new();
     let mut sources = std::collections::BTreeSet::new();
+    let mut canonical_sources = std::collections::BTreeSet::new();
+    let mut admitted_sources = Vec::with_capacity(inputs.len());
     for input in inputs {
         if input.id.trim().is_empty()
             || input.id.contains(['/', '\\'])
@@ -3411,18 +3413,20 @@ pub(crate) fn validate_provider_evidence_inputs(
                 None,
             ));
         }
-        let source = Path::new(&input.source);
-        let metadata = std::fs::symlink_metadata(source).map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
+        let source = admit_provider_evidence_source(&input.source)?;
+        if !canonical_sources.insert(source.canonical_path.clone()) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "provider-evidence",
-                "provider evidence sources must be existing absolute regular files",
-                Some(format!("{}: {error}", input.source)),
+                "provider evidence sources must be unique after canonical path resolution",
+                Some(format!(
+                    "supplied_path={} canonical_path={}",
+                    source.supplied_path.display(),
+                    source.canonical_path.display()
+                )),
                 None,
-            )
-        })?;
-        if !source.is_absolute() || !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(homeboy::core::Error::validation_invalid_argument("provider-evidence", "provider evidence sources must be existing absolute regular files without symlinks", Some(input.source.clone()), None));
+            ));
         }
+        admitted_sources.push(source);
     }
     if let Some(prompt) = prompt {
         for token in prompt.split_whitespace() {
@@ -3432,12 +3436,97 @@ pub(crate) fn validate_provider_evidence_inputs(
                     '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
                 )
             });
-            if path.starts_with('/') && !sources.contains(path) {
+            if path.starts_with('/')
+                && !admitted_sources
+                    .iter()
+                    .any(|source| provider_evidence_paths_equivalent(path, source))
+            {
                 return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
             }
         }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct AdmittedProviderEvidenceSource {
+    supplied_path: PathBuf,
+    canonical_path: PathBuf,
+    approved_root: Option<PathBuf>,
+}
+
+impl AdmittedProviderEvidenceSource {
+    fn copy_path(&self) -> &Path {
+        // Only the macOS system alias is safe to bypass during the no-follow walk.
+        self.approved_root
+            .as_ref()
+            .map_or(&self.supplied_path, |_| &self.canonical_path)
+    }
+}
+
+fn admit_provider_evidence_source(
+    source: &str,
+) -> homeboy::core::Result<AdmittedProviderEvidenceSource> {
+    let supplied_path = PathBuf::from(source);
+    let metadata = std::fs::symlink_metadata(&supplied_path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence sources must be existing absolute regular files",
+            Some(format!("{source}: {error}")),
+            None,
+        )
+    })?;
+    if !supplied_path.is_absolute() || !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence sources must be existing absolute regular files without symlinks",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    let canonical_path = supplied_path.canonicalize().map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source could not be canonicalized",
+            Some(format!("{source}: {error}")),
+            None,
+        )
+    })?;
+    Ok(AdmittedProviderEvidenceSource {
+        approved_root: approved_macos_temporary_root(&supplied_path, &canonical_path),
+        supplied_path,
+        canonical_path,
+    })
+}
+
+fn approved_macos_temporary_root(supplied_path: &Path, canonical_path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let supplied_suffix = supplied_path.strip_prefix("/var").ok()?;
+        let canonical_suffix = canonical_path.strip_prefix("/private/var").ok()?;
+        (supplied_suffix == canonical_suffix).then(|| PathBuf::from("/private/var"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (supplied_path, canonical_path);
+        None
+    }
+}
+
+fn provider_evidence_paths_equivalent(
+    reference: &str,
+    declared: &AdmittedProviderEvidenceSource,
+) -> bool {
+    if Path::new(reference) == declared.supplied_path {
+        return true;
+    }
+    let reference = Path::new(reference);
+    let Ok(canonical_reference) = reference.canonicalize() else {
+        return false;
+    };
+    canonical_reference == declared.canonical_path
+        && (approved_macos_temporary_root(reference, &canonical_reference).is_some()
+            || declared.approved_root.is_some())
 }
 
 pub(crate) fn projected_provider_evidence(
@@ -3468,10 +3557,15 @@ pub(crate) fn project_provider_evidence_inputs(
     let mut projected = projected_provider_evidence(inputs, workspace.to_str())?;
     for (input, projection) in inputs.iter().zip(&mut projected) {
         let destination = PathBuf::from(projection["path"].as_str().expect("evidence path"));
-        let (bytes, digest) =
-            secure_provider_evidence_copy(Path::new(&input.source), &destination)?;
+        let source = admit_provider_evidence_source(&input.source)?;
+        let (bytes, digest) = secure_provider_evidence_copy(source.copy_path(), &destination)?;
         projection["size_bytes"] = serde_json::json!(bytes);
         projection["sha256"] = serde_json::json!(digest);
+        projection["supplied_path"] = serde_json::json!(source.supplied_path);
+        projection["canonical_path"] = serde_json::json!(source.canonical_path);
+        if let Some(root) = source.approved_root {
+            projection["approved_root"] = serde_json::json!(root);
+        }
     }
     Ok(projected)
 }
@@ -3699,7 +3793,11 @@ pub(crate) fn rewrite_provider_evidence_prompt(
             .join(".homeboy/evidence")
             .join(&input.id)
             .join(Path::new(&input.source).file_name().unwrap_or_default());
-        *prompt = prompt.replace(&input.source, &destination.display().to_string());
+        let destination = destination.display().to_string();
+        *prompt = prompt.replace(&input.source, &destination);
+        if let Ok(source) = admit_provider_evidence_source(&input.source) {
+            *prompt = prompt.replace(&source.canonical_path.display().to_string(), &destination);
+        }
     }
 }
 
@@ -3782,6 +3880,145 @@ mod provider_evidence_tests {
             None,
         )
         .expect_err("symlink source rejected");
+        assert!(error.message.contains("regular files"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn admits_var_temporary_evidence_as_its_private_var_canonical_identity() {
+        let var_temp = std::env::temp_dir();
+        if !var_temp.starts_with("/var/") {
+            return;
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("homeboy-provider-evidence-")
+            .tempdir_in(&var_temp)
+            .expect("temporary workspace under var");
+        let source = temp.path().join("source.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "{}").expect("write source");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let canonical_source = source.canonicalize().expect("canonical source");
+        let supplied_source = Path::new("/var").join(
+            canonical_source
+                .strip_prefix("/private/var")
+                .expect("temporary file is under private var"),
+        );
+        assert!(supplied_source.exists(), "var alias resolves to the source");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: supplied_source.display().to_string(),
+        };
+
+        validate_provider_evidence_inputs(
+            &[input.clone()],
+            Some(&format!("Read {}", canonical_source.display())),
+        )
+        .expect("private var spelling is declared by its var alias");
+        let projected = project_provider_evidence_inputs(&[input.clone()], &workspace, None)
+            .expect("project var alias");
+        assert_eq!(
+            projected[0]["supplied_path"],
+            supplied_source.display().to_string()
+        );
+        assert_eq!(
+            projected[0]["canonical_path"],
+            canonical_source.display().to_string()
+        );
+        assert_eq!(projected[0]["approved_root"], "/private/var");
+
+        let mut prompt = Some(format!("Read {}", canonical_source.display()));
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        assert_eq!(
+            prompt,
+            Some(format!(
+                "Read {}",
+                projected[0]["path"].as_str().expect("projected path")
+            ))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn accepts_only_the_exact_macos_var_alias_boundary() {
+        assert_eq!(
+            approved_macos_temporary_root(
+                Path::new("/var/folders/example/evidence.json"),
+                Path::new("/private/var/folders/example/evidence.json")
+            ),
+            Some(PathBuf::from("/private/var"))
+        );
+        assert!(approved_macos_temporary_root(
+            Path::new("/var/folders/example/evidence.json"),
+            Path::new("/private/var/elsewhere/evidence.json")
+        )
+        .is_none());
+        assert!(approved_macos_temporary_root(
+            Path::new("/var/../private/var/folders/example/evidence.json"),
+            Path::new("/private/var/folders/example/evidence.json")
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_evidence_behind_an_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let outside = temp.path().join("outside");
+        let linked_parent = temp.path().join("linked-parent");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&outside).expect("create outside");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(outside.join("source.json"), "{}").expect("write source");
+        symlink(&outside, &linked_parent).expect("link parent");
+
+        let error = project_provider_evidence_inputs(
+            &[AgentTaskProviderEvidenceInput {
+                id: "source".to_string(),
+                source: linked_parent.join("source.json").display().to_string(),
+            }],
+            &workspace,
+            None,
+        )
+        .expect_err("intermediate symlink is rejected during secure copy");
+        assert!(error.message.contains("symlink or non-directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_source_replaced_with_a_symlink_after_admission() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let outside = temp.path().join("outside.json");
+        let destination = temp.path().join("workspace/evidence.json");
+        std::fs::write(&source, "accepted").expect("write source");
+        std::fs::write(&outside, "outside").expect("write outside");
+        let admitted = admit_provider_evidence_source(&source.display().to_string())
+            .expect("admit regular source");
+        std::fs::remove_file(&source).expect("remove admitted source");
+        symlink(&outside, &source).expect("replace source with symlink");
+
+        let error = secure_provider_evidence_copy(admitted.copy_path(), &destination)
+            .expect_err("secure reopen rejects the replacement symlink");
+        assert!(error.message.contains("could not be securely opened"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn rejects_non_regular_evidence_source() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let error = validate_provider_evidence_inputs(
+            &[AgentTaskProviderEvidenceInput {
+                id: "directory".to_string(),
+                source: temp.path().display().to_string(),
+            }],
+            None,
+        )
+        .expect_err("directory evidence is rejected");
         assert!(error.message.contains("regular files"));
     }
 
