@@ -511,6 +511,11 @@ fn copy_piped_stdin_to_child(
 /// Windows reports a closed anonymous pipe through `PeekNamedPipe` as an
 /// error rather than a zero-byte read. Treat only the no-bytes-remaining form
 /// as EOF so an empty pipeline keeps normal no-input command semantics.
+/// Production reaches this only from the `#[cfg(windows)]` `PeekNamedPipe`
+/// path, but it is a pure predicate and its test runs on every host. Gate it
+/// on `windows` OR `test` so a Linux lib build does not carry an unreachable
+/// function, and the cross-platform test still compiles.
+#[cfg(any(windows, test))]
 pub(super) fn windows_pipe_error_is_eof(error_code: Option<i32>, available: u32) -> bool {
     available == 0 && matches!(error_code, Some(109 | 233))
 }

@@ -33,10 +33,9 @@ use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
     DaemonCandidateReconciliationResult, DaemonExactOrphanRecoveryResult,
-    DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
-    DaemonOrphanAdoptionResult, DaemonProcessCandidate, DaemonProcessOwnership,
-    DaemonStaleReasonCode, DaemonStartResult, DaemonTerminationClassification,
-    DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonProcessCandidate,
+    DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
+    DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -1076,140 +1075,6 @@ where
     }
 }
 
-struct MissingLeaseStateRecoveryRequest {
-    lease_id: String,
-    recorded_pid: u32,
-    recorded_endpoint: SocketAddr,
-}
-
-struct MissingLeaseStateRecoveryOperations<
-    Status,
-    PidIsRunning,
-    ProbeEndpoint,
-    AcquireOwner,
-    Reconcile,
-    Start,
-> {
-    status: Status,
-    pid_is_running: PidIsRunning,
-    probe_endpoint: ProbeEndpoint,
-    acquire_owner: AcquireOwner,
-    reconcile: Reconcile,
-    start: Start,
-}
-
-fn recover_missing_lease_state_with_operations<
-    Status,
-    PidIsRunning,
-    ProbeEndpoint,
-    OwnerLock,
-    AcquireOwner,
-    Reconcile,
-    Start,
->(
-    request: MissingLeaseStateRecoveryRequest,
-    operations: MissingLeaseStateRecoveryOperations<
-        Status,
-        PidIsRunning,
-        ProbeEndpoint,
-        AcquireOwner,
-        Reconcile,
-        Start,
-    >,
-) -> Result<super::DaemonStateLossRecoveryResult>
-where
-    Status: FnOnce() -> Result<super::DaemonStatus>,
-    PidIsRunning: FnOnce(u32) -> bool,
-    ProbeEndpoint: FnOnce(SocketAddr) -> Result<String>,
-    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
-    Reconcile: FnOnce() -> Result<(PathBuf, crate::api_jobs::DaemonLeaseJobDiagnostics)>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
-{
-    let MissingLeaseStateRecoveryRequest {
-        lease_id,
-        recorded_pid,
-        recorded_endpoint,
-    } = request;
-    let MissingLeaseStateRecoveryOperations {
-        status,
-        pid_is_running,
-        probe_endpoint,
-        acquire_owner,
-        reconcile,
-        start,
-    } = operations;
-    let status = status()?;
-    if status.state.is_some()
-        || status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
-        || status.freshness.active_jobs == 0
-        || status.reachable
-    {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "state-loss recovery requires an absent daemon state, unreachable endpoint, and active jobs",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    if pid_is_running(recorded_pid) {
-        return Err(Error::validation_invalid_argument(
-            "recorded_pid",
-            format!("recorded daemon PID `{recorded_pid}` is still running"),
-            Some(recorded_pid.to_string()),
-            None,
-        ));
-    }
-    let endpoint_probe = probe_endpoint(recorded_endpoint)?;
-    let owner_lock = acquire_owner()?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "daemon owner lock is held; refusing state-loss recovery",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    let (snapshot_path, reconciled) = reconcile()?;
-    if reconciled.protected_count() > 0 {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!(
-                "deferred missing-lease recovery because {} active child process(es) are still running: {}",
-                reconciled.protected_count(),
-                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            Some(lease_id.clone()),
-            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
-        ));
-    }
-    if reconciled.matching_count() == 0 {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!("no active durable jobs belong to exact lease `{lease_id}`"),
-            Some(lease_id.clone()),
-            None,
-        ));
-    }
-    drop(owner_lock);
-    let replacement = start()?;
-    let affected_job_count = reconciled.matching_count();
-    Ok(super::DaemonStateLossRecoveryResult {
-        recovered_lease_id: lease_id.to_string(),
-        recorded_dead_pid: recorded_pid,
-        recorded_endpoint: recorded_endpoint.to_string(),
-        affected_job_ids: reconciled.matching_job_ids,
-        affected_job_count,
-        evidence_snapshot_path: snapshot_path.display().to_string(),
-        ownership_proof: vec![
-            format!("operator supplied exact missing lease `{lease_id}`"),
-            format!("recorded daemon PID `{recorded_pid}` was not running"),
-            "daemon owner lock acquired non-destructively".to_string(),
-            endpoint_probe,
-        ],
-        retry_guidance: "Recorded outcomes were retained. Retry unfinished eligible work through its original command or workflow.".to_string(),
-        replacement,
-    })
-}
-
 fn parse_recorded_daemon_endpoint(value: &str) -> Result<SocketAddr> {
     let endpoint = value.parse::<SocketAddr>().map_err(|_| {
         Error::validation_invalid_argument(
@@ -1242,74 +1107,6 @@ fn probe_recorded_daemon_endpoint(endpoint: SocketAddr) -> Result<String> {
             "recorded daemon endpoint `{endpoint}` was unreachable: {error}"
         )),
     }
-}
-
-fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, Start>(
-    status: Status,
-    probe: Probe,
-    reconcile: Reconcile,
-    start: Start,
-) -> Result<DaemonLeaselessOrphanReconciliationResult>
-where
-    Status: FnOnce() -> Result<super::DaemonStatus>,
-    Probe: FnOnce() -> Result<Vec<String>>,
-    Reconcile: FnOnce() -> Result<(PathBuf, crate::api_jobs::LeaselessOrphanJobDiagnostics)>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
-{
-    let status = status()?;
-    if status.freshness.active_jobs == 0
-        || !matches!(
-            status.freshness.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::LeaseMissing
-                    | DaemonStaleReasonCode::LeaseCorrupt
-                    | DaemonStaleReasonCode::VersionMismatch
-            )
-        )
-    {
-        return Err(Error::validation_invalid_argument(
-            "job_store",
-            "lease-less reconciliation requires missing or corrupt lease metadata with active jobs",
-            None,
-            None,
-        ));
-    }
-    let no_owner_proof = probe()?;
-    let (snapshot_path, reconciled) = reconcile()?;
-    if !reconciled.protected_job_ids.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "job_store",
-            format!(
-                "deferred lease-less recovery because {} active child process(es) are still running: {}",
-                reconciled.protected_job_ids.len(),
-                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            None,
-            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
-        ));
-    }
-    if !reconciled.preserved_remote_job_ids.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "job_store",
-            format!(
-                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
-                reconciled.preserved_remote_job_ids.len(),
-                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            None,
-            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
-        ));
-    }
-    let affected_job_count = reconciled.reconciled_count();
-    let replacement = start()?;
-    Ok(DaemonLeaselessOrphanReconciliationResult {
-        snapshot_path: snapshot_path.display().to_string(),
-        affected_job_ids: reconciled.reconciled_job_ids.into_iter().map(|id| id.to_string()).collect(),
-        affected_job_count,
-        no_owner_proof,
-        retry_guidance: "Inspect retained job events, then retry eligible work through its original command or workflow.".to_string(),
-        replacement,
-    })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2393,32 +2190,6 @@ fn snapshot_job_store(path: &Path, raw: &[u8]) -> Result<PathBuf> {
     Ok(snapshot)
 }
 
-fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {
-    let store = super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
-    let diagnostics = store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
-    if diagnostics.protected_count() > 0 {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!(
-                "deferred dead-lease recovery because {} active child process(es) cannot be reattached: {}",
-                diagnostics.protected_count(),
-                diagnostics
-                    .protected_job_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-            Some(expected_lease_id.to_string()),
-            Some(vec![
-                "Homeboy cannot collect an orphan child result; wait for it to exit, then retry exact recovery."
-                    .to_string(),
-            ]),
-        ));
-    }
-    Ok(())
-}
-
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     ensure_running_with_operations(
@@ -2428,71 +2199,6 @@ fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartRes
         pid_is_running,
         || start_or_return_live_unlocked(addr),
     )
-}
-
-fn reconcile_dead_lease_and_ensure_running_with_operations<
-    Lock,
-    AcquireLock,
-    ReadStatus,
-    PidIsRunning,
-    Reconcile,
-    Start,
->(
-    wait: Duration,
-    acquire_lock: AcquireLock,
-    expected_lease_id: &str,
-    read_status: ReadStatus,
-    pid_is_running: PidIsRunning,
-    reconcile: Reconcile,
-    start: Start,
-) -> Result<DaemonStartResult>
-where
-    AcquireLock: FnOnce(Duration) -> Result<Lock>,
-    ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
-    PidIsRunning: FnOnce(u32) -> bool,
-    Reconcile: FnOnce() -> Result<()>,
-    Start: FnOnce() -> Result<DaemonStartResult>,
-{
-    let _lock = acquire_lock(wait)?;
-    let status = read_status()?;
-    let state = status.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "expected-lease-id",
-            "remote daemon has no recorded lease; refusing dead-lease reconciliation",
-            Some(expected_lease_id.to_string()),
-            None,
-        )
-    })?;
-    if pid_is_running(state.pid) {
-        return Ok(DaemonStartResult {
-            pid: state.pid,
-            address: state.address,
-            state_path: state.state_path,
-            lease_id: state.lease_id,
-        });
-    }
-    if status.freshness.stale_reason_code != Some(super::DaemonStaleReasonCode::PidDead) {
-        return Err(Error::validation_invalid_argument(
-            "expected-lease-id",
-            "remote daemon PID is not proven dead; refusing dead-lease reconciliation",
-            Some(expected_lease_id.to_string()),
-            None,
-        ));
-    }
-    if state.lease_id != expected_lease_id {
-        return Err(Error::validation_invalid_argument(
-            "expected-lease-id",
-            format!(
-                "remote daemon lease `{}` does not match expected stale lease; refusing reconciliation",
-                state.lease_id
-            ),
-            Some(expected_lease_id.to_string()),
-            None,
-        ));
-    }
-
-    reconcile()?;
-    start()
 }
 
 fn ensure_running_with_operations<Lock, AcquireLock, ReadStatus, PidIsRunning, Start>(
