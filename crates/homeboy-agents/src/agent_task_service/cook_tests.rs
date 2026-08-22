@@ -5373,7 +5373,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"remote://fixture/durable-ensure\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; fi\n  ;;\nensure)\n  git -C '{}' worktree add --quiet -b durable-ensure '{}' HEAD && touch '{}'\n  ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet -b durable-ensure '{}' HEAD && touch '{}'\n  ;;\nesac\n",
                 created.display(),
                 workspace.display(),
                 source.display(),
@@ -5400,7 +5400,17 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
-                    ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
+                    ensure: Some(vec![
+                        provider.display().to_string(),
+                        "ensure".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{purpose}".to_string(),
+                        "{owner_run_ref}".to_string(),
+                        "{cleanup_policy}".to_string(),
+                    ]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -5433,6 +5443,10 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
                 "head": "durable-ensure",
                 "task_url": "https://example.test/issues/12601",
             },
+            "lifecycle_intent": {
+                "purpose": "agent_task_cook",
+                "cleanup_policy": "remove_on_success",
+            },
         });
 
         recipe_store
@@ -5453,6 +5467,14 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
             .read_controller_plan(run_id)
             .expect("injected lifecycle store has the materialized plan");
         assert_eq!(plan.metadata["cook_provision"]["action"], "existing");
+        assert_eq!(
+            plan.metadata["cook_provision"]["lifecycle_intent"]["owner_run_ref"],
+            run_id
+        );
+        assert_eq!(
+            plan.metadata["cook_provision"]["worktree_provider_id"],
+            "fixture"
+        );
         assert_eq!(
             options.source_worktree_path.as_deref(),
             Some(workspace.as_path())

@@ -2328,6 +2328,12 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 "head": args.head,
                 "task_url": args.dispatch.task_url,
             },
+            // Cook owns this destination's terminal lifecycle. Its exact run id
+            // is assigned during durable materialization, before ensure runs.
+            "lifecycle_intent": {
+                "purpose": "agent_task_cook",
+                "cleanup_policy": "remove_on_success",
+            },
         }));
     }
     match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
