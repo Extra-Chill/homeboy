@@ -329,24 +329,7 @@ fn review_record_projection(
     record: &homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord,
 ) -> (Value, Vec<Value>) {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
-        return (value, Vec::new());
-    };
-    let mut cleanup_evidence = Vec::new();
-    for key in [
-        "automatic_artifact_retention",
-        "automatic_artifact_retention_inaccessible_roots",
-    ] {
-        if metadata.remove(key).is_some() {
-            cleanup_evidence.push(serde_json::json!({
-                "kind": key,
-                "details_omitted": true,
-                "ref": format!("homeboy://agent-task/run/{}/status#metadata.{key}", record.run_id),
-                "command": format!("homeboy agent-task status {} --full", record.run_id),
-                "export_command": format!("homeboy agent-task status {} --full --output <path>", record.run_id),
-            }));
-        }
-    }
+    let cleanup_evidence = super::status::cleanup_evidence_projection(&mut value, &record.run_id);
     (value, cleanup_evidence)
 }
 
