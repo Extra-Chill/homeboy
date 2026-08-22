@@ -287,6 +287,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                 "unavailable_sources": durable_read.unavailable_sources,
             }
     });
+    value["canonical_candidate"] = canonical_candidate_projection(classify_candidates(&value));
     if let Some(selection) = target.selection {
         let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
         if latest_attempt_run_id.is_some_and(|latest| latest != record.run_id) {
