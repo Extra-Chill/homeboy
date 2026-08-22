@@ -67,6 +67,27 @@ if grep -q '^::' "${TMP_DIR}/bounded-liveness.log"; then
   exit 1
 fi
 
+mkdir -p "${TMP_DIR}/bin"
+cat > "${TMP_DIR}/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "${HEARTBEAT_SLEEP_PID_FILE}"
+exec /bin/sleep "$@"
+SH
+chmod +x "${TMP_DIR}/bin/sleep"
+
+HEARTBEAT_SLEEP_PID_FILE="${TMP_DIR}/heartbeat-sleep.pid" \
+PATH="${TMP_DIR}/bin:${PATH}" \
+HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/cleanup-phases.jsonl" \
+HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS=30 \
+bash "${PROGRESS}" run command_execution -- bash -c 'while [ ! -s "$HEARTBEAT_SLEEP_PID_FILE" ]; do :; done' >/dev/null
+heartbeat_sleep_pid="$(cat "${TMP_DIR}/heartbeat-sleep.pid")"
+if kill -0 "${heartbeat_sleep_pid}" 2>/dev/null; then
+  printf 'FAIL: phase finalization left heartbeat timer %s for runner orphan cleanup\n' "${heartbeat_sleep_pid}"
+  kill "${heartbeat_sleep_pid}" 2>/dev/null || true
+  exit 1
+fi
+printf 'PASS: phase finalization terminates its active heartbeat timer\n'
+
 HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
 bash "${PROGRESS}" run command_execution -- bash -c 'exit 1' >"${TMP_DIR}/bounded.log" 2>&1 || true
 HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
