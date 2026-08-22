@@ -11565,15 +11565,45 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             .unwrap()
             .is_some());
 
-        std::fs::write(target.path().join("unrelated.txt"), "drift\n").unwrap();
+        let base = Command::new("git")
+            .args(["rev-parse", "HEAD^"])
+            .current_dir(target.path())
+            .output()
+            .unwrap();
+        let base = String::from_utf8(base.stdout).unwrap().trim().to_string();
         assert!(Command::new("git")
-            .args(["add", "unrelated.txt"])
+            .args(["branch", "side", &base])
             .current_dir(target.path())
             .status()
             .unwrap()
             .success());
         assert!(Command::new("git")
-            .args(["commit", "--quiet", "-m", "unrelated"])
+            .args(["checkout", "--quiet", "side"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.path().join("side.txt"), "side\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "side.txt"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "side"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "--quiet", "cook-candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["merge", "--quiet", "--no-ff", "-s", "ours", "side", "-m", "merge"])
             .current_dir(target.path())
             .status()
             .unwrap()
@@ -11583,7 +11613,7 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             error.details["workspace"]["classification"],
             "workspace.cook_owned_unpushed_commit_mismatch"
         );
-        assert_eq!(error.details["workspace"]["reason"], "divergent_ancestry");
+        assert_eq!(error.details["workspace"]["reason"], "merge_commit");
     });
 }
 
