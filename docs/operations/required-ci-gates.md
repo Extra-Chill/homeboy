@@ -130,8 +130,24 @@ without wiring it into the terminal job turns `Required Gates Declaration` red.
 ## Apply And Verify
 
 The GitHub ruleset is repository state, so it cannot be changed by a pull
-request. A repository administrator applies the versioned payload to the
-existing `main` ruleset and verifies the result:
+request. `Required Gates Ruleset` audits the existing ruleset every hour from
+`main`, fails on drift, and uploads its before/desired/after evidence. It does
+not create another ruleset. Configure the `main-ruleset-administration`
+environment with required reviewers and a repository-administration token named
+`HOMEBOY_RULESET_ADMIN_TOKEN`; only the approved manual reconciliation job can
+use that credential.
+
+After reviewing the audit artifact, dispatch reconciliation from `main`:
+
+```bash
+gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main \
+  -f operation=reconcile
+```
+
+The reconciliation job applies the versioned payload only when the existing
+ruleset differs, records the before/desired/after documents, and fails unless
+they exactly match. It then runs the same fail-closed effective-enforcement
+verification used below. For an administrator recovery outside Actions:
 
 ```bash
 gh api --method PUT repos/Extra-Chill/homeboy/rulesets/13680120 \
