@@ -1,3 +1,4 @@
+use super::store::read_plan_path;
 use super::*;
 use homeboy_engine_primitives::content_hash;
 use sha2::Digest;
@@ -397,7 +398,7 @@ pub fn record_pre_dispatch_failure_in_store(
             ..AgentTaskQueueStatus::default()
         },
     };
-    record_run_aggregate(&run_id, &plan, &aggregate)
+    record_run_aggregate_in_store(lifecycle_store, &run_id, &plan, &aggregate)
 }
 
 #[derive(Debug, Clone)]
@@ -471,12 +472,13 @@ pub fn record_remote_dispatch_failure_in_store(
         let remote_plan_path = record.plan_path.clone();
         let remote_aggregate_path = record.aggregate_path.clone();
         let plan = if std::path::Path::new(&record.plan_path).is_file() {
-            store::read_plan_path(&record.plan_path)?
+            read_plan_path(&record.plan_path)?
         } else {
             synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
         };
         record.run_id = run_id.clone();
-        record.plan_path = store::write_plan_in_store(lifecycle_store, &run_id, &plan)?
+        record.plan_path = lifecycle_store
+            .write_controller_plan(&run_id, &plan)?
             .display()
             .to_string();
         apply_aggregate_to_record(

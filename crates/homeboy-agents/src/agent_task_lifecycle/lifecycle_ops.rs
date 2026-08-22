@@ -6059,6 +6059,52 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
     record_promotion_in_store(&lifecycle_store, run_id, promotion)
 }
 
+/// Retain a bounded, ordered replay of runner-delivered promotion frames. This
+/// is observer evidence only; promotion checkpoints remain the recovery authority.
+pub fn record_promotion_progress_frames(
+    run_id: &str,
+    runner_job_id: &str,
+    frames: impl IntoIterator<Item = (u64, Value)>,
+) -> Result<()> {
+    const MAX_FRAMES: usize = 64;
+
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let run_id = sanitize_run_id(run_id);
+    let _ = lifecycle_store.mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let events = metadata
+            .entry("promotion_progress_frames".to_string())
+            .or_insert_with(|| json!([]));
+        let events = events
+            .as_array_mut()
+            .expect("promotion progress frames are an array");
+        let mut changed = false;
+        for (sequence, frame) in frames {
+            if events.iter().any(|event| {
+                event.get("runner_job_id").and_then(Value::as_str) == Some(runner_job_id)
+                    && event.get("sequence").and_then(Value::as_u64) == Some(sequence)
+            }) {
+                continue;
+            }
+            let frame = json!({
+                "runner_job_id": runner_job_id,
+                "sequence": sequence,
+                "frame": frame,
+                "recorded_at": now_timestamp(),
+            });
+            events.push(homeboy_core::redaction::redact_json(&frame));
+            changed = true;
+        }
+        if events.len() > MAX_FRAMES {
+            let excess = events.len() - MAX_FRAMES;
+            events.drain(..excess);
+            changed = true;
+        }
+        changed
+    })?;
+    Ok(())
+}
+
 pub fn record_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

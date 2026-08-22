@@ -8,8 +8,10 @@ ARCH="$(uname -m)"
 case "${OS}-${ARCH}" in
   linux-x86_64) ASSET="homeboy-x86_64-unknown-linux-gnu.tar.xz" ;;
   linux-aarch64|linux-arm64) ASSET="homeboy-aarch64-unknown-linux-gnu.tar.xz" ;;
-  darwin-x86_64) ASSET="homeboy-x86_64-apple-darwin.tar.xz" ;;
+  # darwin-x86_64 is intentionally unmapped: `x86_64-apple-darwin` was dropped
+  # from `dist-workspace.toml`, so releases publish no Intel macOS tarball.
   darwin-aarch64|darwin-arm64) ASSET="homeboy-aarch64-apple-darwin.tar.xz" ;;
+  darwin-x86_64) echo "Homeboy no longer publishes an Intel macOS (x86_64-apple-darwin) binary. Build from source: cargo install --git https://github.com/Extra-Chill/homeboy" >&2; exit 1 ;;
   *) echo "Unsupported platform: ${OS}-${ARCH}" >&2; exit 1 ;;
 esac
 

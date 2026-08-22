@@ -2,9 +2,9 @@ use super::super::dispatch::{
     compact_exec_command_run, raw_exec_command_run, render_compact_exec_output,
 };
 use super::super::exec::{
-    exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
-    prepare_runner_exec_secret_env_plan, read_bounded, read_runner_exec_script,
-    read_runner_exec_script_from_reader, should_print_handoff,
+    exec_with_hydration, exec_workspace_context, prepare_runner_exec_command,
+    prepare_runner_exec_env, prepare_runner_exec_secret_env_plan, read_bounded,
+    read_runner_exec_script, read_runner_exec_script_from_reader, should_print_handoff,
     validate_runner_exec_invocation_shape, validate_runner_exec_public_env,
     RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
@@ -54,10 +54,11 @@ fn synced_node_workload_receives_runner_extension_environment() {
         )
         .expect("create runner");
 
-        let (output, code) = exec(
+        let (output, code) = exec_with_hydration(
             "lab-node",
             None,
             Some(project.path().display().to_string()),
+            false,
             None,
             false,
             false,
@@ -525,10 +526,11 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec(
+        let (output, exit_code) = exec_with_hydration(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            false,
             None,
             false,
             false,
@@ -605,10 +607,11 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec(
+        let (output, exit_code) = exec_with_hydration(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            false,
             None,
             false,
             false,
@@ -688,33 +691,11 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec(
-            "lab-local",
-            Some(workspace.path().display().to_string()),
-            None,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            Some(run.id.clone()),
-            Vec::new(),
-            Vec::new(),
-            vec!["summary.json".to_string()],
-            false,
-            false,
-            vec![
+        let (output, exit_code) = exec_with_hydration("lab-local", Some(workspace.path().display().to_string()), None, false, None, false, false, Vec::new(), None, Vec::new(), Vec::new(), None, None, false, Some(run.id.clone()), Vec::new(), Vec::new(), vec!["summary.json".to_string()], false, false, vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
-            ],
-            Vec::new(),
-        )
+            ], Vec::new())
         .expect("runner exec");
 
         assert_eq!(exit_code, 0);
@@ -1121,10 +1102,11 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
 
 #[test]
 fn runner_exec_rejects_artifacts_without_run_id() {
-    let err = exec(
+    let err = exec_with_hydration(
         "lab-local",
         None,
         None,
+        false,
         None,
         false,
         false,
@@ -1154,10 +1136,11 @@ fn runner_exec_rejects_artifacts_without_run_id() {
 fn read_only_artifact_exec_rejects_capture_patch() {
     // A read-only retrieval must never rewrite a draining generation, so it
     // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
-    let err = exec(
+    let err = exec_with_hydration(
         "lab-local",
         None,
         None,
+        false,
         None,
         false,
         true, // capture_patch
@@ -1189,10 +1172,11 @@ fn read_only_artifact_exec_rejects_capture_patch() {
 
 #[test]
 fn read_only_artifact_exec_rejects_declared_outputs() {
-    let err = exec(
+    let err = exec_with_hydration(
         "lab-local",
         None,
         None,
+        false,
         None,
         false,
         false,
@@ -1256,10 +1240,11 @@ fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -
 
 #[test]
 fn runner_exec_rejects_summaries_without_run_id() {
-    let err = exec(
+    let err = exec_with_hydration(
         "lab-local",
         None,
         None,
+        false,
         None,
         false,
         false,

@@ -96,6 +96,7 @@ pub fn copy_runner_artifact_source(
                     source: format!("{server_id}:{path}"),
                     destination: temp_path.display().to_string(),
                     recursive: true,
+                    directory_contents: false,
                     compress: true,
                     dry_run: false,
                     exclude: Vec::new(),

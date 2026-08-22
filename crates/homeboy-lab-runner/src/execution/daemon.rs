@@ -300,11 +300,18 @@ pub(super) fn exec_via_daemon(
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     let mut daemon_endpoint = local_url.to_string();
+    let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if Instant::now() >= deadline {
             let events = fetch_daemon_events(&client, &daemon_endpoint, &job.id.to_string())
                 .map(|events| redact_runner_job_events(&events, &env, &secret_env_names))
                 .unwrap_or_default();
+            record_and_report_promotion_progress_frames(
+                run_id.as_deref(),
+                &job.id.to_string(),
+                &events,
+                &mut reported_progress_sequence,
+            );
             return Err(daemon_job_wait_timeout(
                 runner,
                 &cwd,
@@ -346,6 +353,15 @@ pub(super) fn exec_via_daemon(
         })?;
         daemon_endpoint = refreshed_endpoint;
         job = refreshed_job;
+        if let Ok(events) = fetch_daemon_events(&client, &daemon_endpoint, &job_id) {
+            let events = redact_runner_job_events(&events, &env, &secret_env_names);
+            record_and_report_promotion_progress_frames(
+                run_id.as_deref(),
+                &job_id,
+                &events,
+                &mut reported_progress_sequence,
+            );
+        }
     }
     let job_id = job.id.to_string();
     let mut events = match fetch_daemon_events(&client, &daemon_endpoint, &job_id) {
@@ -356,6 +372,12 @@ pub(super) fn exec_via_daemon(
             ))
         }
     };
+    record_and_report_promotion_progress_frames(
+        run_id.as_deref(),
+        &job_id,
+        &events,
+        &mut reported_progress_sequence,
+    );
     append_agent_task_lifecycle_workload_event(
         &mut events,
         lab_runner_workload.as_ref(),
@@ -547,6 +569,104 @@ pub(super) fn exec_via_daemon(
         append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
     }
     Ok((output, exit_code))
+}
+
+pub(super) fn record_and_report_promotion_progress_frames(
+    run_id: Option<&str>,
+    runner_job_id: &str,
+    events: &[JobEvent],
+    last_sequence: &mut u64,
+) {
+    let frames = promotion_progress_frames(events, last_sequence);
+    if let Some(run_id) = run_id {
+        let _ = homeboy_agents::agent_task_lifecycle::record_promotion_progress_frames(
+            run_id,
+            runner_job_id,
+            frames.iter().map(|(sequence, _)| {
+                let event = events
+                    .iter()
+                    .find(|event| event.sequence == *sequence)
+                    .expect("selected promotion event exists");
+                (*sequence, event.data.clone().expect("promotion frame data"))
+            }),
+        );
+    }
+    for (_, message) in frames {
+        eprintln!("{message}");
+    }
+}
+
+fn promotion_progress_frames(events: &[JobEvent], last_sequence: &mut u64) -> Vec<(u64, String)> {
+    let mut frames = Vec::new();
+    for event in events {
+        if event.sequence <= *last_sequence {
+            continue;
+        }
+        *last_sequence = event.sequence;
+        let Some(message) = event
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/metadata/promotion/schema"))
+            .filter(|schema| {
+                schema.as_str() == Some(crate::progress::PROMOTION_PROGRESS_FRAME_SCHEMA)
+            })
+            .and_then(|_| {
+                event
+                    .data
+                    .as_ref()?
+                    .pointer("/metadata/promotion/message")?
+                    .as_str()
+            })
+        else {
+            continue;
+        };
+        frames.push((event.sequence, message.to_string()));
+    }
+    frames
+}
+
+#[cfg(test)]
+mod promotion_progress_tests {
+    use super::*;
+
+    fn frame(sequence: u64, message: &str) -> JobEvent {
+        JobEvent {
+            sequence,
+            job_id: uuid::Uuid::nil(),
+            kind: homeboy_core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: sequence,
+            message: None,
+            data: Some(json!({
+                "schema": "homeboy/runner-progress/v1",
+                "phase": "promotion",
+                "metadata": {
+                    "promotion": {
+                        "schema": crate::progress::PROMOTION_PROGRESS_FRAME_SCHEMA,
+                        "message": message,
+                    }
+                }
+            })),
+        }
+    }
+
+    #[test]
+    fn promotion_progress_replays_in_sequence_once_for_late_observers() {
+        let events = vec![
+            frame(4, "promotion progress: applying patch"),
+            frame(5, "promotion progress: gate running"),
+        ];
+        let mut cursor = 0;
+
+        assert_eq!(
+            promotion_progress_frames(&events, &mut cursor),
+            vec![
+                (4, "promotion progress: applying patch".to_string()),
+                (5, "promotion progress: gate running".to_string()),
+            ]
+        );
+        assert_eq!(cursor, 5);
+        assert!(promotion_progress_frames(&events, &mut cursor).is_empty());
+    }
 }
 
 pub(super) fn runner_exec_source_claim_error(

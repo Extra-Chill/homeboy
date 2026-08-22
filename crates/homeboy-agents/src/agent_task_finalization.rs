@@ -595,10 +595,14 @@ fn validate_gate_proof_binding(
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
     use crate::agent_task_promotion::AgentTaskPromotionStatus;
-    if gate_proof.promotion.status != AgentTaskPromotionStatus::Applied {
+    if gate_proof.promotion.status != AgentTaskPromotionStatus::Applied
+        && !(gate_proof.promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
+            && !gate_proof.promotion.changed_files.is_empty()
+            && gate_proof.promotion.finalization_eligible(false))
+    {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "durable gate proof must record an applied promotion",
+            "durable gate proof must record an applied promotion or a verified existing-candidate delta",
             None,
             None,
         ));

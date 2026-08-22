@@ -524,20 +524,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
     }
 }
 
-pub(crate) fn print_json_result_for_command(
-    result: Result<Value>,
-    exit_code: i32,
-    command: &str,
-    presentation: Option<CommandPresentationEnvelope>,
-) -> Result<()> {
-    print_json_result_for_identity(
-        result,
-        exit_code,
-        &CommandIdentity::top_level(command),
-        presentation,
-    )
-}
-
 pub fn print_json_result_for_identity(
     result: Result<Value>,
     exit_code: i32,

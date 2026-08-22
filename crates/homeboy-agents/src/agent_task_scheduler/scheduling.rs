@@ -1059,7 +1059,6 @@ impl AgentTaskScheduleSupport {
             AgentTaskOutcomeStatus::Succeeded
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
-                | AgentTaskOutcomeStatus::Timeout
                 | AgentTaskOutcomeStatus::CandidateRecoverable
         ) || !outcome
             .artifacts
