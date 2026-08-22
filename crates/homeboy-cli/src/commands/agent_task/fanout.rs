@@ -2673,152 +2673,12 @@ fn with_workspace_owner_repair_commands(
     Ok(worktrees)
 }
 
-/// Provider-managed destinations have provider-owned path policy. Dry-run
-/// therefore asks the provider's optional read-only plan command rather than
-/// deriving native sibling paths or invoking ensure.
-fn plan_provider_worktrees_dry_run(
-    args: &AgentTaskFanoutCookBatchArgs,
-    plan: &BatchCookFanoutPlan,
-) -> Result<worktree::WorktreeQueueCreateOutput> {
-    use homeboy::core::worktree_providers::{
-        plan_apply_enabled_worktree_provider_with_lifecycle_from_config,
-        WorktreeProviderCreateIntent, WorktreeProviderCreatePlan,
-    };
-
-    let config = homeboy::core::defaults::load_config();
-    let mut rows = Vec::new();
-    for cook in &plan.cooks {
-        let head = cook.head.as_ref().expect("generated cooks have heads");
-        let task_url = cook
-            .task_url
-            .as_ref()
-            .expect("generated cooks have task URLs");
-        let intent = WorktreeProviderCreateIntent {
-            handle: cook.to_worktree.clone(),
-            repo: args.repo.clone(),
-            base: args.from.clone(),
-            head: head.clone(),
-            task_url: task_url.clone(),
-        };
-        let command = worktree_create_command(args, head);
-        match plan_apply_enabled_worktree_provider_with_lifecycle_from_config(&intent, &config) {
-            Ok(WorktreeProviderCreatePlan::Existing(resolution)) => {
-                rows.push(worktree::WorktreeQueueCreateRow {
-                    branch: head.clone(),
-                    handle: resolution.worktree.handle,
-                    status: worktree::WorktreeQueueCreateStatus::Created,
-                    command,
-                    retry_after_seconds: None,
-                    active_lock_holder: None,
-                    path: Some(resolution.worktree.path),
-                    error: None,
-                });
-            }
-            Ok(WorktreeProviderCreatePlan::WouldCreate(resolution)) => {
-                rows.push(worktree::WorktreeQueueCreateRow {
-                    branch: head.clone(),
-                    handle: resolution.worktree.handle,
-                    status: worktree::WorktreeQueueCreateStatus::WouldCreate,
-                    command,
-                    retry_after_seconds: None,
-                    active_lock_holder: None,
-                    path: Some(resolution.worktree.path),
-                    error: None,
-                });
-            }
-            Err(error) => {
-                let mut row = worktree::WorktreeQueueCreateRow {
-                    branch: head.clone(),
-                    handle: cook.to_worktree.clone(),
-                    status: worktree::WorktreeQueueCreateStatus::Failed,
-                    command,
-                    retry_after_seconds: None,
-                    active_lock_holder: None,
-                    path: None,
-                    error: Some(error.message),
-                };
-                row.error = Some(
-                    serde_json::json!({
-                        "message": row.error,
-                        "details": error.details,
-                    })
-                    .to_string(),
-                );
-                rows.push(row);
-            }
-        }
-    }
-    Ok(worktree::WorktreeQueueCreateOutput {
-        schema: "homeboy/worktree-queue-create/v1",
-        repo: args.repo.clone(),
-        base_ref: args.from.clone(),
-        dry_run: true,
-        rows,
-    })
-}
-
 fn configured_provider_workspace_creation() -> Result<bool> {
     let config = homeboy::core::defaults::load_config();
     Ok(config
         .worktree_providers
         .values()
         .any(|provider| provider.enabled && provider.apply_enabled))
-}
-
-/// Dry-run observes existing managed worktrees but only plans creation for
-/// missing handles. This preserves the exact native creation path while never
-/// asking dispatch to resolve a workspace that does not exist yet.
-fn queue_or_reuse_worktrees_dry_run(
-    args: &AgentTaskFanoutCookBatchArgs,
-    plan: &BatchCookFanoutPlan,
-    queue_create: impl Fn(Vec<&BatchCookSpec>, bool) -> Result<worktree::WorktreeQueueCreateOutput>,
-) -> Result<worktree::WorktreeQueueCreateOutput> {
-    let mut reused = Vec::new();
-    let mut to_create = Vec::new();
-    for cook in &plan.cooks {
-        let branch = cook.head.as_ref().expect("generated cooks have heads");
-        match active_registered_worktree_path(&cook.to_worktree) {
-            Some(path) => {
-                reused.push(worktree::WorktreeQueueCreateRow {
-                    branch: branch.clone(),
-                    handle: cook.to_worktree.clone(),
-                    status: worktree::WorktreeQueueCreateStatus::Created,
-                    command: worktree_create_command(args, branch),
-                    retry_after_seconds: None,
-                    active_lock_holder: None,
-                    path: Some(path),
-                    error: None,
-                });
-            }
-            _ => to_create.push(cook),
-        }
-    }
-    let planned = queue_create(to_create, true)?;
-    let rows = plan
-        .cooks
-        .iter()
-        .filter_map(|cook| {
-            let branch = cook.head.as_ref().expect("generated cooks have heads");
-            reused
-                .iter()
-                .find(|row| row.handle == cook.to_worktree)
-                .cloned()
-                .or_else(|| {
-                    planned
-                        .rows
-                        .iter()
-                        .find(|row| row.branch == *branch)
-                        .cloned()
-                })
-        })
-        .collect();
-    Ok(worktree::WorktreeQueueCreateOutput {
-        schema: "homeboy/worktree-queue-create/v1",
-        repo: args.repo.clone(),
-        base_ref: args.from.clone(),
-        dry_run: true,
-        rows,
-    })
 }
 
 fn active_registered_worktree_path(handle: &str) -> Option<String> {
@@ -2864,24 +2724,6 @@ fn preflight_batch_cook_recipes(
             options.attempt_dispatcher = Some(dispatcher(&options));
         }
         agent_task_service::validate_initial_recipe_compatibility(&options)?;
-    }
-    Ok(())
-}
-
-/// A dry-run validates the immutable recipe declaration, not a future
-/// workspace. Dispatch compilation resolves workspace handles by design, so it
-/// runs only after execution has materialized the declared destination.
-fn preflight_batch_cook_recipe_declarations(
-    plan: &BatchCookFanoutPlan,
-    static_planning: bool,
-) -> Result<()> {
-    for cook in &plan.cooks {
-        // Invocation construction resolves provider disclosure metadata. That
-        // is execution hydration, so static planning limits itself to the
-        // already-validated declaration and leaves provider resolution to run.
-        if !static_planning {
-            cook.to_cook_invocation(plan)?;
-        }
     }
     Ok(())
 }
@@ -4393,10 +4235,6 @@ fn profile_replay_requires_redaction(spec: &str) -> bool {
                     .is_some_and(|commands| !commands.is_empty())
             })
         })
-}
-
-fn has_private_gates(args: &AgentTaskFanoutCookBatchArgs) -> bool {
-    has_private_gate_declaration(args)
 }
 
 /// Before Cook resolves issue assignments, conservatively treat any declared

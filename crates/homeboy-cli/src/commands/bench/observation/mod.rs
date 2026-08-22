@@ -9,10 +9,6 @@ pub(in crate::commands::bench) use lifecycle::{
 };
 
 #[cfg(test)]
-pub(in crate::commands::bench::observation) use artifacts::apply_recorded_bench_artifact_links;
-#[cfg(test)]
-pub(in crate::commands::bench::observation) use homeboy::core::observation::ArtifactRecord;
-#[cfg(test)]
 pub(in crate::commands::bench::observation) use lifecycle::BenchObservationSummary;
 
 #[cfg(test)]

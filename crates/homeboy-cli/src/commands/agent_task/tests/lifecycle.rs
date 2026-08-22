@@ -1606,8 +1606,11 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let error = run_resume_with_executor(
+        let error = run_resume_with_executor_and_bridge(
             "run-cli-resume-transport-proxy".to_string(),
+            false,
+            None,
+            false,
             executor.clone(),
         )
         .expect_err("transport proxy needs runner recovery");
@@ -1692,8 +1695,8 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let (_, exit_code) =
-            run_next_with_executor(executor.clone()).expect("run-next skips proxy");
+        let (_, exit_code) = run_next_with_executor_and_fanout(executor.clone(), None)
+            .expect("run-next skips proxy");
 
         assert_eq!(exit_code, 0);
         assert!(executor
@@ -3510,10 +3513,13 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_next_with_executor(Arc::new(InspectingExecutor {
-            run_id: "run-next-a".to_string(),
-            observed_status: Arc::clone(&observed_status),
-        }))
+        let (_value, exit_code) = run_next_with_executor_and_fanout(
+            Arc::new(InspectingExecutor {
+                run_id: "run-next-a".to_string(),
+                observed_status: Arc::clone(&observed_status),
+            }),
+            None,
+        )
         .expect("claimed run completed");
 
         let observed = observed_status
@@ -3604,10 +3610,13 @@ fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queu
 #[test]
 fn run_next_returns_unclaimed_when_no_queued_runs_exist() {
     with_temp_home(|| {
-        let (value, exit_code) = run_next_with_executor(Arc::new(InspectingExecutor {
-            run_id: "unused".to_string(),
-            observed_status: Arc::new(Mutex::new(None)),
-        }))
+        let (value, exit_code) = run_next_with_executor_and_fanout(
+            Arc::new(InspectingExecutor {
+                run_id: "unused".to_string(),
+                observed_status: Arc::new(Mutex::new(None)),
+            }),
+            None,
+        )
         .expect("run-next checked queue");
 
         assert_eq!(exit_code, 0);
@@ -4039,8 +4048,11 @@ fn resume_command_executes_existing_run() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_resume_with_executor(
+        let (_value, exit_code) = run_resume_with_executor_and_bridge(
             "run-resume-cli".to_string(),
+            false,
+            None,
+            false,
             Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
                 observed_status: Arc::clone(&observed_status),
