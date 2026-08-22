@@ -728,10 +728,23 @@ fn validate_adoption_merge_proof(
     expected: &AgentTaskPromotionCandidate,
     adoption_merge: Option<&serde_json::Value>,
 ) -> Result<()> {
-    let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
+    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
         return Ok(());
     };
-    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
+    let parents = git_output(
+        &options.path,
+        &["rev-list", "--parents", "-n", "1", &fingerprint.head],
+    )?;
+    let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
+    let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
+        if parents.len() == 2 {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "two-parent promoted candidate is missing its required adoption merge proof",
+                None,
+                None,
+            ));
+        }
         return Ok(());
     };
     let field = |name| {
@@ -760,15 +773,22 @@ fn validate_adoption_merge_proof(
             None,
         ));
     }
-    let parents = git_output(
-        &options.path,
-        &["rev-list", "--parents", "-n", "1", candidate],
-    )?;
-    let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
     if parents.as_slice() != [candidate_parent, resolved_base_parent] {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "adoption merge proof parents do not match the promoted merge candidate",
+            None,
+            None,
+        ));
+    }
+    let actual_candidate_tree = git_output(
+        &options.path,
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?;
+    if actual_candidate_tree != candidate_tree {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "adoption merge proof candidate tree does not match the promoted merge candidate",
             None,
             None,
         ));
