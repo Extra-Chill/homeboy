@@ -1140,6 +1140,47 @@ fn ensure_running_concurrent_callers_converge_on_same_daemon() {
 }
 
 #[test]
+fn ensure_running_concurrent_callers_wait_for_slow_startup() {
+    with_isolated_home(|_| {
+        let daemon = fake_daemon(4242, "lease-slow");
+        let state = Arc::new(Mutex::new(FakeEnsureState::default()));
+        let barrier = Arc::new(Barrier::new(3));
+        let first = ensure_with_slow_fake_operations(
+            Arc::clone(&barrier),
+            Arc::clone(&state),
+            daemon.clone(),
+        );
+        let second =
+            ensure_with_slow_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon);
+        barrier.wait();
+
+        let first = first.join().expect("first thread").expect("first ensure");
+        let second = second
+            .join()
+            .expect("second thread")
+            .expect("second ensure");
+        assert_eq!(first, second);
+        assert_eq!(state.lock().expect("state").starts, 1);
+    });
+}
+
+#[test]
+fn ensure_running_returns_the_startup_failure() {
+    with_isolated_home(|_| {
+        let err = ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            || Ok(fake_status(None, false)),
+            |_| false,
+            || Err(crate::error::Error::internal_unexpected("startup failed")),
+        )
+        .expect_err("startup failure must be returned to the caller");
+
+        assert_eq!(err.message, "startup failed");
+    });
+}
+
+#[test]
 fn startup_observation_requires_a_live_attempt_token() {
     let expected = "attempt-token";
     let wrong = fake_status(Some(fake_daemon(4242, "other-lease")), true);
@@ -1352,6 +1393,37 @@ fn ensure_with_fake_operations(
             },
             move |pid| pid == daemon_pid,
             move || {
+                let mut state = start_state.lock().expect("state");
+                state.starts += 1;
+                state.daemon = Some(daemon.clone());
+                Ok(daemon)
+            },
+        )
+    })
+}
+
+fn ensure_with_slow_fake_operations(
+    barrier: Arc<Barrier>,
+    state: Arc<Mutex<FakeEnsureState>>,
+    daemon: super::DaemonStartResult,
+) -> std::thread::JoinHandle<crate::error::Result<super::DaemonStartResult>> {
+    std::thread::spawn(move || {
+        barrier.wait();
+        let read_state = Arc::clone(&state);
+        let start_state = Arc::clone(&state);
+        let daemon_pid = daemon.pid;
+        ensure_running_with_operations(
+            Duration::from_secs(1),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            move || {
+                Ok(fake_status(
+                    read_state.lock().expect("state").daemon.clone(),
+                    true,
+                ))
+            },
+            move |pid| pid == daemon_pid,
+            move || {
+                std::thread::sleep(Duration::from_millis(100));
                 let mut state = start_state.lock().expect("state");
                 state.starts += 1;
                 state.daemon = Some(daemon.clone());
