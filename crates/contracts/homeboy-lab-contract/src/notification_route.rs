@@ -7,11 +7,67 @@ use serde::{Deserialize, Serialize};
 use homeboy_error::{Error, Result};
 
 pub const NOTIFICATION_ROUTE_METADATA_KEY: &str = "notification_route";
+pub const NOTIFICATION_RESOLUTION_METADATA_KEY: &str = "notification_resolution";
 pub const NOTIFICATION_TRANSPORT_ENV: &str = "HOMEBOY_NOTIFICATION_TRANSPORT";
 pub const NOTIFICATION_ROUTE_ENV: &str = "HOMEBOY_NOTIFICATION_ROUTE";
+pub const NOTIFICATION_RESOLUTION_ENV: &str = "HOMEBOY_NOTIFICATION_RESOLUTION";
 
 thread_local! {
     static CURRENT_NOTIFICATION_ROUTE: RefCell<Option<NotificationRoute>> = const { RefCell::new(None) };
+    static CURRENT_NOTIFICATION_RESOLUTION: RefCell<Option<NotificationRouteResolution>> = const { RefCell::new(None) };
+}
+
+/// Safe evidence of how a notification route was selected. This intentionally
+/// never includes the opaque route value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationRouteResolution {
+    pub schema: String,
+    pub classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver_transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_context: Vec<String>,
+}
+
+impl NotificationRouteResolution {
+    pub fn new(classification: impl Into<String>) -> Self {
+        Self {
+            schema: "homeboy/notification-route-resolution/v1".to_string(),
+            classification: classification.into(),
+            transport: None,
+            resolver_transport: None,
+            missing_context: Vec::new(),
+        }
+    }
+
+    pub fn insert_into_metadata(&self, metadata: &mut serde_json::Value) {
+        if !metadata.is_object() {
+            *metadata = serde_json::json!({});
+        }
+        metadata[NOTIFICATION_RESOLUTION_METADATA_KEY] =
+            serde_json::to_value(self).expect("notification resolution is serializable");
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == "homeboy/notification-route-resolution/v1"
+            && matches!(
+                self.classification.as_str(),
+                "explicit" | "environment" | "resolver" | "route_less" | "invalid"
+            )
+            && self.transport.as_deref().is_none_or(valid_transport_id)
+            && self
+                .resolver_transport
+                .as_deref()
+                .is_none_or(valid_transport_id)
+            && self.missing_context.len() <= 32
+            && self
+                .missing_context
+                .iter()
+                .all(|field| valid_safe_identifier(field, 128))
+    }
 }
 
 /// An opaque, non-secret destination owned by an installed notification transport.
@@ -32,12 +88,7 @@ impl NotificationRoute {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let valid_transport = !self.transport.is_empty()
-            && self.transport.len() <= 64
-            && self
-                .transport
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        let valid_transport = valid_transport_id(&self.transport);
         if !valid_transport {
             return Err(Error::validation_invalid_argument(
                 "notification_transport",
@@ -54,7 +105,7 @@ impl NotificationRoute {
             return Err(Error::validation_invalid_argument(
                 "notification_route",
                 "must be a non-empty, at most 4096-character opaque non-secret value without control characters or credential syntax",
-                Some(self.route.clone()),
+                None,
                 None,
             ));
         }
@@ -133,14 +184,48 @@ pub fn from_cli_or_env(
 /// through the environment therefore adds no exposure the delivery path did not
 /// already have.
 pub fn child_env(route: Option<&NotificationRoute>) -> Vec<(&'static str, String)> {
-    route
+    let mut environment = route
         .map(|route| {
             vec![
                 (NOTIFICATION_TRANSPORT_ENV, route.transport.clone()),
                 (NOTIFICATION_ROUTE_ENV, route.route.clone()),
             ]
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(resolution) = current_resolution().filter(NotificationRouteResolution::validate) {
+        environment.push((
+            NOTIFICATION_RESOLUTION_ENV,
+            serde_json::to_string(&resolution).expect("notification resolution is serializable"),
+        ));
+    }
+    environment
+}
+
+pub fn propagated_resolution_from_env(
+    route: Option<&NotificationRoute>,
+) -> Option<NotificationRouteResolution> {
+    let resolution = serde_json::from_str::<NotificationRouteResolution>(
+        &std::env::var(NOTIFICATION_RESOLUTION_ENV).ok()?,
+    )
+    .ok()?;
+    let matching_transport = match (resolution.transport.as_deref(), route) {
+        (Some(transport), Some(route)) => transport == route.transport,
+        (None, None) => true,
+        _ => false,
+    };
+    (resolution.validate() && matching_transport).then_some(resolution)
+}
+
+fn valid_transport_id(transport: &str) -> bool {
+    valid_safe_identifier(transport, 64)
+}
+
+fn valid_safe_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn contains_credential_syntax(route: &str) -> bool {
@@ -166,6 +251,23 @@ pub fn with_current<T>(route: Option<NotificationRoute>, operation: impl FnOnce(
 
 pub fn current() -> Option<NotificationRoute> {
     CURRENT_NOTIFICATION_ROUTE.with(|current| current.borrow().clone())
+}
+
+/// Bind route-resolution evidence for the command lifetime.
+pub fn with_current_resolution<T>(
+    resolution: Option<NotificationRouteResolution>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    CURRENT_NOTIFICATION_RESOLUTION.with(|current| {
+        let previous = current.replace(resolution);
+        let result = operation();
+        current.replace(previous);
+        result
+    })
+}
+
+pub fn current_resolution() -> Option<NotificationRouteResolution> {
+    CURRENT_NOTIFICATION_RESOLUTION.with(|current| current.borrow().clone())
 }
 
 /// A route captured from one thread so it can be re-bound on another.
@@ -212,11 +314,30 @@ mod tests {
     }
 
     #[test]
+    fn resolution_evidence_persists_without_the_opaque_route() {
+        let resolution = NotificationRouteResolution {
+            schema: "homeboy/notification-route-resolution/v1".to_string(),
+            classification: "route_less".to_string(),
+            transport: None,
+            resolver_transport: Some("example.completed".to_string()),
+            missing_context: vec!["CALLER_THREAD_ID".to_string()],
+        };
+        let mut metadata = serde_json::json!({});
+        resolution.insert_into_metadata(&mut metadata);
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(serialized.contains("CALLER_THREAD_ID"));
+        assert!(!serialized.contains("opaque-destination"));
+    }
+
+    #[test]
     fn malformed_route_is_rejected() {
         assert!(NotificationRoute::new("bad transport", "route").is_err());
         assert!(NotificationRoute::new("extension", "").is_err());
         assert!(NotificationRoute::new("extension", "line\nbreak").is_err());
         assert!(NotificationRoute::new("extension", "token=credential").is_err());
+        let error = NotificationRoute::new("extension", "opaque\ndestination").unwrap_err();
+        assert!(error.details.get("id").is_none());
+        assert!(!error.details.to_string().contains("destination"));
     }
 
     #[test]
@@ -272,6 +393,52 @@ mod tests {
                 (NOTIFICATION_ROUTE_ENV, "opaque/thread 42".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn child_env_carries_safe_resolution_evidence_without_the_route() {
+        let route = NotificationRoute::new("generic.completed", "opaque-destination").unwrap();
+        let mut resolution = NotificationRouteResolution::new("resolver");
+        resolution.transport = Some("generic.completed".to_string());
+        resolution.resolver_transport = Some("generic.completed".to_string());
+
+        let environment =
+            with_current_resolution(Some(resolution.clone()), || child_env(Some(&route)));
+        let serialized = environment
+            .iter()
+            .find_map(|(name, value)| (*name == NOTIFICATION_RESOLUTION_ENV).then_some(value))
+            .expect("resolution environment");
+
+        assert_eq!(
+            serde_json::from_str::<NotificationRouteResolution>(serialized).unwrap(),
+            resolution
+        );
+        assert!(!serialized.contains("opaque-destination"));
+    }
+
+    #[test]
+    fn propagated_resolution_requires_the_same_transport() {
+        let _lock = env_lock().lock().unwrap();
+        let old_resolution = std::env::var(NOTIFICATION_RESOLUTION_ENV).ok();
+        let route = NotificationRoute::new("generic.completed", "opaque-destination").unwrap();
+        let mut resolution = NotificationRouteResolution::new("resolver");
+        resolution.transport = Some("generic.completed".to_string());
+        std::env::set_var(
+            NOTIFICATION_RESOLUTION_ENV,
+            serde_json::to_string(&resolution).unwrap(),
+        );
+
+        assert_eq!(
+            propagated_resolution_from_env(Some(&route)),
+            Some(resolution)
+        );
+        let other_route = NotificationRoute::new("other.completed", "other-route").unwrap();
+        assert!(propagated_resolution_from_env(Some(&other_route)).is_none());
+
+        match old_resolution {
+            Some(value) => std::env::set_var(NOTIFICATION_RESOLUTION_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_RESOLUTION_ENV),
+        }
     }
 
     /// A half-set pair is a hard error in `from_cli_or_env`, so an absent route

@@ -283,6 +283,13 @@ It must write exactly one JSON result to stdout:
 {"schema":"homeboy/notification-route-resolver/v1","status":"unmatched"}
 ```
 
+An unmatched resolver may name the caller-context fields that would permit a
+match. Names are bounded ASCII identifiers; values must never be returned:
+
+```json
+{"schema":"homeboy/notification-route-resolver/v1","status":"unmatched","missing_context":["CALLER_THREAD_ID"]}
+```
+
 or:
 
 ```json
@@ -300,6 +307,9 @@ typed `notification_route_resolver` diagnostic. Timed-out Unix resolvers are
 killed as a process group so descendants cannot retain their pipes. A selected
 route is validated and bound before durable submission, so detached, fanout,
 resume, daemon, and delivery paths reuse their existing route persistence.
+Route resolution evidence persists the classification, transport identity, and
+missing context names, but never the opaque route value. A detached route-less
+Cook warns before handoff and `agent-task status` retains the same safe evidence.
 Cook seals to its pinned controller runtime before ambient discovery, so exactly
 that executing runtime resolves and persists the selected route once.
 

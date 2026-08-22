@@ -17,10 +17,14 @@ use homeboy_extension_contract::{
     NOTIFICATION_ROUTE_RESOLVER_REQUEST_SCHEMA, NOTIFICATION_ROUTE_RESOLVER_SCHEMA,
 };
 
-use crate::{extension_store::load_all_extensions, notification_route::NotificationRoute};
+use crate::{
+    extension_store::load_all_extensions,
+    notification_route::{NotificationRoute, NotificationRouteResolution},
+};
 
 const AMBIENT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLVER_OUTPUT_LIMIT: usize = 16 * 1024;
+const MAX_MISSING_CONTEXT_FIELDS: usize = 32;
 
 /// Ask installed transport resolvers for a route. One match is selected; zero
 /// matches retains route-less behavior. Ambient discovery has one aggregate
@@ -28,12 +32,25 @@ const RESOLVER_OUTPUT_LIMIT: usize = 16 * 1024;
 /// A resolver that cannot start or exceeds that deadline is skipped with a
 /// bounded diagnostic; malformed, invalid, and ambiguous results fail closed.
 pub fn resolve_installed() -> Result<Option<NotificationRoute>> {
+    Ok(resolve_installed_with_evidence()?.route)
+}
+
+/// Resolve installed extension routes while retaining safe admission evidence.
+pub fn resolve_installed_with_evidence() -> Result<ResolvedNotificationRoute> {
     resolve_installed_with_timeout(AMBIENT_DISCOVERY_TIMEOUT)
 }
 
-fn resolve_installed_with_timeout(timeout: Duration) -> Result<Option<NotificationRoute>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNotificationRoute {
+    pub route: Option<NotificationRoute>,
+    pub evidence: NotificationRouteResolution,
+}
+
+fn resolve_installed_with_timeout(timeout: Duration) -> Result<ResolvedNotificationRoute> {
     let extensions = load_all_extensions()?;
     let mut matches = Vec::new();
+    let mut missing_context = Vec::new();
+    let mut resolver_transports = Vec::new();
     let started = Instant::now();
     for extension in extensions {
         for transport in &extension.notification_transports {
@@ -42,7 +59,7 @@ fn resolve_installed_with_timeout(timeout: Duration) -> Result<Option<Notificati
             };
             let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                 ambient_discovery_warning("notification route resolver discovery timed out");
-                return select_match(matches);
+                return select_match(matches, resolver_transports, missing_context);
             };
             match invoke(
                 resolver,
@@ -50,25 +67,51 @@ fn resolve_installed_with_timeout(timeout: Duration) -> Result<Option<Notificati
                 extension.extension_path.as_deref().unwrap_or_default(),
                 remaining,
             ) {
-                Ok(Some(route)) => matches.push(route),
-                Ok(None) => {}
+                Ok(ResolverResult::Matched(route)) => matches.push(route),
+                Ok(ResolverResult::Unmatched {
+                    missing_context: missing,
+                }) => {
+                    resolver_transports.push(transport.id.clone());
+                    missing_context.extend(missing);
+                }
                 Err(InvokeError::Optional(message)) => {
                     ambient_discovery_warning(message);
                     if started.elapsed() >= timeout {
-                        return select_match(matches);
+                        return select_match(matches, resolver_transports, missing_context);
                     }
                 }
                 Err(InvokeError::Fatal(error)) => return Err(error),
             }
         }
     }
-    select_match(matches)
+    select_match(matches, resolver_transports, missing_context)
 }
 
-fn select_match(mut matches: Vec<NotificationRoute>) -> Result<Option<NotificationRoute>> {
+fn select_match(
+    mut matches: Vec<NotificationRoute>,
+    resolver_transports: Vec<String>,
+    mut missing_context: Vec<String>,
+) -> Result<ResolvedNotificationRoute> {
     match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
+        0 => {
+            missing_context.sort();
+            missing_context.dedup();
+            let mut evidence = NotificationRouteResolution::new("route_less");
+            evidence.resolver_transport =
+                (resolver_transports.len() == 1).then(|| resolver_transports[0].clone());
+            evidence.missing_context = missing_context;
+            Ok(ResolvedNotificationRoute {
+                route: None,
+                evidence,
+            })
+        }
+        1 => {
+            let route = matches.pop();
+            let mut evidence = NotificationRouteResolution::new("resolver");
+            evidence.transport = route.as_ref().map(|route| route.transport.clone());
+            evidence.resolver_transport = evidence.transport.clone();
+            Ok(ResolvedNotificationRoute { route, evidence })
+        }
         _ => Err(resolver_error(
             "more than one installed notification route resolver matched",
         )),
@@ -87,9 +130,39 @@ pub fn resolve_from_cli_or_env(
     }
 }
 
+/// Resolve explicit argv or propagated environment context with its source.
+pub fn resolve_from_cli_or_env_with_evidence(
+    cli_transport: Option<&str>,
+    cli_route: Option<&str>,
+) -> Result<ResolvedNotificationRoute> {
+    let route = resolve_from_cli_or_env(cli_transport, cli_route)
+        .map_err(with_invalid_resolution_evidence)?;
+    let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
+        "explicit"
+    } else if route.is_some() {
+        "environment"
+    } else {
+        "route_less"
+    });
+    evidence.transport = route.as_ref().map(|route| route.transport.clone());
+    if cli_transport.is_none() {
+        if let Some(propagated) =
+            crate::notification_route::propagated_resolution_from_env(route.as_ref())
+        {
+            evidence = propagated;
+        }
+    }
+    Ok(ResolvedNotificationRoute { route, evidence })
+}
+
 enum InvokeError {
     Optional(&'static str),
     Fatal(Error),
+}
+
+enum ResolverResult {
+    Matched(NotificationRoute),
+    Unmatched { missing_context: Vec<String> },
 }
 
 fn invoke(
@@ -97,7 +170,7 @@ fn invoke(
     transport: &str,
     extension_path: &str,
     timeout: Duration,
-) -> std::result::Result<Option<NotificationRoute>, InvokeError> {
+) -> std::result::Result<ResolverResult, InvokeError> {
     let argv: Vec<String> = resolver
         .command
         .iter()
@@ -189,11 +262,25 @@ fn invoke(
             "notification route resolver returned an unsupported schema",
         )));
     }
+    if response.missing_context.len() > MAX_MISSING_CONTEXT_FIELDS
+        || response
+            .missing_context
+            .iter()
+            .any(|field| !valid_context_field_name(field))
+    {
+        return Err(InvokeError::Fatal(resolver_error(
+            "notification route resolver returned invalid missing context field names",
+        )));
+    }
     match (response.status, response.route) {
-        (NotificationRouteResolverStatus::Unmatched, None) => Ok(None),
-        (NotificationRouteResolverStatus::Matched, Some(route)) => {
+        (NotificationRouteResolverStatus::Unmatched, None) => Ok(ResolverResult::Unmatched {
+            missing_context: response.missing_context,
+        }),
+        (NotificationRouteResolverStatus::Matched, Some(route))
+            if response.missing_context.is_empty() =>
+        {
             NotificationRoute::new(transport, route)
-                .map(Some)
+                .map(ResolverResult::Matched)
                 .map_err(|_| {
                     InvokeError::Fatal(resolver_error(
                         "notification route resolver returned an invalid route",
@@ -204,6 +291,14 @@ fn invoke(
             "notification route resolver returned an invalid result shape",
         ))),
     }
+}
+
+fn valid_context_field_name(field: &str) -> bool {
+    !field.is_empty()
+        && field.len() <= 128
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn terminate(child: &mut std::process::Child, reader: Option<thread::JoinHandle<(Vec<u8>, bool)>>) {
@@ -256,7 +351,23 @@ fn read_bounded(mut reader: impl Read) -> (Vec<u8>, bool) {
 }
 
 fn resolver_error(message: &str) -> Error {
-    Error::validation_invalid_argument("notification_route_resolver", message, None, None)
+    with_invalid_resolution_evidence(Error::validation_invalid_argument(
+        "notification_route_resolver",
+        message,
+        None,
+        None,
+    ))
+}
+
+fn with_invalid_resolution_evidence(mut error: Error) -> Error {
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "notification_resolution".to_string(),
+            serde_json::to_value(NotificationRouteResolution::new("invalid"))
+                .expect("notification resolution is serializable"),
+        );
+    }
+    error
 }
 
 #[cfg(test)]
@@ -365,7 +476,9 @@ mod tests {
             install_resolver("resolver-two", "sleep 1");
             let started = Instant::now();
             assert_eq!(
-                resolve_installed_with_timeout(Duration::from_millis(100)).unwrap(),
+                resolve_installed_with_timeout(Duration::from_millis(100))
+                    .unwrap()
+                    .route,
                 None
             );
             assert!(started.elapsed() < Duration::from_millis(500));
@@ -388,5 +501,55 @@ mod tests {
                 Some(NotificationRoute::new("chosen.transport", "chosen-route").unwrap())
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmatched_resolver_reports_safe_missing_caller_context() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver(
+                "resolver-test",
+                "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"unmatched\",\"missing_context\":[\"CALLER_THREAD_ID\"]}'",
+            );
+            let resolution = resolve_installed_with_evidence().unwrap();
+            assert!(resolution.route.is_none());
+            assert_eq!(resolution.evidence.classification, "route_less");
+            assert_eq!(
+                resolution.evidence.resolver_transport.as_deref(),
+                Some("synthetic.completed")
+            );
+            assert_eq!(resolution.evidence.missing_context, ["CALLER_THREAD_ID"]);
+            assert!(serde_json::to_string(&resolution.evidence)
+                .unwrap()
+                .contains("CALLER_THREAD_ID"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_missing_context_diagnostics_fail_closed() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver(
+                "resolver-test",
+                "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"unmatched\",\"missing_context\":[\"token=opaque-destination\"]}'",
+            );
+            let error = resolve_installed_with_evidence().unwrap_err();
+            assert!(error.to_string().contains("invalid missing context"));
+            assert!(!error.to_string().contains("opaque-destination"));
+        });
+    }
+
+    #[test]
+    fn explicit_and_environment_context_have_distinct_evidence() {
+        let explicit = resolve_from_cli_or_env_with_evidence(Some("chosen"), Some("route"))
+            .expect("explicit route");
+        assert_eq!(explicit.evidence.classification, "explicit");
+        assert_eq!(explicit.evidence.transport.as_deref(), Some("chosen"));
+
+        let invalid = resolve_from_cli_or_env_with_evidence(Some("chosen"), None).unwrap_err();
+        assert_eq!(
+            invalid.details["notification_resolution"]["classification"],
+            "invalid"
+        );
     }
 }

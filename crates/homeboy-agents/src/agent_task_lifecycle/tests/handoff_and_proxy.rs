@@ -254,6 +254,30 @@ fn submit_plan_persists_queued_status() {
     });
 }
 
+#[test]
+fn submit_plan_persists_safe_route_resolution_without_a_destination() {
+    with_isolated_home(|_| {
+        let mut resolution =
+            homeboy_core::notification_route::NotificationRouteResolution::new("route_less");
+        resolution.resolver_transport = Some("generic.completed".to_string());
+        resolution.missing_context = vec!["CALLER_THREAD_ID".to_string()];
+
+        let record = homeboy_core::notification_route::with_current_resolution(
+            Some(resolution.clone()),
+            || submit_plan(&test_plan(), Some("route-less-cook")).expect("submitted"),
+        );
+
+        assert_eq!(
+            record.metadata["notification_resolution"],
+            serde_json::to_value(resolution).unwrap()
+        );
+        assert!(record.metadata.get("notification_route").is_none());
+        assert!(!serde_json::to_string(&record.metadata)
+            .unwrap()
+            .contains("opaque-destination"));
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {

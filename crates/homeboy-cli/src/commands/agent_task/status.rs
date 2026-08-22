@@ -220,6 +220,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     // and the flag says so instead of leaving the caller to guess (#W3-15).
     attach_reconciled(&mut value, false);
     attach_status_identity(&mut value, &args.run_id, &target);
+    attach_notification_resolution(&mut value, &record);
     attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
@@ -779,6 +780,15 @@ fn attach_cook_notification_delivery(
     }
     if let Value::Object(fields) = value {
         fields.insert("notification_delivery".to_string(), outcome);
+    }
+}
+
+fn attach_notification_resolution(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Some(resolution) = record.metadata.get("notification_resolution") else {
+        return;
+    };
+    if let Value::Object(fields) = value {
+        fields.insert("notification_resolution".to_string(), resolution.clone());
     }
 }
 
@@ -5055,6 +5065,18 @@ fn compact_status_summary_with_aggregate(
             ],
         );
     }
+    if let Some(resolution) = record.get("notification_resolution") {
+        summary["notification_resolution"] = compact_fields(
+            resolution,
+            &[
+                "schema",
+                "classification",
+                "transport",
+                "resolver_transport",
+                "missing_context",
+            ],
+        );
+    }
     enforce_compact_status_budget(summary)
 }
 
@@ -5162,6 +5184,7 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
     // state, and the full-output command always survive this final pass.
     for section in [
         "notification_delivery",
+        "notification_resolution",
         "transport_recovery",
         "diagnostic_summary",
         "failure_reasons",
@@ -7663,6 +7686,35 @@ mod tests {
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn compact_status_surfaces_route_less_resolver_diagnostics_without_destination() {
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "queued",
+                "tasks": [],
+                "notification_resolution": {
+                    "schema": "homeboy/notification-route-resolution/v1",
+                    "classification": "route_less",
+                    "resolver_transport": "generic.completed",
+                    "missing_context": ["CALLER_THREAD_ID"],
+                    "route": "opaque-destination"
+                }
+            }),
+            "cook-attempt-1",
+        );
+
+        assert_eq!(
+            summary["notification_resolution"]["classification"],
+            "route_less"
+        );
+        assert_eq!(
+            summary["notification_resolution"]["missing_context"],
+            json!(["CALLER_THREAD_ID"])
+        );
+        assert!(summary["notification_resolution"].get("route").is_none());
     }
 
     #[test]
