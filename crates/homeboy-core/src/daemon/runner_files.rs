@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::remote_runner;
 use super::runner_workspace_root;
-use super::{FilePathRequest, FileUploadRequest};
+use super::{FilePathRequest, FileUploadChunkRequest, FileUploadRequest};
 use crate::broker_auth::BrokerScope;
 use crate::error::{Error, Result};
 
@@ -135,6 +135,106 @@ pub(super) fn upload_runner_file(
         "path": path.display().to_string(),
         "size_bytes": content.len(),
     }))
+}
+
+pub(super) fn upload_runner_file_chunk(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<serde_json::Value> {
+    let request: FileUploadChunkRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse file upload chunk request".to_string()),
+            )
+        })?;
+    broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
+    let path = resolve_runner_workspace_path(
+        &request.runner_id,
+        &request.path,
+        request.workspace_root.as_deref(),
+    )?;
+    let upload_id = uuid::Uuid::parse_str(&request.upload_id).map_err(|_| {
+        Error::validation_invalid_argument(
+            "upload_id",
+            "runner file upload chunk requires a UUID upload id",
+            Some(request.upload_id.clone()),
+            None,
+        )
+    })?;
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(&request.content_base64)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "content_base64",
+                format!("runner file upload chunk content is not valid base64: {error}"),
+                None,
+                None,
+            )
+        })?;
+    if content.len() > 64 * 1024 {
+        return Err(Error::validation_invalid_argument(
+            "content_base64",
+            "runner file upload chunk exceeds the 65536-byte limit",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let temp = path.with_file_name(format!(
+        ".{}.{}.upload",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("upload"),
+        upload_id
+    ));
+    let current = fs::metadata(&temp)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if current != request.offset || current + content.len() as u64 > request.size_bytes {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "runner evidence chunk does not match its declared offset or size",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(if request.private { 0o600 } else { 0o644 });
+    }
+    let mut file = options
+        .open(&temp)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(temp.display().to_string())))?;
+    file.write_all(&content)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| Error::internal_io(error.to_string(), Some(temp.display().to_string())))?;
+    let size = current + content.len() as u64;
+    if request.final_chunk {
+        let expected = request.sha256.as_deref().ok_or_else(|| {
+            Error::invalid_argument(
+                "sha256",
+                "final runner file upload chunk requires a SHA-256",
+            )
+        })?;
+        if size != request.size_bytes || crate::artifact_metadata::sha256_file(&temp)? != expected {
+            let _ = fs::remove_file(&temp);
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "runner evidence chunk upload does not match its declared digest or size",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        fs::rename(&temp, &path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+    }
+    Ok(
+        json!({"runner_id": request.runner_id, "path": path.display().to_string(), "size_bytes": size, "final": request.final_chunk}),
+    )
 }
 
 pub(super) fn download_runner_file(

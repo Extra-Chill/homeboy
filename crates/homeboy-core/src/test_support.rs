@@ -2061,6 +2061,42 @@ fn handle_reverse_broker_request(
         }
         return ok(json!({ "uploaded": true }));
     }
+    if request.method == "POST" && request.path == "/files/upload-chunk" {
+        use base64::Engine;
+        use std::io::Write;
+        let path = request.body["path"].as_str().expect("broker chunk path");
+        let upload_id = request.body["upload_id"].as_str().expect("broker chunk id");
+        let offset = request.body["offset"]
+            .as_u64()
+            .expect("broker chunk offset");
+        let size = request.body["size_bytes"]
+            .as_u64()
+            .expect("broker chunk size");
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(
+                request.body["content_base64"]
+                    .as_str()
+                    .expect("broker chunk content"),
+            )
+            .expect("decode broker chunk");
+        let temp = format!("{path}.{upload_id}.fixture-upload");
+        let current = std::fs::metadata(&temp)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        assert_eq!(current, offset, "broker chunk offset");
+        assert!(current + content.len() as u64 <= size, "broker chunk size");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&temp)
+            .expect("open broker chunk");
+        file.write_all(&content).expect("write broker chunk");
+        if request.body["final"].as_bool().unwrap_or(false) {
+            assert_eq!(current + content.len() as u64, size, "broker final size");
+            std::fs::rename(&temp, path).expect("publish broker chunk");
+        }
+        return ok(json!({ "uploaded": true }));
+    }
     if request.method == "POST" && request.path == "/files/download" {
         use base64::Engine;
         let path = request.body["path"].as_str().expect("broker download path");

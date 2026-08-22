@@ -758,7 +758,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--provider-profile` | `<PROFILE>` | _no help text_ |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--provider-config` | `<JSON>` | _no help text_ |
-| `--provider-evidence` | `<JSON>` | Read-only external file projected into every child Cook workspace |
+| `--provider-evidence` | `<JSON>` | Read-only external file streamed into a private, digest-addressed projection in every child Cook workspace (64 MiB maximum per file) |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. When omitted, each child derives its disclosure from its effective provider and model selection |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |

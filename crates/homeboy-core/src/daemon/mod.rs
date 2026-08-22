@@ -55,7 +55,10 @@ pub use control::{
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 use patch_capture::{capture_baseline, capture_patch_report};
-use runner_files::{create_runner_file_directory, download_runner_file, upload_runner_file};
+use runner_files::{
+    create_runner_file_directory, download_runner_file, upload_runner_file,
+    upload_runner_file_chunk,
+};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
@@ -929,6 +932,24 @@ pub(super) struct FileUploadRequest {
     private: bool,
     #[serde(default)]
     atomic: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FileUploadChunkRequest {
+    runner_id: String,
+    path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    upload_id: String,
+    offset: u64,
+    content_base64: String,
+    #[serde(rename = "final")]
+    final_chunk: bool,
+    #[serde(default)]
+    sha256: Option<String>,
+    size_bytes: u64,
+    #[serde(default)]
+    private: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1838,6 +1859,10 @@ where
             Ok(body) => daemon_endpoint_response("files.upload", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
+        ("POST", "/files/upload-chunk") => match upload_runner_file_chunk(body, &broker_auth) {
+            Ok(body) => daemon_endpoint_response("files.upload_chunk", body),
+            Err(err) => remote_runner::auth_or_bad_request(err),
+        },
         ("POST", "/files/download") => match download_runner_file(body, &broker_auth) {
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
@@ -1869,9 +1894,10 @@ where
             artifact: None,
         },
         ("GET", "/lifecycle/stop") => method_not_allowed(),
-        ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
-            method_not_allowed()
-        }
+        ("GET", "/files/mkdir")
+        | ("GET", "/files/upload")
+        | ("GET", "/files/upload-chunk")
+        | ("GET", "/files/download") => method_not_allowed(),
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs/reconcile")
         | ("POST", "/runner/workspace-claims/acquire")

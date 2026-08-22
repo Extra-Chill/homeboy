@@ -77,7 +77,8 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub secret_env: Vec<String>,
     #[arg(long = "provider-config", value_name = "JSON")]
     pub provider_config: Option<String>,
-    /// Read-only external file projected into every child Cook workspace.
+    /// Read-only external file streamed into a private, digest-addressed
+    /// projection in every child Cook workspace (64 MiB maximum per file).
     #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// AI tool disclosure recorded in every child PR's assistance attribution.

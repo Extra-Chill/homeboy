@@ -706,7 +706,15 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         .unwrap_or_else(|_| source_path.to_path_buf());
     let transfer = lab_runner_file_transfer(runner_id)?;
     let mut entries = Vec::new();
-    for (path, expected_sha256) in paths {
+    for (path, declared) in paths {
+        if declared.artifact_digest != declared.sha256 {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab evidence artifact digest does not match its declared SHA-256",
+                Some(path),
+                None,
+            ));
+        }
         let local = PathBuf::from(&path);
         let canonical = local.canonicalize().map_err(|error| {
             Error::validation_invalid_argument(
@@ -731,12 +739,14 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         );
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
         transfer.ensure_directory(parent)?;
-        transfer.upload_private_file_atomic(
+        transfer.upload_private_evidence_atomic(
             &canonical.display().to_string(),
             &remote,
-            expected_sha256
+            declared
+                .sha256
                 .strip_prefix("sha256:")
-                .unwrap_or(&expected_sha256),
+                .unwrap_or(&declared.sha256),
+            declared.size_bytes,
         )?;
         entries.push(workspace_mapping_entry_for_materialized_file(
             "provider_evidence",
@@ -747,9 +757,16 @@ fn materialize_agent_task_evidence_inputs_on_runner(
     Ok(entries)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredProviderEvidence {
+    sha256: String,
+    size_bytes: u64,
+    artifact_digest: String,
+}
+
 fn declared_agent_task_evidence_inputs(
     args: &[String],
-) -> std::collections::BTreeMap<String, String> {
+) -> std::collections::BTreeMap<String, DeclaredProviderEvidence> {
     let mut paths = std::collections::BTreeMap::new();
     for (index, arg) in args.iter().enumerate() {
         let spec = if matches!(arg.as_str(), "--plan" | "--attempt-plan") {
@@ -786,11 +803,23 @@ fn declared_agent_task_evidence_inputs(
                 continue;
             };
             for input in inputs {
-                if let (Some(path), Some(sha256)) = (
+                if let (Some(path), Some(sha256), Some(size_bytes), Some(artifact_digest)) = (
                     input.get("path").and_then(serde_json::Value::as_str),
                     input.get("sha256").and_then(serde_json::Value::as_str),
+                    input.get("size_bytes").and_then(serde_json::Value::as_u64),
+                    input
+                        .get("artifact")
+                        .and_then(|artifact| artifact.get("digest"))
+                        .and_then(serde_json::Value::as_str),
                 ) {
-                    paths.insert(path.to_string(), sha256.to_string());
+                    paths.insert(
+                        path.to_string(),
+                        DeclaredProviderEvidence {
+                            sha256: sha256.to_string(),
+                            size_bytes,
+                            artifact_digest: artifact_digest.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -1209,7 +1238,11 @@ mod tests {
             declared_agent_task_evidence_inputs(&args),
             std::collections::BTreeMap::from([(
                 "/workspace/.homeboy/evidence/one/input.json".to_string(),
-                "sha256:abc".to_string()
+                DeclaredProviderEvidence {
+                    sha256: "sha256:abc".to_string(),
+                    size_bytes: 4_194_304,
+                    artifact_digest: "sha256:abc".to_string(),
+                }
             )])
         );
         assert!(
@@ -1221,14 +1254,18 @@ mod tests {
             "homeboy".to_string(),
             format!(
                 "--plan={}",
-                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def"}]}}}]})
+                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def","size_bytes":3,"artifact":{"digest":"sha256:def"}}]}}}]})
             ),
         ];
         assert_eq!(
             declared_agent_task_evidence_inputs(&plan_equals),
             std::collections::BTreeMap::from([(
                 "/workspace/.homeboy/evidence/two/input.json".to_string(),
-                "sha256:def".to_string()
+                DeclaredProviderEvidence {
+                    sha256: "sha256:def".to_string(),
+                    size_bytes: 3,
+                    artifact_digest: "sha256:def".to_string(),
+                }
             )])
         );
     }
