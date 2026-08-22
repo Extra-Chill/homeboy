@@ -3981,10 +3981,6 @@ pub(super) fn run_next(args: RunNextArgs) -> CmdResult<Value> {
     )
 }
 
-pub(super) fn run_next_with_executor(executor: SharedAgentTaskExecutor) -> CmdResult<Value> {
-    run_next_with_executor_and_fanout(executor, None)
-}
-
 pub(super) fn run_next_with_executor_and_fanout(
     executor: SharedAgentTaskExecutor,
     fanout_id: Option<String>,
@@ -4033,13 +4029,6 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
         args.full,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
-}
-
-pub(super) fn run_resume_with_executor(
-    run_id: String,
-    executor: SharedAgentTaskExecutor,
-) -> CmdResult<Value> {
-    run_resume_with_executor_and_bridge(run_id, false, None, false, executor)
 }
 
 pub(super) fn run_resume_with_executor_and_bridge(
