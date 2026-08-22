@@ -3643,7 +3643,10 @@ fn provider_evidence_paths_equivalent(
 }
 
 fn approved_provider_evidence_spellings(canonical_path: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
     let mut spellings = vec![canonical_path.to_path_buf()];
+    #[cfg(not(target_os = "macos"))]
+    let spellings = vec![canonical_path.to_path_buf()];
     #[cfg(target_os = "macos")]
     if let Some(suffix) = canonical_path
         .to_str()
