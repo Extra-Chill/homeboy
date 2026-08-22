@@ -4681,12 +4681,20 @@ fn run_cook_spine(
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
+        // Recipe attempts retain logical input provenance. The controller plan
+        // is the canonical dispatch contract once pending workspace resolution
+        // has authenticated and projected a concrete root into it.
+        let plan = if lifecycle_store.record_exists(&latest_attempt.run_id)? {
+            lifecycle_store.read_controller_plan(&latest_attempt.run_id)?
+        } else {
+            latest_attempt.plan.clone()
+        };
         materialize_cook_attempt_with_stores(
             store,
             lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
-            &latest_attempt.plan,
+            &plan,
         )?;
     }
     // The recipe alone is resumable input, not a status-addressable run. Publish
@@ -7217,13 +7225,31 @@ fn cook_owned_unpushed_destination(
     if head == fingerprint.head {
         return Ok(None);
     }
-    let parent = homeboy_core::git::run_git(
+    let parents = homeboy_core::git::run_git(
         path,
-        &["rev-parse", "--verify", "HEAD^"],
-        "resolve Cook-owned committed candidate parent",
+        &["rev-list", "--parents", "-n", "1", "HEAD"],
+        "resolve Cook-owned committed candidate parents",
     )?
-    .trim()
-    .to_string();
+    .split_whitespace()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    if parents.len() != 2 {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            "clean unpushed checkout is not a single-parent Cook-owned promoted candidate",
+            Some(path.display().to_string()),
+            None,
+        );
+        error.details["workspace"] = serde_json::json!({
+            "classification": "workspace.cook_owned_unpushed_commit_mismatch",
+            "reason": "merge_commit",
+            "owning_layer": "cook",
+            "path": path,
+            "parents": parents,
+        });
+        return Err(error);
+    }
+    let parent = &parents[1];
     let tree = homeboy_core::git::run_git(
         path,
         &["rev-parse", "--verify", "HEAD^{tree}"],
@@ -7231,7 +7257,7 @@ fn cook_owned_unpushed_destination(
     )?
     .trim()
     .to_string();
-    if parent != fingerprint.head || tree != fingerprint.tree {
+    if parent != &fingerprint.head || tree != fingerprint.tree {
         let mut error = Error::validation_invalid_argument(
             "to_worktree",
             "clean unpushed checkout is not the exact one-commit Cook-owned promoted candidate",
@@ -7240,7 +7266,7 @@ fn cook_owned_unpushed_destination(
         );
         error.details["workspace"] = serde_json::json!({
             "classification": "workspace.cook_owned_unpushed_commit_mismatch",
-            "reason": if parent != fingerprint.head { "divergent_ancestry" } else { "unrelated_unpushed_commit" },
+            "reason": if parent != &fingerprint.head { "divergent_ancestry" } else { "unrelated_unpushed_commit" },
             "owning_layer": "cook",
             "path": path,
             "expected_parent": fingerprint.head,
