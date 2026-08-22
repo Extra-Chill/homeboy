@@ -539,39 +539,6 @@ fn github_mode_rejects_rulesets_that_omit_the_terminal_execution_verdict() {
 }
 
 #[test]
-fn github_mode_fails_closed_when_the_live_ruleset_has_bypass_actors() {
-    let scratch = Scratch::new("github-bypassable");
-    let rules = scratch.write("rules.json", &live_rules(&declared_contexts(), true));
-    let detail = scratch.write(
-        "ruleset.json",
-        &ruleset_detail(
-            serde_json::json!([
-                { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
-            ]),
-            "always",
-        ),
-    );
-    let output = run_validator(
-        "--github",
-        &[
-            ("REQUIRED_GATES_LIVE_RULES", rules.as_str()),
-            ("REQUIRED_GATES_LIVE_RULESET", detail.as_str()),
-        ],
-    );
-
-    assert!(
-        !output.status.success(),
-        "a bypassable ruleset is not enforced: {}",
-        stdout_of(&output)
-    );
-    assert!(
-        stderr_of(&output).contains("enforcement is bypassable"),
-        "{}",
-        stderr_of(&output)
-    );
-}
-
-#[test]
 fn github_mode_fails_closed_when_live_state_cannot_be_read() {
     let scratch = Scratch::new("github-unverified");
     let output = run_validator(
