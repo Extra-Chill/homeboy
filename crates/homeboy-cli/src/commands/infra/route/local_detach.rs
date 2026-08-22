@@ -405,7 +405,9 @@ pub(super) fn intercept_local_detached_cook(
                 return Err(error);
             }
         };
-        println!("{stdout}");
+        // `--output` owns the serialized acknowledgement until this point. Emit
+        // those exact bytes so both requested destinations carry one contract.
+        print!("{stdout}");
         return Ok(Some(0));
     }
 
