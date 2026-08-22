@@ -6,10 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
+    materialize_snapshot_piped, materialize_snapshot_stage,
     register_after_snapshot_directory_discovery_hook, scratch_scoped_command,
-    snapshot_archive_command, snapshot_install_command, snapshot_materialization_command,
-    snapshot_overlay_install_command, synthetic_checkout_value, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
+    snapshot_archive_command, snapshot_input_manifest, snapshot_install_command,
+    snapshot_overlay_install_command, snapshot_stable_manifest, synthetic_checkout_value,
+    validate_snapshot_stability, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_hash_for_policy, workspace_content_hash_v1,
     workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
@@ -1498,51 +1500,6 @@ fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
     }
 }
 
-/// Cover the command production actually executes, not a re-composition of its
-/// parts. `materialize_snapshot_piped` used to assemble the archive pipeline and
-/// the scratch prefix inline, so no test observed the assembled program; the
-/// scratch branch is taken unconditionally by `sync_workspace`, which is why a
-/// malformed composition took out every workspace-prune behavior test at once
-/// instead of a single targeted assertion (#10399).
-#[test]
-fn snapshot_materialization_command_parses_under_posix_shells() {
-    use homeboy_core::engine::shell;
-
-    let source = tempfile::tempdir().expect("snapshot source");
-    let local_target = format!(
-        "sh -c {}",
-        shell::quote_arg(&snapshot_install_command(
-            "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc"
-        ))
-    );
-
-    for excludes in [
-        vec![],
-        vec!["node_modules".to_string()],
-        vec!["./target".to_string(), "node_modules".to_string()],
-    ] {
-        for target in [local_target.as_str(), "ssh runner 'tar -xf -'"] {
-            for scratch in [
-                None,
-                Some(Path::new("/var/lib/homeboy/scratch dir")),
-                Some(Path::new("/var/lib/homeboy/scratch")),
-            ] {
-                let command =
-                    snapshot_materialization_command(source.path(), target, &excludes, scratch)
-                        .expect("snapshot materialization command");
-
-                assert_eq!(
-                    scratch.is_some(),
-                    command.starts_with("export TMPDIR="),
-                    "scratch scoping must be applied exactly when a scratch filesystem is admitted: {command}"
-                );
-
-                assert_parses_under_posix_shells(&command, "snapshot materialization command");
-            }
-        }
-    }
-}
-
 /// The install commands cross the same `sh -c` boundary as the archive
 /// pipeline, on both the local and the SSH runner path, so hold them to the
 /// same portability contract (#10399).
@@ -1586,6 +1543,117 @@ fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependen
         command.contains("tar --no-xattrs -C \"$stage/source\""),
         "the final snapshot archive must preserve internal symlink entries: {command}"
     );
+}
+
+#[test]
+fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
+    let source = tempfile::tempdir().expect("snapshot source");
+    let overlay = source.path().join("runtime-overlays");
+    fs::create_dir_all(&overlay).expect("runtime overlay source");
+    fs::write(overlay.join("runtime.js"), "runtime").expect("runtime artifact");
+
+    // This is the race that previously became `tar: ./runtime-overlays: Cannot
+    // stat` in a pipeline whose SSH side had already started. The typed manifest
+    // preserves the declaration identity and staging now fails before transport.
+    let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
+    fs::remove_dir_all(&overlay).expect("remove overlay after manifest creation");
+    let error = materialize_snapshot_stage(source.path(), &[], &manifest, None)
+        .expect_err("missing declared overlay must fail during local staging");
+
+    assert_eq!(error.retryable, Some(false));
+    assert_eq!(error.details["classification"], "snapshot_construction");
+    assert_eq!(error.details["declaration_id"], "root:runtime-overlays");
+    assert_eq!(
+        error.details["source_identity"],
+        serde_json::json!(overlay.display().to_string())
+    );
+    assert!(error.details["staging_output"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("/source")));
+    assert!(error.details["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("tar: ./runtime-overlays: Cannot stat")));
+    assert_eq!(
+        error.details["recovery"]["action"],
+        "rebuild_snapshot_staging_and_replay_cook"
+    );
+}
+
+#[test]
+fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
+    let source = tempfile::tempdir().expect("source");
+    let scratch = tempfile::tempdir().expect("admitted scratch");
+    let archive_list = tempfile::NamedTempFile::new().expect("archive list");
+    fs::write(source.path().join("runtime-overlays"), "runtime").expect("overlay");
+    fs::write(source.path().join("other"), "other").expect("other input");
+    let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
+        .expect("stage in admitted scratch");
+    assert!(stage.path().starts_with(scratch.path()));
+
+    materialize_snapshot_piped(
+        source.path(),
+        &format!(
+            "tar -tf - > {}",
+            homeboy_core::engine::shell::quote_arg(&archive_list.path().display().to_string())
+        ),
+        &[],
+        "test SSH snapshot transport",
+        Some(scratch.path()),
+    )
+    .expect("stage then transport snapshot");
+
+    let entries = fs::read_to_string(archive_list.path()).expect("tar input list");
+    assert!(entries.contains("runtime-overlays"));
+    assert!(entries.contains("other"));
+}
+
+#[test]
+fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift() {
+    let source = tempfile::tempdir().expect("source");
+    let scratch = tempfile::tempdir().expect("admitted scratch");
+    let marker = tempfile::NamedTempFile::new().expect("marker");
+    fs::remove_file(marker.path()).expect("remove marker");
+    let missing_source = source.path().join("missing-workspace");
+    let error = materialize_snapshot_piped(
+        &missing_source,
+        &format!("touch {}", marker.path().display()),
+        &[],
+        "test SSH snapshot transport",
+        Some(scratch.path()),
+    )
+    .expect_err("construction failure must reject transport");
+    assert_eq!(error.details["classification"], "snapshot_construction");
+    assert!(
+        !marker.path().exists(),
+        "transport must not start after staging failure"
+    );
+}
+
+#[test]
+fn snapshot_stability_rejects_a_mixed_staged_tree_even_if_source_is_restored() {
+    let source = tempfile::tempdir().expect("source");
+    let scratch = tempfile::tempdir().expect("scratch");
+    fs::write(source.path().join("runtime-overlays"), "before").expect("overlay");
+    let before = snapshot_stable_manifest(source.path(), &[]).expect("before manifest");
+    let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
+        .expect("stage");
+    fs::write(stage.path().join("source/runtime-overlays"), "mixed").expect("mutate stage");
+    fs::write(source.path().join("runtime-overlays"), "after").expect("mutate source");
+    fs::write(source.path().join("runtime-overlays"), "before").expect("restore source");
+    let staged =
+        snapshot_stable_manifest(&stage.path().join("source"), &[]).expect("staged manifest");
+    let after = snapshot_stable_manifest(source.path(), &[]).expect("after manifest");
+    let error = validate_snapshot_stability(
+        &before,
+        &staged,
+        &after,
+        source.path(),
+        &stage.path().join("source"),
+    )
+    .expect_err("mixed staged tree must fail even after source ABA restoration");
+    assert_eq!(error.details["classification"], "snapshot_construction");
 }
 
 #[cfg(unix)]
