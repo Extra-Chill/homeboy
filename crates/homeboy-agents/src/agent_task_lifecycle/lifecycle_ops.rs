@@ -453,6 +453,629 @@ pub fn record_detached_cook_handoff_parent_in_store(
     )
 }
 
+/// Persist a detached Cook while its Lab destination is not yet admissible.
+///
+/// The binding is deliberately assembled by the CLI from identities, immutable
+/// input references, and secret-free replay arguments. It never contains secret
+/// values or a redacted receipt that cannot replay. Reusing the Cook id for a
+/// different request is rejected before any destination can be provisioned.
+pub fn record_unmaterialized_cook_admission(
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_unmaterialized_cook_admission_in_store(&lifecycle_store, cook_id, binding, state, reason)
+}
+
+/// Create a complete detached parent and immutable admission binding in the
+/// first durable run-record write. Input bytes remain staged and this state is
+/// deliberately invisible to runner selection until publication is recovered.
+pub fn prepare_unmaterialized_cook_admission(
+    cook_id: &str,
+    binding: Value,
+    requested_state: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    validate_unmaterialized_admission_input(&binding, requested_state)?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    store.with_config_lock(|| {
+        let resolved = resolve_run_id_in_store(&store, &cook_id)?;
+        if resolved != cook_id {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "detached Cook id already resolves to an existing Cook attempt",
+                Some(cook_id.clone()),
+                None,
+            ));
+        }
+        if let Ok(existing) = store.read_record(&cook_id) {
+            if existing.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "detached Cook id collides with an existing non-handoff run",
+                    Some(cook_id.clone()),
+                    None,
+                ));
+            }
+            if existing.metadata["unmaterialized_cook_admission"]["binding"] != binding {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "Cook id is already bound to a different unmaterialized admission request",
+                    Some(cook_id.clone()),
+                    None,
+                ));
+            }
+            return Ok(existing);
+        }
+
+        let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+        let mut submission_metadata = serde_json::Map::new();
+        submission_metadata.insert(
+            "detached_cook_handoff".to_string(),
+            json!({
+                "state": "pending",
+                "admission_state": "unmaterialized",
+                "cook_id": cook_id,
+                "cancellation_fence": { "state": "open" },
+            }),
+        );
+        submission_metadata.insert(
+            "unmaterialized_cook_admission".to_string(),
+            unmaterialized_admission_value(
+                &cook_id,
+                binding.clone(),
+                "preparing_inputs",
+                requested_state,
+                reason,
+            ),
+        );
+        let runtime_root = homeboy_core::controller_runtime::runtime_root_in(store.roots().data())?;
+        submit_plan_with_runtime_admission_in_store(
+            &store,
+            &plan,
+            Some(&cook_id),
+            execution_runner_id(),
+            Some(submission_metadata),
+            Some(&|run_id| {
+                homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+            }),
+            |run_id| {
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                    &runtime_root,
+                    run_id,
+                    || Ok(store.read_record(run_id)?.state.is_terminal()),
+                )
+            },
+        )
+    })
+}
+
+fn validate_unmaterialized_admission_input(binding: &Value, state: &str) -> Result<()> {
+    if !matches!(
+        state,
+        "queued" | "blocked_runner_unavailable" | "blocked_runner_stale"
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.state",
+            "unmaterialized Cook admission requires a typed queued or runner-blocked state",
+            Some(state.to_string()),
+            None,
+        ));
+    }
+    if !binding.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.binding",
+            "unmaterialized Cook admission requires an immutable object binding",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn unmaterialized_admission_value(
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    requested_state: &str,
+    reason: &str,
+) -> Value {
+    json!({
+        "schema": "homeboy/unmaterialized-cook-admission/v1",
+        "state": state,
+        "requested_state": requested_state,
+        "reason": homeboy_core::redaction::redact_string(reason),
+        "binding": binding,
+        "admission_attempts": 0,
+        "fence": 0,
+        "retry": {
+            "policy": "bounded_exponential",
+            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339(),
+            "max_attempts": 20,
+        },
+        "commands": {
+            "status": format!("homeboy agent-task status {cook_id}"),
+            "watch": format!("homeboy agent-task status {cook_id} --watch"),
+            "cancel": format!("homeboy agent-task cancel {cook_id}"),
+            "resume": format!("homeboy agent-task resume {cook_id}"),
+            "resume_trigger": "daemon-tick-or-runner-admission-event",
+        },
+    })
+}
+
+pub fn record_unmaterialized_cook_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store.with_config_lock(|| {
+        record_unmaterialized_cook_admission_locked(
+            lifecycle_store,
+            cook_id,
+            binding,
+            state,
+            reason,
+        )
+    })
+}
+
+fn record_unmaterialized_cook_admission_locked(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    const SCHEMA: &str = "homeboy/unmaterialized-cook-admission/v1";
+    if !matches!(
+        state,
+        "queued" | "blocked_runner_unavailable" | "blocked_runner_stale"
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.state",
+            "unmaterialized Cook admission requires a typed queued or runner-blocked state",
+            Some(state.to_string()),
+            None,
+        ));
+    }
+    if !binding.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.binding",
+            "unmaterialized Cook admission requires an immutable object binding",
+            None,
+            None,
+        ));
+    }
+
+    let cook_id = sanitize_run_id(cook_id);
+    if lifecycle_store.read_record(&cook_id).is_err() {
+        let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+        let mut submission_metadata = serde_json::Map::new();
+        submission_metadata.insert(
+            "detached_cook_handoff".to_string(),
+            json!({
+                "state": "pending",
+                "admission_state": "unmaterialized",
+                "cook_id": cook_id,
+                "cancellation_fence": { "state": "open" },
+            }),
+        );
+        submission_metadata.insert(
+            "unmaterialized_cook_admission".to_string(),
+            unmaterialized_admission_value(&cook_id, binding, state, state, reason),
+        );
+        let runtime_root =
+            homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
+        let record = submit_plan_with_runtime_admission_in_store(
+            lifecycle_store,
+            &plan,
+            Some(&cook_id),
+            execution_runner_id(),
+            Some(submission_metadata),
+            Some(&|run_id| {
+                homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+            }),
+            |run_id| {
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                    &runtime_root,
+                    run_id,
+                    || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+                )
+            },
+        )?;
+        return record_cook_progress_in_store(
+            lifecycle_store,
+            &record.run_id,
+            state,
+            0,
+            Some(reason),
+        );
+    }
+    let _ = record_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id)?;
+    let state = state.to_string();
+    let reason = homeboy_core::redaction::redact_string(reason);
+    let binding_for_write = binding.clone();
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal()
+            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
+                == "cancelled"
+        {
+            return false;
+        }
+        let existing = &record.metadata["unmaterialized_cook_admission"];
+        if existing.is_object() {
+            // The first immutable admission owns retry/lease state. An
+            // idempotent duplicate must not erase an active replay claim.
+            return false;
+        }
+        record.metadata["unmaterialized_cook_admission"] = json!({
+            "schema": SCHEMA,
+            "state": state,
+            "reason": reason,
+            "binding": binding_for_write,
+            "admission_attempts": 0,
+            "fence": 0,
+            "retry": {
+                "policy": "bounded_exponential",
+                "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339(),
+                "max_attempts": 20,
+            },
+            "commands": {
+                "status": format!("homeboy agent-task status {cook_id}"),
+                "watch": format!("homeboy agent-task status {cook_id} --watch"),
+                "cancel": format!("homeboy agent-task cancel {cook_id}"),
+                "resume": format!("homeboy agent-task resume {cook_id}"),
+                "resume_trigger": "daemon-tick-or-runner-admission-event",
+            },
+        });
+        // Unlike the short pre-spawn lease, this admission is daemon-owned and
+        // remains live until cancellation, exhaustion, or materialization.
+        record.metadata["detached_cook_handoff"]["admission_state"] =
+            json!("unmaterialized");
+        record.metadata["detached_cook_handoff"]
+            .as_object_mut()
+            .expect("handoff metadata object")
+            .remove("admission_deadline_at");
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    let Some(record) = record else {
+        let existing = lifecycle_store.read_record(&cook_id)?;
+        if existing.metadata["unmaterialized_cook_admission"]["binding"] != binding {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "Cook id is already bound to a different unmaterialized admission request",
+                Some(cook_id),
+                None,
+            ));
+        }
+        return Ok(existing);
+    };
+    record_cook_progress_in_store(lifecycle_store, &record.run_id, &state, 0, Some(&reason))
+}
+
+/// Validate immutable Cook admission ownership before the CLI snapshots any
+/// replay bytes. The final parent+binding write repeats this decision under the
+/// same config lock, so this is an early rejection optimization, not authority.
+pub fn precheck_unmaterialized_cook_admission(
+    cook_id: &str,
+    request_ref: &str,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    store.with_config_lock(|| {
+        let resolved = resolve_run_id_in_store(&store, &cook_id)?;
+        if resolved != cook_id {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "Cook id already resolves to an existing Cook attempt",
+                Some(cook_id.clone()),
+                None,
+            ));
+        }
+        let Ok(record) = store.read_record(&cook_id) else {
+            return Ok(None);
+        };
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "Cook id collides with an existing non-handoff run",
+                Some(cook_id.clone()),
+                None,
+            ));
+        }
+        let admission = &record.metadata["unmaterialized_cook_admission"];
+        if !admission.is_object() {
+            return Ok(None);
+        }
+        if admission["binding"]["request_ref"].as_str() != Some(request_ref) {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "Cook id is already bound to a different unmaterialized admission request",
+                Some(cook_id.clone()),
+                None,
+            ));
+        }
+        Ok(Some(record))
+    })
+}
+
+/// Recover or complete the atomic input-directory publication for one prepared
+/// admission, then expose its requested queue state in the same locked update.
+pub fn recover_unmaterialized_cook_input_publication(cook_id: &str) -> Result<AgentTaskRunRecord> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    recover_unmaterialized_cook_input_publication_in_store(&store, cook_id)
+}
+
+pub fn recover_unmaterialized_cook_input_publication_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    store.with_config_lock(|| {
+        let current = store.read_record(&cook_id)?;
+        let admission = &current.metadata["unmaterialized_cook_admission"];
+        if admission["state"] != "preparing_inputs" {
+            return Ok(current);
+        }
+        let publication = &admission["binding"]["input_publication"];
+        let staging = publication["staging_root"].as_str().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_admission.input_publication",
+                "prepared admission has no durable staging root",
+                Some(cook_id.clone()),
+                None,
+            )
+        })?;
+        let published = publication["published_root"].as_str().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_admission.input_publication",
+                "prepared admission has no durable publication root",
+                Some(cook_id.clone()),
+                None,
+            )
+        })?;
+        let staging = std::path::PathBuf::from(staging);
+        let published = std::path::PathBuf::from(published);
+        let admission_root = store.data_root().join("agent-task-cook-admissions");
+        if !staging.starts_with(&admission_root) || !published.starts_with(&admission_root) {
+            return Err(Error::validation_invalid_argument(
+                "cook_admission.input_publication",
+                "prepared admission input roots escape durable admission storage",
+                Some(cook_id.clone()),
+                None,
+            ));
+        }
+        if !published.exists() {
+            if !staging.is_dir() {
+                return Err(Error::internal_io(
+                    "prepared Cook input staging directory is unavailable".to_string(),
+                    Some(staging.display().to_string()),
+                ));
+            }
+            if let Some(parent) = published.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(
+                        |error| {
+                            Error::internal_io(
+                                error.to_string(),
+                                Some(parent.display().to_string()),
+                            )
+                        },
+                    )?;
+                }
+            }
+            fs::rename(&staging, &published).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "publish {} -> {}",
+                        staging.display(),
+                        published.display()
+                    )),
+                )
+            })?;
+        } else if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(staging.display().to_string()))
+            })?;
+        }
+        let updated =
+            store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+                let admission = &mut record.metadata["unmaterialized_cook_admission"];
+                if admission["state"] != "preparing_inputs" {
+                    return false;
+                }
+                let requested = admission["requested_state"]
+                    .as_str()
+                    .filter(|state| {
+                        matches!(
+                            *state,
+                            "queued" | "blocked_runner_unavailable" | "blocked_runner_stale"
+                        )
+                    })
+                    .unwrap_or("blocked_runner_unavailable")
+                    .to_string();
+                admission["state"] = json!(requested);
+                admission["binding"]["input_publication"]["state"] = json!("published");
+                admission["binding"]["input_publication"]["published_at"] =
+                    json!(chrono::Utc::now().to_rfc3339());
+                // The first bounded selection belongs to this admission call.
+                // Backoff applies only after an observed blocked attempt.
+                admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+                record.updated_at = Some(now_timestamp());
+                true
+            })?;
+        Ok(updated.unwrap_or(current))
+    })
+}
+
+/// Consume the exact replay generation selected by the daemon. This is the
+/// worker-side mutation fence and must run before routing can provision a
+/// destination or dispatch a provider.
+pub fn consume_unmaterialized_cook_replay_claim(
+    cook_id: &str,
+    fence: u64,
+    token: &str,
+) -> Result<bool> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let token = token.to_string();
+    let owner = current_replay_worker_owner()?;
+    let consumed = store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal() {
+            return false;
+        }
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if admission["lease"]["state"] != "claimed"
+            || admission["lease"]["fence"].as_u64() != Some(fence)
+            || admission["lease"]["token"].as_str() != Some(token.as_str())
+        {
+            return false;
+        }
+        admission["state"] = json!("replaying");
+        admission["lease"]["state"] = json!("consumed");
+        admission["lease"]["consumed_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["lease"]["owner"] = owner.clone();
+        admission["lease"]["expires_at"] =
+            json!((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(consumed.is_some())
+}
+
+/// Revalidate and renew a consumed replay lease immediately before the existing
+/// Cook route crosses into destination materialization. A superseded worker can
+/// never pass this boundary, even if it wakes after its original lease expired.
+pub fn renew_unmaterialized_cook_replay_claim(
+    cook_id: &str,
+    fence: u64,
+    token: &str,
+) -> Result<bool> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let token = token.to_string();
+    let owner = current_replay_worker_owner()?;
+    let renewed = store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal() {
+            return false;
+        }
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if admission["state"] != "replaying"
+            || admission["lease"]["state"] != "consumed"
+            || admission["lease"]["fence"].as_u64() != Some(fence)
+            || admission["lease"]["token"].as_str() != Some(token.as_str())
+            || admission["lease"]["owner"] != owner
+        {
+            return false;
+        }
+        admission["state"] = json!("materializing");
+        admission["lease"]["state"] = json!("materializing");
+        admission["lease"]
+            .as_object_mut()
+            .expect("replay lease object")
+            .remove("expires_at");
+        admission["lease"]["materialization_fence_at"] = json!(chrono::Utc::now().to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(renewed.is_some())
+}
+
+fn current_replay_worker_owner() -> Result<serde_json::Value> {
+    let pid = std::process::id();
+    let process_start_identity = homeboy_core::process::process_start_identity(pid)
+        .map_err(|error| Error::internal_io(error, Some(format!("inspect replay worker {pid}"))))?
+        .ok_or_else(|| {
+            Error::internal_io(
+                "replay worker process start identity is unavailable".to_string(),
+                Some(format!("pid:{pid}")),
+            )
+        })?;
+    Ok(json!({
+        "pid": pid,
+        "process_start_identity": process_start_identity,
+    }))
+}
+
+/// Release an exact replay claim after its supervised worker exits before an
+/// attempt lifecycle record is published. A published index or reserved child
+/// record is the normal handoff and remains authoritative.
+pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
+    cook_id: &str,
+    fence: u64,
+    token: &str,
+) -> Result<bool> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let token = token.to_string();
+    let released = store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
+            return false;
+        }
+        let reserved_child_published = record.metadata["detached_cook_handoff"]
+            ["materializing_attempt_run_id"]
+            .as_str()
+            .is_some_and(|run_id| store.read_record(run_id).is_ok());
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if reserved_child_published
+            || !matches!(
+                admission["lease"]["state"].as_str(),
+                Some("claimed" | "consumed" | "materializing")
+            )
+            || admission["lease"]["fence"].as_u64() != Some(fence)
+            || admission["lease"]["token"].as_str() != Some(token.as_str())
+        {
+            return false;
+        }
+        admission["state"] = json!("queued");
+        admission["reason"] = json!("replay worker exited before attempt publication");
+        admission["lease"]["state"] = json!("released");
+        admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(released.is_some())
+}
+
+/// Rearm one blocked admission for an explicit scoped resume. Active replay or
+/// materialization ownership is preserved; terminal records are never reopened.
+pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRunRecord> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let current = store.read_record(&cook_id)?;
+    if current.state.is_terminal() {
+        return Ok(current);
+    }
+    let updated = store.mutate_record(&cook_id, |record| {
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if !admission.is_object()
+            || matches!(
+                admission["lease"]["state"].as_str(),
+                Some("claimed" | "consumed" | "materializing")
+            )
+        {
+            return false;
+        }
+        admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["reason"] = json!("explicit scoped resume requested");
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(updated.unwrap_or(current))
+}
+
 /// Reject detached Cook work after the pre-spawn parent has been cancelled.
 /// The child reads this durable fence independently of launcher liveness.
 pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
@@ -798,6 +1421,22 @@ pub fn detached_cook_admission_is_live(
     }
     match record.metadata["detached_cook_handoff"]["admission_state"].as_str() {
         Some("supervising") => true,
+        Some("unmaterialized") => {
+            record.state == AgentTaskRunState::Queued
+                && record.metadata["unmaterialized_cook_admission"]["state"]
+                    .as_str()
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            "preparing_inputs"
+                                | "queued"
+                                | "blocked_runner_unavailable"
+                                | "blocked_runner_stale"
+                                | "replaying"
+                                | "materializing"
+                        )
+                    })
+        }
         Some("child_attached") => detached_cook_child_is_live(record).unwrap_or_else(|| {
             detached_cook_deadline(record, "child_supervisor_deadline_at")
                 .is_some_and(|deadline| deadline > now)

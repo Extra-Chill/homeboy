@@ -18,6 +18,51 @@ use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use homeboy_core::test_support;
 
 #[test]
+fn repeated_admission_wakes_are_coalesced_into_one_pending_pass() {
+    let state = Arc::new(AtomicU8::new(ADMISSION_WAKE_IDLE));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let callback = {
+        let calls = Arc::clone(&calls);
+        let release_rx = Arc::clone(&release_rx);
+        Arc::new(move || {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                started_tx.send(()).expect("first pass started");
+                release_rx
+                    .lock()
+                    .expect("release receiver")
+                    .recv()
+                    .expect("release first pass");
+            }
+        }) as Arc<dyn Fn() + Send + Sync>
+    };
+
+    assert!(wake_unmaterialized_admission_reconciliation_with(
+        Arc::clone(&state),
+        Arc::clone(&callback)
+    ));
+    started_rx.recv().expect("wake worker started");
+    for _ in 0..20 {
+        assert!(!wake_unmaterialized_admission_reconciliation_with(
+            Arc::clone(&state),
+            Arc::clone(&callback)
+        ));
+    }
+    release_tx.send(()).expect("release worker");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while state.load(Ordering::SeqCst) != ADMISSION_WAKE_IDLE
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(state.load(Ordering::SeqCst), ADMISSION_WAKE_IDLE);
+}
+
+#[test]
 fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {
     let error = controller_proxy_from_url("socks5://user:token@127.0.0.1:8080")
         .expect_err("proxy credentials cannot cross the controller boundary");

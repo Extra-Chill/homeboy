@@ -1451,6 +1451,9 @@ fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiv
         isolated_tick(|| {
             let _ = orchestration::reconcile_controller_waits();
         });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_unmaterialized_cook_admissions();
+        });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
         }

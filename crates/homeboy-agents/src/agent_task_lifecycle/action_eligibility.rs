@@ -106,7 +106,10 @@ pub fn lifecycle_action_eligibility(
                 resume,
                 AgentTaskActionConfirmation::None,
                 Vec::new(),
-                false,
+                record
+                    .metadata
+                    .get("unmaterialized_cook_admission")
+                    .is_some_and(serde_json::Value::is_object),
                 "agent_task_run",
             ),
             action(
@@ -300,5 +303,20 @@ mod tests {
             decision(&report, AgentTaskLifecycleAction::Resume),
             AgentTaskActionAvailability::Unavailable
         );
+    }
+
+    #[test]
+    fn unmaterialized_cook_resume_is_projected_as_idempotent() {
+        let mut record = record(AgentTaskRunState::Queued, false);
+        record.metadata["unmaterialized_cook_admission"] =
+            serde_json::json!({"state": "blocked_runner_unavailable"});
+        let report = lifecycle_action_eligibility(&record, None);
+        let resume = report
+            .actions
+            .iter()
+            .find(|action| action.action == AgentTaskLifecycleAction::Resume)
+            .expect("resume action");
+        assert!(resume.idempotent);
+        assert_eq!(resume.availability, AgentTaskActionAvailability::Available);
     }
 }

@@ -85,6 +85,31 @@ impl AgentTaskLifecycleStore {
             .join("index.json")
     }
 
+    pub(crate) fn unmaterialized_admission_cursor(&self) -> Option<String> {
+        let path = self
+            .data_root()
+            .join("agent-task-cook-admissions")
+            .join("reconcile-cursor.json");
+        let value = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())?;
+        value["last_run_id"].as_str().map(str::to_string)
+    }
+
+    pub(crate) fn write_unmaterialized_admission_cursor(&self, run_id: &str) -> Result<()> {
+        let path = self
+            .data_root()
+            .join("agent-task-cook-admissions")
+            .join("reconcile-cursor.json");
+        write_private_json(
+            &path,
+            &json!({
+                "schema": "homeboy/unmaterialized-cook-reconcile-cursor/v1",
+                "last_run_id": run_id,
+            }),
+        )
+    }
+
     /// The observation database below these roots.
     ///
     /// Delegates to `paths` so this can never name a different file than the
