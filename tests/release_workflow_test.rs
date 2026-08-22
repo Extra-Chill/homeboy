@@ -418,15 +418,30 @@ fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
 fn release_preflight_validates_the_private_workspace_build_before_mutating_release_state() {
     let prepare = job_section(release_workflow(), "prepare");
     let package_preflight = prepare
-        .find("name: Preflight release workspace build")
+        .find("name: Preflight full-workspace compilation")
         .expect("prepare must validate the complete release build");
     let release_action = prepare
         .find("uses: Extra-Chill/homeboy-action@v2")
         .expect("prepare must run the release action");
 
+    // The `--all-targets` check replaced a codegen build that ran immediately
+    // before a narrower `--tests` check. The property under test never was
+    // "codegen happens here" — nothing in `prepare` consumes the object files,
+    // and `gate-build` already proved the release profile links. It is "the
+    // WHOLE workspace, including every test and bench target, compiles against
+    // the LOCKED graph before a tag exists". `--all-targets` asserts that
+    // strictly harder than the pair it replaced, for less wall clock.
     assert!(
-        prepare.contains("run: cargo build --workspace --locked"),
-        "release preflight must build the private workspace with the locked dependency graph"
+        prepare.contains("run: cargo check --workspace --all-targets --locked"),
+        "release preflight must compile every workspace target against the locked dependency graph"
+    );
+    // Asserted against the `run:` line specifically. Matching the bare command
+    // anywhere in the job would also match the comment that explains why the
+    // codegen step was removed, which is how this assertion first failed.
+    assert!(
+        !prepare.contains("run: cargo build --workspace"),
+        "prepare must not re-run codegen that gate-build already proved; the \
+         --all-targets check above is the preflight"
     );
     assert!(
         cargo_manifest().contains("publish = false"),
@@ -2259,7 +2274,22 @@ fn macos_release_shell_scripts_avoid_bash_4_only_constructs() {
     }
 }
 
-/// The exact published inventory of `v0.332.0` — the last healthy release.
+/// A complete, healthy release inventory for the currently declared platform
+/// set.
+///
+/// This began as a verbatim transcript of `v0.332.0`, the last healthy release
+/// at the time. It cannot stay one. The asset contract is an EXACT-SET match —
+/// it rejects unexpected assets as loudly as missing ones — so this fixture
+/// states "what a complete release looks like", and that is a function of
+/// `dist-workspace.toml`, not of history. When `x86_64-apple-darwin` was
+/// dropped from the target list, a fixture frozen at v0.332.0 started failing
+/// as two assets too MANY rather than passing as a historical fact.
+///
+/// Keep it in step with `declared_dist_targets()`: two entries per target
+/// (`.tar.xz` and its `.sha256`), plus the platform-independent tail below.
+/// `asset_contract_covers_every_target_the_repo_declares` is what catches this
+/// drifting — it derives the target list from the manifest and requires each
+/// declared archive to be load-bearing here.
 const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "dist-manifest.json",
     "homeboy-aarch64-apple-darwin.tar.xz",
@@ -2267,8 +2297,6 @@ const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "homeboy-aarch64-unknown-linux-gnu.tar.xz",
     "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256",
     "homeboy-installer.sh",
-    "homeboy-x86_64-apple-darwin.tar.xz",
-    "homeboy-x86_64-apple-darwin.tar.xz.sha256",
     "homeboy-x86_64-unknown-linux-gnu.tar.xz",
     "homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256",
     "homeboy.rb",
@@ -2405,8 +2433,14 @@ fn planned_contract_rejects_host_only_assets_and_accepts_every_supported_platfor
         code, 0,
         "the complete supported-platform plan must pass: {out}"
     );
+    // Derived, not transcribed. A literal `14` here was a second place the
+    // platform count had to be hand-updated, and it silently disagreed with
+    // `HEALTHY_RELEASE_ASSETS` the moment a target was dropped.
+    let expected_count = HEALTHY_RELEASE_ASSETS.len();
     assert!(
-        out.contains("14 assets from cargo-dist release plan"),
+        out.contains(&format!(
+            "{expected_count} assets from cargo-dist release plan"
+        )),
         "the final contract must include every planned asset, including dist-manifest.json: {out}"
     );
 }

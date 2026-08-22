@@ -16,7 +16,24 @@ tap = "Extra-Chill/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+#
+# `x86_64-apple-darwin` was removed deliberately. It built on `macos-15-intel`,
+# a 10x-billed runner, and at 24 minutes it was the long pole of the entire
+# build matrix — the next slowest target finishes in 15. Its published asset
+# was downloaded exactly once per release across every release inspected, and
+# that one download is the hourly `release-integrity` sweeper verifying the
+# asset exists, not a consumer installing it. The fleet is Apple Silicon and
+# x86_64 Linux; no Intel Mac has ever pulled this binary.
+#
+# Everything downstream derives from `dist plan`: the `build-local-artifacts`
+# matrix reads `ci.github.artifacts_matrix`, and `plan.expected-assets` reads
+# `.releases[].artifacts[]`. This list is the single source of truth, so no
+# workflow edit is needed to match.
+#
+# `homeboy upgrade` on an Intel Mac now reports an undetermined target and
+# directs the user to `--method source` instead of 404ing against an asset
+# that no longer exists. See `release_catalog::target_triple_for`.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Allow manual CI edits
 # Allow manual CI edits
 allow-dirty = ["ci"]
