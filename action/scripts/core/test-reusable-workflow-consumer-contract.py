@@ -201,6 +201,11 @@ if [row["section_key"] for row in mixed_rows] != ["lint"]:
 
 enforcement = callee["jobs"]["reconcile-test-shards"]
 enforcement_steps = {step.get("name"): step for step in enforcement["steps"] if "name" in step}
+aggregate_download = enforcement_steps.get("Resolve candidate Test result", {})
+if "resolve-run-artifact.sh homeboy-candidate-test-results" not in aggregate_download.get("run", ""):
+    fail("sharded Test reconciliation does not resolve a prior successful aggregate")
+if aggregate_download.get("if") != "needs.candidate-test-result.result == 'success'":
+    fail("sharded Test aggregate resolution is not gated on a successful aggregate")
 aggregation_failure = enforcement_steps.get("Report candidate Test aggregation failure", {})
 if "needs.candidate-test-result.result != 'success'" not in aggregation_failure.get("if", ""):
     fail("failed sharded Test aggregation is not routed to a red verdict")

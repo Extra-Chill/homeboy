@@ -1042,10 +1042,18 @@ jobs:
           echo "::error::Test inventory generation failed for '${command}' (inventory=${{ needs.candidate-test-plan.result }}; results=${results}). Inspect Plan candidate Test shards for the underlying command failure."
           find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
           exit 1
+      # A rerun can execute this verdict without rerunning successful shards or
+      # their aggregate. Resolve the newest complete aggregate it can consume.
+      - name: Resolve candidate Test result
+        id: candidate-test-result-artifact
+        if: needs.candidate-test-result.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-candidate-test-results
       - uses: actions/download-artifact@v7
         if: needs.candidate-test-result.result == 'success'
         with:
-          name: homeboy-candidate-test-results-${{ github.run_attempt }}
+          name: ${{ steps.candidate-test-result-artifact.outputs.artifact-name }}
           path: candidate-test-results
       - name: Report candidate Test aggregation failure
         if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'

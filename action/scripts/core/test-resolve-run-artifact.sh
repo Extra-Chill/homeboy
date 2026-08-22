@@ -14,6 +14,7 @@ printf '%s\n' \
   homeboy-test-archive-1 \
   homeboy-test-archive-3 \
   homeboy-test-shard-plan-2 \
+  homeboy-candidate-test-results-1 \
   unrelated
 SH
 chmod +x "${tmp}/bin/gh"
@@ -28,6 +29,8 @@ resolve 2 homeboy-test-archive
 grep -Fx 'artifact-name=homeboy-test-archive-1' "${tmp}/output" >/dev/null || { printf 'FAIL: prior producer attempt was not selected\n'; exit 1; }
 resolve 3 homeboy-test-archive
 grep -Fx 'artifact-name=homeboy-test-archive-3' "${tmp}/output" >/dev/null || { printf 'FAIL: newest available producer attempt was not selected\n'; exit 1; }
+resolve 2 homeboy-candidate-test-results
+grep -Fx 'artifact-name=homeboy-candidate-test-results-1' "${tmp}/output" >/dev/null || { printf 'FAIL: final Test reconciliation did not reuse the prior aggregate result\n'; exit 1; }
 if resolve 1 homeboy-test-shard-plan >/dev/null 2>&1; then
   printf 'FAIL: resolver accepted an artifact from a future attempt\n'; exit 1
 fi
