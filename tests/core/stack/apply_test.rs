@@ -790,13 +790,19 @@ fn rebase_rebuilds_target_without_editing_spec() {
             provenance: None,
             requirements: Default::default(),
         };
-        save(&spec).expect("save stack spec");
+        save(&homeboy_core::paths::homeboy().expect("config root"), &spec)
+            .expect("save stack spec");
         let spec_path = home
             .path()
             .join(".config/homeboy/stacks/rebase-no-edit.json");
         let before = fs::read_to_string(&spec_path).expect("read spec before rebase");
 
-        let output = rebase(&spec, ConflictPolicy::default()).expect("rebase stack");
+        let output = rebase(
+            &homeboy_core::paths::homeboy().expect("config root"),
+            &spec,
+            ConflictPolicy::default(),
+        )
+        .expect("rebase stack");
         assert!(output.success);
         assert_eq!(output.picked_count, 0);
         assert_eq!(output.skipped_count, 0);

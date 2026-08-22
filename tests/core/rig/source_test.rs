@@ -12,6 +12,18 @@ use crate::rig_test_support::{
     bare_source_path, minimal_rig, minimal_stack, run_git, write_rig, write_stack, GitFixture,
 };
 
+/// The isolated home each test below installs, named as a config root.
+///
+/// A test is the entry point for its own unit of work, so resolving once here is
+/// a boundary resolution, not an ambient one. What matters is that the
+/// production path beneath it resolves nothing (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::PathRoots::from_environment()
+        .expect("path roots")
+        .config()
+        .to_path_buf()
+}
+
 /// Source-update-only fixture helpers. These live here rather than in the
 /// shared `support.rs` because only the source-update tests attach to an
 /// existing repo and push back to a bare source; keeping them in the shared
@@ -49,7 +61,7 @@ fn test_list_sources() {
 
     install(package.path().to_str().unwrap(), None, true).expect("install all");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
     assert_eq!(result.invalid.len(), 0);
     assert_eq!(result.sources.len(), 1);
     assert_eq!(result.sources[0].source, package.path().to_string_lossy());
@@ -116,7 +128,7 @@ fn list_sources_reports_stack_specs_from_package() {
 
     install(package.path().to_str().unwrap(), None, false).expect("install");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
     assert_eq!(result.sources.len(), 1);
     assert_eq!(result.sources[0].stacks.len(), 1);
     assert_eq!(result.sources[0].stacks[0].id, "alpha-combined");
@@ -135,7 +147,7 @@ fn sources_list_reports_legacy_stack_without_inferring_or_mutating_provenance() 
         .replace("${env.DEV_ROOT}/legacy", "/definitely/missing/legacy");
     fs::write(&config, &content).expect("legacy stack");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
 
     assert!(result.sources.is_empty());
     assert_eq!(result.orphaned_stacks.len(), 1);
@@ -184,7 +196,8 @@ fn test_remove_source() {
     let manual = homeboy_core::paths::rig_config("manual").expect("manual rig path");
     fs::write(&manual, minimal_rig("manual")).expect("manual rig");
 
-    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+    let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
+        .expect("remove source");
     assert_eq!(result.removed.len(), 2);
     assert!(result.skipped.is_empty());
     assert!(result.removed_package_path.is_none());
@@ -211,7 +224,8 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_rig("replacement")).expect("replacement rig");
 
-    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+    let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
+        .expect("remove source");
     assert!(result.removed.is_empty());
     assert_eq!(result.skipped.len(), 1);
     assert!(config.exists());
@@ -232,7 +246,8 @@ fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
 
-    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+    let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
+        .expect("remove source");
 
     assert!(result.removed_stacks.is_empty());
     assert_eq!(result.skipped_stacks.len(), 1);
@@ -255,10 +270,11 @@ fn remove_source_treats_copied_config_as_owned_when_contents_match() {
     fs::remove_file(&config).expect("remove symlink");
     fs::copy(&source, &config).expect("copy rig config");
 
-    let listed = list_sources().expect("sources");
+    let listed = list_sources(&test_config_root()).expect("sources");
     assert!(listed.sources[0].rigs[0].config_owned);
 
-    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+    let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
+        .expect("remove source");
     assert_eq!(result.removed.len(), 1);
     assert!(result.skipped.is_empty());
     assert!(!config.exists());
@@ -288,7 +304,7 @@ fn sources_list_reports_corrupt_metadata_and_missing_configs() {
     )
     .expect("missing metadata");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
     assert_eq!(result.invalid.len(), 1);
     assert_eq!(result.invalid[0].id, "broken");
     assert_eq!(result.sources.len(), 1);
@@ -306,7 +322,7 @@ fn sources_list_reports_missing_linked_source_paths() {
     install(package.path().to_str().unwrap(), None, false).expect("install linked");
     fs::remove_dir_all(package.path()).expect("remove linked source");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
 
     assert_eq!(result.sources.len(), 1);
     let source = &result.sources[0];
@@ -377,7 +393,7 @@ fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
     )
     .expect("installed stack");
 
-    let result = list_sources().expect("sources");
+    let result = list_sources(&test_config_root()).expect("sources");
 
     assert!(result.sources.is_empty());
     assert_eq!(result.invalid.len(), 1);
@@ -410,7 +426,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     commit_package(package.path(), "update alpha");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let result = update_source_for_rig("alpha").expect("update rig source");
+    let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 
     assert_eq!(result.updated.len(), 1);
     assert!(result.skipped.is_empty());
@@ -455,7 +471,7 @@ fn update_git_source_refreshes_owned_stack_specs() {
     commit_package(package.path(), "update alpha stack");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let result = update_source_for_rig("alpha").expect("update rig source");
+    let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 
     assert_eq!(result.updated_stacks.len(), 1);
     assert_eq!(result.updated_stacks[0].id, "alpha-combined");
@@ -498,7 +514,8 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
     commit_package(package.path(), "remote update");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let error = update_source_for_rig("alpha").expect_err("invalid provenance must fail closed");
+    let error = update_source_for_rig(&test_config_root(), "alpha")
+        .expect_err("invalid provenance must fail closed");
 
     assert!(error.message.contains("no validated discovery path"));
     assert_eq!(
@@ -537,7 +554,8 @@ fn update_all_reports_broken_sources_and_continues() {
     commit_package(good_package.path(), "update good rig");
     GitFixture::attach(good_package.path()).push_main(&good_source);
 
-    let result = update_all_sources().expect("update all continues after broken source");
+    let result =
+        update_all_sources(&test_config_root()).expect("update all continues after broken source");
 
     assert_eq!(result.failed.len(), 1);
     assert_eq!(result.failed[0].source, broken_source);
@@ -570,10 +588,10 @@ fn refresh_source_selector_updates_recorded_package() {
     commit_package(package.path(), "refresh alpha");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let package_id = list_sources().expect("sources").sources[0]
+    let package_id = list_sources(&test_config_root()).expect("sources").sources[0]
         .package_id
         .clone();
-    let result = update_source(Some(&package_id)).expect("refresh source");
+    let result = update_source(&test_config_root(), Some(&package_id)).expect("refresh source");
 
     assert_eq!(result.updated.len(), 1);
     assert_eq!(result.updated[0].id, "alpha");
@@ -610,7 +628,7 @@ fn refresh_without_selector_updates_all_sources() {
     commit_package(package.path(), "refresh alpha");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let result = update_source(None).expect("refresh all sources");
+    let result = update_source(&test_config_root(), None).expect("refresh all sources");
 
     assert_eq!(result.updated.len(), 1);
     assert_eq!(result.updated[0].id, "alpha");
@@ -639,7 +657,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     commit_package(package.path(), "update alpha stack");
     GitFixture::attach(package.path()).push_main(&source);
 
-    let result = update_source_for_rig("alpha").expect("update rig source");
+    let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 
     assert!(result.updated_stacks.is_empty());
     assert_eq!(result.skipped.len(), 1);
@@ -657,7 +675,7 @@ fn update_all_skips_linked_local_sources() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
     install(package.path().to_str().unwrap(), None, false).expect("install linked");
-    let result = update_all_sources().expect("update all");
+    let result = update_all_sources(&test_config_root()).expect("update all");
 
     assert!(result.updated.is_empty());
     assert_eq!(result.skipped.len(), 1);
@@ -673,7 +691,7 @@ fn update_all_skips_linked_local_stack_sources() {
     write_stack(package.path(), "alpha-combined", "alpha");
 
     install(package.path().to_str().unwrap(), None, false).expect("install linked");
-    let result = update_all_sources().expect("update all");
+    let result = update_all_sources(&test_config_root()).expect("update all");
 
     assert!(result.updated.is_empty());
     assert!(result.updated_stacks.is_empty());
@@ -691,7 +709,7 @@ fn update_single_linked_local_source_errors() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
     install(package.path().to_str().unwrap(), None, false).expect("install linked");
-    let err = update_source_for_rig("alpha").expect_err("linked update error");
+    let err = update_source_for_rig(&test_config_root(), "alpha").expect_err("linked update error");
 
     assert!(err.message.contains("linked local source"));
 }

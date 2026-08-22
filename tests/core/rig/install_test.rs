@@ -382,11 +382,19 @@ mod install_flows {
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        assert_eq!(homeboy_stack::stack::list().expect("stack list").len(), 1);
         assert_eq!(
-            homeboy_stack::stack::load("studio-combined")
-                .expect("load stack")
-                .component,
+            homeboy_stack::stack::list(&homeboy_core::paths::homeboy().expect("config root"))
+                .expect("stack list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            homeboy_stack::stack::load(
+                &homeboy_core::paths::homeboy().expect("config root"),
+                "studio-combined",
+            )
+            .expect("load stack")
+            .component,
             "studio"
         );
         let metadata = read_stack_source_metadata("studio-combined").expect("stack metadata");

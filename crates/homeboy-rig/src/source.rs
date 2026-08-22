@@ -21,12 +21,13 @@ pub use types::{
     SkippedRigSourceUpdate,
 };
 
-pub fn list_sources() -> Result<RigSourceListResult> {
-    read_source_entries().and_then(group_source_entries)
+pub fn list_sources(config_root: &Path) -> Result<RigSourceListResult> {
+    let entries = read_source_entries(config_root)?;
+    group_source_entries(config_root, entries)
 }
 
-pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
-    let list = list_sources()?;
+pub fn remove_source(config_root: &Path, selector: &str) -> Result<RigSourceRemoveResult> {
+    let list = list_sources(config_root)?;
     let matches = list
         .sources
         .into_iter()
@@ -63,7 +64,7 @@ pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
     let mut skipped = Vec::new();
     let mut skipped_stacks = Vec::new();
     for rig in &source.rigs {
-        let metadata_path = paths::rig_source_metadata(&rig.id)?;
+        let metadata_path = paths::rig_source_metadata_in_root(config_root, &rig.id);
         let config_path = PathBuf::from(&rig.config_path);
         let remove_config = rig.config_present && rig.config_owned;
         if remove_config {
@@ -83,7 +84,7 @@ pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
         }
     }
     for stack in &source.stacks {
-        let metadata_path = paths::stack_source_metadata(&stack.id)?;
+        let metadata_path = paths::stack_source_metadata_in_root(config_root, &stack.id);
         let config_path = PathBuf::from(&stack.config_path);
         let remove_config = stack.config_present && stack.config_owned;
         if remove_config {
@@ -133,7 +134,7 @@ pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
     })
 }
 
-pub fn update_source_for_rig(id: &str) -> Result<RigSourceUpdateResult> {
+pub fn update_source_for_rig(config_root: &Path, id: &str) -> Result<RigSourceUpdateResult> {
     let metadata = super::install::read_source_metadata(id).ok_or_else(|| {
         Error::validation_invalid_argument(
             "rig_id",
@@ -151,7 +152,7 @@ pub fn update_source_for_rig(id: &str) -> Result<RigSourceUpdateResult> {
         ));
     }
 
-    let list = list_sources()?;
+    let list = list_sources(config_root)?;
     let source = list
         .sources
         .into_iter()
@@ -165,17 +166,17 @@ pub fn update_source_for_rig(id: &str) -> Result<RigSourceUpdateResult> {
             )
         })?;
 
-    update_group(source)
+    update_group(config_root, source)
 }
 
-pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
+pub fn update_all_sources(config_root: &Path) -> Result<RigSourceUpdateResult> {
     let mut aggregate = RigSourceUpdateResult {
         updated: Vec::new(),
         updated_stacks: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),
     };
-    for source in list_sources()?.sources {
+    for source in list_sources(config_root)?.sources {
         if source.linked {
             for rig in source.rigs {
                 aggregate.skipped.push(SkippedRigSourceUpdate {
@@ -193,7 +194,7 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
             }
             continue;
         }
-        match update_group(source.clone()) {
+        match update_group(config_root, source.clone()) {
             Ok(result) => {
                 aggregate.updated.extend(result.updated);
                 aggregate.updated_stacks.extend(result.updated_stacks);
@@ -213,12 +214,12 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
     Ok(aggregate)
 }
 
-pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
+pub fn update_source(config_root: &Path, selector: Option<&str>) -> Result<RigSourceUpdateResult> {
     let Some(selector) = selector else {
-        return update_all_sources();
+        return update_all_sources(config_root);
     };
 
-    let matches = list_sources()?
+    let matches = list_sources(config_root)?
         .sources
         .into_iter()
         .filter(|source| source_matches(source, selector))
@@ -273,10 +274,10 @@ pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
         });
     }
 
-    update_group(source)
+    update_group(config_root, source)
 }
 
-fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
+fn update_group(config_root: &Path, source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
     if source.discovery_path.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "source",
@@ -375,7 +376,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         super::install::package_content_hash(Path::new(&source.package_path))?;
     for stack in current_stacks {
         let existing = source.stacks.iter().find(|entry| entry.id == stack.id);
-        let config_path = paths::stack_config(&stack.id)?;
+        let config_path = paths::stack_config_in_root(config_root, &stack.id);
         if config_path.exists() || fs::symlink_metadata(&config_path).is_ok() {
             if existing.is_none_or(|entry| !entry.config_owned) {
                 skipped.push(SkippedRigSourceUpdate {
@@ -461,8 +462,8 @@ struct StackSourceEntry {
     metadata: StackSourceMetadata,
 }
 
-fn read_source_entries() -> Result<SourceEntries> {
-    let dir = paths::rig_sources()?;
+fn read_source_entries(config_root: &Path) -> Result<SourceEntries> {
+    let dir = paths::rig_sources_in_root(config_root);
     let rig_entries = super::json_config::read_json_configs::<RigSourceMetadata>(
         &dir,
         "read rig sources dir",
@@ -482,7 +483,7 @@ fn read_source_entries() -> Result<SourceEntries> {
         })
         .collect::<Vec<_>>();
 
-    let valid_stacks = read_stack_source_entries(&mut invalid)?;
+    let valid_stacks = read_stack_source_entries(config_root, &mut invalid)?;
     invalid.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(SourceEntries {
         valid,
@@ -492,9 +493,10 @@ fn read_source_entries() -> Result<SourceEntries> {
 }
 
 fn read_stack_source_entries(
+    config_root: &Path,
     invalid: &mut Vec<InvalidRigSourceMetadata>,
 ) -> Result<Vec<StackSourceEntry>> {
-    let dir = paths::stack_sources()?;
+    let dir = paths::stack_sources_in_root(config_root);
     let entries = super::json_config::read_json_configs::<StackSourceMetadata>(
         &dir,
         "read stack sources dir",
@@ -521,7 +523,7 @@ fn invalid_source_metadata(
     }
 }
 
-fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
+fn group_source_entries(config_root: &Path, entries: SourceEntries) -> Result<RigSourceListResult> {
     let managed_stack_ids = entries
         .valid_stacks
         .iter()
@@ -530,7 +532,7 @@ fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
     let mut groups: BTreeMap<String, RigSourceGroup> = BTreeMap::new();
     for entry in entries.valid {
         let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
-        let config_path = paths::rig_config(&entry.id).ok();
+        let config_path = Some(paths::rig_config_in_root(config_root, &entry.id));
         let config_present = config_path.as_ref().is_some_and(|path| path.exists());
         let config_owned = config_path.as_ref().is_some_and(|path| {
             entry.metadata.materialized || rig_config_matches_source(path, &entry.metadata.rig_path)
@@ -545,7 +547,7 @@ fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
 
     for entry in entries.valid_stacks {
         let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
-        let config_path = paths::stack_config(&entry.id).ok();
+        let config_path = Some(paths::stack_config_in_root(config_root, &entry.id));
         let config_present = config_path.as_ref().is_some_and(|path| path.exists());
         let config_owned = config_path
             .as_ref()
@@ -556,6 +558,7 @@ fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
             .or_insert_with(|| new_stack_source_group(&entry.metadata))
             .stacks
             .push(source_stack(
+                config_root,
                 entry,
                 config_path,
                 config_present,
@@ -569,7 +572,8 @@ fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
         source.stacks.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
-    let orphaned_stacks = installed_stacks_without_source_metadata(&managed_stack_ids)?;
+    let orphaned_stacks =
+        installed_stacks_without_source_metadata(config_root, &managed_stack_ids)?;
 
     Ok(RigSourceListResult {
         sources,
@@ -671,13 +675,14 @@ fn source_rig(
 }
 
 fn source_stack(
+    config_root: &Path,
     entry: StackSourceEntry,
     config_path: Option<PathBuf>,
     config_present: bool,
     config_owned: bool,
 ) -> RigSourceStack {
     let stack_present = Path::new(&entry.metadata.stack_path).is_file();
-    let (component_path, component_path_present) = stack_component_path(&entry.id);
+    let (component_path, component_path_present) = stack_component_path(config_root, &entry.id);
     RigSourceStack {
         id: entry.id,
         stack_path: entry.metadata.stack_path,
@@ -692,9 +697,10 @@ fn source_stack(
 }
 
 fn installed_stacks_without_source_metadata(
+    config_root: &Path,
     managed_stack_ids: &HashSet<String>,
 ) -> Result<Vec<OrphanedRigSourceStack>> {
-    let dir = paths::stacks()?;
+    let dir = paths::stacks_in_root(config_root);
     let entries = super::json_config::sorted_json_config_entries(
         &dir,
         "read stacks dir",
@@ -706,16 +712,19 @@ fn installed_stacks_without_source_metadata(
         .into_iter()
         .filter(|entry| !managed_stack_ids.contains(&entry.id))
         .map(|entry| {
-            orphaned_stack(InstalledStack {
-                id: entry.id,
-                path: entry.path,
-            })
+            orphaned_stack(
+                config_root,
+                InstalledStack {
+                    id: entry.id,
+                    path: entry.path,
+                },
+            )
         })
         .collect())
 }
 
-fn orphaned_stack(stack: InstalledStack) -> OrphanedRigSourceStack {
-    let (component_path, component_path_present) = stack_component_path(&stack.id);
+fn orphaned_stack(config_root: &Path, stack: InstalledStack) -> OrphanedRigSourceStack {
+    let (component_path, component_path_present) = stack_component_path(config_root, &stack.id);
     let content_identity = fs::read(&stack.path)
         .map(|content| {
             format!(
@@ -740,8 +749,8 @@ fn orphaned_stack(stack: InstalledStack) -> OrphanedRigSourceStack {
     }
 }
 
-fn stack_component_path(id: &str) -> (Option<String>, Option<bool>) {
-    let Ok(spec) = homeboy_stack::stack::load(id) else {
+fn stack_component_path(config_root: &Path, id: &str) -> (Option<String>, Option<bool>) {
+    let Ok(spec) = homeboy_stack::stack::load(config_root, id) else {
         return (None, None);
     };
     let component_path = homeboy_stack::stack::expand_path(&spec.component_path);

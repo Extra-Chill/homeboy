@@ -69,10 +69,15 @@ pub fn plan_stack_sync(rig: &RigSpec) -> Vec<RigStackPlanEntry> {
 }
 
 pub fn run_sync(rig: &RigSpec, dry_run: bool) -> Result<RigStackSyncReport> {
+    // Boundary: one rig stack sync is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     Ok(run_sync_with(
         rig,
         dry_run,
-        |component_id, stack_id, dry_run| sync_checked(rig, component_id, stack_id, dry_run),
+        |component_id, stack_id, dry_run| {
+            sync_checked(config_root, rig, component_id, stack_id, dry_run)
+        },
     ))
 }
 
@@ -99,11 +104,16 @@ pub fn run_component_sync(
         )
     })?;
 
+    // Boundary: one component stack sync is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     let entry = run_one(
         component_id,
         stack_id,
         dry_run,
-        |component_id, stack_id, dry_run| sync_checked(rig, component_id, stack_id, dry_run),
+        |component_id, stack_id, dry_run| {
+            sync_checked(config_root, rig, component_id, stack_id, dry_run)
+        },
     );
 
     if entry.status == "changed" || entry.status == "no-op" {
@@ -195,16 +205,17 @@ where
 }
 
 fn sync_checked(
+    config_root: &Path,
     rig: &RigSpec,
     component_id: &str,
     stack_id: &str,
     dry_run: bool,
 ) -> Result<SyncOutput> {
-    let mut spec = stack::load(stack_id)?;
+    let mut spec = stack::load(config_root, stack_id)?;
     validate_component_stack_path(rig, component_id, &spec)?;
     // Rig sync inherits the default conflict policy: pause with the
     // conflicted pick intact so the operator can resolve it in the checkout.
-    stack::sync(&mut spec, dry_run, ConflictPolicy::default())
+    stack::sync(config_root, &mut spec, dry_run, ConflictPolicy::default())
 }
 
 pub(crate) fn validate_component_stack_path(
