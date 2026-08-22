@@ -39,6 +39,11 @@ use super::{
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
+// A launcher can observe two five-second lease-publication attempts and clean
+// up the first attempt before returning. Followers must wait through that
+// bounded startup lifecycle, then re-read the durable lease rather than timing
+// out halfway through the winning launch.
+const ENSURE_RUNNING_STARTUP_WAIT: Duration = Duration::from_secs(15);
 
 /// Enumerate foreground daemon processes without inferring ownership from a
 /// command substring. A candidate is an owner only when its explicit state
@@ -1318,7 +1323,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// Return a live daemon under the lifecycle lock, or start one when its lease
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
-    ensure_running_with_wait(addr, Duration::from_secs(5))
+    ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
 }
 
 /// The optional controller operation id is intentionally additive. Existing
@@ -1332,7 +1337,7 @@ pub fn ensure_running_with_replacement_operation(
         return ensure_running(addr);
     };
     parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock_for_ensure(Duration::from_secs(5))?;
+    let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
     let status = read_status()?;
     if let Some(state) = status
         .state
