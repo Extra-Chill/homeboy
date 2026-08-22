@@ -209,15 +209,11 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
         .expect("reusable Test gate");
     assert!(test_gate.contains("      scope: auto"));
     assert!(test_gate.contains("      differential-gating: 'true'"));
-    assert!(test_gate.contains("      baseline-commands: none"));
+    assert!(test_gate.contains("      baseline-commands: review test"));
     assert!(test_gate
         .contains("      test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
     assert!(test_gate.contains("      execution-timeout-seconds: '2100'"));
     assert!(test_gate.contains("      test-timeout-seconds: '1800'"));
-    assert!(
-        !test_gate.contains("baseline-commands: review test"),
-        "Test differential gating expands changed PRs to an unbounded full-workspace run"
-    );
 }
 
 #[test]

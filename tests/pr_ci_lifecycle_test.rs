@@ -124,17 +124,18 @@ fn non_pr_ci_invocations_remain_admitted() {
 }
 
 #[test]
-fn ci_admits_only_the_configured_shard_budget_and_publishes_timing_evidence() {
+fn ci_uses_a_baseline_capable_test_execution_and_publishes_timing_evidence() {
     let config: serde_json::Value =
         serde_json::from_str(include_str!("../.github/ci-capacity.json")).expect("capacity config");
     assert_eq!(config["schema"], "homeboy/ci-capacity/v1");
-    assert_eq!(config["test_shards"], 4);
+    assert_eq!(config["test_shards"], 1);
     assert_eq!(config["queue_delay_slo_seconds"]["window_days"], 7);
     assert_eq!(config["queue_delay_slo_seconds"]["p95"], 300);
     assert_eq!(config["queue_delay_slo_seconds"]["p99"], 600);
 
     let workflow = ci_workflow();
     let test = job_section(workflow, "homeboy");
+    assert!(test.contains("baseline-commands: review test"));
     let shard_p95 = config["execution_slo_seconds"]["test_shard_p95"]
         .as_u64()
         .expect("Test shard p95");

@@ -225,8 +225,8 @@ jobs:
           comment-section-title: ${{ matrix.section_title }}
 
   # The caller job name plus the called reconciliation job name preserves the
-  # required `homeboy / Test` context. PRs execute the affected test closure;
-  # ambiguous source changes fail closed or use Homeboy's full-scope fallback.
+  # required `homeboy / Test` context. Differential Test runs use one candidate
+  # and one base execution so inherited failures remain attributable.
   homeboy:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
@@ -265,7 +265,7 @@ jobs:
       source: .
       scope: auto
       differential-gating: 'true'
-      baseline-commands: none
+      baseline-commands: review test
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'
