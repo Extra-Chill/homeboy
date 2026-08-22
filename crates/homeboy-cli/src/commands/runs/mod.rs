@@ -45,7 +45,7 @@ mod watch;
 use super::CmdResult;
 
 // Public command-layer API consumed by routing, raw/json output, rig, and bench.
-pub use dispatch::{global_runner_error, run, run_markdown};
+pub(crate) use dispatch::{global_runner_error, run, run_markdown};
 pub use handlers::list_runs;
 pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
 
@@ -81,11 +81,8 @@ pub(crate) use types::RunsArtifactGetArgs;
 use types::DEFAULT_LIMIT;
 pub(crate) use types::{RunsListArgs, RunsListOutput};
 
-pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
-pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
-pub use dossier::{runs_dossier, RunsDossierOutput};
-pub use resources::{runs_resources, RunsResourcesArgs, RunsResourcesOutput};
+pub(crate) use resources::{runs_resources, RunsResourcesArgs, RunsResourcesOutput};
 
 // Test-only helpers consumed by sibling test modules via `super::runs::*` / `super::*`.
 #[cfg(test)]

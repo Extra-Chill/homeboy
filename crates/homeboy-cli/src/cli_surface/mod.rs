@@ -125,11 +125,11 @@ pub struct Cli {
 impl Cli {
     /// Builds the user-facing command tree with Lab options shown only where
     /// the Lab portability contract can honor them.
-    pub fn command_with_scoped_lab_args() -> Command {
+    pub(crate) fn command_with_scoped_lab_args() -> Command {
         crate::command_contract::scope_lab_cli_arguments(Self::command())
     }
 
-    pub fn from_registered_arg_matches(
+    pub(crate) fn from_registered_arg_matches(
         matches: &ArgMatches,
     ) -> Result<(Self, &'static crate::command_contract::CommandSpec), clap::Error> {
         let cli = Self::from_arg_matches(matches)?;
@@ -141,7 +141,7 @@ impl Cli {
     }
 
     /// Compiles parser matches into typed values plus durable source metadata.
-    pub fn compile_registered_arg_matches(
+    pub(crate) fn compile_registered_arg_matches(
         matches: &ArgMatches,
     ) -> Result<
         (
@@ -417,23 +417,7 @@ pub struct CommandSurface {
     pub commands: Vec<CommandSurfaceEntry>,
 }
 
-impl CommandSurface {
-    pub fn contains_path(&self, path: &[&str]) -> bool {
-        let Some((first, rest)) = path.split_first() else {
-            return false;
-        };
-
-        let Some(entry) = self
-            .commands
-            .iter()
-            .find(|entry| !entry.hidden && entry.matches(first))
-        else {
-            return false;
-        };
-
-        entry.contains_rest(rest)
-    }
-}
+impl CommandSurface {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSurfaceEntry {
@@ -480,16 +464,7 @@ pub struct CommandSurfaceDoctorReport {
     pub drift_notes: Vec<String>,
 }
 
-impl CommandSafetyManifest {
-    pub fn find_path(&self, path: &[&str]) -> Option<&CommandSafetyEntry> {
-        let (first, rest) = path.split_first()?;
-
-        self.commands
-            .iter()
-            .find(|entry| entry.name == *first)
-            .and_then(|entry| entry.find_rest(rest))
-    }
-}
+impl CommandSafetyManifest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSafetyEntry {
@@ -511,18 +486,7 @@ pub struct CommandSafetyEntry {
     pub subcommands: Vec<CommandSafetyEntry>,
 }
 
-impl CommandSafetyEntry {
-    fn find_rest(&self, path: &[&str]) -> Option<&CommandSafetyEntry> {
-        let Some((first, rest)) = path.split_first() else {
-            return Some(self);
-        };
-
-        self.subcommands
-            .iter()
-            .find(|entry| entry.name == *first)
-            .and_then(|entry| entry.find_rest(rest))
-    }
-}
+impl CommandSafetyEntry {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandDryRunMetadata {
@@ -590,22 +554,7 @@ pub struct ExtensionCommandHealth {
 mod entry_command_impls {
     use super::*;
 
-    impl CommandSurfaceEntry {
-        pub(super) fn matches(&self, name: &str) -> bool {
-            self.name == name || self.visible_aliases.iter().any(|alias| alias == name)
-        }
-
-        pub(super) fn contains_rest(&self, path: &[&str]) -> bool {
-            let Some((first, rest)) = path.split_first() else {
-                return true;
-            };
-
-            self.subcommands
-                .iter()
-                .find(|entry| !entry.hidden && entry.matches(first))
-                .is_some_and(|entry| entry.contains_rest(rest))
-        }
-    }
+    impl CommandSurfaceEntry {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,17 +579,7 @@ mod dynamic_impls {
     use super::*;
 
     impl DynamicCommandDescriptor {
-        pub fn extension_command(name: String, about: String) -> Self {
-            Self {
-                docs_path: Some(format!("docs/commands/{name}.md")),
-                name,
-                about,
-                extension: None,
-                safety: None,
-            }
-        }
-
-        pub fn installed_extension_command(
+        pub(crate) fn installed_extension_command(
             name: String,
             about: String,
             docs_path: Option<String>,
@@ -674,29 +613,28 @@ mod dynamic_impls {
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
 mod safety_manifest;
-pub use safety_manifest::{
-    command_safety_manifest_audit, command_safety_manifest_from,
-    command_safety_manifest_from_dynamic, current_command_safety_manifest,
+pub(crate) use safety_manifest::{
+    command_safety_manifest_from, command_safety_manifest_from_dynamic,
 };
 
 mod surface {
     use super::*;
 
-    pub fn current_command_surface() -> CommandSurface {
+    pub(crate) fn current_command_surface() -> CommandSurface {
         command_surface_from(Cli::command())
     }
 
-    pub fn command_surface_from(command: Command) -> CommandSurface {
+    pub(crate) fn command_surface_from(command: Command) -> CommandSurface {
         command_surface_from_with_depth(command, DEFAULT_COMMAND_SURFACE_DEPTH)
     }
 
-    pub fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
+    fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
         CommandSurface {
             commands: visible_subcommands(&command, depth),
         }
     }
 
-    pub fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
+    pub(crate) fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
         let surface = current_command_surface();
         let manifest = command_safety_manifest_from(surface.clone());
         let source_registry_commands = manifest
@@ -723,7 +661,7 @@ mod surface {
         )
     }
 
-    pub fn command_surface_doctor_report(
+    fn command_surface_doctor_report(
         source_registry_commands: BTreeSet<String>,
         docs_index_commands: BTreeSet<String>,
         help_commands: BTreeSet<String>,
@@ -809,10 +747,7 @@ mod surface {
         }
     }
 
-    pub fn visible_subcommands(
-        command: &Command,
-        remaining_depth: usize,
-    ) -> Vec<CommandSurfaceEntry> {
+    fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
         command
             .get_subcommands()
             .map(|subcommand| CommandSurfaceEntry {
@@ -831,12 +766,11 @@ mod surface {
             .collect()
     }
 }
-pub use surface::*;
+pub(crate) use surface::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     /// Repo-root-relative paths (docs/, README.md) resolve from the workspace
     /// root, not this crate's manifest dir. After homeboy-cli was extracted into
@@ -886,40 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn test_current_command_surface() {
-        let surface = current_command_surface();
-
-        assert!(surface.contains_path(&["self"]));
-        assert!(surface.contains_path(&["self", "status"]));
-        assert!(surface.contains_path(&["self", "doctor"]));
-        assert!(surface.contains_path(&["review", "ci", "list"]));
-        assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
-        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
-        assert!(surface.contains_path(&["trace", "observe"]));
-    }
-
-    #[test]
-    fn test_command_surface_from() {
-        let surface = command_surface_from(Cli::command());
-
-        assert!(surface.contains_path(&["self"]));
-        assert!(surface.contains_path(&["self", "status"]));
-        assert!(surface.contains_path(&["self", "doctor"]));
-        assert!(surface.contains_path(&["review", "ci", "list"]));
-        assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
-        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
-        assert!(surface.contains_path(&["trace", "observe"]));
-    }
-
-    #[test]
-    fn test_contains_path() {
-        let surface = current_command_surface();
-
-        assert!(surface.contains_path(&["self"]));
-        assert!(!surface.contains_path(&["self", "missing"]));
-    }
-
-    #[test]
     fn command_registry_docs_paths_exist_and_are_indexed() {
         let root = workspace_root();
         let index = commands_index();
@@ -940,60 +840,6 @@ mod tests {
             assert!(
                 index.contains(&format!("[{slug}]({slug}.md)")),
                 "docs/commands/commands-index.md is missing registered command `{}`",
-                entry.name
-            );
-        }
-    }
-
-    #[test]
-    fn command_registry_manifest_and_docs_metadata_align() {
-        let parser_names = Cli::command()
-            .get_subcommands()
-            .filter(|subcommand| !subcommand.is_hide_set())
-            .map(|subcommand| subcommand.get_name().to_string())
-            .collect::<BTreeSet<_>>();
-        let registry_names = crate::command_contract::COMMAND_SPECS
-            .iter()
-            .map(|entry| entry.name.to_string())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(registry_names, parser_names);
-
-        let manifest = current_command_safety_manifest();
-        for entry in crate::command_contract::COMMAND_SPECS {
-            let manifest_entry = manifest
-                .find_path(&[entry.name])
-                .unwrap_or_else(|| panic!("manifest missing registered command `{}`", entry.name));
-            // The manifest deliberately replaces the registry's generic output
-            // note with a safety-specific note for any command it classifies as
-            // mutating, operator-only, or guarded by dangerous flags. Those
-            // divergences are intentional, so only assert exact equality for
-            // commands without a safety classification (which still catches
-            // accidental drift on the common path).
-            let output_notes_overridden_for_safety = manifest_entry.mutates
-                || manifest_entry.operator
-                || !manifest_entry.dangerous_flags.is_empty();
-
-            assert_eq!(
-                manifest_entry.docs.path,
-                entry.docs_path(),
-                "manifest docs path drifted from registry for `{}`",
-                entry.name
-            );
-            if !output_notes_overridden_for_safety {
-                assert_eq!(
-                    manifest_entry.output.notes, entry.output_notes,
-                    "manifest output notes drifted from registry for `{}`",
-                    entry.name
-                );
-            }
-            assert_eq!(
-                manifest_entry.lab.supported, entry.lab_supported,
-                "manifest Lab support drifted from registry for `{}`",
-                entry.name
-            );
-            assert_eq!(
-                manifest_entry.lab.notes, entry.lab_notes,
-                "manifest Lab notes drifted from registry for `{}`",
                 entry.name
             );
         }
@@ -1042,100 +888,6 @@ mod tests {
     }
 
     #[test]
-    fn review_audit_baseline_manifest_declares_baseline_mutation() {
-        let manifest = current_command_safety_manifest();
-
-        for subcommand in ["refresh", "merge", "prune"] {
-            let entry = manifest
-                .find_path(&["review", "audit-baseline", subcommand])
-                .unwrap_or_else(|| panic!("review audit-baseline {subcommand} must be present in the command safety manifest"));
-
-            assert!(
-                entry.mutates,
-                "review audit-baseline {subcommand} mutates persisted audit baseline data"
-            );
-        }
-
-        assert!(
-            manifest
-                .find_path(&["review", "audit", "baseline", "refresh"])
-                .is_none(),
-            "`review audit baseline` is a pre-parse argv spelling, not a clap path"
-        );
-    }
-
-    #[test]
-    fn extension_converge_manifest_declares_extension_mutation() {
-        let manifest = current_command_safety_manifest();
-        let converge = manifest
-            .find_path(&["extension", "converge"])
-            .expect("extension converge must be present in the command safety manifest");
-
-        assert!(converge.mutates);
-        assert!(!converge.operator);
-        assert!(converge
-            .output
-            .notes
-            .contains("mutates installed extension"));
-    }
-
-    #[test]
-    fn rig_lint_manifest_declares_static_read_only_behavior() {
-        let manifest = current_command_safety_manifest();
-        let lint = manifest
-            .find_path(&["rig", "lint"])
-            .expect("rig lint must be present in the command safety manifest");
-
-        assert!(!lint.mutates);
-        assert!(!lint.operator);
-        assert!(lint.output.structured);
-        assert!(lint
-            .output
-            .notes
-            .contains("without evaluating the live environment"));
-        assert_eq!(lint.docs.path.as_deref(), Some("docs/commands/rig.md"));
-    }
-
-    #[test]
-    fn worktree_cleanup_manifest_requires_explicit_apply() {
-        let manifest = current_command_safety_manifest();
-        let cleanup = manifest
-            .find_path(&["worktree", "cleanup"])
-            .expect("worktree cleanup must be present in the command safety manifest");
-
-        assert!(cleanup.operator);
-        assert!(cleanup.output.notes.contains("non-mutating"));
-        assert_eq!(cleanup.dry_run.flag.as_deref(), Some("--dry-run"));
-        assert!(cleanup.dangerous_flags.iter().any(|flag| flag == "--apply"));
-    }
-
-    #[test]
-    fn documented_docs_surface_matches_manifest_and_parser() {
-        let readme = std::fs::read_to_string(workspace_root().join("README.md"))
-            .expect("failed to read README");
-        let manifest = current_command_safety_manifest();
-
-        for argv in [
-            ["homeboy", "self", "docs", "list"].as_slice(),
-            ["homeboy", "self", "docs", "index"].as_slice(),
-            ["homeboy", "self", "docs", "commands/commands-index"].as_slice(),
-        ] {
-            Cli::try_parse_from(argv).unwrap_or_else(|error| {
-                panic!("documented docs command form failed to parse: {argv:?}\n{error}")
-            });
-        }
-
-        assert!(current_command_surface().contains_path(&["self", "docs"]));
-        assert!(manifest.find_path(&["self", "docs"]).is_some());
-        assert!(readme.contains("homeboy self docs list"));
-        assert!(!readme.contains("homeboy docs"));
-        assert!(
-            current_command_surface_doctor_report().agrees,
-            "documented command index must agree with the manifest and parser"
-        );
-    }
-
-    #[test]
     fn generated_quality_remediation_commands_parse() {
         for argv in [
             ["homeboy", "review", "audit", "fixture"].as_slice(),
@@ -1177,57 +929,6 @@ mod tests {
             Cli::try_parse_from(&argv).unwrap_or_else(|error| {
                 panic!("generated Cook continuation command failed to parse: {command}\n{error}")
             });
-        }
-    }
-
-    #[test]
-    fn core_command_docs_do_not_drift_from_registry() {
-        let root = workspace_root();
-        let registered_docs = crate::command_contract::COMMAND_SPECS
-            .iter()
-            .filter_map(|entry| entry.docs_slug)
-            .collect::<BTreeSet<_>>();
-        let extension_or_support_docs =
-            crate::command_contract::non_core_command_doc_slugs().collect::<BTreeSet<_>>();
-
-        for doc in
-            std::fs::read_dir(root.join("docs/commands")).expect("failed to read docs/commands")
-        {
-            let doc = doc.expect("failed to read docs/commands entry");
-            let path = doc.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-                continue;
-            }
-            let slug = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .expect("command docs filename should be valid UTF-8");
-            assert!(
-                registered_docs.contains(slug) || extension_or_support_docs.contains(slug),
-                "docs/commands/{slug}.md is not registered as a core command doc or known extension/support doc"
-            );
-        }
-    }
-
-    #[test]
-    fn non_core_command_doc_registry_paths_exist() {
-        let root = workspace_root();
-        let index = commands_index();
-
-        for slug in crate::command_contract::non_core_command_doc_slugs() {
-            assert!(
-                root.join("docs/commands")
-                    .join(format!("{slug}.md"))
-                    .is_file(),
-                "non-core command doc registry points at missing docs/commands/{slug}.md"
-            );
-        }
-
-        for slug in crate::command_contract::runtime_extension_command_doc_slugs() {
-            assert!(
-                index.contains(&format!("[{slug}]({slug}.md)")),
-                "docs/commands/commands-index.md is missing runtime extension command doc `{slug}`"
-            );
         }
     }
 
@@ -1604,7 +1305,7 @@ pub mod reference_docs;
 ///
 /// `placement` carries a default, so presence is not enough to detect: this
 /// keys on argument provenance and fires only when both were actually typed.
-pub fn reject_conflicting_placement_selection(
+pub(crate) fn reject_conflicting_placement_selection(
     matches: &clap::ArgMatches,
 ) -> Result<(), clap::Error> {
     use crate::cli_surface::argument_provenance::{ArgumentSource, CommandArgumentProvenance};

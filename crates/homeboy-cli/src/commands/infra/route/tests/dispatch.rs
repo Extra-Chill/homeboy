@@ -225,7 +225,10 @@ fn explicit_local_promotion_defers_target_resolution_to_promotion() {
         .map(|arg| (*arg).to_string())
         .collect::<Vec<_>>();
 
-    assert_eq!(route_after_parse(&cli, &normalized, None).unwrap(), None);
+    assert_eq!(
+        route_after_parse_with_provenance(&cli, &normalized, None, None).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -258,7 +261,8 @@ fn cook_preview_bypasses_every_placement_route_without_durable_state() {
             let before = std::fs::read_dir(home).expect("read isolated home").count();
 
             assert_eq!(
-                route_after_parse(&cli, &normalized, None).expect("preview bypasses placement"),
+                route_after_parse_with_provenance(&cli, &normalized, None, None)
+                    .expect("preview bypasses placement"),
                 None,
                 "{placement:?}"
             );
@@ -774,7 +778,9 @@ fn non_lab_command_continues_local_dispatch() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let cli = Cli::parse_from(["homeboy", "status"]);
 
-    let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
+    let outcome =
+        route_after_parse_with_provenance(&cli, &["homeboy".into(), "status".into()], None, None)
+            .unwrap();
 
     assert_eq!(outcome, None);
 }
@@ -919,12 +925,13 @@ fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override
     assert!(destructive_fuzz_requires_lab(&cli.command));
 
     let error = crate::test_support::with_isolated_home(|_| {
-        route_after_parse(
+        route_after_parse_with_provenance(
             &cli,
             &normalized
                 .iter()
                 .map(|arg| arg.to_string())
                 .collect::<Vec<_>>(),
+            None,
             None,
         )
         .expect_err("destructive fuzz local route should be refused")
@@ -976,8 +983,13 @@ fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
         ];
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse(&cli, &normalized, Some(&output.to_string_lossy()))
-            .expect("route rig up plan");
+        let outcome = route_after_parse_with_provenance(
+            &cli,
+            &normalized,
+            Some(&output.to_string_lossy()),
+            None,
+        )
+        .expect("route rig up plan");
 
         assert_eq!(outcome, Some(0));
         let plan: serde_json::Value =
@@ -1354,7 +1366,7 @@ fn lab_offload_subprocess_skips_recursive_lab_routing() {
         "pattern-preview-assets".to_string(),
     ];
 
-    let outcome = route_after_parse(&cli, &normalized, None).unwrap();
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None).unwrap();
 
     assert_eq!(outcome, None);
 }
@@ -1377,7 +1389,7 @@ fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner(
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("runner-hosted bench execution should stay local");
 
     assert_eq!(outcome, None);
@@ -1401,7 +1413,7 @@ fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
     let cli = Cli::parse_from(&normalized);
 
     let err = crate::test_support::with_isolated_home(|_| {
-        route_after_parse(&cli, &normalized, None)
+        route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect_err("ambient marker must not bypass required Lab placement")
     });
 
@@ -1424,7 +1436,7 @@ fn managed_runner_context_bypasses_auto_routing_once() {
     let cli = Cli::parse_from(&normalized);
 
     assert_eq!(
-        route_after_parse(&cli, &normalized, None).expect("managed context"),
+        route_after_parse_with_provenance(&cli, &normalized, None, None).expect("managed context"),
         None
     );
 }
@@ -1482,7 +1494,8 @@ fn runner_resident_run_plan_does_not_require_a_second_controller_session() {
     let cli = Cli::parse_from(&normalized);
 
     assert_eq!(
-        route_after_parse(&cli, &normalized, None).expect("runner-resident handoff stays local"),
+        route_after_parse_with_provenance(&cli, &normalized, None, None)
+            .expect("runner-resident handoff stays local"),
         None
     );
 }
@@ -1513,7 +1526,8 @@ fn nested_command_targeting_parent_runner_does_not_require_a_second_controller_s
     let cli = Cli::parse_from(&normalized);
 
     assert_eq!(
-        route_after_parse(&cli, &normalized, None).expect("runner-resident cook stays local"),
+        route_after_parse_with_provenance(&cli, &normalized, None, None)
+            .expect("runner-resident cook stays local"),
         None
     );
 }
@@ -1545,7 +1559,7 @@ fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
     let cli = Cli::parse_from(&normalized);
 
     assert_eq!(
-        route_after_parse(&cli, &normalized, None)
+        route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect("managed promotion must execute on its authorized runner"),
         None
     );
@@ -1575,7 +1589,7 @@ fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
     let cli = Cli::parse_from(&normalized);
 
     let error = crate::test_support::with_isolated_home(|_| {
-        route_after_parse(&cli, &normalized, None)
+        route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect_err("unmanaged run-plan must still require a Lab runner")
     });
 
@@ -1602,7 +1616,7 @@ fn agent_task_doctor_runner_option_routes_locally() {
 
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("agent-task doctor owns --runner and should not be Lab-routed");
 
     assert_eq!(outcome, None);

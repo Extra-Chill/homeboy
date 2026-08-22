@@ -234,7 +234,7 @@ pub struct ReviewerFacingRefConstants {
     pub accepted_schemes: Vec<String>,
 }
 
-pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> {
+pub(crate) fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> {
     let normalized = contract_id.trim();
     let constants = match normalized {
         "all" => ContractConstants::All(Box::new(AllContractConstants {
@@ -301,7 +301,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
     })
 }
 
-pub fn artifact_manifest_constants() -> ArtifactManifestConstants {
+pub(crate) fn artifact_manifest_constants() -> ArtifactManifestConstants {
     ArtifactManifestConstants {
         schema_id: registry_schema_id("artifact-manifest"),
         file_name: RUNNER_ARTIFACT_MANIFEST_FILE.to_string(),
@@ -312,7 +312,7 @@ pub fn artifact_manifest_constants() -> ArtifactManifestConstants {
     }
 }
 
-pub fn artifact_paths_constants() -> ArtifactPathsConstants {
+pub(crate) fn artifact_paths_constants() -> ArtifactPathsConstants {
     ArtifactPathsConstants {
         schema_id: RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA.to_string(),
         runtime_agent_paths: runtime_agent_artifact_paths(),
@@ -320,13 +320,13 @@ pub fn artifact_paths_constants() -> ArtifactPathsConstants {
     }
 }
 
-pub fn artifact_postprocess_constants() -> ArtifactPostprocessConstants {
+pub(crate) fn artifact_postprocess_constants() -> ArtifactPostprocessConstants {
     ArtifactPostprocessConstants {
         schema_id: registry_schema_id("artifact-postprocess"),
     }
 }
 
-pub fn loop_constants() -> LoopConstants {
+pub(crate) fn loop_constants() -> LoopConstants {
     LoopConstants {
         controller_schema_id: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
         controller_status_schema_id: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
@@ -335,19 +335,19 @@ pub fn loop_constants() -> LoopConstants {
     }
 }
 
-pub fn secret_env_plan_constants() -> SecretEnvPlanConstants {
+pub(crate) fn secret_env_plan_constants() -> SecretEnvPlanConstants {
     SecretEnvPlanConstants {
         schema_id: registry_schema_id("secret-env-plan"),
     }
 }
 
-pub fn env_materialization_plan_constants() -> EnvMaterializationPlanConstants {
+pub(crate) fn env_materialization_plan_constants() -> EnvMaterializationPlanConstants {
     EnvMaterializationPlanConstants {
         schema_id: ENV_MATERIALIZATION_PLAN_SCHEMA.to_string(),
     }
 }
 
-pub fn resource_lifecycle_index_constants() -> ResourceLifecycleIndexConstants {
+pub(crate) fn resource_lifecycle_index_constants() -> ResourceLifecycleIndexConstants {
     ResourceLifecycleIndexConstants {
         schema_id: registry_schema_id("resource-lifecycle-index"),
     }
@@ -359,13 +359,13 @@ pub(crate) fn host_mutation_lifecycle_constants() -> HostMutationLifecycleConsta
     }
 }
 
-pub fn run_location_index_constants() -> RunLocationIndexConstants {
+pub(crate) fn run_location_index_constants() -> RunLocationIndexConstants {
     RunLocationIndexConstants {
         schema_id: registry_schema_id("run-location-index"),
     }
 }
 
-pub fn runner_execution_record_constants() -> RunnerExecutionRecordConstants {
+pub(crate) fn runner_execution_record_constants() -> RunnerExecutionRecordConstants {
     RunnerExecutionRecordConstants {
         schema_id: registry_schema_id("runner-execution-record"),
         projection_fields: vec![
@@ -385,7 +385,7 @@ pub fn runner_execution_record_constants() -> RunnerExecutionRecordConstants {
     }
 }
 
-pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants {
+pub(crate) fn path_materialization_plan_constants() -> PathMaterializationPlanConstants {
     PathMaterializationPlanConstants {
         schema_id: PATH_MATERIALIZATION_PLAN_SCHEMA.to_string(),
         projection_fields: vec![
@@ -413,14 +413,14 @@ pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants
     }
 }
 
-pub fn run_outcome_envelope_constants() -> RunOutcomeEnvelopeConstants {
+pub(crate) fn run_outcome_envelope_constants() -> RunOutcomeEnvelopeConstants {
     RunOutcomeEnvelopeConstants {
         schema_id: RUN_OUTCOME_ENVELOPE_SCHEMA.to_string(),
         file_name: RUN_OUTCOME_ENVELOPE_FILE.to_string(),
     }
 }
 
-pub fn run_artifact_files_constants() -> RunArtifactFilesConstants {
+pub(crate) fn run_artifact_files_constants() -> RunArtifactFilesConstants {
     RunArtifactFilesConstants {
         events: RUN_ARTIFACT_EVENTS_FILE.to_string(),
         status: RUN_ARTIFACT_STATUS_FILE.to_string(),
@@ -433,7 +433,7 @@ pub fn run_artifact_files_constants() -> RunArtifactFilesConstants {
     }
 }
 
-pub fn runtime_artifact_constants() -> RuntimeArtifactConstants {
+pub(crate) fn runtime_artifact_constants() -> RuntimeArtifactConstants {
     RuntimeArtifactConstants {
         runtime_agent_paths: runtime_agent_artifact_paths(),
         canonical_filenames: runtime_artifact_filenames(),
@@ -447,7 +447,7 @@ pub fn runtime_artifact_constants() -> RuntimeArtifactConstants {
     }
 }
 
-pub fn runner_artifact_manifest_ref_constants() -> RunnerArtifactManifestRefConstants {
+pub(crate) fn runner_artifact_manifest_ref_constants() -> RunnerArtifactManifestRefConstants {
     RunnerArtifactManifestRefConstants {
         schema_id: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
         name: RUNNER_ARTIFACT_MANIFEST_REF_NAME.to_string(),
@@ -473,7 +473,7 @@ fn runtime_artifact_filenames() -> RuntimeArtifactFilenames {
     }
 }
 
-pub fn reviewer_facing_ref_constants() -> ReviewerFacingRefConstants {
+pub(crate) fn reviewer_facing_ref_constants() -> ReviewerFacingRefConstants {
     ReviewerFacingRefConstants {
         accepted_schemes: vec![
             "http://".to_string(),

@@ -22,7 +22,7 @@ pub struct MatrixArtifactsReport {
     pub markdown: String,
 }
 
-pub fn matrix_artifacts_from_args(
+pub(crate) fn matrix_artifacts_from_args(
     args: &MatrixArtifactsArgs,
 ) -> homeboy::core::Result<MatrixArtifactsReport> {
     let store = ObservationStore::open_initialized()?;
@@ -61,7 +61,7 @@ pub fn matrix_artifacts_from_args(
     Ok(MatrixArtifactsReport { summary, markdown })
 }
 
-pub fn render_matrix_artifacts_from_args(
+pub(crate) fn render_matrix_artifacts_from_args(
     args: &MatrixArtifactsArgs,
 ) -> homeboy::core::Result<String> {
     Ok(matrix_artifacts_from_args(args)?.markdown)

@@ -4,11 +4,11 @@ use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionManifest};
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
-pub fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
+pub(crate) fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
     RunnerToolRegistry::doctor_tools(runner)
 }
 
-pub fn capabilities_from(
+pub(crate) fn capabilities_from(
     local_execution: bool,
     ssh_execution: bool,
     homeboy_available: bool,
@@ -24,7 +24,7 @@ pub fn capabilities_from(
     }
 }
 
-pub fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
+pub(crate) fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
     let mut by_source = declared_extension_tool_specs_by_source(
         &extension::load_all_extensions().unwrap_or_default(),
     );
@@ -127,11 +127,11 @@ fn declared_tool_source(manifest: &AgentRuntimeManifest) -> String {
         .unwrap_or_else(|| manifest.id.clone())
 }
 
-pub fn tool_available(tools: &BTreeMap<String, ToolProbe>, id: &str) -> bool {
+pub(crate) fn tool_available(tools: &BTreeMap<String, ToolProbe>, id: &str) -> bool {
     tools.get(id).map(|tool| tool.available).unwrap_or(false)
 }
 
-pub fn required_tool_version_args(command: &str) -> Vec<String> {
+pub(crate) fn required_tool_version_args(command: &str) -> Vec<String> {
     let name = Path::new(command)
         .file_name()
         .and_then(|value| value.to_str())
@@ -143,7 +143,7 @@ pub fn required_tool_version_args(command: &str) -> Vec<String> {
     }
 }
 
-pub fn local_tool_probe(command: &str, version_args: &[String]) -> ToolProbe {
+pub(crate) fn local_tool_probe(command: &str, version_args: &[String]) -> ToolProbe {
     let path = common::local_command_line(
         "sh",
         &[
@@ -182,7 +182,11 @@ pub fn local_tool_probe(command: &str, version_args: &[String]) -> ToolProbe {
     }
 }
 
-pub fn remote_tool_probe(client: &SshClient, command: &str, version_args: &[String]) -> ToolProbe {
+pub(crate) fn remote_tool_probe(
+    client: &SshClient,
+    command: &str,
+    version_args: &[String],
+) -> ToolProbe {
     let path = common::remote_line(
         client,
         &format!("command -v {}", common::shell_word(command)),
@@ -220,7 +224,7 @@ pub fn remote_tool_probe(client: &SshClient, command: &str, version_args: &[Stri
     }
 }
 
-pub fn lab_homeboy_path_checks(
+pub(crate) fn lab_homeboy_path_checks(
     client: &SshClient,
     runner_id: &str,
     server_id: &str,
@@ -387,7 +391,7 @@ fn semantic_version_parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-pub fn provider_readiness_checks(
+pub(crate) fn provider_readiness_checks(
     client: &SshClient,
     contracts: &[homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerReadinessContract],
 ) -> Vec<RunnerCheck> {
@@ -405,7 +409,7 @@ pub fn provider_readiness_checks(
         .collect()
 }
 
-pub fn eligible_provider_ids(
+pub(crate) fn eligible_provider_ids(
     providers: &[AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
     selected_provider_id: Option<&str>,
@@ -420,7 +424,7 @@ pub fn eligible_provider_ids(
     .collect()
 }
 
-pub fn local_provider_executor_resolution_checks(
+pub(crate) fn local_provider_executor_resolution_checks(
     providers: &[AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
     selected_provider_id: Option<&str>,
@@ -435,7 +439,7 @@ pub fn local_provider_executor_resolution_checks(
     .collect()
 }
 
-pub fn remote_provider_executor_resolution_checks(
+pub(crate) fn remote_provider_executor_resolution_checks(
     client: &SshClient,
     providers: &[AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
@@ -749,7 +753,7 @@ fn first_stderr_lines(stderr: &str, max: usize) -> String {
 /// source checkout. Surfaces a missing checkout (error) or a checkout that
 /// tracks a different remote than the declared canonical remote (warning)
 /// so operators see drift before a cook runs against a stale source.
-pub fn managed_runner_source_checks(
+pub(crate) fn managed_runner_source_checks(
     client: &SshClient,
     contracts: &[AgentTaskProviderRunnerSource],
 ) -> Vec<RunnerCheck> {
@@ -1362,11 +1366,11 @@ fn remote_homeboy_version(client: &SshClient, command: &str) -> Option<String> {
     )
 }
 
-pub fn local_memory_probe() -> Option<MemoryProbe> {
+pub(crate) fn local_memory_probe() -> Option<MemoryProbe> {
     memory_from_proc_meminfo().or_else(memory_from_macos_sysctl)
 }
 
-pub fn remote_memory_probe(client: &SshClient) -> Option<MemoryProbe> {
+pub(crate) fn remote_memory_probe(client: &SshClient) -> Option<MemoryProbe> {
     let total_mb = common::remote_line(
         client,
         "awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || expr $(sysctl -n hw.memsize 2>/dev/null) / 1048576",
@@ -1385,7 +1389,7 @@ pub fn remote_memory_probe(client: &SshClient) -> Option<MemoryProbe> {
 }
 
 #[cfg(unix)]
-pub fn local_disk_probe(path: &Path) -> Option<DiskProbe> {
+pub(crate) fn local_disk_probe(path: &Path) -> Option<DiskProbe> {
     let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
@@ -1408,11 +1412,11 @@ pub fn local_disk_probe(path: &Path) -> Option<DiskProbe> {
 }
 
 #[cfg(not(unix))]
-pub fn local_disk_probe(_path: &Path) -> Option<DiskProbe> {
+pub(crate) fn local_disk_probe(_path: &Path) -> Option<DiskProbe> {
     None
 }
 
-pub fn remote_disk_probe(client: &SshClient, path: &str) -> Option<DiskProbe> {
+pub(crate) fn remote_disk_probe(client: &SshClient, path: &str) -> Option<DiskProbe> {
     let line = common::remote_line(
         client,
         &format!(
@@ -1430,7 +1434,7 @@ pub fn remote_disk_probe(client: &SshClient, path: &str) -> Option<DiskProbe> {
     })
 }
 
-pub fn local_browser_ready() -> bool {
+pub(crate) fn local_browser_ready() -> bool {
     browser_cache_candidates().into_iter().any(|path| {
         path.is_dir()
             && fs::read_dir(path)
@@ -1439,34 +1443,34 @@ pub fn local_browser_ready() -> bool {
     })
 }
 
-pub fn remote_browser_ready(client: &SshClient) -> bool {
+pub(crate) fn remote_browser_ready(client: &SshClient) -> bool {
     let command = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
     client.execute(command).success
 }
 
-pub fn headed_browser_ready(display_ready: bool, xvfb_ready: bool) -> bool {
+pub(crate) fn headed_browser_ready(display_ready: bool, xvfb_ready: bool) -> bool {
     display_ready || xvfb_ready
 }
 
-pub fn local_display_ready() -> bool {
+pub(crate) fn local_display_ready() -> bool {
     env::var("DISPLAY").is_ok_and(|value| !value.trim().is_empty())
 }
 
-pub fn remote_display_ready(client: &SshClient) -> bool {
+pub(crate) fn remote_display_ready(client: &SshClient) -> bool {
     client.execute("[ -n \"${DISPLAY:-}\" ]").success
 }
 
-pub fn local_xvfb_ready() -> bool {
+pub(crate) fn local_xvfb_ready() -> bool {
     local_tool_probe("xvfb-run", &[]).available || local_tool_probe("Xvfb", &[]).available
 }
 
-pub fn remote_xvfb_ready(client: &SshClient) -> bool {
+pub(crate) fn remote_xvfb_ready(client: &SshClient) -> bool {
     remote_tool_probe(client, "xvfb-run", &[]).available
         || remote_tool_probe(client, "Xvfb", &[]).available
 }
 
 #[cfg(unix)]
-pub fn local_path_writable(path: &Path) -> bool {
+pub(crate) fn local_path_writable(path: &Path) -> bool {
     let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
         Ok(path) => path,
         Err(_) => return false,
@@ -1475,13 +1479,13 @@ pub fn local_path_writable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-pub fn local_path_writable(path: &Path) -> bool {
+pub(crate) fn local_path_writable(path: &Path) -> bool {
     fs::metadata(path)
         .map(|metadata| !metadata.permissions().readonly())
         .unwrap_or(false)
 }
 
-pub fn local_path_or_parent_writable(path: &Path) -> bool {
+pub(crate) fn local_path_or_parent_writable(path: &Path) -> bool {
     if path.exists() {
         local_path_writable(path)
     } else {
@@ -1489,13 +1493,13 @@ pub fn local_path_or_parent_writable(path: &Path) -> bool {
     }
 }
 
-pub fn remote_path_writable(client: &SshClient, path: &str) -> bool {
+pub(crate) fn remote_path_writable(client: &SshClient, path: &str) -> bool {
     client
         .execute(&format!("test -w {}", common::shell_word(path)))
         .success
 }
 
-pub fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
+pub(crate) fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
     client
         .execute(&format!(
             "if [ -e {0} ]; then test -w {0}; else test -w $(dirname {0}); fi",
@@ -1504,7 +1508,10 @@ pub fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
         .success
 }
 
-pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Vec<RunnerCheck> {
+pub(crate) fn connected_daemon_exec_checks(
+    runner_id: &str,
+    workspace_root: &str,
+) -> Vec<RunnerCheck> {
     connected_daemon_exec_checks_with_timeout(
         runner_id,
         workspace_root,
@@ -1552,7 +1559,7 @@ pub(crate) fn connected_daemon_exec_checks_with_timeout(
 /// or invoking runner status reconciliation. The persisted session liveness
 /// check has already matched this lease and PID; this request is a bounded
 /// final health observation for the doctor report.
-pub fn connected_daemon_health_checks_with_timeout(
+pub(crate) fn connected_daemon_health_checks_with_timeout(
     runner_id: &str,
     session: &RunnerSession,
     timeout: std::time::Duration,

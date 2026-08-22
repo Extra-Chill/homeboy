@@ -46,7 +46,7 @@ pub struct HotCommand {
 }
 
 impl HotCommand {
-    pub fn lab_supported(label: &'static str) -> Self {
+    pub(crate) fn lab_supported(label: &'static str) -> Self {
         Self {
             label,
             lab_offload_supported: true,
@@ -150,7 +150,7 @@ pub(crate) struct ResourceAdmissionRecovery {
 /// A free function (rather than an inherent method) because `ResourcePolicyContext`
 /// is defined in the `homeboy-core` crate and this construction depends on
 /// CLI-layer types.
-pub fn resource_policy_context_from_evaluation(
+pub(crate) fn resource_policy_context_from_evaluation(
     command: HotCommand,
     resources: &DoctorOutput,
     warning: Option<&ResourcePolicyWarning>,
@@ -197,7 +197,9 @@ pub fn resource_policy_context_from_evaluation(
 
 /// Serialize a `ResourcePolicyContext` as the JSON value that lands inside
 /// observation `metadata_json["resource_policy"]`.
-pub fn resource_policy_context_to_json(context: &ResourcePolicyContext) -> serde_json::Value {
+pub(crate) fn resource_policy_context_to_json(
+    context: &ResourcePolicyContext,
+) -> serde_json::Value {
     serde_json::to_value(context).unwrap_or(serde_json::Value::Null)
 }
 
@@ -273,7 +275,7 @@ fn runner_selection_context(
     }
 }
 
-pub fn hot_command(command: &Commands) -> Option<HotCommand> {
+pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
     if is_cook_preview(command)
         || is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
@@ -492,7 +494,7 @@ pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<Resourc
     evaluate_with_runner_hint(command, resources, None)
 }
 
-pub fn evaluate_with_runner_hint(
+pub(crate) fn evaluate_with_runner_hint(
     command: HotCommand,
     resources: &DoctorOutput,
     lab_readiness: Option<&LabRunnerReadiness>,
@@ -516,7 +518,7 @@ pub fn evaluate_with_runner_hint(
 /// runner. This is placement evidence, not a local-execution warning: the
 /// runner handoff owns reporting an authorized fallback if remote preparation
 /// later fails.
-pub fn explicit_runner_controller_notice(
+pub(crate) fn explicit_runner_controller_notice(
     command: HotCommand,
     resources: &DoctorOutput,
     runner_id: &str,
@@ -533,7 +535,7 @@ pub fn explicit_runner_controller_notice(
 /// or automatically selected runner lets the controller admit that lightweight
 /// coordination under warm or hot CPU load, while memory and process pressure
 /// remain local safety gates.
-pub fn admits_warm_runner_coordination(
+pub(crate) fn admits_warm_runner_coordination(
     command: HotCommand,
     resources: &DoctorOutput,
     selected_runner: Option<&str>,
@@ -564,7 +566,7 @@ pub fn admits_warm_runner_coordination(
 /// local host has measured headroom. This is intentionally narrower than an
 /// explicit `--placement local`: missing load observations and every non-load
 /// pressure signal fail closed.
-pub fn admits_auto_local_capacity_fallback(
+pub(crate) fn admits_auto_local_capacity_fallback(
     command: HotCommand,
     resources: &DoctorOutput,
     lab_readiness: Option<&LabRunnerReadiness>,

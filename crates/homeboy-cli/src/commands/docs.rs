@@ -70,12 +70,12 @@ pub enum DocsOutput {
 // ============================================================================
 
 /// Check if this invocation should return JSON (map subcommand)
-pub fn is_json_mode(args: &DocsArgs) -> bool {
+pub(crate) fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(args.command, Some(DocsCommand::Map { .. }))
 }
 
 /// Markdown output mode (topic display, list)
-pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     let topic = args.topic.as_deref().unwrap_or("index");
 
     if topic == "list" {

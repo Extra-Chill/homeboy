@@ -297,7 +297,7 @@ pub struct PassiveTraceArgs {
 }
 
 impl TraceArgs {
-    pub fn is_compare_target_run(&self) -> bool {
+    fn is_compare_target_run(&self) -> bool {
         self.comp.component.as_deref() == Some("compare")
             && (self.baseline_target.is_some() || self.candidate.is_some())
     }
@@ -320,16 +320,13 @@ impl TraceArgs {
     }
 }
 
-pub fn is_markdown_mode(args: &TraceArgs) -> bool {
+pub(crate) fn is_markdown_mode(args: &TraceArgs) -> bool {
     args.report.as_deref() == Some("markdown")
 }
 
-pub fn run_markdown(args: TraceArgs) -> CmdResult<String> {
-    let (output, exit_code) = run(args)?;
-    Ok((render_markdown_output(&output), exit_code))
-}
-
-pub fn run_markdown_with_json_artifact(args: TraceArgs) -> super::output_runtime::CommandRun {
+pub(crate) fn run_markdown_with_json_artifact(
+    args: TraceArgs,
+) -> super::output_runtime::CommandRun {
     let output_to_json = |output: &TraceCommandOutput| {
         serde_json::to_value(output).map_err(|err| {
             homeboy::core::Error::internal_json(
@@ -413,7 +410,7 @@ pub fn run(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     Ok((stdout_output, exit_code))
 }
 
-pub fn run_json_with_output_artifact(
+pub(crate) fn run_json_with_output_artifact(
     args: TraceArgs,
 ) -> (
     homeboy::core::Result<serde_json::Value>,

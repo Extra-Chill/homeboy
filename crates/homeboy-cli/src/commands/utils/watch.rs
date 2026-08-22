@@ -135,7 +135,7 @@ fn parse_duration_parts(raw: &str) -> Result<Duration, String> {
 ///
 /// `field` is the name the user typed (`since`, `duration`, `--timeout`) so the
 /// error points at the flag that was wrong.
-pub fn parse_duration(field: &str, raw: &str) -> homeboy::core::Result<Duration> {
+pub(crate) fn parse_duration(field: &str, raw: &str) -> homeboy::core::Result<Duration> {
     parse_duration_parts(raw).map_err(|message| {
         homeboy::core::Error::validation_invalid_argument(
             field,
@@ -147,7 +147,7 @@ pub fn parse_duration(field: &str, raw: &str) -> homeboy::core::Result<Duration>
 }
 
 /// Duration parser for clap `value_parser` attributes.
-pub fn parse_duration_arg(raw: &str) -> Result<Duration, String> {
+pub(crate) fn parse_duration_arg(raw: &str) -> Result<Duration, String> {
     parse_duration_parts(raw)
 }
 

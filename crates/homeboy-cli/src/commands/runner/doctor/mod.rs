@@ -52,7 +52,7 @@ pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
     run_with_options(runner_id, RunnerDoctorOptions::default())
 }
 
-pub fn run_with_options(
+pub(crate) fn run_with_options(
     runner_id: &str,
     mut options: RunnerDoctorOptions,
 ) -> CmdResult<RunnerDoctorOutput> {

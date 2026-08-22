@@ -37,7 +37,7 @@ impl ArgumentSource {
 pub struct CommandArgumentProvenance(BTreeMap<String, ArgumentSource>);
 
 impl CommandArgumentProvenance {
-    pub fn from_matches(matches: &ArgMatches) -> Self {
+    pub(crate) fn from_matches(matches: &ArgMatches) -> Self {
         let mut provenance = Self::default();
         provenance.collect(matches);
         provenance
@@ -55,7 +55,7 @@ impl CommandArgumentProvenance {
 
     /// Rejects a source policy before a caller starts workspace, provider, or
     /// other external work. A single policy can cover an argument group.
-    pub fn require_sources(
+    pub(crate) fn require_sources(
         &self,
         arguments: &[&str],
         allowed: &[ArgumentSource],
@@ -84,7 +84,7 @@ impl CommandArgumentProvenance {
     }
 
     /// Adds durable provenance to a plan or evidence JSON object.
-    pub fn project_into(&self, value: &mut serde_json::Value) {
+    pub(crate) fn project_into(&self, value: &mut serde_json::Value) {
         if !value.is_object() {
             *value = serde_json::json!({});
         }
@@ -164,23 +164,6 @@ impl TrackerCookArgumentAdapter {
             provenance.set(argument, source);
         }
         CompiledCommand::new(value, provenance)
-    }
-
-    /// Tracker policy can reject caller overrides before it provisions a
-    /// worktree or discovers a provider.
-    pub fn require_policy_owned(
-        provenance: &CommandArgumentProvenance,
-        arguments: &[&str],
-    ) -> Result<(), ArgumentSourcePolicyError> {
-        provenance.require_sources(
-            arguments,
-            &[
-                ArgumentSource::Configuration,
-                ArgumentSource::Policy,
-                ArgumentSource::Generated,
-                ArgumentSource::Default,
-            ],
-        )
     }
 }
 
@@ -334,45 +317,6 @@ mod tests {
             .expect_err("explicit override must be rejected");
 
         assert_eq!(error.rejected[0].argument, "max_attempts");
-        assert_eq!(error.rejected[0].source, ArgumentSource::CommandLine);
-    }
-
-    #[test]
-    fn tracker_cook_fixture_keeps_resolved_values_and_rejects_cli_policy_overrides() {
-        // This is the #10889 handoff shape. It intentionally contains no
-        // tracker implementation; that feature supplies these typed values.
-        #[derive(Debug, PartialEq, Eq)]
-        struct TrackerCookFixture {
-            issue: u64,
-            base: String,
-            max_attempts: u32,
-            placement: String,
-        }
-
-        let compiled = TrackerCookArgumentAdapter::compile(
-            TrackerCookFixture {
-                issue: 10889,
-                base: "main".to_string(),
-                max_attempts: 3,
-                placement: "lab".to_string(),
-            },
-            [
-                ("base", ArgumentSource::Configuration),
-                ("max_attempts", ArgumentSource::Policy),
-                ("placement", ArgumentSource::Policy),
-            ],
-        );
-        TrackerCookArgumentAdapter::require_policy_owned(
-            &compiled.provenance,
-            &["base", "max_attempts", "placement"],
-        )
-        .expect("tracker policy sources are accepted");
-        assert_eq!(compiled.value.issue, 10889);
-
-        let mut overridden = compiled.provenance.clone();
-        overridden.set("base", ArgumentSource::CommandLine);
-        let error = TrackerCookArgumentAdapter::require_policy_owned(&overridden, &["base"])
-            .expect_err("explicit base override is rejected before mutation");
         assert_eq!(error.rejected[0].source, ArgumentSource::CommandLine);
     }
 }

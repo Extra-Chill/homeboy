@@ -10,7 +10,7 @@ mod operations;
 mod ssh_forward;
 
 // Re-export everything at module level to preserve existing import paths.
-pub use operations::{
+pub(crate) use operations::{
     delete_row, describe_table, drop_table, list_tables, query, search, DbResult,
 };
-pub use ssh_forward::{create_tunnel, DbTunnelResult};
+pub(crate) use ssh_forward::{create_tunnel, DbTunnelResult};

@@ -27,11 +27,11 @@ mod types;
 mod tests;
 
 pub use cli::RunnerArgs;
-pub use dispatch::{run, run_command_output};
+pub(crate) use dispatch::{run, run_command_output};
 pub(crate) use status::declared_tool_diagnostics;
 pub use types::RunnerToolDiagnostics;
 
-pub fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
+pub(crate) fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
     args.compact_exec_stdout()
 }
 
@@ -42,7 +42,7 @@ pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
     ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
-pub fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
+pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
     match args.command {
         cli::RunnerCommand::Exec {
             id,

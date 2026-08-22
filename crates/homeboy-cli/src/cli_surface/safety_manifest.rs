@@ -19,21 +19,17 @@
 //! rather than a silently ignored entry.
 
 use crate::cli_surface::{
-    current_command_surface, CommandDocsMetadata, CommandDryRunMetadata, CommandLabMetadata,
-    CommandOutputMetadata, CommandSafetyAuditFinding, CommandSafetyAuditReport, CommandSafetyEntry,
-    CommandSafetyManifest, CommandSurface, CommandSurfaceEntry, DynamicCommandDescriptor,
+    CommandDocsMetadata, CommandDryRunMetadata, CommandLabMetadata, CommandOutputMetadata,
+    CommandSafetyEntry, CommandSafetyManifest, CommandSurface, CommandSurfaceEntry,
+    DynamicCommandDescriptor,
 };
 use crate::command_contract::{registered_command, CommandSafetySpec};
 
-pub fn current_command_safety_manifest() -> CommandSafetyManifest {
-    command_safety_manifest_from(current_command_surface())
-}
-
-pub fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
+pub(crate) fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
     command_safety_manifest_from_dynamic(surface, &[])
 }
 
-pub fn command_safety_manifest_from_dynamic(
+pub(crate) fn command_safety_manifest_from_dynamic(
     surface: CommandSurface,
     dynamic_commands: &[DynamicCommandDescriptor],
 ) -> CommandSafetyManifest {
@@ -43,24 +39,6 @@ pub fn command_safety_manifest_from_dynamic(
             .iter()
             .map(|entry| command_safety_entry(entry, &[], dynamic_commands))
             .collect(),
-    }
-}
-
-pub fn command_safety_manifest_audit(manifest: &CommandSafetyManifest) -> CommandSafetyAuditReport {
-    let mut missing_action_metadata = Vec::new();
-
-    for entry in flatten_manifest_entries(&manifest.commands) {
-        if !entry.hidden && entry.mutates && !entry_has_action_metadata(entry) {
-            missing_action_metadata.push(CommandSafetyAuditFinding {
-                path: entry.path.clone(),
-                reason: "visible mutating command lacks dry-run, dangerous/apply flag, or risk exemption metadata".to_string(),
-            });
-        }
-    }
-
-    CommandSafetyAuditReport {
-        report_only: true,
-        missing_action_metadata,
     }
 }
 
@@ -174,25 +152,6 @@ fn resolved_command_safety(path: &[String]) -> ResolvedCommandSafety {
     resolved.dangerous_flags = resolved.safety.dangerous_flags.to_vec();
 
     resolved
-}
-
-fn flatten_manifest_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
-    let mut flattened = Vec::new();
-
-    for entry in entries {
-        flattened.push(entry);
-        flattened.extend(flatten_manifest_entries(&entry.subcommands));
-    }
-
-    flattened
-}
-
-fn entry_has_action_metadata(entry: &CommandSafetyEntry) -> bool {
-    entry.dry_run.supported
-        || !entry.dangerous_flags.is_empty()
-        || entry.risk_exemption.is_some()
-        || entry.output.notes.contains("--apply")
-        || entry.output.notes.contains("--dry-run")
 }
 
 fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> Option<String> {

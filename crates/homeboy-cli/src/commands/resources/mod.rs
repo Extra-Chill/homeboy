@@ -97,7 +97,7 @@ pub fn run(_args: ResourcesArgs) -> CmdResult<DoctorOutput> {
     run_with_mode(ResourceProbeMode::Full)
 }
 
-pub fn run_preflight() -> CmdResult<DoctorOutput> {
+pub(crate) fn run_preflight() -> CmdResult<DoctorOutput> {
     run_with_mode(ResourceProbeMode::Preflight)
 }
 

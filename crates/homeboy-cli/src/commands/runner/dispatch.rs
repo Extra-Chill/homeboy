@@ -390,7 +390,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
     }
 }
 
-pub fn run_command_output(args: RunnerArgs) -> CommandRun {
+pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
 
     match args.command {

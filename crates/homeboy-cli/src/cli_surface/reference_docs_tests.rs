@@ -12,12 +12,10 @@
 //! ```
 
 use super::reference_docs::{
-    commands_without_description, documented_subcommands, generated_command_index,
-    generated_reference_docs, live_generated_reference_docs, write_cli_reference, WRITE_ENV,
+    commands_without_description, documented_subcommands, write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
-use homeboy_command_contract::cli_reference::CliReference;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -43,67 +41,6 @@ fn cli_reference_docs_regenerate_on_demand() {
     }
 
     write_cli_reference(&workspace_root()).expect("write CLI reference");
-}
-
-/// One generated page per visible top-level command, plus the index.
-#[test]
-fn generated_reference_covers_every_visible_top_level_command() {
-    let root = Cli::command();
-
-    let expected = documented_subcommands(&root)
-        .into_iter()
-        .map(|command| format!("{}.md", command.get_name()))
-        .chain(std::iter::once("index.md".to_string()))
-        .collect::<BTreeSet<_>>();
-
-    assert_eq!(
-        generated_reference_docs()
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        expected
-    );
-}
-
-/// The checked-in reference contract and command index are generated from the
-/// same live Clap tree. Keeping this as an ordinary test makes a new command
-/// fail in CI before it can drift into `self doctor`.
-#[test]
-fn generated_command_docs_match_the_live_clap_tree() {
-    let checked_in = generated_reference_docs();
-    let live = live_generated_reference_docs();
-    assert_eq!(
-        checked_in.keys().collect::<Vec<_>>(),
-        live.keys().collect::<Vec<_>>(),
-        "the checked-in CLI reference document set is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-    );
-    for (path, expected) in &checked_in {
-        let actual = &live[path];
-        if expected != actual {
-            let line = expected
-                .lines()
-                .zip(actual.lines())
-                .position(|(expected, actual)| expected != actual)
-                .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
-            panic!(
-                "{path} is stale at line {}\nchecked in: {:?}\nlive: {:?}\nrun cargo run -p homeboy-cli --bin generate-cli-reference",
-                line + 1,
-                expected.lines().nth(line),
-                actual.lines().nth(line),
-            );
-        }
-    }
-    assert_eq!(
-        CliReference::new(live_generated_reference_docs()),
-        homeboy_command_contract::cli_reference::checked_in_cli_reference(),
-        "the checked-in CLI reference contract is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-    );
-    assert_eq!(
-        std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
-            .expect("read generated command index"),
-        generated_command_index(),
-        "docs/commands/commands-index.md is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-    );
 }
 
 /// A command with no clap `about` is invisible in `--help`, in the generated

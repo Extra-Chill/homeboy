@@ -136,7 +136,9 @@ mod types {
 mod engine {
     use super::*;
 
-    pub fn triage_pr_failures(request: CiFailureTriageRequest) -> Result<CiFailureTriageOutput> {
+    pub(crate) fn triage_pr_failures(
+        request: CiFailureTriageRequest,
+    ) -> Result<CiFailureTriageOutput> {
         let parsed = parse_pr_reference(&request.reference)?;
         let repo = request.repo.clone().or(parsed.repo).ok_or_else(|| {
             Error::validation_missing_argument(vec!["--repo <owner/repo>".to_string()])
@@ -724,7 +726,7 @@ mod engine {
     }
 }
 
-pub use engine::*;
+pub(crate) use engine::*;
 pub use types::*;
 
 #[cfg(test)]

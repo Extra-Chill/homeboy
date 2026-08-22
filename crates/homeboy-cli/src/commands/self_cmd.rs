@@ -86,7 +86,7 @@ struct UpgradeAdmissionReport {
     admission: homeboy_upgrade::upgrade::ControllerUpgradeAdmission,
 }
 
-pub fn identity_report() -> Value {
+pub(crate) fn identity_report() -> Value {
     serde_json::to_value(SelfIdentityReport {
         active_binary: std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
@@ -313,11 +313,11 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
     }
 }
 
-pub fn is_docs_markdown(args: &SelfArgs) -> bool {
+pub(crate) fn is_docs_markdown(args: &SelfArgs) -> bool {
     matches!(&args.command, SelfCommand::Docs(docs_args) if !docs::is_json_mode(docs_args))
 }
 
-pub fn run_docs_markdown(args: SelfArgs) -> CmdResult<String> {
+pub(crate) fn run_docs_markdown(args: SelfArgs) -> CmdResult<String> {
     match args.command {
         SelfCommand::Docs(docs_args) => docs::run_markdown(docs_args),
         _ => Err(homeboy::core::Error::validation_invalid_argument(

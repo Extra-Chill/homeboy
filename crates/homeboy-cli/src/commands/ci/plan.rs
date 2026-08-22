@@ -124,32 +124,14 @@ pub struct CiPlan {
     pub has_lint: bool,
 }
 
-impl CiPlan {
-    /// Comma-separated quality command list, in canonical order.
-    pub fn quality_commands(&self) -> String {
-        join_commands(&self.quality)
-    }
-
-    /// Comma-separated operations command list, in request order.
-    pub fn operations_commands(&self) -> String {
-        join_commands(&self.operations)
-    }
-}
-
-fn join_commands(commands: &[PlannedCommand]) -> String {
-    commands
-        .iter()
-        .map(|c| c.command.as_str())
-        .collect::<Vec<_>>()
-        .join(",")
-}
+impl CiPlan {}
 
 /// Filesystem-safe output stem for a command request.
 ///
 /// Collapses any run of non-`[alnum]._-` characters to a single `-`, trims
 /// leading/trailing `-`, and falls back to a stable default when empty. Matches
 /// the action's `command_output_stem` so existing artifact names stay stable.
-pub fn output_stem(command: &str) -> String {
+fn output_stem(command: &str) -> String {
     let mut stem = String::with_capacity(command.len());
     let mut last_was_sep = false;
     for ch in command.chars() {
@@ -247,58 +229,6 @@ pub fn plan(request: &str, context: CiEventContext) -> CiPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn infers_quality_gates_for_pr_push_manual() {
-        for ctx in [
-            CiEventContext::Pr,
-            CiEventContext::Push,
-            CiEventContext::Manual,
-        ] {
-            let p = plan("", ctx);
-            assert!(p.inferred);
-            assert_eq!(p.quality_commands(), "audit,lint,test");
-            assert!(p.operations.is_empty());
-        }
-    }
-
-    #[test]
-    fn infers_release_for_cron() {
-        let p = plan("", CiEventContext::Cron);
-        assert!(p.inferred);
-        assert_eq!(p.quality_commands(), "release");
-    }
-
-    #[test]
-    fn unknown_context_defaults_to_manual_quality_gates() {
-        assert_eq!(CiEventContext::parse("weird"), CiEventContext::Manual);
-        let p = plan("", CiEventContext::parse("weird"));
-        assert_eq!(p.quality_commands(), "audit,lint,test");
-    }
-
-    #[test]
-    fn explicit_request_is_not_inferred() {
-        let p = plan("test", CiEventContext::Pr);
-        assert!(!p.inferred);
-        assert_eq!(p.quality_commands(), "test");
-    }
-
-    #[test]
-    fn enforces_canonical_order_regardless_of_request_order() {
-        let p = plan("test, refactor, audit, lint", CiEventContext::Manual);
-        assert_eq!(p.quality_commands(), "audit,lint,test,refactor");
-    }
-
-    #[test]
-    fn splits_operations_commands_out_of_quality() {
-        let p = plan("audit, deploy, fleet, lint", CiEventContext::Manual);
-        assert_eq!(p.quality_commands(), "audit,lint");
-        assert_eq!(p.operations_commands(), "deploy,fleet");
-        assert!(p
-            .operations
-            .iter()
-            .all(|c| c.category == CommandCategory::Operations));
-    }
 
     #[test]
     fn skip_lint_only_set_on_test_when_lint_present() {

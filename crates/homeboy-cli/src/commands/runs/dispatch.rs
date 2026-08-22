@@ -19,7 +19,7 @@ impl RunsArgs {
     /// Whether this is a `runs show <id>` invocation eligible for the
     /// compact human summary (i.e. the caller asked for neither `--json`
     /// nor `--format json`).
-    pub fn show_summary_eligible(&self) -> bool {
+    pub(crate) fn show_summary_eligible(&self) -> bool {
         match &self.command {
             RunsCommand::Show {
                 json, presentation, ..
@@ -31,7 +31,7 @@ impl RunsArgs {
     /// Whether this is a `runs dossier <id>` invocation eligible for the
     /// compact human dossier (i.e. the caller asked for neither `--json`
     /// nor `--format json`).
-    pub fn dossier_summary_eligible(&self) -> bool {
+    pub(crate) fn dossier_summary_eligible(&self) -> bool {
         match &self.command {
             RunsCommand::Dossier {
                 json, presentation, ..
@@ -43,7 +43,7 @@ impl RunsArgs {
     /// Whether this is a `runs proof <id>` invocation eligible for the compact
     /// human summary (i.e. the caller asked for neither `--json` nor
     /// `--format json`).
-    pub fn proof_summary_eligible(&self) -> bool {
+    pub(crate) fn proof_summary_eligible(&self) -> bool {
         match &self.command {
             RunsCommand::Proof {
                 json, presentation, ..
@@ -52,7 +52,7 @@ impl RunsArgs {
         }
     }
 
-    pub fn absorb_global_runner_for_command_option(
+    pub(crate) fn absorb_global_runner_for_command_option(
         &mut self,
         runner: Option<String>,
     ) -> Option<String> {
@@ -94,34 +94,20 @@ impl RunsArgs {
         }
     }
 
-    pub fn list_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::List(args) => args.runner.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn is_artifacts(&self) -> bool {
+    pub(crate) fn is_artifacts(&self) -> bool {
         matches!(self.command, RunsCommand::Artifacts(_))
     }
 
-    pub fn artifacts_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::Artifacts(args) => args.runner.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn is_markdown_mode(&self) -> bool {
+    pub(crate) fn is_markdown_mode(&self) -> bool {
         matches!(self.command, RunsCommand::Compare(ref compare) if compare::is_table_mode(compare))
             || matches!(self.command, RunsCommand::Report(ref report_args) if report::is_markdown_mode(report_args))
     }
 
-    pub fn is_bundle_export(&self) -> bool {
+    pub(crate) fn is_bundle_export(&self) -> bool {
         matches!(self.command, RunsCommand::Export(_))
     }
 
-    pub fn is_artifact_get(&self) -> bool {
+    pub(crate) fn is_artifact_get(&self) -> bool {
         matches!(
             self.command,
             RunsCommand::Artifact(RunsArtifactArgs {
@@ -130,16 +116,7 @@ impl RunsArgs {
         )
     }
 
-    pub fn artifact_get_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::Artifact(RunsArtifactArgs {
-                command: RunsArtifactCommand::Get(args),
-            }) => args.runner.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn has_command_local_runner_option(&self) -> bool {
+    pub(crate) fn has_command_local_runner_option(&self) -> bool {
         matches!(
             self.command,
             RunsCommand::Artifacts(RunsArtifactsArgs {
@@ -269,12 +246,12 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     }
 }
 
-pub fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
+pub(crate) fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
     let (message, hints) = args.global_runner_guidance(runner_id);
     Error::validation_invalid_argument("runner", message, Some(runner_id.to_string()), Some(hints))
 }
 
-pub fn run_markdown(args: RunsArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: RunsArgs) -> CmdResult<String> {
     match args.command {
         RunsCommand::Compare(args) => compare::run_markdown(args),
         RunsCommand::Report(args) => report::run_markdown(args),

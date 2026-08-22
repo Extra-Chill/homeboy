@@ -32,7 +32,7 @@ pub struct DbTunnelResult {
     pub tunnel: DbTunnelInfo,
 }
 
-pub fn create_tunnel(project_id: &str, local_port: Option<u16>) -> Result<DbTunnelResult> {
+pub(crate) fn create_tunnel(project_id: &str, local_port: Option<u16>) -> Result<DbTunnelResult> {
     let project = project::load(project_id)?;
     let ctx = resolve_project_ssh(project_id)?;
     let server = ctx.server;

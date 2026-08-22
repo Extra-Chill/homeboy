@@ -29,41 +29,19 @@ mod spec;
 pub use crate::core::artifact_ref::{
     validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
 };
-pub use constants::{
-    artifact_manifest_constants, artifact_paths_constants, artifact_postprocess_constants,
-    contract_constants, env_materialization_plan_constants, loop_constants,
-    path_materialization_plan_constants, resource_lifecycle_index_constants,
-    reviewer_facing_ref_constants, run_artifact_files_constants, run_location_index_constants,
-    run_outcome_envelope_constants, runner_artifact_manifest_ref_constants,
-    runner_execution_record_constants, runtime_artifact_constants, secret_env_plan_constants,
-    AllContractConstants, ArtifactManifestConstants, ArtifactPathsConstants,
-    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput,
-    EnvMaterializationPlanConstants, ExecutorEvidenceConstants, LoopConstants,
-    PathMaterializationPlanConstants, ResourceLifecycleIndexConstants, ReviewerFacingRefConstants,
-    RunArtifactFilesConstants, RunLocationIndexConstants, RunOutcomeEnvelopeConstants,
-    RunnerArtifactManifestRefConstants, RunnerExecutionRecordConstants, RuntimeAgentArtifactPaths,
-    RuntimeArtifactConstants, RuntimeArtifactFilenames, SecretEnvPlanConstants,
-    CONTRACT_CONSTANTS_SCHEMA,
-};
-pub use lab::{
-    lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
-    lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, run_location_index_path, scope_lab_cli_arguments,
-    AgentTaskDispatchIdentity, CommandPortabilityContract, JobArtifactMetadata, LabCommandContract,
-    LabCommandPortability, LabCommandRouteContract, LabRigWorkloadArguments, LabRigWorkloadKind,
-    LabRoutingPolicy, LabRunnerHandoffArtifactManifestRef, LabRunnerHandoffEnvelope,
-    LabRunnerHandoffFollowCommands, LabRunnerSupportSummary, LabRunnerWorkload,
-    LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
-    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy, LabRunnerWorkloadAssignment,
-    LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
-    LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
-    LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
-    LabRunnerWorkloadWorkspaceMappings, LabSecretEnvSource, LabSourcePathMode,
-    LabWorkspaceModePolicy, RunLocationIndex, LAB_CAPABILITY_PLAYWRIGHT,
-    LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA, LAB_RUNNER_WORKLOAD_SCHEMA, LAB_TRACE_EXTRA_CAPABILITIES,
-    RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_REF_NAME,
-    RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
+pub(crate) use constants::{contract_constants, ContractConstantsOutput};
+/// Only `commands::contract_lab_routing_tests` reads this; the shipped binary
+/// matches on the contract rather than the mode, so it is compiled out of the
+/// lib build instead of carrying an unused re-export.
+#[cfg(test)]
+pub(crate) use lab::LabSourcePathMode;
+pub(crate) use lab::{
+    lab_runner_support_summary, scope_lab_cli_arguments, CommandPortabilityContract,
+    LabCommandContract, LabCommandPortability, LabCommandRouteContract, LabRigWorkloadArguments,
+    LabRigWorkloadKind, LabWorkspaceModePolicy, LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
+    LAB_RUNNER_WORKLOAD_SCHEMA, LAB_TRACE_EXTRA_CAPABILITIES, RUNNER_ARTIFACT_MANIFEST_FILE,
+    RUNNER_ARTIFACT_MANIFEST_REF_NAME, RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+    RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
 };
 pub(crate) use lab::{
     LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES,
@@ -77,14 +55,10 @@ pub use output::{
     CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
-pub use registry::{
-    registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
-};
-pub use spec::{
-    non_core_command_doc_slugs, registered_command, registered_command_json_family,
-    runtime_extension_command_doc_slugs, support_command_doc_slugs, CommandDocKind, CommandDocSpec,
-    CommandLabSupportSummary, CommandPathSafetySpec, CommandSafetySpec, CommandSpec,
-    COMMAND_DOC_REGISTRY, COMMAND_SPECS,
+pub(crate) use registry::{registered_contract, registered_contracts, ContractRegistryEntry};
+pub(crate) use spec::{
+    registered_command, runtime_extension_command_doc_slugs, CommandSafetySpec, CommandSpec,
+    COMMAND_SPECS,
 };
 pub(crate) use spec::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,

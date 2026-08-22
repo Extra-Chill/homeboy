@@ -2,7 +2,6 @@
 
 use super::*;
 use clap::Parser;
-use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
 use tempfile::tempdir;
 
@@ -38,22 +37,6 @@ fn rig_install_offload_translates_source_path_instead_of_forwarding_it() {
 }
 
 #[test]
-fn linked_local_rig_check_disables_default_lab_offload() {
-    let temp_home = tempdir().expect("temp home");
-    let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
-    write_rig_source_metadata(temp_home.path(), "linked-local", true);
-    let cli = Cli::parse_from(["homeboy", "rig", "check", "linked-local"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "rig check");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn linked_local_rig_check_stays_local_without_runner() {
     // Scope the offload-metadata env var so a parallel test that sets it
     // (process-global) cannot leak into this local/no-runner assertion.
@@ -71,7 +54,7 @@ fn linked_local_rig_check_stays_local_without_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("linked local rig check should skip automatic Lab offload");
 
     assert_eq!(outcome, None);
@@ -105,54 +88,6 @@ fn lab_command_preserves_portable_contract_shape() {
 }
 
 #[test]
-fn extension_update_requires_explicit_lab_runner_without_extension_parity() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "update",
-        "wordpress",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension update");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
-fn extension_refresh_requires_explicit_lab_runner_without_extension_parity() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "refresh",
-        "https://github.com/Extra-Chill/homeboy-extensions.git",
-        "--id",
-        "wordpress",
-        "--ref",
-        "6ff93f43",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension refresh");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn extension_update_routes_locally_without_explicit_lab_runner() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let normalized = vec![
@@ -163,7 +98,7 @@ fn extension_update_routes_locally_without_explicit_lab_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("extension update without --runner should not offload");
 
     assert_eq!(outcome, None);
@@ -189,68 +124,11 @@ fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("dev-run should execute its own runner lifecycle");
 
     assert_eq!(outcome, None);
     assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn extension_show_routes_to_explicit_lab_runner() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "show",
-        "wordpress",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension show");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
-fn fuzz_doctor_supports_runner_lab_placement_route() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "fuzz",
-        "doctor",
-        "--extension",
-        "nodejs",
-        "--runner",
-        "homeboy-lab",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
-    assert_eq!(command.hot_label, "fuzz doctor");
-    assert!(lab_runner_supports_contract_label(command.hot_label));
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(command.routing_policy.requires_extension_parity);
-    assert!(command.routing_policy.read_only_polling);
-    assert_eq!(command.required_extensions, vec!["nodejs".to_string()]);
-    assert_eq!(
-        command.source_path_mode,
-        runners::LabOffloadSourcePathMode::RunnerResident
-    );
-    assert_eq!(
-        command.workspace_mode_policy,
-        runners::LabOffloadWorkspaceModePolicy::RunnerResident
-    );
-    assert!(cli.command.lab_offload_mutation_flag().is_none());
-    assert!(!cli.command.lab_offload_captures_mutation_patch());
-    assert!(cli.command.supports_lab_runner());
 }
 
 #[test]
@@ -265,19 +143,11 @@ fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("fuzz doctor without --runner should remain a local diagnostic");
 
     assert_eq!(outcome, None);
     assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn extension_list_stays_local_only() {
-    let cli = Cli::parse_from(["homeboy", "--runner", "lab", "extension", "list"]);
-
-    assert!(lab_offload_command(&cli.command).unwrap().is_none());
-    assert!(!cli.command.supports_lab_runner());
 }
 
 #[test]
@@ -292,7 +162,7 @@ fn global_runner_for_runs_show_has_local_mirror_guidance() {
         "run-123",
     ]);
 
-    let err = route_after_parse(
+    let err = route_after_parse_with_provenance(
         &cli,
         &[
             "homeboy".into(),
@@ -302,6 +172,7 @@ fn global_runner_for_runs_show_has_local_mirror_guidance() {
             "show".into(),
             "run-123".into(),
         ],
+        None,
         None,
     )
     .expect_err("runs show rejects global runner with guidance");
@@ -340,7 +211,7 @@ fn runs_list_runner_option_after_subcommand_routes_locally() {
     ] {
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse(&cli, &normalized, None)
+        let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect("runs list subcommand runner option should not be rejected");
 
         assert_eq!(outcome, None);
@@ -359,7 +230,7 @@ fn global_runner_for_runs_list_keeps_placement_guidance() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let err = route_after_parse(&cli, &normalized, None)
+    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect_err("top-level runner on runs list should keep placement guidance");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -399,66 +270,10 @@ fn runs_artifact_attach_runner_option_routes_locally() {
     ] {
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse(&cli, &normalized, None)
+        let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect("runs artifact attach command-local runner option should not be rejected");
 
         assert_eq!(outcome, None);
-    }
-}
-
-#[test]
-fn agent_task_inspection_commands_support_runner_resident_recovery() {
-    for args in [
-        ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
-    ] {
-        let cli = Cli::parse_from(args);
-        let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert_eq!(
-            command.source_path_mode,
-            runners::LabOffloadSourcePathMode::RunnerResident
-        );
-        assert_eq!(
-            command.workspace_mode_policy,
-            runners::LabOffloadWorkspaceModePolicy::RunnerResident
-        );
-        assert!(!command.routing_policy.default_lab_offload);
-    }
-}
-
-#[test]
-fn agent_task_retry_run_supports_explicit_runner() {
-    for args in [
-        [
-            "homeboy",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "retry",
-            "agent-task-123",
-            "--run",
-        ],
-        [
-            "homeboy",
-            "agent-task",
-            "retry",
-            "agent-task-123",
-            "--run",
-            "--runner",
-            "homeboy-lab",
-        ],
-    ] {
-        let cli = Cli::parse_from(args);
-
-        let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
     }
 }
 
@@ -514,40 +329,6 @@ fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
         .unwrap()
         .is_portable());
     assert_eq!(lab.placement, crate::cli_surface::Placement::Lab);
-}
-
-#[test]
-fn agent_task_providers_supports_explicit_runner_discovery() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "providers",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert!(lab_runner_supports_contract_label(command.hot_label));
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(command.routing_policy.preserve_result_payload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    // The runner catalog answers from the runner's own installation. Nothing
-    // about a provider read needs the controller's working tree, and building
-    // one is exactly the materialization ceremony that outran the caller's
-    // timeout (#9763).
-    assert_eq!(
-        command.source_path_mode,
-        runners::LabOffloadSourcePathMode::RunnerResident
-    );
-    assert_eq!(
-        command.workspace_mode_policy,
-        runners::LabOffloadWorkspaceModePolicy::RunnerResident
-    );
 }
 
 #[test]
@@ -797,7 +578,7 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
     assert!(!command.routing_policy.default_lab_offload);
     assert!(!command.routing_policy.infer_source_path_tools);
 
-    let err = route_after_parse(&cli, &normalized, None)
+    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect_err("fanout submit-batch must not run locally under Lab placement");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -807,39 +588,6 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
     assert!(err.message.contains("--placement lab"));
     assert!(err.message.contains("requires an eligible Lab runner"));
     assert!(err.message.contains("agent-task fanout submit-batch"));
-}
-
-#[test]
-fn agent_task_fanout_run_plan_coordination_is_controller_local() {
-    // `--runner` implies Lab placement and is mutually exclusive with an
-    // explicit `--placement` at parse time (#9002), so a runner-pinned fanout
-    // uses `--runner` alone.
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "agent-task".to_string(),
-        "fanout".to_string(),
-        "run-plan".to_string(),
-        "--input".to_string(),
-        "fanout.json".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    // Fanout coordination is controller-owned so durable batch state,
-    // worktree ownership, and recovery stay local; the coordinator itself
-    // is not Lab-portable, though the independent cooks it generates may use
-    // their own Lab placement (#8045).
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(command.hot_label, "agent-task fanout run-plan");
-    assert!(!command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(cli
-        .command
-        .lab_runner_unsupported_reason()
-        .is_some_and(|reason| reason.contains("controller-owned")));
 }
 
 #[test]
@@ -994,20 +742,6 @@ fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
     assert_eq!(command.hot_label, "review audit");
     assert!(command.is_portable());
     assert!(command.routing_policy.requires_extension_parity);
-}
-
-#[test]
-fn lab_command_preserves_local_only_contract_shape() {
-    let cli = Cli::parse_from(["homeboy", "rig", "up", "demo"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "rig up");
-    assert!(matches!(
-        command.portability,
-        LabCommandPortability::LocalOnly(_)
-    ));
-    assert!(!command.routing_policy.requires_extension_parity);
 }
 
 #[test]

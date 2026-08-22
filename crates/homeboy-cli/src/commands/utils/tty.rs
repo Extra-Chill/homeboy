@@ -8,11 +8,11 @@ fn is_stdin_tty() -> bool {
     io::stdin().is_terminal()
 }
 
-pub fn is_stdout_tty() -> bool {
+pub(crate) fn is_stdout_tty() -> bool {
     io::stdout().is_terminal()
 }
 
-pub fn require_tty_for_interactive() -> bool {
+pub(crate) fn require_tty_for_interactive() -> bool {
     is_stdin_tty() && is_stdout_tty()
 }
 
@@ -33,7 +33,7 @@ pub fn prompt(message: &str) -> homeboy::core::Result<String> {
     Ok(line.trim().to_string())
 }
 
-pub fn prompt_password(message: &str) -> homeboy::core::Result<String> {
+pub(crate) fn prompt_password(message: &str) -> homeboy::core::Result<String> {
     prompt(message)
 }
 

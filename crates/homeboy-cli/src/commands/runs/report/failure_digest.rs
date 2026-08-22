@@ -118,11 +118,11 @@ fn render_failure_digest(context: &FailureDigestContext) -> String {
 
 mod detail {
     use super::*;
-    pub fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
+    pub(crate) fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
         homeboy::core::config::read_json_value_spec_with_bare_path(spec, context)
     }
 
-    pub fn normalize_object(value: Value) -> Map<String, Value> {
+    pub(crate) fn normalize_object(value: Value) -> Map<String, Value> {
         match value {
             Value::Object(map) => map,
             _ => Map::new(),
@@ -136,7 +136,7 @@ mod detail {
             .is_some_and(is_attention_status)
     }
 
-    pub fn is_attention_status(status: &str) -> bool {
+    fn is_attention_status(status: &str) -> bool {
         matches!(
             status,
             "fail"
@@ -149,11 +149,11 @@ mod detail {
         )
     }
 
-    pub fn command_reported(results: &Map<String, Value>, command: &str) -> bool {
+    pub(crate) fn command_reported(results: &Map<String, Value>, command: &str) -> bool {
         results.contains_key(command)
     }
 
-    pub fn command_names_from_csv(raw: &str) -> BTreeSet<String> {
+    fn command_names_from_csv(raw: &str) -> BTreeSet<String> {
         raw.split(',')
             .filter_map(|part| part.trim().split(' ').next())
             .map(str::trim)
@@ -162,7 +162,7 @@ mod detail {
             .collect()
     }
 
-    pub fn failed_commands(results: &Map<String, Value>) -> Vec<String> {
+    fn failed_commands(results: &Map<String, Value>) -> Vec<String> {
         let mut commands = results
             .iter()
             .filter_map(|(name, status)| {
@@ -176,7 +176,7 @@ mod detail {
         commands
     }
 
-    pub fn read_command_json(output_dir: &Path, command: &str) -> Option<Value> {
+    pub(crate) fn read_command_json(output_dir: &Path, command: &str) -> Option<Value> {
         let path = output_dir.join(format!("{command}.json"));
         homeboy::core::config::try_read_json_file(&path)
     }
@@ -189,7 +189,7 @@ mod detail {
         )
     }
 
-    pub fn envelope_parts(value: Option<Value>) -> (Map<String, Value>, Map<String, Value>) {
+    pub(crate) fn envelope_parts(value: Option<Value>) -> (Map<String, Value>, Map<String, Value>) {
         let Some(Value::Object(mut root)) = value else {
             return (Map::new(), Map::new());
         };
@@ -211,7 +211,7 @@ mod detail {
         (root, Map::new())
     }
 
-    pub fn render_lint_section(out: &mut String, output_dir: &Path, run_url: &str) {
+    pub(crate) fn render_lint_section(out: &mut String, output_dir: &Path, run_url: &str) {
         out.push_str("### Lint Failure Digest\n");
         let (data, error) = envelope_parts(read_command_json(output_dir, "lint"));
 
@@ -242,7 +242,7 @@ mod detail {
         out.push('\n');
     }
 
-    pub fn render_formatting_findings(out: &mut String, data: &Map<String, Value>) {
+    fn render_formatting_findings(out: &mut String, data: &Map<String, Value>) {
         let formatting = object_value(data, "formatting_findings");
         if formatting.is_empty() {
             return;
@@ -276,7 +276,7 @@ mod detail {
         let _ = writeln!(out, "  - Suggested command: `{}`", command);
     }
 
-    pub fn render_test_section(out: &mut String, output_dir: &Path, run_url: &str) {
+    pub(crate) fn render_test_section(out: &mut String, output_dir: &Path, run_url: &str) {
         out.push_str("### Test Failure Digest\n");
         let (data, error) = envelope_parts(read_command_json(output_dir, "test"));
         render_error_details(out, &error);
@@ -307,11 +307,11 @@ mod detail {
         out.push('\n');
     }
 
-    pub fn number_value(map: &Map<String, Value>, key: &str) -> Option<f64> {
+    pub(crate) fn number_value(map: &Map<String, Value>, key: &str) -> Option<f64> {
         map.get(key).and_then(Value::as_f64)
     }
 
-    pub fn render_error_details(out: &mut String, error: &Map<String, Value>) {
+    pub(crate) fn render_error_details(out: &mut String, error: &Map<String, Value>) {
         if let Some(code) = string_value(error, "code") {
             let _ = writeln!(out, "- Error code: `{}`", code);
         }
@@ -494,7 +494,7 @@ mod detail {
         out.push('\n');
     }
 
-    pub fn read_baseline_command_json(
+    fn read_baseline_command_json(
         output_dir: &Path,
         command: &str,
     ) -> Option<(PathBuf, Result<Value, String>)> {
@@ -507,7 +507,7 @@ mod detail {
             })
     }
 
-    pub fn baseline_command_paths(output_dir: &Path, command: &str) -> Vec<PathBuf> {
+    fn baseline_command_paths(output_dir: &Path, command: &str) -> Vec<PathBuf> {
         vec![
             output_dir.join(format!("baseline-{command}.json")),
             output_dir.join(format!("{command}-baseline.json")),
@@ -554,7 +554,7 @@ mod detail {
         }
     }
 
-    pub fn baseline_artifact_reports_failure(value: &Value) -> bool {
+    fn baseline_artifact_reports_failure(value: &Value) -> bool {
         let root = value.as_object().cloned().unwrap_or_default();
         if root.get("success").and_then(Value::as_bool) == Some(false) {
             return true;
@@ -569,12 +569,7 @@ mod detail {
                 .is_some_and(|code| code != 0)
     }
 
-    pub fn render_baseline_evidence(
-        out: &mut String,
-        command: &str,
-        path: &Path,
-        baseline: &Value,
-    ) {
+    fn render_baseline_evidence(out: &mut String, command: &str, path: &Path, baseline: &Value) {
         let (data, error) = envelope_parts(Some(baseline.clone()));
         let command_line = baseline_command_line(&data, &error).unwrap_or_else(|| {
             format!(
@@ -592,7 +587,7 @@ mod detail {
         }
     }
 
-    pub fn baseline_command_line(
+    fn baseline_command_line(
         data: &Map<String, Value>,
         error: &Map<String, Value>,
     ) -> Option<String> {
@@ -612,7 +607,7 @@ mod detail {
         None
     }
 
-    pub fn baseline_evidence_refs(
+    fn baseline_evidence_refs(
         data: &Map<String, Value>,
         error: &Map<String, Value>,
     ) -> Vec<String> {
@@ -624,7 +619,7 @@ mod detail {
         refs.into_iter().collect()
     }
 
-    pub fn collect_artifact_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
+    fn collect_artifact_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
         for key in ["artifacts", "artifact_refs"] {
             if let Some(items) = map.get(key).and_then(Value::as_array) {
                 for item in items {
@@ -645,7 +640,7 @@ mod detail {
         }
     }
 
-    pub fn collect_path_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
+    fn collect_path_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
         for key in [
             "log_path",
             "stderr_path",
@@ -663,7 +658,7 @@ mod detail {
         }
     }
 
-    pub fn failure_fingerprints(value: &Value) -> BTreeSet<String> {
+    fn failure_fingerprints(value: &Value) -> BTreeSet<String> {
         let (data, error) = envelope_parts(Some(value.clone()));
         let mut fingerprints = BTreeSet::new();
         collect_failure_fingerprints_from_map(&data, &mut fingerprints);
@@ -671,10 +666,7 @@ mod detail {
         fingerprints
     }
 
-    pub fn collect_failure_fingerprints_from_map(
-        map: &Map<String, Value>,
-        out: &mut BTreeSet<String>,
-    ) {
+    fn collect_failure_fingerprints_from_map(map: &Map<String, Value>, out: &mut BTreeSet<String>) {
         for key in [
             "findings",
             "failures",
@@ -726,7 +718,7 @@ mod detail {
         }
     }
 
-    pub fn render_tooling_section(out: &mut String, tooling: &Map<String, Value>) {
+    pub(crate) fn render_tooling_section(out: &mut String, tooling: &Map<String, Value>) {
         if tooling.is_empty() {
             return;
         }
@@ -741,7 +733,7 @@ mod detail {
         out.push('\n');
     }
 
-    pub fn render_full_log(out: &mut String, command: &str, run_url: &str) {
+    pub(crate) fn render_full_log(out: &mut String, command: &str, run_url: &str) {
         if run_url.is_empty() {
             let _ = writeln!(
                 out,
@@ -753,7 +745,7 @@ mod detail {
         }
     }
 
-    pub fn has_any_lint_detail(data: &Map<String, Value>, error: &Map<String, Value>) -> bool {
+    fn has_any_lint_detail(data: &Map<String, Value>, error: &Map<String, Value>) -> bool {
         [
             "summary",
             "phpcs_summary",
@@ -768,7 +760,7 @@ mod detail {
                 .any(|key| string_value(error, key).is_some())
     }
 
-    pub fn render_lint_findings(out: &mut String, findings: &[&Value], data: &Map<String, Value>) {
+    fn render_lint_findings(out: &mut String, findings: &[&Value], data: &Map<String, Value>) {
         if findings.is_empty() {
             return;
         }
@@ -799,7 +791,7 @@ mod detail {
         }
     }
 
-    pub fn summarize_lint_finding(item: &Value, idx: usize) -> String {
+    fn summarize_lint_finding(item: &Value, idx: usize) -> String {
         let Some(obj) = item.as_object() else {
             return format!(
                 "{}. {}",
@@ -836,28 +828,28 @@ mod detail {
         }
     }
 
-    pub fn object_value(map: &Map<String, Value>, key: &str) -> Map<String, Value> {
+    pub(crate) fn object_value(map: &Map<String, Value>, key: &str) -> Map<String, Value> {
         map.get(key)
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default()
     }
 
-    pub fn object_value_opt<'a>(
+    fn object_value_opt<'a>(
         map: &'a Map<String, Value>,
         key: &str,
     ) -> Option<&'a Map<String, Value>> {
         map.get(key).and_then(Value::as_object)
     }
 
-    pub fn array_value<'a>(map: &'a Map<String, Value>, key: &str) -> Vec<&'a Value> {
+    pub(crate) fn array_value<'a>(map: &'a Map<String, Value>, key: &str) -> Vec<&'a Value> {
         map.get(key)
             .and_then(Value::as_array)
             .map(|items| items.iter().collect())
             .unwrap_or_default()
     }
 
-    pub fn array_from_object(map: &Map<String, Value>, key: &str) -> Vec<Value> {
+    pub(crate) fn array_from_object(map: &Map<String, Value>, key: &str) -> Vec<Value> {
         map.get(key)
             .and_then(Value::as_array)
             .cloned()
@@ -881,7 +873,7 @@ mod detail {
             .unwrap_or_default()
     }
 
-    pub fn test_failed_count(data: &Map<String, Value>, fallback: usize) -> usize {
+    fn test_failed_count(data: &Map<String, Value>, fallback: usize) -> usize {
         let counts = object_value(data, "test_counts");
         let failed = counts.get("failed").and_then(Value::as_u64).unwrap_or(0);
         let errors = counts.get("errors").and_then(Value::as_u64).unwrap_or(0);
@@ -893,7 +885,7 @@ mod detail {
         }
     }
 
-    pub fn summarize_test_failure(item: &Value, idx: usize) -> String {
+    fn summarize_test_failure(item: &Value, idx: usize) -> String {
         let Some(obj) = item.as_object() else {
             return format!("{}. {}", idx, item.as_str().unwrap_or("unknown"));
         };
@@ -923,7 +915,12 @@ mod detail {
         parts.join(" — ")
     }
 
-    pub fn append_details_block(out: &mut String, summary: &str, lines: &[String], limit: usize) {
+    pub(crate) fn append_details_block(
+        out: &mut String,
+        summary: &str,
+        lines: &[String],
+        limit: usize,
+    ) {
         let content = lines
             .iter()
             .filter(|line| !line.trim().is_empty())

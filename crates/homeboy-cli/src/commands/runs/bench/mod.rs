@@ -11,11 +11,11 @@ use super::{require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 mod types;
 pub use types::*;
 
-pub fn bench_compare_from_args(args: RunsBenchCompareArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn bench_compare_from_args(args: RunsBenchCompareArgs) -> CmdResult<RunsOutput> {
     bench_compare(&args.from_run, &args.to_run, &args.metrics)
 }
 
-pub fn bench_compare(
+pub(crate) fn bench_compare(
     from_run_id: &str,
     to_run_id: &str,
     metrics: &[String],

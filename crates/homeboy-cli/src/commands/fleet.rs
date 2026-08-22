@@ -22,7 +22,7 @@ pub struct FleetArgs {
 }
 
 impl FleetArgs {
-    pub fn is_hot_resource_command(&self) -> bool {
+    pub(crate) fn is_hot_resource_command(&self) -> bool {
         matches!(
             &self.command,
             FleetCommand::Exec {

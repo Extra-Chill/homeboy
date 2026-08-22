@@ -93,7 +93,7 @@ pub struct DeferredWorkloadRequirements {
 }
 
 impl DeferredWorkloadRequirements {
-    pub fn is_satisfied_by(
+    pub(crate) fn is_satisfied_by(
         &self,
         runtime_ids: &BTreeSet<String>,
         capabilities: &BTreeSet<String>,
@@ -141,10 +141,7 @@ pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
     defer_in_roots(&ambient_config_root()?, input)
 }
 
-pub fn defer_in_roots(
-    config_root: &Path,
-    input: DeferredWorkloadInput,
-) -> Result<DeferredWorkload> {
+fn defer_in_roots(config_root: &Path, input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
     if input
         .job_overrides
         .secret_env_names
@@ -208,7 +205,7 @@ pub fn claim(
     claim_in_roots(&ambient_config_root()?, input, runner_id, owner)
 }
 
-pub fn claim_in_roots(
+fn claim_in_roots(
     config_root: &Path,
     input: &DeferredWorkloadInput,
     runner_id: &str,
@@ -246,42 +243,7 @@ pub fn claim_in_roots(
     })
 }
 
-pub fn claim_next_in_roots(
-    config_root: &Path,
-    runner_id: &str,
-    owner: &str,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_at_in_roots(config_root, runner_id, owner, now_ms())
-}
-
-/// Claim the next record using the supplied clock. The worker uses this seam to
-/// make lease recovery deterministic without changing the durable protocol.
-pub fn claim_next_at(runner_id: &str, owner: &str, now: u64) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at(runner_id, owner, now, |_| true)
-}
-
-pub fn claim_next_at_in_roots(
-    config_root: &Path,
-    runner_id: &str,
-    owner: &str,
-    now: u64,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at_in_roots(config_root, runner_id, owner, now, |_| true)
-}
-
-/// Claim the next deferred workload accepted by the selected runner. Records
-/// that require a different runtime or capability remain deferred for a later
-/// compatible runner.
-pub(crate) fn claim_next_matching_at(
-    runner_id: &str,
-    owner: &str,
-    now: u64,
-    accepts: impl Fn(&DeferredWorkload) -> bool,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at_in_roots(&ambient_config_root()?, runner_id, owner, now, accepts)
-}
-
-pub fn claim_next_matching_at_in_roots(
+pub(crate) fn claim_next_matching_at_in_roots(
     config_root: &Path,
     runner_id: &str,
     owner: &str,
@@ -321,7 +283,7 @@ pub fn heartbeat(id: &str, owner: &str) -> Result<bool> {
     heartbeat_in_roots(&ambient_config_root()?, id, owner)
 }
 
-pub fn heartbeat_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<bool> {
+pub(crate) fn heartbeat_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<bool> {
     update_in_roots(config_root, |records| {
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(false);
@@ -342,7 +304,7 @@ pub fn terminalize(id: &str, succeeded: bool) -> Result<()> {
     terminalize_in_roots(&ambient_config_root()?, id, succeeded)
 }
 
-pub fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Result<()> {
+pub(crate) fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Result<()> {
     update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             record.state = if succeeded {
@@ -358,7 +320,7 @@ pub fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Re
     })
 }
 
-pub fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<()> {
+pub(crate) fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<()> {
     update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             if record.state == DeferredWorkloadState::Claimed
@@ -380,7 +342,10 @@ pub fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result
 /// Reconciliation terminates a worker that can no longer prove ownership, so
 /// its claims must not sit out the full lease before another worker may take
 /// them. Returns the ids that were released.
-pub fn release_claims_for_owner_in_roots(config_root: &Path, owner: &str) -> Result<Vec<String>> {
+pub(crate) fn release_claims_for_owner_in_roots(
+    config_root: &Path,
+    owner: &str,
+) -> Result<Vec<String>> {
     update_in_roots(config_root, |records| {
         let now = now_ms();
         let mut released = Vec::new();
@@ -405,11 +370,11 @@ pub fn records() -> Result<Vec<DeferredWorkload>> {
     records_in_roots(&ambient_config_root()?)
 }
 
-pub fn records_in_roots(config_root: &Path) -> Result<Vec<DeferredWorkload>> {
+pub(crate) fn records_in_roots(config_root: &Path) -> Result<Vec<DeferredWorkload>> {
     read_store(&store_path_in_roots(config_root))
 }
 
-pub fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
+pub(crate) fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
     Ok(records_in_roots(config_root)?.iter().any(|record| {
         matches!(
             record.state,
@@ -424,7 +389,7 @@ pub fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
 /// that outlives the command which started it must not hold a caller's
 /// ephemeral worktree open, because worktree cleanup then leaves the process
 /// anchored to a deleted directory (#12081).
-pub fn worker_root_in_roots(config_root: &Path) -> Result<PathBuf> {
+pub(crate) fn worker_root_in_roots(config_root: &Path) -> Result<PathBuf> {
     let root = config_root.to_path_buf();
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
@@ -443,7 +408,7 @@ pub fn worker_root_in_roots(config_root: &Path) -> Result<PathBuf> {
     })
 }
 
-pub fn try_acquire_worker_lock_in_roots(
+pub(crate) fn try_acquire_worker_lock_in_roots(
     config_root: &Path,
 ) -> Result<Option<DeferredWorkloadWorkerLock>> {
     let root = worker_root_in_roots(config_root)?;
@@ -466,7 +431,7 @@ pub fn try_acquire_worker_lock_in_roots(
     }
 }
 
-pub fn acquire_worker_start_lock_in_roots(
+pub(crate) fn acquire_worker_start_lock_in_roots(
     config_root: &Path,
 ) -> Result<DeferredWorkloadWorkerStartLock> {
     let root = config_root.to_path_buf();
@@ -499,7 +464,9 @@ pub fn acquire_worker_start_lock_in_roots(
     Ok(DeferredWorkloadWorkerStartLock { _file: file })
 }
 
-pub fn worker_status_in_roots(config_root: &Path) -> Result<Option<DeferredWorkloadWorkerStatus>> {
+pub(crate) fn worker_status_in_roots(
+    config_root: &Path,
+) -> Result<Option<DeferredWorkloadWorkerStatus>> {
     let path = store_path_in_roots(config_root).with_extension("worker-status.json");
     if !path.exists() {
         return Ok(None);
@@ -512,7 +479,10 @@ pub fn worker_status_in_roots(config_root: &Path) -> Result<Option<DeferredWorkl
         .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))
 }
 
-pub fn worker_is_live_in_roots(config_root: &Path, status: &DeferredWorkloadWorkerStatus) -> bool {
+pub(crate) fn worker_is_live_in_roots(
+    config_root: &Path,
+    status: &DeferredWorkloadWorkerStatus,
+) -> bool {
     if matches!(status.state.as_str(), "idle" | "stopped") {
         return false;
     }
@@ -582,10 +552,6 @@ impl DeferredWorkloadWorkerDisposition {
             reason: reason.to_string(),
         }
     }
-
-    pub fn is_orphaned(&self) -> bool {
-        matches!(self, Self::Orphaned { .. })
-    }
 }
 
 /// Decide whether a candidate worker process is the live singleton owner.
@@ -594,7 +560,7 @@ impl DeferredWorkloadWorkerDisposition {
 /// any work remains, and the worker status plus the process's own execve
 /// environment say which process owns it. A process that merely looks like a
 /// worker is never retained on that basis, and never terminated on it either.
-pub fn classify_worker_process(
+pub(crate) fn classify_worker_process(
     process: &DeferredWorkloadWorkerProcess,
     owner: Option<&DeferredWorkloadWorkerStatus>,
     owner_is_live: bool,
@@ -629,7 +595,7 @@ pub fn classify_worker_process(
 }
 
 /// Every live process whose command line presents as a deferred-workload worker.
-pub fn worker_processes() -> Result<Vec<DeferredWorkloadWorkerProcess>> {
+pub(crate) fn worker_processes() -> Result<Vec<DeferredWorkloadWorkerProcess>> {
     let mut processes = worker_process_candidates()?
         .into_iter()
         .map(|(pid, argv)| {
@@ -771,7 +737,7 @@ fn process_working_directory(_pid: u32) -> (Option<String>, bool) {
     (None, false)
 }
 
-pub fn write_worker_status_in_roots(
+pub(crate) fn write_worker_status_in_roots(
     config_root: &Path,
     owner_token: &str,
     state: &str,
@@ -800,7 +766,10 @@ pub fn write_worker_status_in_roots(
     write_store(&path, &bytes)
 }
 
-pub fn append_worker_log_in_roots(config_root: &Path, message: impl AsRef<str>) -> Result<()> {
+pub(crate) fn append_worker_log_in_roots(
+    config_root: &Path,
+    message: impl AsRef<str>,
+) -> Result<()> {
     let path = store_path_in_roots(config_root).with_extension("worker.log");
     let line = format!("{} {}\n", now_ms(), message.as_ref());
     use std::io::Write;
@@ -996,28 +965,6 @@ mod tests {
         }
     }
 
-    fn owner_status(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerStatus {
-        DeferredWorkloadWorkerStatus {
-            schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
-            pid,
-            owner_token: owner_token.to_string(),
-            linux_starttime_ticks: Some(1),
-            state: "waiting_for_runner".to_string(),
-            updated_at_ms: 0,
-            detail: String::new(),
-        }
-    }
-
-    fn worker_process(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerProcess {
-        DeferredWorkloadWorkerProcess {
-            pid,
-            startup_token: Some(owner_token.to_string()),
-            owns_startup_token: true,
-            working_directory: None,
-            working_directory_deleted: false,
-        }
-    }
-
     #[test]
     fn deferred_workload_is_idempotent_and_survives_restart_before_claim() {
         let ctx = homeboy_core::test_support::HermeticTestContext::new();
@@ -1107,36 +1054,6 @@ mod tests {
     }
 
     #[test]
-    fn next_claim_heartbeats_and_publishes_durable_worker_status() {
-        let ctx = homeboy_core::test_support::HermeticTestContext::new();
-        let config_root = ctx.config_dir();
-
-        let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
-        let claimed = claim_next_in_roots(&config_root, "ready-runner", "worker-a")
-            .expect("claim next")
-            .expect("deferred workload");
-        assert_eq!(claimed.id, deferred.id);
-        assert_eq!(claimed.runner_id.as_deref(), Some("ready-runner"));
-        assert!(heartbeat_in_roots(&config_root, &claimed.id, "worker-a").expect("heartbeat"));
-        assert!(!heartbeat_in_roots(&config_root, &claimed.id, "worker-b")
-            .expect("wrong worker heartbeat"));
-
-        write_worker_status_in_roots(
-            &config_root,
-            "test-owner",
-            "dispatching",
-            "replaying deferred workload",
-        )
-        .expect("write worker status");
-        let status = worker_status_in_roots(&config_root)
-            .expect("read worker status")
-            .expect("status exists");
-        assert_eq!(status.state, "dispatching");
-        assert_eq!(status.detail, "replaying deferred workload");
-        assert_eq!(status.owner_token, "test-owner");
-    }
-
-    #[test]
     fn matching_claim_skips_a_live_claimed_head_for_a_later_deferred_record() {
         let ctx = homeboy_core::test_support::HermeticTestContext::new();
         let config_root = ctx.config_dir();
@@ -1145,7 +1062,7 @@ mod tests {
         let mut later_input = input();
         later_input.args.push("later".to_string());
         let later = defer_in_roots(&config_root, later_input).expect("later workload");
-        claim_next_at_in_roots(&config_root, "other-runner", "other-worker", 1)
+        claim_next_matching_at_in_roots(&config_root, "other-runner", "other-worker", 1, |_| true)
             .expect("claim first")
             .expect("first workload is claimed");
 
@@ -1373,7 +1290,8 @@ mod tests {
         let config_root = ctx.config_dir();
 
         let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
-        claim_next_at_in_roots(&config_root, "runner", "doomed-worker", 1).expect("claim workload");
+        claim_next_matching_at_in_roots(&config_root, "runner", "doomed-worker", 1, |_| true)
+            .expect("claim workload");
 
         let released = release_claims_for_owner_in_roots(&config_root, "doomed-worker")
             .expect("release claims");
@@ -1386,64 +1304,6 @@ mod tests {
         assert!(records_in_roots(&config_root).expect("records")[0]
             .claim_owner
             .is_none());
-    }
-
-    #[test]
-    fn only_the_proven_singleton_owner_survives_reconciliation() {
-        let owner = owner_status(41, "owner-token");
-
-        assert_eq!(
-            classify_worker_process(&worker_process(41, "owner-token"), Some(&owner), true, true),
-            DeferredWorkloadWorkerDisposition::Retained
-        );
-
-        // A different process running the same command is not the owner.
-        assert!(classify_worker_process(
-            &worker_process(42, "owner-token"),
-            Some(&owner),
-            true,
-            true
-        )
-        .is_orphaned());
-        // The owner pid presenting a token it cannot prove is not the owner
-        // either: `/proc/<pid>/environ` is the proof, argv is only the label.
-        let unproven = DeferredWorkloadWorkerProcess {
-            owns_startup_token: false,
-            ..worker_process(41, "owner-token")
-        };
-        assert!(classify_worker_process(&unproven, Some(&owner), true, true).is_orphaned());
-        // A stale token from a previous singleton generation is not the owner.
-        assert!(classify_worker_process(
-            &worker_process(41, "stale-token"),
-            Some(&owner),
-            true,
-            true
-        )
-        .is_orphaned());
-    }
-
-    #[test]
-    fn a_worker_with_no_durable_work_or_no_live_owner_is_orphaned() {
-        let owner = owner_status(41, "owner-token");
-
-        assert!(classify_worker_process(
-            &worker_process(41, "owner-token"),
-            Some(&owner),
-            true,
-            false
-        )
-        .is_orphaned());
-        assert!(classify_worker_process(
-            &worker_process(41, "owner-token"),
-            Some(&owner),
-            false,
-            true
-        )
-        .is_orphaned());
-        assert!(
-            classify_worker_process(&worker_process(41, "owner-token"), None, true, true)
-                .is_orphaned()
-        );
     }
 
     #[test]

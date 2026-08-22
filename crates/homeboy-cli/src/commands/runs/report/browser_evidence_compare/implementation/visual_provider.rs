@@ -27,7 +27,9 @@ pub struct VisualCompareProviderRequest<'a> {
 
 /// Create the artifacts directory, write the request file, run the provider
 /// process, and return the parsed JSON response value.
-pub fn run_visual_compare_provider(request: &VisualCompareProviderRequest<'_>) -> Result<Value> {
+pub(crate) fn run_visual_compare_provider(
+    request: &VisualCompareProviderRequest<'_>,
+) -> Result<Value> {
     std::fs::create_dir_all(request.artifacts_dir).map_err(|err| {
         Error::internal_io(
             format!(

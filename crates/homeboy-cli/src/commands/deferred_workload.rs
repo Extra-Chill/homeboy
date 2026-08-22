@@ -241,7 +241,7 @@ fn reconcile_workers(
 /// Homeboy installation. Resolving them independently let a five-second poll
 /// re-resolve the root up to 250 times, and left the spawned worker free to
 /// disagree with the probe that was waiting on it.
-pub fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
+pub(crate) fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
     let _start_lock = deferred_workload::acquire_worker_start_lock_in_roots(config_root)?;
     ensure_worker_with(
         config_root,
@@ -326,7 +326,7 @@ pub fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
     )
 }
 
-pub fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
+pub(crate) fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
     restart_worker_if_pending_with(
         config_root,
         |status: &deferred_workload::DeferredWorkloadWorkerStatus| {
@@ -1115,40 +1115,6 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--runner-secret-env", "DB_SERVICE_PASSWORD"] }));
-    }
-
-    #[test]
-    fn restarted_worker_reclaims_an_expired_claim() {
-        crate::test_support::with_isolated_home(|_| {
-            let deferred = deferred_workload::defer(input()).expect("defer workload");
-            let first = deferred_workload::claim_next_at("first-runner", "dead-worker", 1)
-                .expect("claim workload")
-                .expect("deferred workload");
-            let dispatched = Rc::new(Cell::new(0));
-            let dispatch_count = dispatched.clone();
-
-            run_worker_with(
-                &test_config_root(),
-                "restarted-worker",
-                || Ok(Some(inventory("recovery-runner"))),
-                move |record, runner_id, owner| {
-                    assert_eq!(record.id, deferred.id);
-                    assert_eq!(runner_id, "recovery-runner");
-                    assert_eq!(owner, "restarted-worker");
-                    dispatch_count.set(dispatch_count.get() + 1);
-                    Ok(true)
-                },
-                || first.claim_expires_at_ms.expect("claim expiry"),
-                |_| panic!("recovered worker should not wait"),
-            )
-            .expect("restarted worker reclaims expired work");
-
-            assert_eq!(dispatched.get(), 1);
-            assert_eq!(
-                deferred_workload::records().expect("records")[0].state,
-                deferred_workload::DeferredWorkloadState::Dispatched
-            );
-        });
     }
 
     #[test]

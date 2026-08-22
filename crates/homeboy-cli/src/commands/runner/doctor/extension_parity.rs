@@ -6,7 +6,11 @@ use homeboy::core::server::SshClient;
 use super::types::RunnerCheck;
 use super::{checks, common};
 
-pub fn local_check(homeboy_command: &str, cwd: Option<&str>, extension_id: &str) -> RunnerCheck {
+pub(crate) fn local_check(
+    homeboy_command: &str,
+    cwd: Option<&str>,
+    extension_id: &str,
+) -> RunnerCheck {
     let mut command = Command::new(homeboy_command);
     command.args(["extension", "show", extension_id]);
     if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
@@ -35,7 +39,7 @@ pub fn local_check(homeboy_command: &str, cwd: Option<&str>, extension_id: &str)
     }
 }
 
-pub fn remote_check(
+pub(crate) fn remote_check(
     client: &SshClient,
     homeboy_command: &str,
     cwd: Option<&str>,
@@ -64,7 +68,7 @@ pub fn remote_check(
     )
 }
 
-pub fn check_from_probe(
+pub(crate) fn check_from_probe(
     target: &str,
     homeboy_command: &str,
     cwd: Option<&str>,

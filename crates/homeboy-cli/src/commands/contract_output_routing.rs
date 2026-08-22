@@ -20,7 +20,7 @@ impl Commands {
             .with_lab_contract(self.lab_contract())
     }
 
-    pub fn output_descriptor(
+    pub(crate) fn output_descriptor(
         &self,
         spec: &CommandSpec,
         has_output_file: bool,
@@ -108,7 +108,11 @@ impl Commands {
         }
     }
 
-    pub fn response_plan(&self, spec: &CommandSpec, has_output_file: bool) -> CommandResponsePlan {
+    pub(crate) fn response_plan(
+        &self,
+        spec: &CommandSpec,
+        has_output_file: bool,
+    ) -> CommandResponsePlan {
         let descriptor = self.output_descriptor(spec, has_output_file);
 
         CommandResponsePlan {
@@ -117,20 +121,7 @@ impl Commands {
         }
     }
 
-    pub fn response_mode(&self, spec: &CommandSpec, has_output_file: bool) -> CommandResponseMode {
-        self.output_descriptor(spec, has_output_file).response_mode
-    }
-
-    pub fn output_file_mode(
-        &self,
-        spec: &CommandSpec,
-        has_output_file: bool,
-    ) -> CommandOutputFileMode {
-        self.output_descriptor(spec, has_output_file)
-            .output_file_mode
-    }
-
-    pub fn consumes_output_file_as_command_arg(&self) -> bool {
+    pub(crate) fn consumes_output_file_as_command_arg(&self) -> bool {
         matches!(self, Commands::Runs(args) if args.is_artifact_get())
     }
 }

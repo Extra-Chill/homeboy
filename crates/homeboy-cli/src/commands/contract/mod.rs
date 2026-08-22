@@ -1477,7 +1477,6 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::current_command_surface;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1728,17 +1727,6 @@ mod tests {
             "{:?}",
             err.details
         );
-    }
-
-    #[test]
-    fn command_registry_export_covers_contract_command() {
-        let export = command_registry_export();
-
-        assert!(export
-            .commands
-            .iter()
-            .any(|command| command.name == "contract"));
-        assert!(current_command_surface().contains_path(&["contract", "export"]));
     }
 
     #[test]

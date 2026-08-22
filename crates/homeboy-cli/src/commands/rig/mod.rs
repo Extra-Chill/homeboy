@@ -34,18 +34,14 @@ pub struct RigArgs {
 }
 
 impl RigArgs {
-    pub fn is_hot_resource_command(&self) -> bool {
+    pub(crate) fn is_hot_resource_command(&self) -> bool {
         matches!(
             self.command,
             RigCommand::Up { .. } | RigCommand::Check { .. }
         )
     }
 
-    pub fn is_check_command(&self) -> bool {
-        matches!(self.command, RigCommand::Check { .. })
-    }
-
-    pub fn is_runner_source_management_command(&self) -> bool {
+    pub(crate) fn is_runner_source_management_command(&self) -> bool {
         matches!(
             self.command,
             RigCommand::Install { .. }

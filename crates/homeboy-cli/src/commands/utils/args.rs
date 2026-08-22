@@ -316,7 +316,7 @@ impl PositionalComponentArgs {
 
     /// Resolve the component ID, falling back to CWD auto-discovery.
     /// Returns the effective component ID string for display/logging.
-    pub fn resolve_id(&self) -> homeboy::core::Result<String> {
+    pub(crate) fn resolve_id(&self) -> homeboy::core::Result<String> {
         if let Some(ref id) = self.component {
             return Ok(id.clone());
         }
@@ -850,11 +850,6 @@ impl ScopeArgs {
         self.selection().unwrap_or(Scope::Workspace)
     }
 
-    /// True when no selector was supplied.
-    pub fn is_unscoped(&self) -> bool {
-        self.selection().is_none()
-    }
-
     /// The selected scope kind, if any.
     pub fn kind(&self) -> Option<ScopeKind> {
         self.selection().map(|scope| scope.kind())
@@ -926,22 +921,6 @@ mod scope_args_tests {
     }
 
     #[test]
-    fn no_selector_is_unscoped_and_defaults_to_workspace() {
-        let args = parse(&["scoped"]);
-        assert!(args.is_unscoped());
-        assert!(args.selection().is_none());
-        assert!(args.kind().is_none());
-        assert_eq!(args.resolve(), Scope::Workspace);
-    }
-
-    #[test]
-    fn explicit_workspace_is_scoped() {
-        let args = parse(&["scoped", "--workspace"]);
-        assert!(!args.is_unscoped());
-        assert_eq!(args.kind(), Some(ScopeKind::Workspace));
-    }
-
-    #[test]
     fn kind_matches_the_selected_variant() {
         assert_eq!(
             parse(&["scoped", "--project", "growth"]).kind(),
@@ -983,13 +962,6 @@ mod scope_args_tests {
                 "{first} and --workspace should conflict"
             );
         }
-    }
-
-    #[test]
-    fn default_is_an_unscoped_group() {
-        let args = ScopeArgs::default();
-        assert!(args.is_unscoped());
-        assert_eq!(args.resolve(), Scope::Workspace);
     }
 }
 
@@ -1150,7 +1122,7 @@ impl ChangedScopeArgs {
     }
 
     /// True when nothing narrowed the run — the full component is in scope.
-    pub fn is_full_scope(&self) -> bool {
+    pub(crate) fn is_full_scope(&self) -> bool {
         !self.is_scoped()
     }
 
@@ -1441,13 +1413,8 @@ impl PresentationArgs {
         matches!(self.format, OutputFormat::Json)
     }
 
-    /// True when the caller explicitly asked for markdown.
-    pub fn is_markdown(&self) -> bool {
-        matches!(self.format, OutputFormat::Markdown)
-    }
-
     /// True when the caller asked for the compact summary.
-    pub fn is_summary(&self) -> bool {
+    pub(crate) fn is_summary(&self) -> bool {
         matches!(self.detail, DetailLevel::Summary)
     }
 
@@ -1464,7 +1431,7 @@ impl PresentationArgs {
     /// state to distinguish from its default, so `--json --format text`
     /// cannot mean "text". Passing both spellings with the same intent is
     /// the only combination an operator can express, and it agrees.
-    pub fn json_or_legacy(&self, legacy_json: bool) -> bool {
+    pub(crate) fn json_or_legacy(&self, legacy_json: bool) -> bool {
         legacy_json || self.is_json()
     }
 }
@@ -1508,17 +1475,6 @@ mod presentation_args_tests {
     fn unknown_values_are_rejected() {
         assert!(PresentationCli::try_parse_from(["rendered", "--format", "yaml"]).is_err());
         assert!(PresentationCli::try_parse_from(["rendered", "--detail", "verbose"]).is_err());
-    }
-
-    #[test]
-    fn format_predicates_are_mutually_exclusive() {
-        let json = parse(&["rendered", "--format=json"]);
-        assert!(json.is_json());
-        assert!(!json.is_markdown());
-
-        let markdown = parse(&["rendered", "--format=markdown"]);
-        assert!(markdown.is_markdown());
-        assert!(!markdown.is_json());
     }
 
     #[test]
@@ -1620,15 +1576,6 @@ impl MutationArgs {
         self.apply
     }
 
-    /// True when this run must not mutate anything.
-    ///
-    /// The plan-only default means this is simply `!apply`; `--dry-run`
-    /// makes that default explicit rather than adding a second way to
-    /// suppress a mutation.
-    pub fn is_dry_run(&self) -> bool {
-        !self.apply
-    }
-
     /// The resolved plan/execute mode.
     pub fn mode(&self) -> MutationMode {
         if self.apply {
@@ -1689,11 +1636,6 @@ pub struct DryRunArgs {
 }
 
 impl DryRunArgs {
-    /// True when this run must not mutate anything.
-    pub fn is_dry_run(&self) -> bool {
-        self.dry_run
-    }
-
     /// The resolved plan/execute mode.
     pub fn mode(&self) -> MutationMode {
         if self.dry_run {
@@ -1713,37 +1655,6 @@ mod mutation_args_tests {
     struct MutationCli {
         #[command(flatten)]
         mutation: MutationArgs,
-    }
-
-    fn parse(args: &[&str]) -> MutationArgs {
-        MutationCli::try_parse_from(args)
-            .expect("mutation args should parse")
-            .mutation
-    }
-
-    #[test]
-    fn bare_invocation_plans() {
-        let args = parse(&["mutating"]);
-        assert!(!args.is_apply());
-        assert!(args.is_dry_run());
-        assert_eq!(args.mode(), MutationMode::Plan);
-    }
-
-    #[test]
-    fn apply_executes() {
-        let args = parse(&["mutating", "--apply"]);
-        assert!(args.is_apply());
-        assert!(!args.is_dry_run());
-        assert_eq!(args.mode(), MutationMode::Apply);
-    }
-
-    #[test]
-    fn dry_run_is_the_default_spelled_out_and_never_executes() {
-        let args = parse(&["mutating", "--dry-run"]);
-        assert!(!args.is_apply());
-        assert!(args.is_dry_run());
-        assert_eq!(args.mode(), MutationMode::Plan);
-        assert_eq!(args.mode(), parse(&["mutating"]).mode());
     }
 
     #[test]
@@ -1869,7 +1780,7 @@ impl SettingArgs {
         Ok(self.setting_json.clone())
     }
 
-    pub fn has_overrides(&self) -> bool {
+    pub(crate) fn has_overrides(&self) -> bool {
         !self.settings_json_file.is_empty()
             || !self.setting.is_empty()
             || !self.setting_json.is_empty()

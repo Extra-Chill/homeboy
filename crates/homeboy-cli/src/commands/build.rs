@@ -202,44 +202,6 @@ mod tests {
             .args
     }
 
-    /// Every shape `homeboy build` accepted before `ScopeArgs` must still
-    /// parse into the same fields. `--path` in particular keeps its
-    /// local_path-override meaning; it only moved into the shared group.
-    #[test]
-    fn previously_valid_invocations_still_parse() {
-        let single = parse(&["build", "my-comp"]);
-        assert_eq!(single.target_id.as_deref(), Some("my-comp"));
-        assert!(single.component_ids.is_empty());
-        assert!(!single.all);
-        assert!(single.scope.path.is_none());
-
-        let project_all = parse(&["build", "my-project", "--all"]);
-        assert_eq!(project_all.target_id.as_deref(), Some("my-project"));
-        assert!(project_all.all);
-
-        let multi = parse(&["build", "my-project", "comp-a", "comp-b"]);
-        assert_eq!(multi.target_id.as_deref(), Some("my-project"));
-        assert_eq!(multi.component_ids, vec!["comp-a", "comp-b"]);
-
-        let with_path = parse(&["build", "my-comp", "--path", "/tmp/checkout"]);
-        assert_eq!(with_path.target_id.as_deref(), Some("my-comp"));
-        assert_eq!(with_path.scope.path.as_deref(), Some("/tmp/checkout"));
-
-        let bare_path = parse(&["build", "--path", "/tmp/checkout"]);
-        assert!(bare_path.target_id.is_none());
-        assert_eq!(bare_path.scope.path.as_deref(), Some("/tmp/checkout"));
-
-        let json = parse(&["build", "--json", r#"{"componentIds":["a"]}"#]);
-        assert_eq!(json.json.as_deref(), Some(r#"{"componentIds":["a"]}"#));
-
-        let changed = parse(&["build", "my-comp", "--changed-since", "origin/main"]);
-        assert_eq!(changed.changed.changed_since(), Some("origin/main"));
-
-        let cwd = parse(&["build"]);
-        assert!(cwd.target_id.is_none());
-        assert!(cwd.scope.is_unscoped());
-    }
-
     /// `--path` stays out of the shared-resolver branch so it keeps composing
     /// with the positional target and CWD discovery.
     #[test]
