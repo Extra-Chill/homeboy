@@ -1253,6 +1253,63 @@ where
     continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, false)
 }
 
+fn explicit_local_continuation_decision(
+    plan: &homeboy::agents::agent_task_scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<Option<homeboy_lab_runner_contract::ExecutionPlacementDecision>> {
+    if !homeboy::core::resource_policy_context::captured_context()
+        .is_some_and(|context| context.local_override)
+    {
+        return Ok(None);
+    }
+    let prior: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+        plan.metadata["execution_placement_decision"].clone(),
+    )
+    .map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "execution_placement_decision",
+            format!("durable Cook attempt has no valid placement decision: {error}"),
+            None,
+            None,
+        )
+    })?;
+    Ok(Some(
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            prior.policy_id,
+            prior.policy_revision,
+            prior.identity,
+            homeboy_lab_runner_contract::Placement::Local,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            None,
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: true,
+                authority: Some("operator --placement local".to_string()),
+            },
+        ),
+    ))
+}
+
+fn apply_explicit_local_continuation(
+    run_id: &str,
+    options: &mut homeboy::agents::agent_task_service::AgentTaskCookServiceOptions,
+) -> homeboy::core::Result<()> {
+    let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
+        return Ok(());
+    };
+    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation(
+        run_id,
+        decision.clone(),
+    )?;
+    options.initial_plan.metadata["execution_placement_decision"] = serde_json::to_value(decision)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    options.attempt_dispatcher = None;
+    Ok(())
+}
+
 /// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
 /// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
 /// observation-only until the attempt becomes terminal.
@@ -1322,6 +1379,8 @@ where
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
         let execute = |options| {
+            let mut options = options;
+            apply_explicit_local_continuation(&run_id, &mut options)?;
             agent_task_service::authorize_cook_continue_route_with_artifact(
                 &options,
                 args.artifact_id.as_deref(),
@@ -1359,7 +1418,21 @@ where
         ));
     }
 
-    let dispatcher = reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+    let local_override = explicit_local_continuation_decision(
+        &recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_id)
+            .ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected("selected Cook attempt is absent")
+            })?
+            .plan,
+    )?;
+    let dispatcher = if local_override.is_some() {
+        None
+    } else {
+        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
+    };
     let attempt = recipe
         .attempts
         .iter()
@@ -1381,6 +1454,9 @@ where
     };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
+    if local_override.is_some() {
+        apply_explicit_local_continuation(&run_id, &mut options)?;
+    }
     agent_task_service::authorize_cook_continue_route_with_artifact(
         &options,
         args.artifact_id.as_deref(),
