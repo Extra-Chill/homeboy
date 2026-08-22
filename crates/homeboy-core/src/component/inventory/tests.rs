@@ -539,6 +539,35 @@ fn load_resolves_the_selected_registration_without_requiring_global_inventory() 
     );
 }
 
+#[test]
+fn registered_by_id_inspects_only_the_selected_workspace_in_a_large_registry() {
+    let dir = temp_home_dir();
+    let target_repo = dir.path().join("target-repo");
+    fs::create_dir_all(&target_repo).unwrap();
+    write_portable_id(&target_repo, "target");
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    write_standalone_json(&components, "target", &target_repo.to_string_lossy());
+
+    for index in 0..300 {
+        let id = format!("unrelated-{index}");
+        let repo = dir.path().join(&id);
+        fs::create_dir_all(&repo).unwrap();
+        write_portable_id(&repo, &id);
+        write_standalone_json(&components, &id, &repo.to_string_lossy());
+    }
+
+    crate::component::portable::take_discovery_paths_for_test();
+    let component = registered_by_id("target")
+        .unwrap()
+        .expect("target component");
+    let discovery_paths = crate::component::portable::take_discovery_paths_for_test();
+
+    assert_eq!(component.local_path, target_repo.to_string_lossy());
+    assert_eq!(discovery_paths, vec![target_repo]);
+}
+
 #[cfg(unix)]
 #[test]
 fn registered_base_returns_before_a_sleeping_git_enrichment_probe() {

@@ -3928,9 +3928,7 @@ fn validate_batch_cook_gates(
 }
 
 fn batch_gate_workspace(args: &AgentTaskFanoutCookBatchArgs) -> Result<Option<std::path::PathBuf>> {
-    let component = homeboy::core::component::registered()?
-        .into_iter()
-        .find(|component| component.id == args.repo);
+    let component = homeboy::core::component::registered_by_id(&args.repo)?;
     let Some(component) = component else {
         return Ok(None);
     };
@@ -3948,9 +3946,7 @@ fn batch_plan_gate_workspace(plan: &BatchCookFanoutPlan) -> Result<Option<std::p
         return Ok(None);
     }
     let repository = repositories.into_iter().next().expect("one repository");
-    let component = homeboy::core::component::registered()?
-        .into_iter()
-        .find(|component| component.id == repository);
+    let component = homeboy::core::component::registered_by_id(repository)?;
     let Some(component) = component else {
         return Ok(None);
     };
@@ -5911,6 +5907,58 @@ fi
     }
 
     #[test]
+    fn fanout_dry_run_bounds_gate_workspace_lookup_in_a_large_registry() {
+        with_isolated_home(|home| {
+            let target = home.path().join("target");
+            std::fs::create_dir(&target).expect("target workspace");
+            std::fs::write(target.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("target manifest");
+            write_component_registration(home.path(), "fixture", &target);
+
+            for index in 0..300 {
+                let id = format!("unrelated-{index}");
+                let workspace = home.path().join(&id);
+                std::fs::create_dir(&workspace).expect("unrelated workspace");
+                std::fs::write(
+                    workspace.join("homeboy.json"),
+                    serde_json::json!({ "id": id }).to_string(),
+                )
+                .expect("unrelated manifest");
+                write_component_registration(home.path(), &id, &workspace);
+            }
+
+            let mut args = cook_batch_args();
+            args.repo = "fixture".to_string();
+            args.issues = (1..=4)
+                .map(|issue| format!("https://github.com/Extra-Chill/homeboy/issues/{issue}"))
+                .collect();
+            let started = Instant::now();
+            let (value, exit_code) = cook_batch(args).expect("bounded four-child dry run");
+            let rows = value["worktrees"]["rows"]
+                .as_array()
+                .expect("worktree rows");
+            let planned_handles = value["plan"]["cooks"]
+                .as_array()
+                .expect("planned cooks")
+                .iter()
+                .map(|cook| cook["to_worktree"].as_str().expect("planned handle"))
+                .collect::<BTreeSet<_>>();
+            let projected_handles = rows
+                .iter()
+                .map(|row| row["handle"].as_str().expect("projected handle"))
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(exit_code, 0, "{value}");
+            assert!(
+                started.elapsed() < DRY_RUN_PHASE_TIMEOUT,
+                "targeted registry lookup exceeded the normal planner deadline"
+            );
+            assert_eq!(rows.len(), 4);
+            assert_eq!(projected_handles, planned_handles);
+        });
+    }
+
+    #[test]
     fn cook_batch_repo_normalization_accepts_slugs_and_registered_primary_paths() {
         with_isolated_home(|home| {
             let primary = home.path().join("primary");
@@ -7106,6 +7154,32 @@ fi
             .as_str()
             .expect("replay command")
             .contains("--dry-run"));
+    }
+
+    #[test]
+    fn dry_run_planner_attributes_a_slow_workspace_lookup_to_its_exact_phase() {
+        let args = cook_batch_args();
+        let mut planner = DryRunPlanner::new(&args);
+        planner.phase_timeout = Duration::from_millis(20);
+
+        let error = planner
+            .run_bounded(
+                "gate_workspace",
+                "authoritative registered workspace",
+                || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    Ok(())
+                },
+            )
+            .expect_err("slow workspace lookup must be bounded");
+
+        assert_eq!(error.details["reason"], "planner_deadline_exceeded");
+        assert_eq!(error.details["phase"], "gate_workspace");
+        assert!(error.details["phase_elapsed_ms"].as_u64().unwrap() >= 20);
+        assert_eq!(
+            error.details["unresolved_dependency"],
+            "authoritative registered workspace"
+        );
     }
 
     #[test]
