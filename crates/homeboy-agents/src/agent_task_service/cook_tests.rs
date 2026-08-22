@@ -5600,7 +5600,8 @@ fn review_12349_deferred_lookup_cancellation_preserves_cancelled_state() {
 
 #[cfg(unix)]
 #[test]
-fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
+fn short_cook_deadline_caps_resolve_timeout_without_starting_retry() {
+    use crate::agent_task_timeout::{now_unix_ms, with_current_cook_deadline, CookDeadline};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -5620,7 +5621,7 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
                 enabled: true,
                 kind: homeboy_core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
-                lookup_timeout_ms: 25,
+                lookup_timeout_ms: 5_000,
                 mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
@@ -5654,11 +5655,23 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
                 .push((event.phase.to_string(), event.detail.map(str::to_string)));
             Ok(())
         };
-        let result = run_cook(CookContext {
-            durable_observer: Some(&observer),
-            ..CookContext::new(options, Arc::new(UnusedExecutor))
-        })
-        .expect("Cook records split lookup timeout");
+        let started = std::time::Instant::now();
+        let result = with_current_cook_deadline(
+            Some(CookDeadline::from_unix_ms(
+                now_unix_ms().saturating_add(200),
+            )),
+            || {
+                run_cook(CookContext {
+                    durable_observer: Some(&observer),
+                    ..CookContext::new(options, Arc::new(UnusedExecutor))
+                })
+            },
+        )
+        .expect("Cook records short-deadline lookup timeout");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "effective lookup timeout must cap total pre-execution time"
+        );
         assert_eq!(result.value.status, "pre_execution_failure");
         let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -5668,28 +5681,37 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
             "timed_out"
         );
         assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_id"],
-            "fixture"
-        );
-        assert_eq!(
             record.metadata["pre_execution_failure"]["details"]
                 ["worktree_provider_call_classification"],
             "timeout"
         );
-        assert!(record.metadata["pre_execution_failure"]["details"]
-            ["worktree_provider_replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains(provider.to_string_lossy().as_ref()));
         let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
-        assert_eq!(plan.metadata["worktree_provider_resolve"]["attempt"], 2);
+        assert_eq!(plan.metadata["worktree_provider_resolve"]["attempt"], 1);
         assert_eq!(
             plan.metadata["worktree_provider_resolve"]["retry_disposition"],
-            "exhausted"
+            "deadline_expired"
         );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["configured_timeout_ms"],
+            5_000
+        );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["provider_id"],
+            "fixture"
+        );
+        assert!(plan.metadata["worktree_provider_resolve"]["events"]
+            .as_array()
+            .expect("resolve events")
+            .iter()
+            .any(|event| event["attempt"] == 1
+                && event["effective_timeout_ms"].as_u64().unwrap_or(u64::MAX) < 5_000));
         assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert!(record.metadata["provider_executions"].is_null());
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"],
+            plan.metadata["worktree_provider_resolve"]
+        );
         assert!(phases
             .lock()
             .expect("phase lock")
