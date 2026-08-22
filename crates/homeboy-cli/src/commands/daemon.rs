@@ -791,6 +791,7 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 }
 
 fn serve(addr: &str) -> CmdResult<DaemonOutput> {
+    register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
     let state = daemon::serve_with_analysis_runner(parsed, CommandAnalysisJobRunner)?;
     Ok((
@@ -802,6 +803,14 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
         }),
         0,
     ))
+}
+
+fn register_daemon_controller_job_providers() {
+    // A daemon executes controller jobs after the submitting CLI has exited.
+    // Register the runner continuation here, at the process boundary that owns
+    // those jobs, rather than relying on a later status command to populate the
+    // process-global projection provider.
+    crate::runner::register_runner_continuation_provider();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -843,6 +852,13 @@ mod tests {
 
     use super::*;
     use crate::cli_surface::{Cli, Commands};
+
+    #[test]
+    fn daemon_controller_context_registers_runner_continuation_projection() {
+        register_daemon_controller_job_providers();
+
+        assert!(homeboy::agents::agent_task_lifecycle::runner_authority("local").is_configured());
+    }
 
     #[test]
     fn legacy_child_recovery_parser_requires_exact_evidence() {

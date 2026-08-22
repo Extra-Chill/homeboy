@@ -648,7 +648,14 @@ mod tests {
                 workspace_claim_binding: None,
                 workspace_owner_lease: None,
             }));
-            store.reserve_local_child(job.id).expect("reserve child");
+            store
+                .reserve_local_child_at_with_runner_capacity(
+                    job.id,
+                    crate::api_jobs::timestamp_ms(),
+                    None,
+                )
+                .map(|_| ())
+                .expect("reserve child");
             let handle = store.handle(job.id);
             let reservation_id = handle.local_child_reservation_id().expect("reservation id");
             let context = RunnerJobExecutionContext::direct_daemon(

@@ -10,7 +10,6 @@ pub use provider::register as register_runner_evidence_provider;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use tokens::artifact_store_locator_from_runner_artifact_id;
 pub use tokens::{
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, runner_artifact_store_token,

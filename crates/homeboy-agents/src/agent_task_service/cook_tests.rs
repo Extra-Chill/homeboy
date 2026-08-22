@@ -3145,6 +3145,37 @@ impl AgentTaskCookAttemptDispatcher for RecordingDetachedAttemptDispatcher {
     }
 }
 
+#[derive(Debug)]
+struct WorkspaceCapturingDetachedAttemptDispatcher {
+    plan: Arc<Mutex<Option<AgentTaskPlan>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for WorkspaceCapturingDetachedAttemptDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-workspace-capturing-detached" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        *self.plan.lock().expect("captured dispatch plan") = Some(plan.clone());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "workspace-capturing-daemon-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct UnusedExecutor;
 
@@ -3182,6 +3213,22 @@ impl AgentTaskExecutorAdapter for ImmediateSuccessExecutor {
             follow_up: None,
             metadata: Value::Null,
         }
+    }
+}
+
+#[derive(Clone)]
+struct RecordingImmediateSuccessExecutor {
+    starts: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for RecordingImmediateSuccessExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        ImmediateSuccessExecutor.execute(request, context)
     }
 }
 
@@ -5011,7 +5058,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 
 #[cfg(unix)]
 #[test]
-fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
+fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -5065,13 +5112,10 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
         let workspace = workspace.canonicalize().expect("canonical workspace");
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let provider = provider_dir.path().join("provider");
-        let first_resolve = provider_dir.path().join("first-resolve");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nif test \"$1\" = identity; then\n  if test ! -f '{}'; then : > '{}'; sleep 1; fi\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\nelse\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'\nfi\n",
-                first_resolve.display(),
-                first_resolve.display(),
+                "#!/bin/sh\nsleep 1\nprintf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"unreachable\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\n",
                 workspace.display(),
             ),
         )
@@ -5138,9 +5182,9 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
 
         options.source_worktree_path = Some(workspace.clone());
         let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
-            .expect("Cook retries and materializes the provider workspace");
+            .expect("Cook records exhausted provider timeout");
 
-        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.exit_code, 1, "{:?}", result.value);
         assert_eq!(result.value.cook_id, cook_id);
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         let record = agent_task_lifecycle::status(run_id).expect("durable lookup record");
@@ -5153,6 +5197,10 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
         assert_eq!(
             persisted_plan.metadata["worktree_provider_resolve"]["attempt"],
             2
+        );
+        assert_eq!(
+            persisted_plan.metadata["worktree_provider_resolve"]["retry_disposition"],
+            "exhausted"
         );
         assert!(
             persisted_plan.metadata["worktree_provider_resolve"]["deadline_unix_ms"]
@@ -5179,10 +5227,7 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
             persisted_plan.metadata["cook_provision"]["handle"],
             exact_handle
         );
-        assert_eq!(
-            persisted_plan.tasks[0].workspace.root.as_deref(),
-            Some(workspace.to_str().expect("utf8 workspace"))
-        );
+        assert_eq!(persisted_plan.tasks[0].workspace.root, None);
     });
 }
 
@@ -5314,7 +5359,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
             .expect("persist recipe in the injected recipe store");
         materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
             .expect("materialize run in the injected lifecycle store");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("materialize the ensured workspace in the injected lifecycle store");
 
         assert!(created.exists(), "ensure ran after durable Cook admission");
@@ -5602,7 +5647,8 @@ fn review_12349_deferred_lookup_cancellation_preserves_cancelled_state() {
 
 #[cfg(unix)]
 #[test]
-fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
+fn short_cook_deadline_caps_resolve_timeout_without_starting_retry() {
+    use crate::agent_task_timeout::{now_unix_ms, with_current_cook_deadline, CookDeadline};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -5622,7 +5668,7 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
                 enabled: true,
                 kind: homeboy_core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
-                lookup_timeout_ms: 25,
+                lookup_timeout_ms: 5_000,
                 mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
@@ -5656,11 +5702,23 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
                 .push((event.phase.to_string(), event.detail.map(str::to_string)));
             Ok(())
         };
-        let result = run_cook(CookContext {
-            durable_observer: Some(&observer),
-            ..CookContext::new(options, Arc::new(UnusedExecutor))
-        })
-        .expect("Cook records split lookup timeout");
+        let started = std::time::Instant::now();
+        let result = with_current_cook_deadline(
+            Some(CookDeadline::from_unix_ms(
+                now_unix_ms().saturating_add(200),
+            )),
+            || {
+                run_cook(CookContext {
+                    durable_observer: Some(&observer),
+                    ..CookContext::new(options, Arc::new(UnusedExecutor))
+                })
+            },
+        )
+        .expect("Cook records short-deadline lookup timeout");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "effective lookup timeout must cap total pre-execution time"
+        );
         assert_eq!(result.value.status, "pre_execution_failure");
         let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -5670,19 +5728,37 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
             "timed_out"
         );
         assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_id"],
-            "fixture"
-        );
-        assert_eq!(
             record.metadata["pre_execution_failure"]["details"]
                 ["worktree_provider_call_classification"],
             "timeout"
         );
-        assert!(record.metadata["pre_execution_failure"]["details"]
-            ["worktree_provider_replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains(provider.to_string_lossy().as_ref()));
+        let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
+        assert_eq!(plan.metadata["worktree_provider_resolve"]["attempt"], 1);
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["retry_disposition"],
+            "deadline_expired"
+        );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["configured_timeout_ms"],
+            5_000
+        );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["provider_id"],
+            "fixture"
+        );
+        assert!(plan.metadata["worktree_provider_resolve"]["events"]
+            .as_array()
+            .expect("resolve events")
+            .iter()
+            .any(|event| event["attempt"] == 1
+                && event["effective_timeout_ms"].as_u64().unwrap_or(u64::MAX) < 5_000));
+        assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert!(record.metadata["provider_executions"].is_null());
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"],
+            plan.metadata["worktree_provider_resolve"]
+        );
         assert!(phases
             .lock()
             .expect("phase lock")
@@ -5985,7 +6061,7 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
 
         let lifecycle_store =
             AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("materialize original provider workspace");
 
         assert_eq!(
@@ -6000,6 +6076,46 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
         assert_eq!(
             options.initial_plan.tasks[0].workspace.root.as_deref(),
             canonical_original.to_str()
+        );
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut dispatch_options = batch_cook_options(
+            "provider-bound-dispatch",
+            Arc::new(WorkspaceCapturingDetachedAttemptDispatcher {
+                plan: Arc::clone(&captured),
+            }),
+        );
+        dispatch_options.to_worktree = "fixture@provider-bound".to_string();
+        dispatch_options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending", "kind": "provider",
+            "handle": dispatch_options.to_worktree,
+            "worktree_provider_id": "z-original",
+        });
+
+        let report = run_cook(CookContext::new(dispatch_options, Arc::new(UnusedExecutor)))
+            .expect("Cook dispatches the materialized provider workspace");
+        assert_eq!(report.value.status, "in_flight");
+        let dispatched = captured
+            .lock()
+            .expect("captured dispatch plan")
+            .clone()
+            .expect("provider dispatch received a plan");
+        assert_eq!(
+            dispatched.tasks[0].workspace.root.as_deref(),
+            canonical_original.to_str(),
+            "provider resolution projects its concrete path into the canonical dispatch plan"
+        );
+        assert_eq!(
+            dispatched.metadata["cook_provision"]["workspace_identity"]["handle"],
+            "fixture@provider-bound",
+            "the logical handle remains the authenticated provider identity"
+        );
+        let recipe = super::super::load_recipe("provider-bound-dispatch")
+            .expect("logical Cook recipe remains durable");
+        assert!(recipe.attempts[0].plan.tasks[0].workspace.root.is_none());
+        assert_eq!(
+            recipe.attempts[0].plan.metadata["cook_provision"]["action"],
+            "lookup_pending"
         );
     });
 }
@@ -8203,6 +8319,177 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
                 "transient"
             );
         }
+    });
+}
+
+#[test]
+fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_replaying_lab() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let config_root = homeboy_core::paths::homeboy().expect("resolve isolated config root");
+        std::fs::create_dir_all(&config_root).expect("create isolated config root");
+        std::fs::write(
+            config_root.join("homeboy.json"),
+            r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+        )
+        .expect("disable host-capacity admission for local continuation");
+        let (_checkout_guard, checkout) =
+            homeboy_core::test_support::shared_committed_git_repo_fixture(
+                "local-placement-override",
+            );
+        let worktree_parent = tempfile::tempdir().expect("create worktree parent");
+        let worktree = worktree_parent.path().join("candidate");
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "local-placement-override",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let lab_dispatches = Arc::new(AtomicUsize::new(0));
+        let local_starts = Arc::new(AtomicUsize::new(0));
+        let cook_id = "cook-local-placement-override";
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RetryableTransportFailingAttemptDispatcher {
+                dispatches: Arc::clone(&lab_dispatches),
+            }),
+        );
+        options.provider_command = Some("fixture-provider".to_string());
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.to_worktree = "fixture@local-placement-override".to_string();
+        options.source_worktree_path = Some(worktree.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(worktree.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.to_worktree,
+            "root": worktree,
+            "branch": "local-placement-override",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.to_worktree.clone(),
+            path: worktree.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register original Cook worktree");
+        let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "fixture-policy",
+            "v1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture-worktree".to_string(),
+                task: "provider".to_string(),
+                candidate: Some("candidate-a".to_string()),
+                base: Some("base-a".to_string()),
+            },
+            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            Some(
+                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                    runner_id: "fixture-lab".to_string(),
+                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
+                },
+            ),
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: true,
+                reason: Some("fixture policy allows local recovery".to_string()),
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        options.initial_plan.metadata["execution_placement_decision"] =
+            serde_json::to_value(&prior).expect("serialize auto Lab decision");
+
+        let exhausted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("exhaust the bounded Lab transport retry");
+        assert_eq!(exhausted.value.status, "pre_execution_failure");
+        assert_eq!(lab_dispatches.load(Ordering::SeqCst), 2);
+        let exhausted_run_id = exhausted
+            .value
+            .latest_run_id
+            .expect("exhausted transport attempt is durable");
+        let recipe_before = super::super::load_recipe(cook_id).expect("durable recipe");
+
+        let local = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            prior.policy_id.clone(),
+            prior.policy_revision.clone(),
+            prior.identity.clone(),
+            homeboy_lab_runner_contract::Placement::Local,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            None,
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: true,
+                authority: Some("operator --placement local".to_string()),
+            },
+        );
+        agent_task_lifecycle::transition_execution_placement_for_continuation(
+            &exhausted_run_id,
+            local.clone(),
+        )
+        .expect("authorize local continuation after auto Lab preacceptance failure");
+
+        options.initial_run_id = exhausted_run_id.clone();
+        options.initial_plan = agent_task_lifecycle::load_controller_plan(&exhausted_run_id)
+            .expect("load transitioned plan");
+        options.attempt_dispatcher = None;
+        let continued = run_cook(CookContext::new(
+            options,
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&local_starts),
+            }),
+        ))
+        .expect("local continuation starts provider work");
+
+        assert_eq!(
+            lab_dispatches.load(Ordering::SeqCst),
+            2,
+            "no Lab connection after override"
+        );
+        assert_eq!(
+            local_starts.load(Ordering::SeqCst),
+            1,
+            "one local provider start: {continued:#?}"
+        );
+        assert_eq!(continued.value.cook_id, cook_id);
+        let recipe_after =
+            super::super::load_recipe(cook_id).expect("durable recipe after override");
+        assert_eq!(
+            recipe_after.promotion_transport,
+            recipe_before.promotion_transport
+        );
+        assert_eq!(recipe_after.gate_policy, recipe_before.gate_policy);
+        assert_eq!(recipe_after.retry_budget, recipe_before.retry_budget);
+        assert_eq!(recipe_after.finalization, recipe_before.finalization);
+        assert_eq!(
+            recipe_after.attempts[0].plan.tasks[0].instructions,
+            recipe_before.attempts[0].plan.tasks[0].instructions
+        );
+        let transitioned =
+            agent_task_lifecycle::status(&exhausted_run_id).expect("transition evidence");
+        assert_eq!(
+            transitioned.metadata["execution_placement_decision"]["decision_id"],
+            local.decision_id
+        );
+        assert_eq!(
+            transitioned.metadata["execution_placement_decision"]["identity"]["candidate"],
+            "candidate-a"
+        );
+        assert_eq!(
+            transitioned.metadata["transport_admission_reset"]["kind"],
+            "placement_transition"
+        );
     });
 }
 
@@ -11565,15 +11852,45 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             .unwrap()
             .is_some());
 
-        std::fs::write(target.path().join("unrelated.txt"), "drift\n").unwrap();
+        let base = Command::new("git")
+            .args(["rev-parse", "HEAD^"])
+            .current_dir(target.path())
+            .output()
+            .unwrap();
+        let base = String::from_utf8(base.stdout).unwrap().trim().to_string();
         assert!(Command::new("git")
-            .args(["add", "unrelated.txt"])
+            .args(["branch", "side", &base])
             .current_dir(target.path())
             .status()
             .unwrap()
             .success());
         assert!(Command::new("git")
-            .args(["commit", "--quiet", "-m", "unrelated"])
+            .args(["checkout", "--quiet", "side"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.path().join("side.txt"), "side\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "side.txt"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "side"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "--quiet", "cook-candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["merge", "--quiet", "--no-ff", "-s", "ours", "side", "-m", "merge"])
             .current_dir(target.path())
             .status()
             .unwrap()
@@ -11583,7 +11900,7 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             error.details["workspace"]["classification"],
             "workspace.cook_owned_unpushed_commit_mismatch"
         );
-        assert_eq!(error.details["workspace"]["reason"], "divergent_ancestry");
+        assert_eq!(error.details["workspace"]["reason"], "merge_commit");
     });
 }
 

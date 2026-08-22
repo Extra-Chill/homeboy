@@ -628,6 +628,13 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
             chrono::Utc::now(),
         ))
     }
+
+    fn recover_controller_upgrade_admission_for_verified_target(
+        &self,
+    ) -> Result<ControllerUpgradeAdmission> {
+        agent_task_lifecycle::quarantine_verified_fixture_runner_records()?;
+        self.controller_upgrade_admission()
+    }
 }
 
 pub fn register_controller_upgrade_admission_provider() {

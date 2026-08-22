@@ -289,14 +289,6 @@ pub(crate) fn plan_controller_snapshot_extension(
     })
 }
 
-pub(crate) fn materialize_runner_extension(
-    runner: &Runner,
-    homeboy_path: &str,
-    request: &RunnerExtensionMaterializationRequest,
-) -> Result<RunnerExtensionMaterializationProvenance> {
-    materialize_runner_extension_with_env(runner, homeboy_path, None, request)
-}
-
 pub(crate) fn materialize_runner_extension_with_env(
     runner: &Runner,
     homeboy_path: &str,

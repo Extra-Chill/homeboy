@@ -633,7 +633,12 @@ impl JobStore {
         pid: u32,
         _started_at: String,
     ) -> Result<Job> {
-        self.reserve_local_child(job_id)?;
+        self.reserve_local_child_at_with_runner_capacity(
+            job_id,
+            crate::api_jobs::timestamp_ms(),
+            None,
+        )
+        .map(|_| ())?;
         self.start_with_reserved_child_identity(
             job_id,
             pid,

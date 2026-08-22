@@ -9,9 +9,7 @@ pub use homeboy_core::execution_contract::is_remote_runner_artifact_path;
 // Contract-driven token construction moved to core's execution_contract (not
 // runner behavior) so core code can build/parse them without a core -> runner
 // edge. Re-exported so runner-internal call sites resolve unchanged.
-pub use homeboy_core::execution_contract::{
-    artifact_store_locator_from_runner_artifact_id, runner_artifact_store_token,
-};
+pub use homeboy_core::execution_contract::runner_artifact_store_token;
 
 pub fn is_retrievable_runner_artifact(path: &str) -> bool {
     RemoteArtifactToken::parse(path).is_ok()
