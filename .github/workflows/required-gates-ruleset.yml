@@ -1,0 +1,62 @@
+name: Required Gates Ruleset
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Audit the live ruleset or reconcile it to the versioned policy.
+        required: true
+        default: audit
+        type: choice
+        options: [audit, reconcile]
+
+concurrency:
+  group: required-gates-ruleset-Extra-Chill-homeboy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit required gates ruleset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Audit the existing ruleset against the versioned policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/manage-required-gates-ruleset.sh --operation audit --evidence required-gates-ruleset-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: required-gates-ruleset-audit
+          path: required-gates-ruleset-audit.json
+          if-no-files-found: error
+
+  reconcile:
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'reconcile' }}
+    needs: audit
+    runs-on: ubuntu-latest
+    environment: main-ruleset-administration
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Reconcile the existing ruleset and verify effective enforcement
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
+        run: |
+          test -n "${GH_TOKEN}"
+          bash .github/manage-required-gates-ruleset.sh --operation reconcile --evidence required-gates-ruleset-reconcile.json
+          bash .github/validate-required-gates.sh --github
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: required-gates-ruleset-reconcile
+          path: required-gates-ruleset-reconcile.json
+          if-no-files-found: error

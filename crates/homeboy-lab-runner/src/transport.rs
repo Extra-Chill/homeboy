@@ -1,5 +1,6 @@
 use homeboy_engine_primitives::content_hash;
 use std::fs;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use base64::Engine;
@@ -7,6 +8,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
+use sha2::Digest;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -15,6 +17,9 @@ use homeboy_core::server::{self, SshClient};
 use super::session::{RunnerSession, RunnerStatusReport, RunnerTunnelMode};
 use super::{broker_http, Runner, RunnerKind};
 use homeboy_core::broker_auth;
+
+const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_UPLOAD_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunnerSessionHandle {
@@ -186,11 +191,67 @@ impl RunnerFileTransfer {
             }
             RunnerFileTransferCapability::Unsupported { .. } => unreachable!("checked above"),
         };
-        Ok(RunnerFileTransfer {
+        let transfer = RunnerFileTransfer {
             runner_id: runner.id.clone(),
             workspace_root: runner.workspace_root.clone(),
             channel,
-        })
+        };
+        // This is deliberately before any mkdir/upload materializes workspace
+        // state. Older daemons return a bounded typed refusal here, rather than
+        // a late 404 in the middle of evidence publication.
+        transfer.ensure_chunk_upload_protocol()?;
+        Ok(transfer)
+    }
+
+    fn ensure_chunk_upload_protocol(&self) -> Result<()> {
+        let (RunnerFileChannel::DaemonHttp {
+            client,
+            endpoint_url,
+            broker_token,
+        }
+        | RunnerFileChannel::BrokerHttp {
+            client,
+            endpoint_url,
+            broker_token,
+        }) = &self.channel
+        else {
+            // SSH has its own bounded atomic upload protocol and never calls
+            // the daemon chunk endpoint.
+            return Ok(());
+        };
+        let response = match &self.channel {
+            RunnerFileChannel::BrokerHttp { .. } => broker_http::get_json(
+                client,
+                endpoint_url,
+                "/files/capabilities",
+                "runner file capability preflight",
+                broker_token.as_deref(),
+            ),
+            RunnerFileChannel::DaemonHttp { .. } => daemon_file_get_json(
+                client,
+                endpoint_url,
+                "/files/capabilities",
+                broker_token.as_deref(),
+            ),
+            RunnerFileChannel::DirectSsh(_) => unreachable!(),
+        }
+        .map_err(|error| unsupported_chunk_upload_error(&self.runner_id, error.to_string()))?;
+        let version = response.get("protocol_version").and_then(Value::as_u64);
+        let enabled = response
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("private_file_chunk_upload"))
+            });
+        if version != Some(CHUNK_UPLOAD_PROTOCOL_VERSION) || !enabled {
+            return Err(unsupported_chunk_upload_error(
+                &self.runner_id,
+                "daemon did not advertise private_file_chunk_upload protocol version 1",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn ensure_directory(&self, remote_dir: &str) -> Result<()> {
@@ -259,18 +320,8 @@ impl RunnerFileTransfer {
         remote_path: &str,
         expected_sha256: &str,
     ) -> Result<()> {
-        let content = fs::read(local_path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
-        })?;
-        let actual_sha256 = content_hash::sha256_hex(&content);
-        if actual_sha256 != expected_sha256 {
-            return Err(Error::validation_invalid_argument(
-                "at_file",
-                "private runner file content does not match its declared SHA-256",
-                Some(remote_path.to_string()),
-                None,
-            ));
-        }
+        let content =
+            private_file_bytes_with_expected_digest(local_path, expected_sha256, remote_path)?;
         let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
         let result = match &self.channel {
             RunnerFileChannel::DirectSsh(client) => {
@@ -325,6 +376,114 @@ impl RunnerFileTransfer {
             }
         }
         result
+    }
+
+    /// Transfer a declared evidence blob from one verified, bounded snapshot.
+    /// SSH consumes the snapshot path; HTTP sends it in bounded chunks.
+    pub(crate) fn upload_private_evidence_atomic(
+        &self,
+        local_path: &str,
+        remote_path: &str,
+        expected_sha256: &str,
+        expected_size: u64,
+    ) -> Result<()> {
+        let snapshot = private_evidence_snapshot(local_path, expected_sha256, expected_size)?;
+        let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
+        let result = match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let upload = client.upload_file_private(
+                    snapshot.path().to_str().expect("snapshot path"),
+                    &temp_path,
+                );
+                if !upload.success {
+                    Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "private evidence upload",
+                        remote_path,
+                        upload.stderr,
+                        "direct_ssh",
+                    ))
+                } else {
+                    let publish = client.execute(&format!(
+                        "test \"$(shasum -a 256 {} | awk '{{print $1}}')\" = {} && test \"$(wc -c < {})\" -eq {} && chmod 600 {} && mv -f {} {}",
+                        shell::quote_arg(&temp_path), shell::quote_arg(expected_sha256), shell::quote_arg(&temp_path), expected_size, shell::quote_arg(&temp_path), shell::quote_arg(&temp_path), shell::quote_arg(remote_path),
+                    ));
+                    if publish.success {
+                        Ok(())
+                    } else {
+                        Err(file_transfer_operation_error(
+                            &self.runner_id,
+                            "private evidence publish",
+                            remote_path,
+                            publish.stderr,
+                            "direct_ssh",
+                        ))
+                    }
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => self
+                .upload_private_file_chunks(
+                    snapshot.path(),
+                    remote_path,
+                    expected_sha256,
+                    expected_size,
+                ),
+        };
+        if result.is_err() {
+            if let RunnerFileChannel::DirectSsh(client) = &self.channel {
+                let _ = client.execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
+            }
+        }
+        result
+    }
+
+    fn upload_private_file_chunks(
+        &self,
+        path: &std::path::Path,
+        remote_path: &str,
+        sha256: &str,
+        size: u64,
+    ) -> Result<()> {
+        const CHUNK_BYTES: usize = 64 * 1024;
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        let mut input = fs::File::open(path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        let mut offset = 0u64;
+        let mut buffer = [0u8; CHUNK_BYTES];
+        loop {
+            let read = input.read(&mut buffer).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+            let final_chunk = read == 0 || offset + read as u64 == size;
+            if read == 0 && offset != size {
+                return Err(Error::validation_invalid_argument(
+                    "provider_evidence",
+                    "evidence snapshot ended before its declared size",
+                    Some(remote_path.to_string()),
+                    None,
+                ));
+            }
+            let upload = self.http_post_json(
+                "/files/upload-chunk",
+                json!({"runner_id": &self.runner_id, "path": remote_path, "workspace_root": &self.workspace_root, "upload_id": upload_id, "offset": offset, "content_base64": base64::engine::general_purpose::STANDARD.encode(&buffer[..read]), "final": final_chunk, "sha256": final_chunk.then_some(sha256), "size_bytes": size, "private": true}),
+                "private evidence upload",
+                remote_path,
+            );
+            if let Err(error) = upload {
+                let _ = self.http_post_json(
+                    "/files/upload-chunk/abort",
+                    json!({"runner_id": &self.runner_id, "workspace_root": &self.workspace_root, "upload_id": upload_id}),
+                    "private evidence upload abort",
+                    remote_path,
+                );
+                return Err(error);
+            }
+            offset += read as u64;
+            if final_chunk {
+                return Ok(());
+            }
+        }
     }
 
     pub(crate) fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
@@ -447,6 +606,202 @@ impl RunnerFileTransfer {
     }
 }
 
+fn private_evidence_snapshot(
+    local_path: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<tempfile::NamedTempFile> {
+    if expected_size > MAX_PROVIDER_EVIDENCE_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            format!(
+                "declared evidence exceeds the {MAX_PROVIDER_EVIDENCE_BYTES}-byte transport limit"
+            ),
+            Some(local_path.to_string()),
+            None,
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut input = options.open(local_path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "provider_evidence",
+            "declared evidence could not be safely opened",
+            Some(format!("{local_path}: {error}")),
+            None,
+        )
+    })?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "declared evidence size no longer matches its projection",
+            Some(local_path.to_string()),
+            None,
+        ));
+    }
+    let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create evidence snapshot".to_string()),
+        )
+    })?;
+    let mut digest = sha2::Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > expected_size {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "declared evidence grew after projection",
+                Some(local_path.to_string()),
+                None,
+            ));
+        }
+        snapshot.write_all(&buffer[..read]).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write evidence snapshot".to_string()),
+            )
+        })?;
+        sha2::Digest::update(&mut digest, &buffer[..read]);
+    }
+    if total != expected_size || format!("{:x}", sha2::Digest::finalize(digest)) != expected_sha256
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "declared evidence no longer matches its digest or size",
+            Some(local_path.to_string()),
+            None,
+        ));
+    }
+    snapshot.as_file().sync_all().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("sync evidence snapshot".to_string()),
+        )
+    })?;
+    Ok(snapshot)
+}
+
+fn private_file_bytes_with_expected_digest(
+    local_path: &str,
+    expected_sha256: &str,
+    remote_path: &str,
+) -> Result<Vec<u8>> {
+    let content = fs::read(local_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(format!("read {local_path}"))))?;
+    let actual_sha256 = content_hash::sha256_hex(&content);
+    if actual_sha256 != expected_sha256 {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "private runner file content does not match its declared SHA-256",
+            Some(remote_path.to_string()),
+            None,
+        ));
+    }
+    Ok(content)
+}
+
+#[cfg(test)]
+mod content_addressed_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_mutated_content_addressed_evidence_before_lab_handoff() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary evidence");
+        std::fs::write(temp.path(), b"mutated").expect("write mutated evidence");
+
+        let error = private_file_bytes_with_expected_digest(
+            temp.path().to_str().expect("path"),
+            "5e5d4d3f5d16a48a9d0e8c306cea55f2472d6f6d94393ee9347f0af3545831a6",
+            "/runner/workspace/.homeboy/evidence/fixture/input.bin",
+        )
+        .expect_err("digest mismatch blocks transfer");
+        assert_eq!(error.details["field"], "provider_evidence");
+        assert!(error
+            .message
+            .contains("does not match its declared SHA-256"));
+    }
+
+    #[test]
+    fn rejects_evidence_that_grew_after_its_projection() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary evidence");
+        std::fs::write(temp.path(), b"declared").expect("write declared evidence");
+        std::fs::write(temp.path(), b"declared and grown").expect("grow projected evidence");
+
+        let error = private_evidence_snapshot(
+            temp.path().to_str().expect("path"),
+            "d7914fe546b68468821c0e51f92b7c6d1a7a5c83ef67f5009e8604f4f408d53d",
+            8,
+        )
+        .expect_err("post-projection growth is rejected");
+        assert_eq!(error.details["field"], "provider_evidence");
+        assert!(error.message.contains("size no longer matches"));
+    }
+
+    #[test]
+    fn snapshot_remains_the_verified_bytes_when_the_source_path_is_replaced_before_upload() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = directory.path().join("fixture.bin");
+        std::fs::write(&source, b"verified bytes").expect("write source");
+        let snapshot = private_evidence_snapshot(
+            source.to_str().expect("path"),
+            &content_hash::sha256_hex(b"verified bytes"),
+            14,
+        )
+        .expect("snapshot verified bytes");
+        std::fs::remove_file(&source).expect("remove source");
+        std::fs::write(&source, b"replacement bytes").expect("replace source path");
+        assert_eq!(
+            std::fs::read(snapshot.path()).expect("read snapshot"),
+            b"verified bytes"
+        );
+    }
+
+    #[test]
+    fn streams_the_64_mib_boundary_through_a_fixed_buffer() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary evidence");
+        let chunk = [0x5au8; 64 * 1024];
+        let mut file = std::fs::File::create(temp.path()).expect("create boundary fixture");
+        let mut hasher = sha2::Sha256::new();
+        for _ in 0..1024 {
+            file.write_all(&chunk).expect("write boundary chunk");
+            hasher.update(chunk);
+        }
+        file.sync_all().expect("sync boundary fixture");
+        let digest = format!("{:x}", hasher.finalize());
+        let snapshot = private_evidence_snapshot(
+            temp.path().to_str().expect("path"),
+            &digest,
+            MAX_PROVIDER_EVIDENCE_BYTES,
+        )
+        .expect("64 MiB boundary is admitted");
+        assert_eq!(
+            snapshot
+                .as_file()
+                .metadata()
+                .expect("snapshot metadata")
+                .len(),
+            MAX_PROVIDER_EVIDENCE_BYTES
+        );
+    }
+}
+
 fn daemon_file_post_json(
     client: &Client,
     base_url: &str,
@@ -484,6 +839,42 @@ fn daemon_file_post_json(
     data.get("body")
         .cloned()
         .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data.body"))
+}
+
+fn daemon_file_get_json(
+    client: &Client,
+    base_url: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Value> {
+    let mut request = client.get(format!("{}{}", base_url.trim_end_matches('/'), path));
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = request
+            .header(broker_auth::BROKER_TOKEN_HEADER, token)
+            .bearer_auth(token);
+    }
+    let response = request.send().map_err(|err| {
+        Error::internal_unexpected(format!("runner file daemon capability request: {err}"))
+    })?;
+    let status_code = response.status().as_u16();
+    let envelope: HttpFileEnvelope = response.json().map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse runner file daemon capability response".to_string()),
+        )
+    })?;
+    if status_code >= 400 || !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "runner file daemon capability request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .and_then(|data| data.get("body").cloned())
+        .ok_or_else(|| {
+            Error::internal_unexpected("runner file daemon capability response missing data.body")
+        })
 }
 
 pub(crate) fn select_runner_transport(
@@ -545,6 +936,23 @@ fn unsupported_file_transfer_error(
     .with_retryable(false)
         .with_hint("Use a direct SSH runner for Lab @file arguments and structured-output download until the reverse broker exposes a file-transfer API.".to_string())
         .with_hint("Next transport implementation should provide mkdir/upload/download through the selected runner transport instead of calling SSH directly.".to_string())
+}
+
+fn unsupported_chunk_upload_error(runner_id: &str, reason: impl Into<String>) -> Error {
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "Lab offload runner `{runner_id}` cannot negotiate the private chunk-upload protocol: {}",
+            reason.into()
+        ),
+        json!({
+            "runner_id": runner_id,
+            "missing_capability": "private_file_chunk_upload",
+            "required_protocol_version": CHUNK_UPLOAD_PROTOCOL_VERSION,
+        }),
+    )
+    .with_retryable(false)
+    .with_hint("Upgrade the runner daemon or select direct SSH, which uses its native bounded atomic transfer protocol.".to_string())
 }
 
 fn file_transfer_operation_error(
@@ -789,5 +1197,17 @@ mod tests {
         let request = server.join().expect("server");
         assert!(request.contains("x-homeboy-broker-token: secret-token"));
         assert!(request.contains("authorization: Bearer secret-token"));
+    }
+
+    #[test]
+    fn old_daemon_capability_preflight_is_a_typed_non_retryable_refusal() {
+        let refusal = unsupported_chunk_upload_error("runner-old", "HTTP 404");
+        assert_eq!(refusal.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(refusal.retryable, Some(false));
+        assert_eq!(
+            refusal.details["missing_capability"],
+            "private_file_chunk_upload"
+        );
+        assert_eq!(refusal.details["required_protocol_version"], 1);
     }
 }
