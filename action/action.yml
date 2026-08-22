@@ -504,14 +504,7 @@ runs:
       shell: bash
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
-      run: |
-        source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
-        if ! pr_is_active; then
-          echo "::warning::PR #${PR_NUMBER} is no longer open (merged or closed) — skipping remaining steps"
-          echo "active=false" >> "${GITHUB_OUTPUT}"
-        else
-          echo "active=true" >> "${GITHUB_OUTPUT}"
-        fi
+      run: bash "${GITHUB_ACTION_PATH}/scripts/core/check-pr-state.sh"
 
     - name: Download Homeboy observations
       if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != '' && inputs.import-observations == 'true'
@@ -737,14 +730,7 @@ runs:
       shell: bash
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
-      run: |
-        source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
-        if ! pr_is_active; then
-          echo "::warning::PR #${PR_NUMBER} is no longer open (merged or closed) — skipping final enforcement"
-          echo "active=false" >> "${GITHUB_OUTPUT}"
-        else
-          echo "active=true" >> "${GITHUB_OUTPUT}"
-        fi
+      run: bash "${GITHUB_ACTION_PATH}/scripts/core/check-pr-state.sh"
 
     - name: Enforce final status
       id: enforce-status
