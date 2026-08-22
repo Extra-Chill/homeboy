@@ -194,6 +194,7 @@ fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
         success: false,
         exit_code: 255,
         timed_out: false,
+        observation: Default::default(),
         child_resource: None,
     };
 

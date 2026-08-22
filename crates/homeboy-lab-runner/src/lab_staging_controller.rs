@@ -350,6 +350,17 @@ struct RuntimeSetPolicy {
 }
 
 enum RuntimeSetAdmission {
+    /// The payload records which compatibility level admitted the runtime set.
+    /// Every production branch matches `Ready(_)`, so nothing reads it at
+    /// runtime — but `runtime_set_admission_*` in this file's tests assert on
+    /// it to pin that the classifier reached `Exact` rather than
+    /// `CompatiblePatchDrift`. Dropping it would delete that distinction from
+    /// the test suite without changing behavior, so it is suppressed here
+    /// rather than silently at module scope.
+    #[allow(
+        dead_code,
+        reason = "Compatibility level is asserted by tests; production branches on the variant only."
+    )]
     Ready(RuntimeSetCompatibility),
     Converge,
     RefuseControllerUpgrade,

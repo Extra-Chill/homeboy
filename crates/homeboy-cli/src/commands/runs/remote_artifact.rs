@@ -70,15 +70,17 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
     runs_service::require_run(&store, &args.run_id)?;
     validate_artifact_name(&args.name)?;
     let runner = runner::load(&args.runner)?;
-    validate_runner_artifact_path(&runner, &args.path)?;
+    // The root that authorizes the path and the root the bytes are copied under
+    // are the same value. Resolving the allowlist's local root separately from
+    // the store's would let a local runner authorize a path against one
+    // installation and land the artifact in another (#7505).
+    let artifact_root = store.artifact_root()?;
+    validate_runner_artifact_path(&runner, &args.path, &artifact_root)?;
 
     // The bytes land under the root this store indexes, because the path is
     // recorded into that same store two lines below (#7505).
-    let source = runner_artifact_attach::copy_runner_artifact_source(
-        &store.artifact_root()?,
-        &runner,
-        &args.path,
-    )?;
+    let source =
+        runner_artifact_attach::copy_runner_artifact_source(&artifact_root, &runner, &args.path)?;
     let metadata = runner_attach_metadata(&runner, &args.path, &source);
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
@@ -331,8 +333,12 @@ fn validate_artifact_name(name: &str) -> homeboy::core::Result<()> {
     Ok(())
 }
 
-fn validate_runner_artifact_path(runner: &Runner, path: &str) -> homeboy::core::Result<()> {
-    let roots = allowed_runner_artifact_roots(runner)?;
+fn validate_runner_artifact_path(
+    runner: &Runner,
+    path: &str,
+    local_artifact_root: &Path,
+) -> homeboy::core::Result<()> {
+    let roots = allowed_runner_artifact_roots(runner, local_artifact_root)?;
     match homeboy::core::paths::authorize_remote_artifact_path(
         Path::new(path),
         &roots,
@@ -366,7 +372,13 @@ fn validate_runner_artifact_path(runner: &Runner, path: &str) -> homeboy::core::
     }
 }
 
-fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<String>> {
+/// Takes the caller's local artifact root rather than resolving one. The
+/// allowlist this builds is what authorizes a runner-side path, so it has to
+/// describe the same installation the caller is about to write into (#7505).
+fn allowed_runner_artifact_roots(
+    runner: &Runner,
+    local_artifact_root: &Path,
+) -> homeboy::core::Result<Vec<String>> {
     let mut roots = Vec::new();
     if let Some(root) = runner.workspace_root.as_deref() {
         roots.push(homeboy::core::paths::normalize_remote_root(root));
@@ -383,7 +395,7 @@ fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<S
     }
     if runner.kind == RunnerKind::Local {
         roots.push(homeboy::core::paths::normalize_remote_root(
-            &homeboy::core::artifact_root()?.display().to_string(),
+            &local_artifact_root.display().to_string(),
         ));
     }
     roots.sort();

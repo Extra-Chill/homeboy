@@ -6,6 +6,7 @@ use crate::project::{Project, ProjectComponentAttachment};
 use std::fs;
 use std::process::Command;
 use std::sync::MutexGuard;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // Tests that override `HOME` to redirect `paths::components()` are
@@ -536,6 +537,71 @@ fn load_resolves_the_selected_registration_without_requiring_global_inventory() 
         !discovery_paths.iter().any(|path| path == &unrelated_repo),
         "targeted load inspected the unrelated component: {discovery_paths:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn registered_base_returns_before_a_sleeping_git_enrichment_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = temp_home_dir();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo directory");
+    write_portable_id(&repo, "sleeping-probe");
+    let components = home
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("components");
+    fs::create_dir_all(&components).expect("components directory");
+    write_standalone_json(&components, "sleeping-probe", &repo.to_string_lossy());
+
+    let bin = tempfile::tempdir().expect("fake git bin");
+    let git = bin.path().join("git");
+    fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("fake git");
+    let mut permissions = fs::metadata(&git).expect("git metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&git, permissions).expect("make fake git executable");
+    let started = Instant::now();
+    let test_name = crate::test_support::harness_test_name(
+        module_path!(),
+        "registered_base_sleeping_git_enrichment_probe_child",
+    );
+    let output = crate::test_support::run_child_test(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg(&test_name)
+            .arg("--ignored")
+            .env("HOME", home.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var_os("PATH")
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            ),
+        &test_name,
+    );
+
+    assert!(
+        output.status.success(),
+        "sleeping probe child failed: {output:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "runs under the parent test with an isolated sleeping Git probe"]
+fn registered_base_sleeping_git_enrichment_probe_child() {
+    let rows = registered_base().expect("base registry rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "sleeping-probe");
+    assert!(rows[0].local_path.ends_with("/repo"));
 }
 
 #[test]

@@ -357,22 +357,28 @@ pub fn submit_plan(
 /// run's own terminal state. Reading that ambiently would let another home's
 /// record of the same identity abandon this store's admission, or leave a
 /// cancellation recorded here unseen while the controller waits on the
-/// admission lock. The controller-runtime store itself stays process-global by
-/// design; only the lifecycle read is rooted here.
+/// admission lock. The controller-runtime store follows the same root now
+/// (#12859), so the admission queue and its lock belong to this installation
+/// rather than the machine.
 pub fn submit_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
         None,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&|run_id| {
+            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+        }),
         |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                &runtime_root,
                 run_id,
                 || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
             )
@@ -1918,10 +1924,11 @@ pub fn record_completed_run(
 /// aggregate write in another leaves a queued record that never completes and a
 /// terminal projection with no run behind it, and neither write ever fails.
 ///
-/// The controller-runtime admission that `submit_plan_in_store` performs stays
-/// process-global by design — it is a content-addressed executable pin shared
-/// across homes, not durable lifecycle state, so it is not one of this store's
-/// roots.
+/// The controller-runtime admission that `submit_plan_in_store` performs
+/// follows this store's root as well (#12859, #12862). The pin itself is
+/// content-addressed and shared, but the admission queue and its cross-process
+/// lock are per-installation: resolving them from the ambient home made every
+/// rooted caller serialize on one machine-global lock.
 pub fn record_completed_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
@@ -4649,15 +4656,20 @@ fn retry_with_force_inner_in_store(
     force: bool,
     enforce_lineage_reservation: bool,
 ) -> Result<AgentTaskRunRecord> {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     retry_with_runtime_admission_in_store(
         lifecycle_store,
         run_id,
         requested_run_id,
         force,
         enforce_lineage_reservation,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&|run_id| {
+            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+        }),
         |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                &runtime_root,
                 run_id,
                 || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
             )

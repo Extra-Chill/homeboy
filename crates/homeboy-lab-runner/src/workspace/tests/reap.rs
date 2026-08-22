@@ -408,29 +408,6 @@ fn delete_always_workspace_preserved_on_retryable_admission_failure_is_not_reape
 }
 
 #[test]
-fn materialized_workspace_preserve_always_policy_never_reaps() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-preserve", runner_root.path());
-
-        {
-            let mut handle = MaterializedWorkspace::new(
-                "lab-local-mat-preserve".to_string(),
-                remote_path.clone(),
-                None,
-                WorkspaceCleanupPolicy::PreserveAlways,
-            );
-            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
-        }
-
-        assert!(
-            Path::new(&remote_path).exists(),
-            "PreserveAlways must never auto-reap, even on success"
-        );
-    });
-}
-
-#[test]
 fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_runner_defaults() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

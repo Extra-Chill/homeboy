@@ -203,6 +203,7 @@ mod tests {
             success: false,
             exit_code: if timed_out { 124 } else { -1 },
             timed_out,
+            observation: Default::default(),
             child_resource: None,
         }
     }

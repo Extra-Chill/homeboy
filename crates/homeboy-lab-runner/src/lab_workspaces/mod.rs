@@ -526,7 +526,17 @@ pub(super) fn sync_lab_runtime_overlays(
                 allow_dirty_lab_workspace: false,
                 run_isolation_token: None,
             },
-        )?
+        )
+        .map_err(|mut error| {
+            // Generic workspace staging only knows filesystem children. Restore
+            // the configured overlay declaration at the owning boundary.
+            if error.details["classification"] == "snapshot_construction" {
+                error.details["declaration_id"] = serde_json::json!(overlay.workspace.role);
+                error.details["runtime_overlay_source"] =
+                    serde_json::json!(overlay.workspace.path.display().to_string());
+            }
+            error
+        })?
         .0;
         let entry = workspace_mapping_entry(&overlay.workspace.role, &synced);
         if !already_synced {

@@ -2,7 +2,7 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use glob_match::glob_match;
 use sha2::{Digest, Sha256};
@@ -114,8 +114,6 @@ pub use homeboy_source_snapshot_contract::workspace_content_identity::{
     WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
-
-pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
 
 // The SSH path passes this script through `sh -c` after shell-quoting it. A
 // single quote can expand from one byte to five bytes at that layer. 16 KiB
@@ -1841,15 +1839,292 @@ pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -
     Ok(())
 }
 
-fn materialize_snapshot_piped(
+pub(super) fn materialize_snapshot_piped(
     local_path: &Path,
     target_command: &str,
     excludes: &[String],
     action: &str,
     scratch: Option<&Path>,
 ) -> Result<()> {
-    let command = snapshot_materialization_command(local_path, target_command, excludes, scratch)?;
+    // Complete the controller-side archive staging before starting the target
+    // command. In particular, an SSH target must never observe a partial or
+    // second read of a controller workspace whose overlay artifacts changed.
+    let source_manifest = snapshot_stable_manifest(local_path, excludes).map_err(|error| {
+        snapshot_construction_failure(
+            "workspace_snapshot",
+            local_path,
+            None,
+            &format!(
+                "{action}: {}; diagnostics: {}",
+                error.message, error.details
+            ),
+        )
+    })?;
+    let mut manifest = snapshot_input_manifest(local_path, excludes)?;
+    let stage = materialize_snapshot_stage(local_path, excludes, &manifest, scratch).map_err(
+        |mut error| {
+            error.message = format!("{action}: {}", error.message);
+            error
+        },
+    )?;
+    // A group that produced no staging output was entirely excluded by the
+    // selected snapshot policy. It is optional transport input, so omit it
+    // rather than giving tar a path that the same staging operation did not
+    // create.
+    manifest
+        .entries
+        .retain(|entry| stage.path().join(&entry.staging_output).exists());
+    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), &[])?;
+    let current_manifest = snapshot_stable_manifest(local_path, excludes)?;
+    validate_snapshot_stability(
+        &source_manifest,
+        &staged_manifest,
+        &current_manifest,
+        local_path,
+        &stage.path().join("source"),
+    )?;
+    let command = snapshot_staged_materialization_command(
+        &stage.path().join("source"),
+        &manifest,
+        target_command,
+        scratch,
+    );
     run_shell_command(&command, action)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SnapshotStableManifest {
+    inventory: WorkspaceContentManifest,
+    content_identity: String,
+}
+
+pub(super) fn snapshot_stable_manifest(
+    path: &Path,
+    excludes: &[String],
+) -> Result<SnapshotStableManifest> {
+    Ok(SnapshotStableManifest {
+        inventory: workspace_content_manifest_for_policy(
+            path,
+            excludes,
+            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )?,
+        content_identity: workspace_content_hash(path, excludes)?,
+    })
+}
+
+pub(super) fn validate_snapshot_stability(
+    before: &SnapshotStableManifest,
+    staged: &SnapshotStableManifest,
+    after: &SnapshotStableManifest,
+    source: &Path,
+    staging_output: &Path,
+) -> Result<()> {
+    if before == staged && staged == after {
+        return Ok(());
+    }
+    Err(snapshot_construction_failure(
+        "workspace_snapshot",
+        source,
+        Some(staging_output),
+        "source and staged snapshot manifests differ; refusing a mixed snapshot",
+    ))
+}
+
+/// One controller-side input and its corresponding private staging output.
+/// The archive transfer consumes only `staging_output`, never `source`.
+#[derive(Debug, Clone)]
+pub(super) struct SnapshotInputManifestEntry {
+    pub(super) declaration_id: String,
+    pub(super) source: PathBuf,
+    pub(super) archive_path: String,
+    pub(super) staging_output: PathBuf,
+}
+
+/// The typed input contract for one snapshot staging operation.
+#[derive(Debug, Clone)]
+pub(super) struct SnapshotInputManifest {
+    pub(super) entries: Vec<SnapshotInputManifestEntry>,
+}
+
+pub(super) fn snapshot_input_manifest(
+    local_path: &Path,
+    excludes: &[String],
+) -> Result<SnapshotInputManifest> {
+    let entries = fs::read_dir(local_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some("read snapshot root".to_string())))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read snapshot root entry".to_string()),
+            )
+        })?;
+    let mut manifest_entries = Vec::new();
+    for entry in entries {
+        let source = entry.path();
+        if is_excluded(local_path, &source, excludes, &[]) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let declaration_id = format!("root:{name}");
+        // `read_dir` is not a presence guarantee. Validate each required input
+        // immediately and report its durable declaration identity before SSH.
+        if let Err(error) = fs::symlink_metadata(&source) {
+            return Err(snapshot_construction_failure(
+                &declaration_id,
+                &source,
+                None,
+                &error.to_string(),
+            ));
+        }
+        manifest_entries.push(SnapshotInputManifestEntry {
+            declaration_id,
+            source,
+            archive_path: format!("./{name}"),
+            staging_output: PathBuf::from("source").join(name),
+        });
+    }
+    Ok(SnapshotInputManifest {
+        entries: manifest_entries,
+    })
+}
+
+/// Materialize every required manifest entry into one private staging tree.
+/// The returned directory is kept alive through transfer, making the staging
+/// output the sole tar input after validation succeeds.
+pub(super) fn materialize_snapshot_stage(
+    local_path: &Path,
+    excludes: &[String],
+    manifest: &SnapshotInputManifest,
+    scratch: Option<&Path>,
+) -> Result<tempfile::TempDir> {
+    let stage = scratch
+        .map_or_else(tempfile::tempdir, |path| {
+            tempfile::Builder::new()
+                .prefix("homeboy-snapshot-stage-")
+                .tempdir_in(path)
+        })
+        .map_err(|error| {
+            snapshot_construction_failure("staging", local_path, None, &error.to_string())
+        })?;
+    let stage_source = stage.path().join("source");
+    fs::create_dir_all(&stage_source).map_err(|error| {
+        snapshot_construction_failure(
+            "staging",
+            local_path,
+            Some(&stage_source),
+            &error.to_string(),
+        )
+    })?;
+    let inputs = snapshot_manifest_tar_input(manifest);
+    // Root-anchored exclusions have already shaped the manifest. Passing them
+    // to tar again would make a root-only exclusion match nested paths.
+    let archive_excludes = excludes
+        .iter()
+        .filter(|pattern| !pattern.starts_with("./"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_archive = format!(
+        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - --null -T -",
+        src = shell::quote_arg(&local_path.display().to_string()),
+        exclude = tar_exclude_args(&archive_excludes),
+    );
+    let command = format!(
+        "({inputs}) | {source_archive} | tar --no-xattrs -C {stage} -xf - && root={root} && stage={stage} && export root stage && find \"$stage\" -type l -exec sh -c {resolve} sh {{}} \\;",
+        stage = shell::quote_arg(&stage_source.display().to_string()),
+        root = shell::quote_arg(&local_path.display().to_string()),
+        resolve = shell::quote_arg(&format!(
+            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
+            tar_exclude_args(&archive_excludes)
+        )),
+    );
+    run_shell_command(&command, "construct workspace snapshot staging").map_err(|error| {
+        let missing = manifest.entries.iter().find(|entry| !entry.source.exists());
+        snapshot_construction_failure(
+            missing
+                .map(|entry| entry.declaration_id.as_str())
+                .unwrap_or("staging"),
+            missing
+                .map(|entry| entry.source.as_path())
+                .unwrap_or(local_path),
+            Some(&stage_source),
+            &error.message,
+        )
+    })?;
+    for entry in &manifest.entries {
+        let output = stage.path().join(&entry.staging_output);
+        if !output.exists() && !entry.source.exists() {
+            return Err(snapshot_construction_failure(
+                &entry.declaration_id,
+                &entry.source,
+                Some(&output),
+                "required staging output was not materialized",
+            ));
+        }
+    }
+    Ok(stage)
+}
+
+fn snapshot_manifest_tar_input(manifest: &SnapshotInputManifest) -> String {
+    if manifest.entries.is_empty() {
+        "printf ''".to_string()
+    } else {
+        format!(
+            "printf '%s\\0' {}",
+            manifest
+                .entries
+                .iter()
+                .map(|entry| shell::quote_arg(&entry.archive_path))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
+}
+
+fn snapshot_staged_materialization_command(
+    stage: &Path,
+    manifest: &SnapshotInputManifest,
+    target_command: &str,
+    scratch: Option<&Path>,
+) -> String {
+    let inputs = snapshot_manifest_tar_input(manifest);
+    let command = format!(
+        "({inputs}) | COPYFILE_DISABLE=1 tar --no-xattrs -C {stage} -cf - --null -T - | {target_command}",
+        stage = shell::quote_arg(&stage.display().to_string()),
+    );
+    scratch.map_or(command.clone(), |scratch| {
+        scratch_scoped_command(&command, scratch)
+    })
+}
+
+fn snapshot_construction_failure(
+    declaration_id: &str,
+    source: &Path,
+    staging_output: Option<&Path>,
+    reason: &str,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "workspace_snapshot",
+        format!("Lab workspace snapshot construction failed before SSH transport: {reason}"),
+        Some(format!("{declaration_id}: {}", source.display())),
+        Some(vec![
+            "Rebuild the Homeboy snapshot staging set, then replay the Cook; component dependency installation cannot repair controller-side snapshot inputs.".to_string(),
+        ]),
+    )
+    .with_retryable(false);
+    error.details["classification"] = serde_json::json!("snapshot_construction");
+    error.details["declaration_id"] = serde_json::json!(declaration_id);
+    error.details["source_identity"] = serde_json::json!(source.display().to_string());
+    error.details["staging_output"] = staging_output
+        .map(|path| serde_json::json!(path.display().to_string()))
+        .unwrap_or(serde_json::Value::Null);
+    error.details["reason"] = serde_json::json!(reason);
+    error.details["recovery"] = serde_json::json!({
+        "owner": "homeboy_snapshot_staging",
+        "action": "rebuild_snapshot_staging_and_replay_cook",
+        "command": "homeboy agent-task retry <run-id> --run",
+    });
+    error
 }
 
 /// Build the exact shell program a snapshot materialization hands to `sh -c`.

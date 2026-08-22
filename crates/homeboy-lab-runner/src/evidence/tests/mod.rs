@@ -10,6 +10,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
+
+/// These cases run inside `with_isolated_home`, so reading the environment here
+/// observes that isolated home. Naming the roots keeps the call sites explicit
+/// about which installation the evidence is being mirrored into.
+fn test_roots() -> homeboy_core::paths::PathRoots {
+    homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+}
+
 use homeboy_core::api_jobs::{
     Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RemoteRunnerObservationRunDetail,
     RunnerJobLifecycleMetadata, RunnerJobProjection,
@@ -567,7 +575,7 @@ fn direct_failure_mirror_projects_bounded_typed_diagnostics_without_artifacts() 
             }),
             None,
             None,
-        ))
+        ), &test_roots())
         .expect("direct failure mirror")
         .expect("mirrored failure");
 
@@ -621,6 +629,7 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
                 None,
             )
             .with_generic_runner_exec_run(),
+            &test_roots(),
         )
         .expect("controller-owned run does not require a remote run lookup")
         .expect("terminal evidence");
@@ -2008,7 +2017,7 @@ fn direct_result_refresh_treats_preterminal_absence_as_pending() {
             &json!({}),
             None,
             None,
-        ))
+        ), &test_roots())
         .expect("preterminal direct result is pending")
         .expect("pending direct evidence");
 

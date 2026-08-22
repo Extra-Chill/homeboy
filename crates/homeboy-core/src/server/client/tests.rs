@@ -16,10 +16,10 @@ use super::local_exec::{
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
     execute_command_with_stdin_timeout, execute_command_with_writer_factory,
-    run_command_with_stdin_source, wrap_command_with_secret_env_read_loop,
+    run_command_with_stdin_source, run_ssh_with_child, wrap_command_with_secret_env_read_loop,
     wrap_timed_remote_command, SECRET_ENV_STDIN_SENTINEL,
 };
-use super::{CommandOutput, SshClient};
+use super::{CommandObservation, CommandOutput, SshClient};
 
 #[test]
 fn secret_env_values_stream_over_stdin_not_command_argv() {
@@ -354,6 +354,7 @@ fn injected_stdin_write_failure_kills_a_term_ignoring_child_without_leaking_secr
     assert!(!output.timed_out);
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(output.stderr.contains("stdin delivery failed"));
+    assert_eq!(output.observation, CommandObservation::StdinDeliveryFailed);
     assert!(!output.stdout.contains("stdin-failure-secret"));
     assert!(!output.stderr.contains("stdin-failure-secret"));
 }
@@ -388,6 +389,46 @@ fn piped_stdin_preserves_binary_bytes_exactly() {
 }
 
 #[test]
+fn explicit_ssh_child_collection_preserves_terminal_and_file_stdin_output() {
+    let mut terminal = Command::new("sh");
+    terminal.args(["-c", "printf terminal; printf diagnostic >&2"]);
+    let terminal = run_ssh_with_child(terminal);
+
+    assert!(terminal.success, "{}", terminal.stderr);
+    assert_eq!(terminal.stdout, "terminal");
+    assert_eq!(terminal.stderr, "diagnostic");
+    assert_eq!(terminal.observation, CommandObservation::Complete);
+
+    let input = tempfile::NamedTempFile::new().expect("file stdin");
+    std::fs::write(input.path(), "file-input").expect("write file stdin");
+    let mut file = Command::new("sh");
+    file.args(["-c", "cat"])
+        .stdin(std::fs::File::open(input.path()).expect("open file stdin"));
+    let file = run_ssh_with_child(file);
+
+    assert!(file.success, "{}", file.stderr);
+    assert_eq!(file.stdout, "file-input");
+}
+
+#[test]
+fn explicit_ssh_child_collection_distinguishes_spawn_failure() {
+    let output = run_ssh_with_child(Command::new("/definitely/missing/homeboy-ssh"));
+
+    assert!(!output.success);
+    assert_eq!(output.observation, CommandObservation::SpawnFailed);
+}
+
+#[test]
+fn explicit_ssh_child_collection_drains_verbose_output_before_waiting() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "yes x | head -c 131072"]);
+    let output = run_ssh_with_child(command);
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout.len(), 131072);
+}
+
+#[test]
 fn piped_stdin_handles_large_payload_with_backpressure() {
     let payload = vec![0xA5; 8 * 1024 * 1024];
     let output = run_command_with_stdin_source(
@@ -409,6 +450,7 @@ fn closed_remote_stdin_cannot_report_success() {
     assert!(!output.success);
     assert_ne!(output.exit_code, 0);
     assert!(output.stderr.contains("stdin delivery failed"));
+    assert_eq!(output.observation, CommandObservation::StdinDeliveryFailed);
 }
 
 #[test]
@@ -991,6 +1033,7 @@ fn managed_session_connect_reports_per_command_fallback() {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         },
     );
