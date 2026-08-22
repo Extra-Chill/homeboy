@@ -269,38 +269,9 @@ fn upgrade_runners_with_executor_and_source_materializer_with_expected_controlle
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Compatibility entry point preserves injectable execution, materialization, and path update operations."
-)]
-pub fn upgrade_runners_with_executor_source_materializer_and_path_updater(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-    update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        exec,
-        status,
-        materialize_source_path,
-        update_homeboy_path,
-        None,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
     reason = "The internal upgrade operation retains explicit controller identity and path mutation boundaries."
 )]
-fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
+pub(crate) fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
     method_override: Option<InstallMethod>,
@@ -329,40 +300,9 @@ fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expec
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Compatibility entry point preserves independently injectable reconnect and path operations."
-)]
-pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    reconnect_stale_daemon: impl FnMut(&str) -> Result<(String, Option<String>)>,
-    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-    update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        exec,
-        status,
-        reconnect_stale_daemon,
-        materialize_source_path,
-        update_homeboy_path,
-        None,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
     reason = "The orchestration boundary keeps every mutating operation explicit for deterministic runner upgrade recovery."
 )]
-fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
+pub(crate) fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
     method_override: Option<InstallMethod>,

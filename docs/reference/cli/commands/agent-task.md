@@ -161,7 +161,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
-| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against (default `main`) |
+| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves repository evidence before falling back to `main` |
 | `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
 | `--title` | `<TEXT>` | Title for the finalized pull request. Defaults to a title derived from the goal / commit |
 | `--commit-message` | `<TEXT>` | Commit message for the cook's committed change. Defaults to a message derived from the goal |

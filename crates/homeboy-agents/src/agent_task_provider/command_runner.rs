@@ -715,7 +715,7 @@ fn run_materialized_provider_command_once_contained(
     // The lease remains alive through the provider process. This lets provider
     // attempts and controller gates share only the same compatibility-keyed
     // Cargo output directory while preserving their isolated HOME/XDG roots.
-    let cargo_target = match provider_cargo_target(request, cwd.as_deref()) {
+    let cargo_target = match provider_cargo_target(request, cwd.as_deref(), &env) {
         Ok(target) => target,
         Err(error) => {
             return failure_outcome(
@@ -1133,6 +1133,7 @@ fn run_materialized_provider_command_once_contained(
 fn provider_cargo_target(
     _request: &AgentTaskExecutorRequest,
     cwd: Option<&Path>,
+    environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
     let Some(cwd) = cwd else { return Ok(None) };
     let enabled =
@@ -1142,26 +1143,12 @@ fn provider_cargo_target(
     if !enabled {
         return Ok(None);
     }
-    let compatibility = [
-        (
-            "CARGO_BUILD_TARGET",
-            std::env::var("CARGO_BUILD_TARGET").unwrap_or_default(),
-        ),
-        ("RUSTFLAGS", std::env::var("RUSTFLAGS").unwrap_or_default()),
-        (
-            "CARGO_PROFILE",
-            std::env::var("CARGO_PROFILE").unwrap_or_default(),
-        ),
-    ];
-    let compatibility = compatibility
-        .iter()
-        .map(|(name, value)| (*name, value.as_str()))
-        .collect::<Vec<_>>();
-    homeboy_core::acquire_managed_cargo_target_with_compatibility(
+    let environment = environment.iter().cloned().collect();
+    homeboy_core::acquire_managed_cargo_target_for_environment(
         "agent-task-cargo",
         cwd,
         None,
-        &compatibility,
+        &environment,
     )
     .map(Some)
 }

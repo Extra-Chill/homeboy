@@ -2712,6 +2712,8 @@ mod tests {
                     "upgrade-admission",
                     "--legacy-identity",
                     "legacy",
+                    "--target-version",
+                    homeboy_upgrade::upgrade::current_version(),
                 ],
                 // A topic is intentionally supplied so this covers the direct
                 // markdown `self docs <topic>` surface, not only `docs map`.

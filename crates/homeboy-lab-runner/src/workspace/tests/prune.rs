@@ -10,7 +10,7 @@ use crate::workspace::sync::{
     active_resource_lifecycle_liveness, encoded_materialized_workspace_metadata_is_valid,
     has_terminal_delete_on_success_lifecycle_with, prune_scan_command, prune_workspaces,
     revalidated_candidate_is_deletable, runner_job_liveness_with, ssh_process_liveness_command,
-    ssh_prune_delete_command, ssh_prune_delete_command_with_terminal_owner,
+    ssh_prune_delete_command_with_terminal_authority,
     ssh_prune_delete_materialized_workspace_command, sync_workspace,
     update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
     ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
@@ -1477,9 +1477,11 @@ fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(ssh_prune_delete_command(
+        .arg(ssh_prune_delete_command_with_terminal_authority(
             &root.path().join("_lab_workspaces").display().to_string(),
             &workspace.display().to_string(),
+            None,
+            None,
         ))
         .output()
         .expect("run atomic SSH-shaped prune delete");
@@ -1499,9 +1501,11 @@ fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(ssh_prune_delete_command(
+        .arg(ssh_prune_delete_command_with_terminal_authority(
             &root.path().join("_lab_workspaces").display().to_string(),
             &active.display().to_string(),
+            None,
+            None,
         ))
         .output()
         .expect("run active lease SSH-shaped prune delete");
@@ -1626,10 +1630,11 @@ fn ssh_terminal_lifecycle_delete_revalidates_process_ownership() {
         .expect("hold workspace cwd after terminal authority");
     let output = Command::new("sh")
         .arg("-c")
-        .arg(ssh_prune_delete_command_with_terminal_owner(
+        .arg(ssh_prune_delete_command_with_terminal_authority(
             &root.path().join("_lab_workspaces").display().to_string(),
             &workspace.display().to_string(),
             Some("terminal-run"),
+            None,
         ))
         .output()
         .expect("revalidate process ownership before terminal lifecycle delete");
@@ -1656,10 +1661,11 @@ fn ssh_terminal_lifecycle_delete_requires_matching_owner_in_pretty_metadata() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(ssh_prune_delete_command_with_terminal_owner(
+        .arg(ssh_prune_delete_command_with_terminal_authority(
             &workspaces.display().to_string(),
             &terminal.display().to_string(),
             Some("terminal-run"),
+            None,
         ))
         .output()
         .expect("delete terminal-owned workspace");
@@ -1676,10 +1682,11 @@ fn ssh_terminal_lifecycle_delete_requires_matching_owner_in_pretty_metadata() {
     .expect("write ambiguous lifecycle metadata");
     let output = Command::new("sh")
         .arg("-c")
-        .arg(ssh_prune_delete_command_with_terminal_owner(
+        .arg(ssh_prune_delete_command_with_terminal_authority(
             &workspaces.display().to_string(),
             &ambiguous.display().to_string(),
             Some("terminal-run"),
+            None,
         ))
         .output()
         .expect("retain ambiguous workspace");

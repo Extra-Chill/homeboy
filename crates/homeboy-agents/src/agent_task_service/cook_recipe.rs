@@ -1732,6 +1732,15 @@ pub fn reconstruct_options_with_dispatcher(
     reconstruct_recipe_options(recipe, attempt_dispatcher, true, true)
 }
 
+/// Reconstruct immutable Cook inputs for a lifecycle-validated local placement
+/// transition. The caller proves the transition against the durable run record;
+/// this only relaxes reconstruction of the superseded Lab transport.
+pub(crate) fn reconstruct_options_with_local_placement_override(
+    recipe: &AgentTaskCookRecipe,
+) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, None, true, false)
+}
+
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
 /// never replays provider work, so it may use a validated historical recipe
 /// after a controller runtime upgrade.

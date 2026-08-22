@@ -555,10 +555,6 @@ impl HomeGuard {
         Self::new_with_guard(binary, Some(guard))
     }
 
-    fn new_while_locked() -> Self {
-        Self::new_with_guard(TestBinary::CurrentTest, None)
-    }
-
     fn new_with_guard(binary: TestBinary, guard: Option<MutexGuard<'static, ()>>) -> Self {
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
@@ -2147,7 +2143,9 @@ fn handle_reverse_broker_request(
                 )
                 .map(|event| json!({ "event": event })),
             "heartbeat" => store
-                .renew_remote_runner_claim(job_id, runner_id, claim_id, 30_000)
+                .renew_remote_runner_claim_with_workspace_owner_lease(
+                    job_id, runner_id, claim_id, 30_000, None, None,
+                )
                 .map(|job| json!({ "job": job })),
             "consume" => store
                 .consume_remote_runner_execution(
@@ -2216,7 +2214,7 @@ mod tests {
                 _guard: guard,
             };
             setup();
-            scope.home = Some(HomeGuard::new_while_locked());
+            scope.home = Some(HomeGuard::new_with_guard(TestBinary::CurrentTest, None));
             scope
         }
 

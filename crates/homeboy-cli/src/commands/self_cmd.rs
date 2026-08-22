@@ -63,6 +63,9 @@ pub struct UpgradeAdmissionArgs {
     /// Build identity reported by the controller invoking the installer
     #[arg(long)]
     pub legacy_identity: String,
+    /// Exact version expected from the checksum-verified staged release.
+    #[arg(long)]
+    pub target_version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -154,7 +157,25 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
         }
         SelfCommand::Identity(_) => Ok((identity_report(), 0)),
         SelfCommand::UpgradeAdmission(args) => {
-            let admission = homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?;
+            let admission = match args.target_version.as_deref() {
+                Some(target_version) => {
+                    if target_version != homeboy_upgrade::upgrade::current_version() {
+                        return Err(homeboy::core::Error::validation_invalid_argument(
+                            "target_version",
+                            format!(
+                                "verified target-version bootstrap recovery expected {target_version}, but this candidate is {}",
+                                homeboy_upgrade::upgrade::current_version()
+                            ),
+                            Some(target_version.to_string()),
+                            None,
+                        ));
+                    }
+                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(
+                        target_version,
+                    )?
+                }
+                None => homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?,
+            };
             let report = UpgradeAdmissionReport {
                 schema: "homeboy/controller-upgrade-bootstrap/v1",
                 legacy_identity: args.legacy_identity,

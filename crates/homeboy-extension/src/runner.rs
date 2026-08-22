@@ -1036,6 +1036,7 @@ mod tests {
     use crate::ExtensionCapability;
     use homeboy_core::component::Component;
     use homeboy_core::engine::run_dir::RunDir;
+    use homeboy_core::server::CommandObservation;
     use homeboy_core::test_support::with_isolated_home;
 
     fn context() -> ExtensionExecutionContext {
@@ -1166,6 +1167,7 @@ mod tests {
             success: false,
             exit_code: 2,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
 
@@ -1200,6 +1202,7 @@ mod tests {
             success: false,
             exit_code: 127,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
 
@@ -1323,6 +1326,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
         std::fs::write(
@@ -1484,6 +1488,7 @@ mod tests {
             success: false,
             exit_code: 1,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
 
