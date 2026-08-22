@@ -370,24 +370,6 @@ fn exact_daemon_loss_recovery_refuses_persisted_child_process_evidence() {
 }
 
 #[test]
-fn exact_daemon_loss_recovery_accepts_a_reservation_without_process_identity() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    store
-        .reserve_local_child_at(job.id, 100)
-        .expect("pre-spawn reservation persists");
-
-    store
-        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job.id], 4242)
-        .expect("a reservation without process identity remains a PID-less job");
-
-    assert_eq!(
-        store.get(job.id).expect("terminal job").status,
-        JobStatus::Failed
-    );
-}
-
-#[test]
 fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");

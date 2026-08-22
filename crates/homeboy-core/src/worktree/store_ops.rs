@@ -257,28 +257,6 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     Ok(WorktreeListOutput { worktrees })
 }
 
-pub(super) fn inventory_with_store(
-    options: WorktreeInventoryOptions,
-    store_dir: &Path,
-    adopted_store_dir: &Path,
-) -> Result<WorktreeInventoryOutput> {
-    struct LocalOnlyAuthority;
-    impl WorktreeReconciliationAuthority for LocalOnlyAuthority {
-        fn acquire(&self, record: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority> {
-            if record.run_id.is_none() {
-                Ok(WorktreeLivenessAuthority::Incomplete {
-                    reason: "no claim-capable workspace owner was supplied".to_string(),
-                })
-            } else {
-                Ok(WorktreeLivenessAuthority::Incomplete {
-                    reason: "no local-and-offloaded run authority was supplied".to_string(),
-                })
-            }
-        }
-    }
-    inventory_with_store_and_authority(options, store_dir, adopted_store_dir, &LocalOnlyAuthority)
-}
-
 pub(super) fn inventory_with_store_and_authority(
     options: WorktreeInventoryOptions,
     store_dir: &Path,
