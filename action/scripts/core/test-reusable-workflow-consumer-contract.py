@@ -204,16 +204,20 @@ enforcement_steps = {step.get("name"): step for step in enforcement["steps"] if 
 aggregate_download = enforcement_steps.get("Resolve candidate Test result", {})
 if "resolve-run-artifact.sh homeboy-candidate-test-results" not in aggregate_download.get("run", ""):
     fail("sharded Test reconciliation does not resolve a prior successful aggregate")
-if aggregate_download.get("if") != "needs.candidate-test-result.result == 'success'":
+if "needs.candidate-test-result.result == 'success'" not in aggregate_download.get("if", ""):
     fail("sharded Test aggregate resolution is not gated on a successful aggregate")
+if "steps.final-pr-state.outputs.active != 'false'" not in aggregate_download.get("if", ""):
+    fail("sharded Test aggregate resolution can run after PR closure")
 aggregation_failure = enforcement_steps.get("Report candidate Test aggregation failure", {})
 if "needs.candidate-test-result.result != 'success'" not in aggregation_failure.get("if", ""):
     fail("failed sharded Test aggregation is not routed to a red verdict")
 if "exit 1" not in aggregation_failure.get("run", ""):
     fail("failed sharded Test aggregation does not fail the Test job")
 aggregate_enforcement = enforcement_steps.get("Enforce sharded Test result", {})
-if aggregate_enforcement.get("if") != "needs.candidate-test-result.result == 'success'":
+if "needs.candidate-test-result.result == 'success'" not in aggregate_enforcement.get("if", ""):
     fail("successful sharded Test aggregation is not routed to final enforcement")
+if "steps.final-pr-state.outputs.active != 'false'" not in aggregate_enforcement.get("if", ""):
+    fail("successful sharded Test aggregation can publish a verdict after PR closure")
 if "candidate-test-results/homeboy-ci-results/results.json" not in aggregate_enforcement.get("run", ""):
     fail("sharded Test enforcement does not consume the aggregate result")
 if "baseline-command" in str(aggregate_enforcement):

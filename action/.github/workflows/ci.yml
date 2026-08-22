@@ -1011,15 +1011,10 @@ jobs:
   reconcile-test-shards:
     name: Test
     needs: [candidate-test-result, candidate-test-plan, plan]
-    # `!cancelled()` rather than `always()`: this job must still report a verdict
-    # when an upstream phase FAILED, but must not manufacture one when the run was
-    # CANCELLED. Under `always()`, a cancelled run left `candidate-test-plan.result`
-    # at `cancelled`, which tripped the `!= 'success'` inventory-failure branch below;
-    # that branch then downloaded a provenance artifact the cancelled plan job had
-    # never uploaded, and the resulting `Artifact not found` failed the job. A
-    # cancellation was therefore published as a red `Test` check carrying no test
-    # verdict at all (Extra-Chill/homeboy#10997).
-    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    # Reconcile every terminal upstream result. The final PR state probe below
+    # suppresses synthetic verdicts only after a PR is closed or merged; an active
+    # PR must still fail closed when a dependency is unexpectedly cancelled.
+    if: ${{ !inputs.contract-probe && always() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1027,14 +1022,20 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Check final PR state
+        id: final-pr-state
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .homeboy-action/scripts/core/check-pr-state.sh
       - name: Download candidate Test inventory failure provenance
-        if: needs.candidate-test-plan.result != 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result != 'success'
         uses: actions/download-artifact@v7
         with:
           name: homeboy-test-inventory-failure-${{ github.run_attempt }}
           path: test-inventory-failure
       - name: Report candidate Test inventory generation failure
-        if: needs.candidate-test-plan.result != 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result != 'success'
         run: |
           provenance=test-inventory-failure/provenance.json
           command="$(jq -r .command "${provenance}")"
@@ -1046,17 +1047,17 @@ jobs:
       # their aggregate. Resolve the newest complete aggregate it can consume.
       - name: Resolve candidate Test result
         id: candidate-test-result-artifact
-        if: needs.candidate-test-result.result == 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-candidate-test-results
       - uses: actions/download-artifact@v7
-        if: needs.candidate-test-result.result == 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
         with:
           name: ${{ steps.candidate-test-result-artifact.outputs.artifact-name }}
           path: candidate-test-results
       - name: Report candidate Test aggregation failure
-        if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
         run: |
           echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
           exit 1
@@ -1069,7 +1070,7 @@ jobs:
       # enforcement step running at all. Every reachable outcome above either
       # exits non-zero or falls through to exactly this step.
       - name: Enforce sharded Test result
-        if: needs.candidate-test-result.result == 'success'
+        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
@@ -1089,16 +1090,26 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Check final PR state
+        id: final-pr-state
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .homeboy-action/scripts/core/check-pr-state.sh
       - name: Download candidate Homeboy binary
         id: candidate-binary
+        if: steps.final-pr-state.outputs.active != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Install candidate Homeboy binary
+        if: steps.final-pr-state.outputs.active != 'false'
         run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
       - id: action-revision
+        if: steps.final-pr-state.outputs.active != 'false'
         run: echo "value=$(git -C .homeboy-action rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v7
+        if: steps.final-pr-state.outputs.active != 'false'
         continue-on-error: true
         with:
           pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
@@ -1106,6 +1117,7 @@ jobs:
       - name: Reconcile provenance-bound phase evidence
         id: reconcile
         shell: bash
+        if: steps.final-pr-state.outputs.active != 'false'
         env:
           PHASE_ARTIFACT_ROOT: differential-artifacts
           REPOSITORY: ${{ github.repository }}
@@ -1119,7 +1131,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        if: always() && inputs.pr-comment != 'false'
+        if: steps.final-pr-state.outputs.active != 'false' && always() && inputs.pr-comment != 'false'
         uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
@@ -1127,7 +1139,7 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - name: Post reconciled PR comment
-        if: always() && github.event_name == 'pull_request' && inputs.pr-comment != 'false'
+        if: steps.final-pr-state.outputs.active != 'false' && always() && github.event_name == 'pull_request' && inputs.pr-comment != 'false'
         shell: bash
         env:
           GITHUB_ACTION_PATH: ${{ github.workspace }}/.homeboy-action
