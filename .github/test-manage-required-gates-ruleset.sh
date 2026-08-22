@@ -6,10 +6,11 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 workflow="${root}/.github/workflows/required-gates-ruleset.yml"
-grep -Fq 'schedule:' "${workflow}"
+grep -Fq 'workflow_dispatch:' "${workflow}"
 grep -Fq 'environment: main-ruleset-administration' "${workflow}"
 grep -Fq -- '--operation audit' "${workflow}"
 grep -Fq -- '--operation reconcile' "${workflow}"
+grep -Fq 'commits/${head}/check-runs' "${workflow}"
 grep -Fq 'bash .github/validate-required-gates.sh --github' "${workflow}"
 
 jq 'del(.rules[] | select(.type == "required_status_checks"))' \
