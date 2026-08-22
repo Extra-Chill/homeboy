@@ -78,6 +78,9 @@ pub struct AgentTaskBatchStatusReport {
     pub observation_fresh: bool,
     pub batch: AgentTaskBatchRecord,
     pub totals: AgentTaskBatchTotals,
+    /// Durable admission progress. `rejected` counts children terminalized by
+    /// the coordinator before a lifecycle record existed; `absent` have neither.
+    pub admission: AgentTaskBatchAdmission,
     /// The controller-side blocker that prevented any child admission. This
     /// projects the typed failure persisted before a child lifecycle record
     /// exists, rather than making callers inspect batch metadata.
@@ -105,6 +108,13 @@ pub struct AgentTaskBatchStatusReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
     pub commands: AgentTaskBatchCommands,
+}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskBatchAdmission {
+    pub expected: usize,
+    pub admitted: usize,
+    pub rejected: usize,
+    pub absent: usize,
 }
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskBatchResumableChild {

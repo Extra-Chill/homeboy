@@ -578,6 +578,14 @@ where
         batch.state = AgentTaskBatchState::Failed;
         let commands = commands(&batch.batch_id);
         let admission_blocker = batch.metadata["terminal_failure"].clone();
+        let expected = batch.child_runs.len();
+        let admitted = batch
+            .child_runs
+            .iter()
+            .filter(|child| {
+                agent_task_lifecycle::run_record_exists_readonly(&child.run_id).unwrap_or(false)
+            })
+            .count();
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
             .pointer("/failure/next_action")
@@ -590,6 +598,12 @@ where
             status: "failed".to_string(),
             observation_fresh: true,
             totals: totals_for_children(&batch.child_runs),
+            admission: AgentTaskBatchAdmission {
+                expected,
+                admitted,
+                rejected: expected.saturating_sub(admitted),
+                absent: 0,
+            },
             batch,
             unavailable_child_runs: Vec::new(),
             admission_blocker: Some(admission_blocker),
@@ -606,12 +620,14 @@ where
     let mut resumable_child_runs = Vec::new();
     let mut timed_out_child_runs = HashSet::new();
     let mut observation_fresh = true;
+    let mut admitted = 0;
     for child in &mut batch.child_runs {
         if terminal_preflight_or_admission_failure(&batch.metadata, &child.run_id) {
             continue;
         }
         match child_status(&child.run_id) {
             Ok(record) => {
+                admitted += 1;
                 if child.state != record.state {
                     child.state = record.state;
                 }
@@ -688,6 +704,7 @@ where
     next_actions.truncate(8);
     let resumable = !resumable_child_runs.is_empty();
     let commands = commands(&batch.batch_id);
+    let expected = batch.child_runs.len();
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
@@ -697,6 +714,12 @@ where
         commands,
         batch,
         totals,
+        admission: AgentTaskBatchAdmission {
+            expected,
+            admitted,
+            rejected: 0,
+            absent: expected.saturating_sub(admitted),
+        },
         unavailable_child_runs,
         admission_blocker: None,
         projection_pending_child_runs,
