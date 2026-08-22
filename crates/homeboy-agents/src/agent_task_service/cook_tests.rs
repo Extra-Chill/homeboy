@@ -3535,6 +3535,11 @@ struct RetryableTransportFailingAttemptDispatcher {
 }
 
 #[derive(Debug)]
+struct AttestingRetryableTransportDispatcher {
+    observations: Arc<Mutex<Vec<(String, Value, Value, bool)>>>,
+}
+
+#[derive(Debug)]
 struct FlakyPreparationDispatcher {
     failures_remaining: AtomicUsize,
 }
@@ -3702,6 +3707,42 @@ impl AgentTaskCookAttemptDispatcher for RetryableTransportFailingAttemptDispatch
         _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> Result<()> {
         self.dispatches.fetch_add(1, Ordering::SeqCst);
+        Err(Error::new(
+            homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
+            "fixture transport disconnected",
+            serde_json::json!({ "phase": "lab_handoff" }),
+        )
+        .with_retryable(true))
+    }
+}
+
+impl AgentTaskCookAttemptDispatcher for AttestingRetryableTransportDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-attesting-transport-failure" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        _run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        let task = &plan.tasks[0];
+        let root = task
+            .workspace
+            .root
+            .as_deref()
+            .expect("baseline workspace root");
+        let identity = task.metadata["cook_workspace_identity"].clone();
+        let predecessor = task.metadata["cook_workspace_identity_predecessor"].clone();
+        let matches = crate::agent_task_workspace_identity::workspace_matches_attestation(
+            std::path::Path::new(root),
+            &identity,
+        );
+        self.observations
+            .lock()
+            .expect("baseline observations")
+            .push((root.to_string(), identity, predecessor, matches));
         Err(Error::new(
             homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
             "fixture transport disconnected",
@@ -8422,6 +8463,68 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
                 "transient"
             );
         }
+    });
+}
+
+#[test]
+fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository root");
+        let primary = temp.path().join("primary");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&primary).expect("create primary repository");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git fixture command");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&primary, &["init", "--initial-branch=main"]);
+        git(&primary, &["config", "user.email", "agent@example.test"]);
+        git(&primary, &["config", "user.name", "Agent"]);
+        std::fs::write(primary.join("fixture.txt"), "base\n").expect("write base fixture");
+        git(&primary, &["add", "fixture.txt"]);
+        git(&primary, &["commit", "-m", "base"]);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                source.to_str().expect("UTF-8 source path"),
+                "HEAD",
+            ],
+        );
+        std::fs::write(source.join("fixture.txt"), "candidate\n").expect("write candidate fixture");
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut options = batch_cook_options(
+            "cook-baseline-attestation",
+            Arc::new(AttestingRetryableTransportDispatcher {
+                observations: Arc::clone(&observations),
+            }),
+        );
+        options.initial_run_id = "cook-baseline-attestation-attempt-1".to_string();
+        options.source_worktree_path = Some(source.clone());
+        options.provider_command = Some("fixture-provider".to_string());
+        options.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        let source_identity = crate::agent_task_workspace_identity::attest_workspace(&source)
+            .expect("attest admitted source workspace");
+        options.initial_plan.tasks[0].metadata["cook_workspace_identity"] = source_identity.clone();
+
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("record bounded transport retry");
+
+        assert_eq!(result.value.attempts.len(), 2);
+        let observations = observations.lock().expect("baseline observations");
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|(_, _, _, matches)| *matches));
+        assert_ne!(observations[0].0, observations[1].0);
+        assert!(observations
+            .iter()
+            .all(|(_, _, predecessor, _)| predecessor == &source_identity));
     });
 }
 
