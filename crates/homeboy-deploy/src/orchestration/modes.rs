@@ -255,6 +255,17 @@ pub(super) fn run_dry_run_mode(
                 result = result.with_deployed_ref(deploy_ref);
             }
             result = with_dry_run_artifact_plan(result, c, config);
+            if project
+                .components
+                .iter()
+                .find(|attachment| attachment.id == c.id)
+                .is_some_and(|attachment| !attachment.selects_deployment_provider())
+            {
+                result.warnings.push(
+                    "deployment route: standard (no project deployment provider target selected)"
+                        .to_string(),
+                );
+            }
             if config.check {
                 result = result.with_component_status(status);
             }
@@ -485,6 +496,50 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn standard_dry_run_reports_route_when_repository_provider_is_not_targeted() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/source/fixture".to_string(),
+            remote_path: "wp-content/plugins/fixture".to_string(),
+            deployment_provider: Some(homeboy_core::component::DeploymentProviderAttachment {
+                extension: "fixture-provider".to_string(),
+                provider: "fixture.deploy".to_string(),
+                contract: None,
+                policy: Some(serde_json::json!({ "repository": "shared" })),
+            }),
+            ..Component::default()
+        };
+        let project = Project {
+            components: vec![homeboy_core::project::ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: component.local_path.clone(),
+                remote_path: Some(component.remote_path.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.check = false;
+        config.all = false;
+        config.component_ids = vec!["fixture".to_string()];
+        config.dry_run = true;
+
+        let result = run_dry_run_mode(
+            std::slice::from_ref(&component),
+            &HashMap::new(),
+            &HashMap::new(),
+            &project,
+            "/srv/site",
+            &config,
+        )
+        .expect("standard dry-run plan");
+
+        assert!(result.results[0].warnings.iter().any(|warning| {
+            warning == "deployment route: standard (no project deployment provider target selected)"
+        }));
     }
 
     #[test]

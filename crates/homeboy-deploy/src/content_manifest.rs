@@ -1108,6 +1108,8 @@ fn entries_match(local: Option<&TreeEntry>, remote: Option<&TreeEntry>) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::server::CommandObservation;
+
     #[test]
     fn local_manifest_detects_content_add_delete_mode_symlink_and_ignores_runtime() {
         let temp = tempfile::tempdir().expect("temp");
@@ -1205,6 +1207,7 @@ mod tests {
             success: false,
             exit_code: 1,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
         let error = remote_probe_error(
@@ -1252,6 +1255,7 @@ mod tests {
             success: false,
             exit_code: 0,
             timed_out: true,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
         let error = remote_probe_error("/srv/site", "timed out after 20s", "remote", &output)
@@ -1277,6 +1281,7 @@ mod tests {
             success: false,
             exit_code: 1,
             timed_out: false,
+            observation: CommandObservation::Complete,
             child_resource: None,
         };
         let error = remote_probe_error("/srv/site", "probe failed", "remote", &output);

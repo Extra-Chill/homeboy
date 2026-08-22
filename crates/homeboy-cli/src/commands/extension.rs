@@ -725,6 +725,7 @@ fn runner_diff_installed(
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                 exit_code: output.status.code().unwrap_or(1),
                 timed_out: false,
+                observation: Default::default(),
                 child_resource: None,
             }
         }

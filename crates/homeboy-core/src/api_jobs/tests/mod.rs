@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 pub(super) fn record_test_local_child(store: &JobStore, job_id: Uuid, pid: u32) {
     store
-        .reserve_local_child(job_id)
+        .reserve_local_child_at_with_runner_capacity(job_id, crate::api_jobs::timestamp_ms(), None)
+        .map(|_| ())
         .expect("reserve local child");
     store
         .start_with_reserved_child_identity(

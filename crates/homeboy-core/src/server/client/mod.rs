@@ -48,5 +48,32 @@ pub struct CommandOutput {
     pub success: bool,
     pub exit_code: i32,
     pub timed_out: bool,
+    /// Whether Homeboy observed a complete, attributable terminal result from
+    /// the child transport. This is transport state, not parsed presentation.
+    pub observation: CommandObservation,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommandObservation {
+    #[default]
+    Complete,
+    StdinDeliveryFailed,
+    Cancelled,
+    StreamDrainTimedOut,
+    TransportObservationFailed,
+    SpawnFailed,
+}
+
+impl CommandObservation {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::StdinDeliveryFailed => "stdin_delivery_failed",
+            Self::Cancelled => "cancelled",
+            Self::StreamDrainTimedOut => "stream_drain_timed_out",
+            Self::TransportObservationFailed => "transport_observation_failed",
+            Self::SpawnFailed => "spawn_failed",
+        }
+    }
 }

@@ -22,9 +22,10 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
         .collect::<Vec<_>>();
     let provider_owned = !resolved_components.is_empty()
         && resolved_components.len() == project.components.len()
-        && resolved_components
+        && project
+            .components
             .iter()
-            .all(|component| component.deployment_provider.is_some());
+            .all(|attachment| attachment.selects_deployment_provider());
 
     match &project.server_id {
         _ if provider_owned => {}
@@ -65,16 +66,20 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     } else {
         blockers.extend(component_local_path_blockers(project));
 
-        let has_deployable = resolved_components.iter().any(|comp| {
-            let has_provider = comp.deployment_provider.is_some();
-            let is_git = comp.deploy_strategy.as_deref() == Some("git");
-            // An ambiguous artifact owner is an authoring error, not a
-            // readiness signal, and this closure has no error channel. Treat
-            // it as "not deployable" here; `build`/`deploy` surface the
-            // actionable ambiguity error when the component is used.
-            let has_artifact = component::resolve_artifact(comp).ok().flatten().is_some();
-            has_provider || is_git || has_artifact
-        });
+        let has_deployable =
+            resolved_components
+                .iter()
+                .zip(&project.components)
+                .any(|(comp, attachment)| {
+                    let has_provider = attachment.selects_deployment_provider();
+                    let is_git = comp.deploy_strategy.as_deref() == Some("git");
+                    // An ambiguous artifact owner is an authoring error, not a
+                    // readiness signal, and this closure has no error channel. Treat
+                    // it as "not deployable" here; `build`/`deploy` surface the
+                    // actionable ambiguity error when the component is used.
+                    let has_artifact = component::resolve_artifact(comp).ok().flatten().is_some();
+                    has_provider || is_git || has_artifact
+                });
 
         if !has_deployable {
             blockers.push(format!(

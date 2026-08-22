@@ -159,7 +159,6 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    ensure_controller_upgrade_admission()?;
     let install_method = method_override.unwrap_or_else(detect_install_method);
 
     if install_method == InstallMethod::Unknown {
@@ -175,6 +174,13 @@ pub fn run_upgrade_with_method(
             "Or: {} install homeboy",
             defaults::secondary_install_method_key()
         )));
+    }
+    // A release candidate is checksum- and exact-version-verified by the
+    // installer before it performs target-version admission recovery. Legacy
+    // admission cannot classify provenance added by that candidate, so it must
+    // not prevent downloading the only binary that can safely prove recovery.
+    if install_method != InstallMethod::Binary {
+        ensure_controller_upgrade_admission()?;
     }
     validate_pinned_version(pinned_version, install_method)?;
     // Pinning is as deliberate as `--force`: it names one release, possibly an
