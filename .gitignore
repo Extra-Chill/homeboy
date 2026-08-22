@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+/crates/*/target/
 /.cargo-target/
 /build/
 dist-manifest.json

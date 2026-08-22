@@ -37,12 +37,6 @@ pub use cli_resolver::{
     LabRunnerHint,
 };
 mod command_path;
-#[allow(
-    dead_code,
-    unused_imports,
-    unused_assignments,
-    reason = "Connection recovery helpers serve optional runner lifecycle paths."
-)]
 mod connection;
 mod continuation_provider;
 pub mod controller_fallback_projection;
@@ -52,32 +46,11 @@ mod daemon_http_get;
 mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
 pub mod direct_lab_handoff;
-#[allow(
-    unused_imports,
-    reason = "Evidence helpers are re-exported for optional runner artifact flows."
-)]
 mod evidence;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Execution adapters support optional runner execution modes."
-)]
 mod execution;
 mod execution_bundle;
-#[allow(
-    dead_code,
-    reason = "Extension materialization supports runner recovery paths."
-)]
 mod extension_materialization;
-#[allow(
-    dead_code,
-    reason = "Generation-store recovery helpers support runner lifecycle reconciliation."
-)]
 mod generation_store;
-#[allow(
-    dead_code,
-    reason = "Staging compatibility states support optional Lab workflows."
-)]
 pub mod lab_staging_controller;
 pub mod runner_staging_operation;
 pub mod runner_staging_store;
@@ -179,30 +152,16 @@ pub fn runner_admission_snapshot_for_status(
 }
 
 mod git_dependency_materialization;
-#[allow(
-    dead_code,
-    unused_assignments,
-    reason = "Refresh helpers support explicit runner refresh paths."
-)]
 mod homeboy_refresh;
 mod job_preparation;
-#[allow(dead_code, reason = "Lab hydration supports offload execution paths.")]
 mod lab;
 mod lab_apply;
 mod lab_args;
 mod lab_capabilities;
 mod lab_command;
-#[allow(
-    dead_code,
-    reason = "Lab environment bounds support optional metadata exports."
-)]
 mod lab_env;
 mod lab_offload_provider;
 pub(crate) mod lab_plan;
-#[allow(
-    dead_code,
-    reason = "Lab selection recovery helpers support contention handling."
-)]
 mod lab_selection;
 pub use lab_selection::{
     compile_lab_admission_plan, placement_readiness, LabAdmissionPlan, PlacementReadiness,
@@ -230,10 +189,6 @@ pub mod runner_probe_gate;
 mod runtime_materialization_status;
 pub mod runtime_materializer;
 mod runtime_overlay_freshness;
-#[allow(
-    dead_code,
-    reason = "Session recovery hints support daemon reconciliation."
-)]
 mod session;
 mod shell_quote;
 mod source_materialization;
@@ -250,21 +205,8 @@ pub use runner_probe_gate::{
 };
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;
-#[allow(
-    dead_code,
-    reason = "Worker lease inspection supports runner recovery."
-)]
 mod worker;
-#[allow(
-    dead_code,
-    reason = "Workload constructors support labeled runner execution paths."
-)]
 pub(crate) mod workload;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Workspace synchronization supports optional cleanup and diagnostic paths."
-)]
 mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
 pub(crate) use workspace::copy_snapshot_to_directory;
@@ -316,10 +258,6 @@ pub(crate) use connection::{
     daemon_lab_handoff_capabilities, status_for_admission,
 };
 pub use runner_probe_gate::observe_runner_capabilities;
-#[allow(
-    dead_code,
-    reason = "Runner upgrades support explicit orchestration paths."
-)]
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
 pub use continuation_provider::register as register_runner_continuation_provider;

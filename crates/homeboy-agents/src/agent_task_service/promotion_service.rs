@@ -5,6 +5,7 @@
 
 use homeboy_engine_primitives::content_hash;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,8 +19,8 @@ use homeboy_core::Result;
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport,
+    promote_with_checkpoint, resume_promoted_patch, with_gate_supervision, with_promotion_progress,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, PromotionProgressCallback,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,7 +275,15 @@ impl AgentTaskPromotionJobDriver {
             )
         })?)?;
         handle.progress(serde_json::json!({ "phase": job.phase }))?;
-        job.report = Some(execute_promotion(job.request.clone())?);
+        let cancellation_handle = handle.clone();
+        let progress_handle = handle.clone();
+        job.report = Some(execute_promotion_with_progress_and_cancellation(
+            job.request.clone(),
+            Some(Arc::new(move |progress| {
+                progress_handle.progress(serde_json::json!({ "phase": progress.phase }))
+            })),
+            Arc::new(move || cancellation_handle.is_cancelled()),
+        )?);
         job.phase = AgentTaskPromotionJobPhase::Completed;
         handle.checkpoint(serde_json::to_value(&job).map_err(|error| {
             homeboy_core::Error::internal_json(
@@ -324,6 +333,83 @@ impl AgentTaskPromotionRequest {
 /// is the operation key: each post-apply checkpoint is persisted before gates,
 /// so a restart can only verify the same materialized candidate.
 pub fn execute_promotion(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
+    execute_promotion_with_progress(request, None)
+}
+
+pub fn execute_promotion_with_progress(
+    request: AgentTaskPromotionRequest,
+    progress: Option<PromotionProgressCallback>,
+) -> Result<AgentTaskPromotionReport> {
+    execute_promotion_with_progress_and_cancellation(request, progress, Arc::new(|| false))
+}
+
+pub fn execute_promotion_with_progress_and_cancellation(
+    request: AgentTaskPromotionRequest,
+    progress: Option<PromotionProgressCallback>,
+    is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<AgentTaskPromotionReport> {
+    match progress {
+        Some(progress) => {
+            let gates = request.gates.clone();
+            with_promotion_progress(progress, || {
+                let gate_ordinal = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let spawned_gate_ordinal = gate_ordinal.clone();
+                let active_gate = Arc::new(std::sync::Mutex::new(None));
+                let spawned_active_gate = active_gate.clone();
+                let result = with_gate_supervision(
+                    crate::agent_task_gate::GateSupervision {
+                        timeout: gates.gate_timeout(),
+                        no_progress_timeout: gates.gate_no_progress_timeout(),
+                        heartbeat_interval: gates.gate_heartbeat_interval(),
+                        on_spawn: Arc::new(move |_, _| {
+                            let gate = format!(
+                                "gate-{}",
+                                spawned_gate_ordinal
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                    + 1
+                            );
+                            *spawned_active_gate.lock().expect("active promotion gate") =
+                                Some(gate.clone());
+                            crate::agent_task_promotion::emit_promotion_progress(
+                                "gate",
+                                Some(gate),
+                                Some("gate process started".to_string()),
+                            );
+                            Ok(())
+                        }),
+                        on_heartbeat: Arc::new(move |status| {
+                            crate::agent_task_promotion::emit_promotion_progress(
+                                "gate",
+                                active_gate.lock().expect("active promotion gate").clone(),
+                                Some(format!(
+                                    "gate elapsed={}ms last-progress={}ms",
+                                    status.elapsed_ms,
+                                    status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                                )),
+                            );
+                            Ok(())
+                        }),
+                        is_cancelled,
+                    },
+                    || execute_promotion_inner(request),
+                );
+                crate::agent_task_promotion::emit_promotion_progress(
+                    "terminal",
+                    None,
+                    Some(if result.is_ok() {
+                        "promotion complete".to_string()
+                    } else {
+                        "promotion stopped".to_string()
+                    }),
+                );
+                result
+            })
+        }
+        None => execute_promotion_inner(request),
+    }
+}
+
+fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
     let previous = request.source_run_id.as_ref().and_then(|run_id| {
         agent_task_lifecycle::status(run_id)
             .ok()
@@ -364,6 +450,11 @@ pub fn execute_promotion(request: AgentTaskPromotionRequest) -> Result<AgentTask
             Ok(())
         })?
     };
+    crate::agent_task_promotion::emit_promotion_progress(
+        "finalization",
+        None,
+        Some("persisting promotion result".to_string()),
+    );
     if let Some(run_id) = request.source_run_id.filter(|_| !request.dry_run) {
         agent_task_lifecycle::record_promotion(
             &run_id,
@@ -375,6 +466,11 @@ pub fn execute_promotion(request: AgentTaskPromotionRequest) -> Result<AgentTask
             })?,
         )?;
     }
+    crate::agent_task_promotion::emit_promotion_progress(
+        "cleanup",
+        None,
+        Some("promotion complete".to_string()),
+    );
     Ok(report)
 }
 

@@ -535,13 +535,6 @@ pub(crate) fn classify_runner_homeboy_version_drift(
     }
 }
 
-pub(crate) fn lab_runner_homeboy_has_blocking_drift(
-    status: &RunnerStatusReport,
-    require_exact: bool,
-) -> bool {
-    lab_runner_homeboy_has_blocking_drift_against_configured_identity(status, None, require_exact)
-}
-
 /// Direct SSH runners execute jobs with their configured executable rather
 /// than the controller binary. When that executable's immutable identity is
 /// available, it is the authoritative admission comparison for the active

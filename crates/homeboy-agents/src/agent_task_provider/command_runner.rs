@@ -683,7 +683,7 @@ fn run_materialized_provider_command_once_contained(
             )
         }
     };
-    let env = match provider_command_env(request, provider) {
+    let mut env = match provider_command_env(request, provider) {
         Ok(env) => env,
         Err(ProviderCommandEnvError::Secret(error)) => {
             return failure_outcome(
@@ -712,6 +712,32 @@ fn run_materialized_provider_command_once_contained(
             )
         }
     };
+    // The lease remains alive through the provider process. This lets provider
+    // attempts and controller gates share only the same compatibility-keyed
+    // Cargo output directory while preserving their isolated HOME/XDG roots.
+    let cargo_target = match provider_cargo_target(request, cwd.as_deref(), &env) {
+        Ok(target) => target,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.cargo_cache_unavailable",
+                error.to_string(),
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
+    if let Some(target) = &cargo_target {
+        env.push((
+            "CARGO_TARGET_DIR".to_string(),
+            target.target_dir().display().to_string(),
+        ));
+        env.push((
+            "HOMEBOY_CARGO_TARGET_RESOLUTION".to_string(),
+            target.resolution().to_string(),
+        ));
+    }
 
     let mut command_builder = Command::new(&program);
     command_builder.args(&args).envs(
@@ -1102,6 +1128,29 @@ fn run_materialized_provider_command_once_contained(
             ),
         ),
     }
+}
+
+fn provider_cargo_target(
+    _request: &AgentTaskExecutorRequest,
+    cwd: Option<&Path>,
+    environment: &[(String, String)],
+) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
+    let Some(cwd) = cwd else { return Ok(None) };
+    let enabled =
+        homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
+            .map(|component| component.managed_execution.shared_cargo_target)
+            .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let environment = environment.iter().cloned().collect();
+    homeboy_core::acquire_managed_cargo_target_for_environment(
+        "agent-task-cargo",
+        cwd,
+        None,
+        &environment,
+    )
+    .map(Some)
 }
 
 // Provider adapters that predate the top-level declaration field consume the

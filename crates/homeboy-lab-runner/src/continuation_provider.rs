@@ -128,6 +128,15 @@ impl RunnerContinuationProvider for RunnerContinuation {
         runner_id: &str,
         job_id: &str,
     ) -> Result<RunnerJobLogSnapshot> {
+        // Controller-job supervision outlives the detached reverse worker. Its
+        // broker result remains authoritative after the worker heartbeat
+        // expires, while the general status path intentionally performs
+        // liveness probes for interactive callers.
+        if let Some(broker_url) = super::connection::recorded_reverse_broker_url(runner_id)? {
+            let (job, events) =
+                super::connection::reverse_broker_job_snapshot_at(&broker_url, runner_id, job_id)?;
+            return Ok(RunnerJobLogSnapshot { job, events });
+        }
         super::evidence::runner_job_log_snapshot(runner_id, job_id)
     }
 

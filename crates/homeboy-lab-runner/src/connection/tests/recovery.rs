@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -427,10 +426,12 @@ fn live_exact_owner_with_dead_listener_selects_bounded_replacement() {
     status.endpoint_probe_error = Some("curl timed out".to_string());
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&session),
             &status,
             session.homeboy_build_identity.as_deref().expect("identity"),
+            "<runner-id>",
+            None
         )
         .expect("exact idle recovery"),
         RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner
@@ -548,10 +549,12 @@ fn replaces_idle_stale_daemon_when_typed_jobs_are_zero_without_lease_recovery_ev
     let status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&direct_ssh_session("lease-stale")),
             &status,
             "homeboy 0.289.0+configured",
+            "<runner-id>",
+            None
         )
         .expect("bounded stale replacement"),
         RemoteDaemonConnectAction::ReplaceIdleStale,
@@ -673,24 +676,6 @@ fn stale_generation_reconciliation_refuses_active_jobs_changed_lease_or_unproven
 }
 
 #[test]
-fn stale_generation_reconciliation_refuses_a_lease_change_after_stop() {
-    let stopped = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        0,
-        "lease-stale",
-        4444,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-    let changed = remote_daemon_status_for_test(true, true, 0, "lease-raced", 5555);
-
-    assert!(authoritative_lease_stop_confirmed(&stopped, "lease-stale").is_ok());
-    assert!(authoritative_lease_stop_confirmed(&changed, "lease-stale")
-        .expect_err("a new lease during recovery is not the stopped lease")
-        .contains("ownership changed"));
-}
-
-#[test]
 fn authoritative_dead_lease_allows_stale_generation_tombstoning() {
     let dead = remote_daemon_status_for_test_with_reason(
         false,
@@ -725,11 +710,15 @@ fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let typed_unknown = idle_stale_status(RemoteDaemonWorkEvidence::Unknown);
 
     for status in [freshness_active, typed_active, typed_unknown] {
-        assert!(
-            remote_daemon_connect_action_with_controller_identity(None, &status, configured)
-                .expect_err("unsafe evidence fails closed")
-                .contains("runner ownership is not proven")
-        );
+        assert!(remote_daemon_connect_action_for_runner(
+            None,
+            &status,
+            configured,
+            "<runner-id>",
+            None
+        )
+        .expect_err("unsafe evidence fails closed")
+        .contains("runner ownership is not proven"));
     }
 }
 
@@ -738,10 +727,12 @@ fn idle_stale_replacement_refuses_unreachable_daemon_evidence() {
     let mut status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
     status.reachable = false;
 
-    assert!(remote_daemon_connect_action_with_controller_identity(
+    assert!(remote_daemon_connect_action_for_runner(
         None,
         &status,
         "homeboy 0.289.0+configured",
+        "<runner-id>",
+        None
     )
     .expect_err("unreachable evidence must fail closed")
     .contains("unreachable"));
@@ -758,10 +749,12 @@ fn reconnect_converges_to_configured_identity_and_repeated_recovery_reattaches()
     status.stale_reason_code = None;
 
     assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
+        remote_daemon_connect_action_for_runner(
             Some(&direct_ssh_session("lease-stale")),
             &status,
             "homeboy 0.289.0+configured",
+            "<runner-id>",
+            None
         )
         .expect("converged daemon reattaches"),
         RemoteDaemonConnectAction::Reattach,
@@ -1162,6 +1155,7 @@ fn remote_leaseless_recovery_timeout_is_actionable() {
         success: false,
         exit_code: 124,
         timed_out: true,
+        observation: Default::default(),
         child_resource: None,
     });
     assert!(message.contains("daemon status"));
@@ -2149,6 +2143,7 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
             success: false,
             exit_code: 124,
             timed_out: true,
+            observation: Default::default(),
             child_resource: None,
         },
     );
@@ -2496,6 +2491,7 @@ fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
         stderr: String::new(),
         exit_code: 0,
         timed_out: false,
+        observation: Default::default(),
         child_resource: None,
     }
     };

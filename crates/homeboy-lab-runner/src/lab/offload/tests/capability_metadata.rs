@@ -593,8 +593,10 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
 
     // `reverse_status` reports runner `0.0.0` against the controller's current
     // version, a MINOR/MAJOR mismatch that is blocking regardless of strict mode.
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
+    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::Incompatible
@@ -785,7 +787,9 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
         RunnerHomeboyVersionDrift::CompatiblePatch
     );
     // Compatibility-aware default: patch drift proceeds.
-    assert!(!lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
     let warning = lab_runner_homeboy_compatible_drift_warning(&status, false)
         .expect("compatible patch drift should warn");
     assert!(warning.contains("wire-compatible"));
@@ -813,7 +817,7 @@ fn same_minor_patch_drift_is_refused_under_strict_mode() {
     let status = status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
 
     // Strict override restores exact-match: patch drift now refuses.
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
     // No "proceeding" warning is emitted under strict mode; the drift surfaces
     // as the refusal error instead.
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, true).is_none());
@@ -832,8 +836,10 @@ fn minor_version_drift_is_incompatible_and_refused() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::Incompatible
     );
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
+    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
@@ -1022,8 +1028,12 @@ fn exact_version_match_has_no_drift() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::None
     );
-    assert!(!lab_runner_homeboy_has_blocking_drift(&status, false));
-    assert!(!lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
+    assert!(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true)
+    );
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
@@ -1040,7 +1050,9 @@ fn matching_full_build_identities_have_no_drift_under_strict_mode() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::None
     );
-    assert!(!lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true)
+    );
 }
 
 #[test]
@@ -1098,7 +1110,9 @@ fn same_semver_with_different_build_identity_is_refused() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::Incompatible
     );
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
 }
 
 #[test]
@@ -1120,7 +1134,9 @@ fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() 
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::None
     );
-    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+    );
 }
 
 #[test]

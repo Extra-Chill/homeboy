@@ -3858,15 +3858,17 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
     });
 }
 
-/// Stays on `with_isolated_home` (#7505). `record_completed_run_in_store` is
-/// rooted for its aggregate half but opens with `submit_plan_in_store`, which
-/// supplies the *real* controller admission — `admit_current_for_with_cancellation_check`
-/// against the machine-global `paths::controller_runtimes_store()`. There is no
-/// `record_completed_run_with_submission_in_store` to hand a stub to, so a
-/// rooted spelling of this test would enqueue against the operator's real home.
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The blocker this test used to carry was real: `submit_plan_in_store`
+/// enqueued its controller admission against the machine-global
+/// `paths::controller_runtimes_store()`, so a rooted spelling would have queued
+/// against the operator's own home. That admission follows the store's root now
+/// (#12862), and no stub is needed to make the submission safe.
 #[test]
 fn record_completed_run_exposes_logs_and_artifacts() {
-    with_isolated_home(|_| {
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(test_context.path_roots());
+    {
         let plan = test_plan();
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -3922,33 +3924,55 @@ fn record_completed_run_exposes_logs_and_artifacts() {
             queue: Default::default(),
         };
 
-        let record =
-            record_completed_run(&plan, &aggregate, Some("run-complete")).expect("recorded");
-        let log = logs(&record.run_id).expect("logs");
-        let artifacts = artifacts(&record.run_id).expect("artifacts");
+        let record = record_completed_run_in_store(
+            &lifecycle_store,
+            &plan,
+            &aggregate,
+            Some("run-complete"),
+        )
+        .expect("recorded");
+        let log = logs_in_store(&lifecycle_store, &record.run_id).expect("logs");
+        let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
         assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
-    });
+    }
 }
 
-/// Stays on `with_isolated_home` (#7505) — `mark_running`; see
-/// `running_observation_projects_each_terminal_aggregate_state`.
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The whole submit -> run -> complete -> read cycle names one home,
+/// including the controller admission `submit_plan_in_store` takes: that queue
+/// and its lock follow the store's root now (#12859) instead of the machine.
 #[test]
 fn submitted_run_can_be_loaded_marked_running_and_completed() {
-    with_isolated_home(|_| {
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(test_context.path_roots());
+    {
         let plan = test_plan();
-        submit_plan(&plan, Some("run-execute")).expect("submitted");
+        submit_plan_in_store(&lifecycle_store, &plan, Some("run-execute")).expect("submitted");
 
-        let loaded_plan = load_plan("run-execute").expect("plan loaded");
-        let running = mark_running("run-execute").expect("marked running");
+        let loaded_plan = load_plan_in_store(&lifecycle_store, "run-execute").expect("plan loaded");
+        let running =
+            mark_running_in_store(&lifecycle_store, "run-execute").expect("marked running");
         let aggregate = succeeded_aggregate(&loaded_plan);
 
-        let completed =
-            record_run_aggregate("run-execute", &loaded_plan, &aggregate).expect("completed");
-        let durable_status = status("run-execute").expect("status");
+        let completed = record_run_aggregate_in_store(
+            &lifecycle_store,
+            "run-execute",
+            &loaded_plan,
+            &aggregate,
+        )
+        .expect("completed");
+        let durable_status = status_in_store(
+            &lifecycle_store,
+            "run-execute",
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status")
+        .record;
 
         assert_eq!(loaded_plan.plan_id, "plan-a");
         assert_eq!(running.state, AgentTaskRunState::Running);
@@ -3969,7 +3993,7 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
         assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
         assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
         assert!(completed.aggregate_path.is_some());
-    });
+    }
 }
 
 /// Stays on `with_isolated_home` (#7505) — `record_completed_run`; see
@@ -4031,19 +4055,34 @@ fn completed_run_persists_opaque_provider_handles_from_outcome_metadata() {
     });
 }
 
-/// Stays on `with_isolated_home` (#7505) — `mark_running`; see
-/// `running_observation_projects_each_terminal_aggregate_state`.
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The aggregate this plants by hand and the record `status` rebuilds
+/// from it are the same run in one home. `mark_running` used to pin this to an
+/// ambient home through its pin migration's machine-global admission lock; that
+/// lock follows the store's root now (#12852, #12859).
 #[test]
 fn status_recovers_terminal_state_from_durable_aggregate() {
-    with_isolated_home(|_| {
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(test_context.path_roots());
+    {
         let plan = test_plan();
-        submit_plan(&plan, Some("run-stale-status")).expect("submitted");
-        mark_running("run-stale-status").expect("marked running");
+        submit_plan_in_store(&lifecycle_store, &plan, Some("run-stale-status")).expect("submitted");
+        mark_running_in_store(&lifecycle_store, "run-stale-status").expect("marked running");
         let aggregate = succeeded_aggregate(&plan);
-        store::write_aggregate("run-stale-status", &aggregate).expect("aggregate written");
+        store::write_aggregate_in_store(&lifecycle_store, "run-stale-status", &aggregate)
+            .expect("aggregate written");
 
-        let recovered = status("run-stale-status").expect("status recovered");
-        let persisted = store::read_record("run-stale-status").expect("record persisted");
+        let recovered = status_in_store(
+            &lifecycle_store,
+            "run-stale-status",
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status recovered")
+        .record;
+        let persisted = lifecycle_store
+            .read_record("run-stale-status")
+            .expect("record persisted");
 
         assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
         assert_eq!(recovered.tasks[0].state, AgentTaskState::Succeeded);
@@ -4051,7 +4090,7 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
         assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
         assert_eq!(persisted.tasks[0].state, AgentTaskState::Succeeded);
         assert_eq!(persisted.totals, Some(aggregate.totals.clone()));
-    });
+    }
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

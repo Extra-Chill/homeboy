@@ -1451,11 +1451,6 @@ impl PresentationArgs {
         matches!(self.detail, DetailLevel::Summary)
     }
 
-    /// True when the command should pick its own default presentation.
-    pub(crate) fn is_auto_format(&self) -> bool {
-        matches!(self.format, OutputFormat::Auto)
-    }
-
     /// Fold a command's legacy boolean `--json` flag into this group.
     ///
     /// `bench --json`, `runs show --json`, `runs proof --json`, and
@@ -1476,7 +1471,7 @@ impl PresentationArgs {
 
 #[cfg(test)]
 mod presentation_args_tests {
-    use super::{DetailLevel, OutputFormat, PresentationArgs};
+    use super::{OutputFormat, PresentationArgs};
     use clap::Parser;
 
     #[derive(Parser)]
@@ -1489,15 +1484,6 @@ mod presentation_args_tests {
         PresentationCli::try_parse_from(args)
             .expect("presentation args should parse")
             .presentation
-    }
-
-    #[test]
-    fn defaults_are_auto_and_full() {
-        let args = parse(&["rendered"]);
-        assert_eq!(args.format, OutputFormat::Auto);
-        assert_eq!(args.detail, DetailLevel::Full);
-        assert!(args.is_auto_format());
-        assert!(!args.is_summary());
     }
 
     #[test]

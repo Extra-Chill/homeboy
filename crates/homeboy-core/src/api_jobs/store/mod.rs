@@ -45,6 +45,10 @@ pub(crate) struct AdmissionReservation {
     pub(crate) expires_at_ms: u64,
     pub(crate) created: bool,
     /// Exact direct-daemon authority registered before this reservation commit.
+    #[allow(
+        dead_code,
+        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
+    )]
     pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
@@ -185,6 +189,10 @@ pub(crate) struct LocalRunnerJob {
     pub(crate) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     /// Exact direct-daemon authority required to execute this queued job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[allow(
+        dead_code,
+        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
+    )]
     pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
@@ -1033,38 +1041,6 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn renew_admission_at(
-        &self,
-        job_id: Uuid,
-        token: &str,
-        now: u64,
-    ) -> Result<AdmissionReservation> {
-        self.durable_transaction(|inner| {
-            let stored = inner
-                .jobs
-                .get_mut(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            let (token, expires_at_ms) = {
-                let lease = Self::admission_lease_for_live_job(stored, token, now)?;
-                lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
-                lease.renewals = lease.renewals.saturating_add(1);
-                (lease.token.clone(), lease.expires_at_ms)
-            };
-            stored.job.updated_at_ms = now;
-            let reservation = AdmissionReservation {
-                job: stored.job.clone(),
-                token,
-                expires_at_ms,
-                created: false,
-                workspace_owner_lease: stored
-                    .local_runner
-                    .as_ref()
-                    .and_then(|runner| runner.workspace_owner_lease.clone()),
-            };
-            Ok(reservation)
-        })
-    }
-
     /// Commit an admission renewal and its exact direct workspace authority in
     /// one durable-store transaction. The daemon renews the owner lease first;
     /// callers must retain the returned lease as the only valid cleanup token.
@@ -1588,11 +1564,6 @@ impl JobStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_controller_terminal_writes(&self, count: u64) {
-        self.terminal_write_failures.store(count, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
     pub(crate) fn fail_next_durable_writes(&self, count: u64) {
         self.durable_write_failures.store(count, Ordering::SeqCst);
     }
@@ -2097,32 +2068,6 @@ impl JobStore {
             .collect()
     }
 
-    /// A process-local controller driver has no durable execution identity that
-    /// can prove whether it survived daemon loss. Terminalize such work rather
-    /// than replaying it on startup; its durable request and key remain evidence
-    /// for the domain layer to inspect or retry with a new idempotency key.
-    pub(crate) fn reconcile_unresolved_controller_jobs(&self) -> Result<Vec<Uuid>> {
-        self.durable_transaction(|inner| {
-            let now = timestamp_ms();
-            let mut reconciled = Vec::new();
-            for stored in inner.jobs.values_mut() {
-                if stored.controller_job.is_some()
-                    && matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-                {
-                    stored.job.status = JobStatus::Failed;
-                    stored.job.updated_at_ms = now;
-                    stored.job.finished_at_ms = Some(now);
-                    stored.job.stale_reason = Some(
-                        "controller job was unresolved after daemon restart; not replayed"
-                            .to_string(),
-                    );
-                    reconciled.push(stored.job.id);
-                }
-            }
-            Ok(reconciled)
-        })
-    }
-
     pub(crate) fn run_background_with_source_snapshot<T, F>(
         &self,
         operation: impl Into<String>,
@@ -2162,126 +2107,6 @@ impl JobStore {
             true,
             run,
         )
-    }
-
-    /// Reserve a local child while the job is still queued. The reservation is
-    /// durable before spawn; only binding a PID plus start ticks exposes Running.
-    pub(crate) fn run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan<
-        T,
-        F,
-    >(
-        &self,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        run: F,
-    ) -> JobRunner
-    where
-        T: Serialize + Send + 'static,
-        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
-    {
-        self.run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            operation,
-            source_snapshot,
-            metadata,
-            path_materialization_plan,
-            None,
-            run,
-        )
-    }
-
-    pub(crate) fn run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
-        T,
-        F,
-    >(
-        &self,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        local_runner: Option<LocalRunnerJob>,
-        run: F,
-    ) -> JobRunner
-    where
-        T: Serialize + Send + 'static,
-        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
-    {
-        let job = self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            operation,
-            source_snapshot,
-            metadata,
-            path_materialization_plan,
-            local_runner,
-        );
-        self.reserve_local_child(job.id)
-            .expect("new local child reservation must persist");
-        let job_id = job.id;
-        let handle_store = self.clone();
-        let worker_store = self.clone();
-        let handle = thread::spawn(move || {
-            let job_handle = JobHandle {
-                store: handle_store,
-                job_id,
-            };
-            let _ = job_handle.progress(serde_json::json!({
-                "phase": "local_child_worker_started",
-            }));
-            match run(job_handle) {
-                Ok(output) => {
-                    let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
-                }
-                Err(error) => {
-                    // A child whose process tree could not be reaped remains
-                    // active. Terminalizing it would let a draining generation
-                    // retire while unconfirmed work still exists.
-                    if error.details["retain_active"].as_bool() == Some(true) {
-                        return;
-                    }
-                    let error_message = error.to_string();
-                    let failure_data = serde_json::json!({
-                        "phase": "local_child_worker_failed_before_child_identity",
-                        "error": error_message,
-                        "error_code": error.code.as_str(),
-                        "error_details": error.details,
-                    });
-                    if worker_store
-                        .get(job_id)
-                        .is_ok_and(|job| job.status == JobStatus::Queued)
-                    {
-                        let _ = worker_store.append_event(
-                            job_id,
-                            JobEventKind::Progress,
-                            Some("local child worker failed before child identity".to_string()),
-                            Some(failure_data.clone()),
-                        );
-                    }
-                    let _ = worker_store.fail_with_data(job_id, error_message, Some(failure_data));
-                }
-            }
-        });
-        JobRunner { job_id, handle }
-    }
-
-    pub(crate) fn run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
-        T,
-        F,
-    >(
-        &self,
-        request: LocalRunnerJobRequest,
-        capacity: usize,
-        run: F,
-    ) -> JobRunner
-    where
-        T: Serialize + Send + 'static,
-        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
-    {
-        self.try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            request,
-            capacity,
-            run,
-        )
-        .expect("local runner queue admission must persist")
     }
 
     /// Fallible variant used by the daemon request boundary so a failed durable
@@ -2599,13 +2424,34 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn reserve_local_child(&self, job_id: Uuid) -> Result<()> {
-        self.reserve_local_child_at(job_id, timestamp_ms())
-    }
-
-    pub(crate) fn reserve_local_child_at(&self, job_id: Uuid, now: u64) -> Result<()> {
-        self.reserve_local_child_at_with_runner_capacity(job_id, now, None)
-            .map(|_| ())
+    /// Reached only from the `#[cfg(test)]` reconciliation paths in
+    /// `store::reconciliation`; production appends terminal evidence through
+    /// `append_status_event_with_data_at`. Kept because those tests assert real
+    /// reconciliation behavior, suppressed per item so the next unused method in
+    /// this impl still fails the build.
+    #[allow(
+        dead_code,
+        reason = "Reached only from cfg(test) reconciliation paths that assert real behavior."
+    )]
+    pub(super) fn append_status_event_with_data(
+        &self,
+        job_id: Uuid,
+        status: JobStatus,
+        message: impl Into<String>,
+        mut data: Value,
+    ) -> Result<JobEvent> {
+        if !data.is_object() {
+            data = serde_json::json!({ "metadata": data });
+        }
+        if let Some(object) = data.as_object_mut() {
+            object.insert("status".to_string(), serde_json::json!(status));
+        }
+        self.append_event(
+            job_id,
+            JobEventKind::Status,
+            Some(message.into()),
+            Some(data),
+        )
     }
 
     pub(crate) fn reserve_local_child_with_runner_capacity(
@@ -2621,7 +2467,7 @@ impl JobStore {
         )
     }
 
-    fn reserve_local_child_at_with_runner_capacity(
+    pub(crate) fn reserve_local_child_at_with_runner_capacity(
         &self,
         job_id: Uuid,
         now: u64,
@@ -2939,59 +2785,10 @@ impl JobStore {
         validate_transition(stored.job.status, next_status)
     }
 
-    pub(super) fn append_status_event(
-        &self,
-        job_id: Uuid,
-        status: JobStatus,
-        message: impl Into<String>,
-    ) -> Result<JobEvent> {
-        self.append_status_event_with_data(
-            job_id,
-            status,
-            message,
-            serde_json::json!({ "status": status }),
-        )
-    }
-
-    pub(super) fn append_status_event_with_data(
-        &self,
-        job_id: Uuid,
-        status: JobStatus,
-        message: impl Into<String>,
-        mut data: Value,
-    ) -> Result<JobEvent> {
-        if !data.is_object() {
-            data = serde_json::json!({ "metadata": data });
-        }
-        if let Some(object) = data.as_object_mut() {
-            object.insert("status".to_string(), serde_json::json!(status));
-        }
-        self.append_event(
-            job_id,
-            JobEventKind::Status,
-            Some(message.into()),
-            Some(data),
-        )
-    }
-
     pub(super) fn event_retention_limit(&self) -> usize {
         self.persistence
             .as_ref()
             .map(|persistence| persistence.event_retention_limit)
-            .unwrap_or(usize::MAX)
-    }
-
-    fn terminal_job_retention_limit(&self) -> usize {
-        self.persistence
-            .as_ref()
-            .map(|persistence| persistence.terminal_job_retention_limit)
-            .unwrap_or(usize::MAX)
-    }
-
-    fn terminal_job_retention_bytes(&self) -> usize {
-        self.persistence
-            .as_ref()
-            .map(|persistence| persistence.terminal_job_retention_bytes)
             .unwrap_or(usize::MAX)
     }
 }
@@ -3408,7 +3205,10 @@ mod local_child_tests {
         let store = JobStore::open(&path).expect("open durable store");
         let job = store.create("runner.exec");
 
-        store.reserve_local_child(job.id).expect("reserve child");
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
+            .map(|_| ())
+            .expect("reserve child");
         let queued = JobStore::open_without_reconciliation(&path).expect("read reservation");
         assert_eq!(
             queued.get(job.id).expect("queued job").status,
@@ -3456,7 +3256,10 @@ mod local_child_tests {
     fn unsupported_identity_with_a_live_pid_blocks_once_without_duplicate_diagnostics() {
         let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
         let job = store.create("runner.exec");
-        store.reserve_local_child(job.id).expect("reserve child");
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
+            .map(|_| ())
+            .expect("reserve child");
         store
             .start_with_reserved_child_identity(
                 job.id,
@@ -3486,7 +3289,10 @@ mod local_child_tests {
     fn unsupported_identity_with_an_absent_pid_terminalizes() {
         let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
         let job = store.create("runner.exec");
-        store.reserve_local_child(job.id).expect("reserve child");
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
+            .map(|_| ())
+            .expect("reserve child");
         store
             .start_with_reserved_child_identity(
                 job.id,
@@ -3510,7 +3316,10 @@ mod local_child_tests {
     fn pid_reuse_mismatch_does_not_protect_the_new_process() {
         let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
         let job = store.create("runner.exec");
-        store.reserve_local_child(job.id).expect("reserve child");
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
+            .map(|_| ())
+            .expect("reserve child");
         let actual = crate::process::linux_process_starttime_ticks(std::process::id())
             .expect("read current start ticks")
             .expect("current process exists");

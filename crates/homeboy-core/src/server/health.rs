@@ -642,6 +642,7 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         }
     }
@@ -679,6 +680,7 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
             success: false,
             exit_code: 255,
             timed_out: true,
+            observation: Default::default(),
             child_resource: None,
         };
 

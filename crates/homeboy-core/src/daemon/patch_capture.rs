@@ -515,30 +515,4 @@ mod tests {
 
         assert_eq!(report.modified_files, vec!["tracked.txt".to_string()]);
     }
-
-    fn git_test_command(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
 }

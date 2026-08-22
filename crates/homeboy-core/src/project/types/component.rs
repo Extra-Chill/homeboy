@@ -47,6 +47,15 @@ pub struct ProjectComponentAttachment {
     pub deployment_provider_input: Option<serde_json::Value>,
 }
 
+impl ProjectComponentAttachment {
+    /// A provider is selected only by project-owned target configuration. A
+    /// portable provider policy describes a capability; it does not choose the
+    /// deployment route for every project that attaches the component.
+    pub fn selects_deployment_provider(&self) -> bool {
+        self.deployment_provider.is_some() || self.deployment_provider_input.is_some()
+    }
+}
+
 pub type ProjectComponentOverrides = crate::component::ComponentOverrideConfig;
 
 #[cfg(test)]
@@ -114,5 +123,31 @@ mod tests {
             .expect("portable component serialization")
             .get("deployment_provider_input")
             .is_none());
+    }
+
+    #[test]
+    fn provider_route_requires_project_target_configuration() {
+        let local = ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: "/source/fixture".to_string(),
+            ..Default::default()
+        };
+        let layered = ProjectComponentAttachment {
+            deployment_provider_input: Some(serde_json::json!({ "target": "site" })),
+            ..local.clone()
+        };
+        let legacy = ProjectComponentAttachment {
+            deployment_provider: Some(crate::component::DeploymentProviderAttachment {
+                extension: "fixture-extension".to_string(),
+                provider: "fixture.deploy".to_string(),
+                contract: Some("deploy-contract.json".to_string()),
+                policy: None,
+            }),
+            ..local.clone()
+        };
+
+        assert!(!local.selects_deployment_provider());
+        assert!(layered.selects_deployment_provider());
+        assert!(legacy.selects_deployment_provider());
     }
 }
