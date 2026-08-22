@@ -141,6 +141,37 @@ append_timeout_triage_to_digest() {
   } >> "${digest_file}"
 }
 
+write_fallback_digest() {
+  local digest_file="$1"
+  local renderer_stderr_file="$2"
+  local failed_commands diagnostics command
+
+  failed_commands="$(jq -r '
+    to_entries[]
+    | select(.value == "fail" or .value == "timeout")
+    | "- `homeboy " + .key + "`: **" + .value + "** (result: `" + (.key | gsub(" "; "-") | gsub("/"; "-")) + ".json`)"
+  ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
+  diagnostics="$(tail -c 4000 "${renderer_stderr_file}" 2>/dev/null | python3 "${SCRIPT_DIR}/../pr/comment/sanitize-timeout-diagnostic.py" || true)"
+
+  {
+    printf '## Failure digest unavailable\n\n'
+    printf 'The Homeboy failure-digest renderer returned no output. Per-command result JSON and logs remain in the CI results artifact.\n\n'
+    printf '### Failed commands\n'
+    if [ -n "${failed_commands}" ]; then
+      printf '%s\n' "${failed_commands}"
+    else
+      printf '%s\n' '- The final result envelope did not identify a failed command.'
+    fi
+    printf '\n### Renderer diagnostic\n\n```text\n%s\n```\n' "${diagnostics:-No renderer stderr was captured.}"
+  } > "${digest_file}"
+
+  while IFS= read -r command; do
+    [ -n "${command}" ] || continue
+    printf '::error::homeboy %s failed, but its failure digest was unavailable; inspect the CI results artifact.\n' "${command}"
+  done < <(jq -r 'to_entries[] | select(.value == "fail" or .value == "timeout") | .key' <<< "${RESULTS_JSON}" 2>/dev/null || true)
+  printf '::error::Failure digest renderer returned no file; inspect the CI results artifact and the fallback digest for failed command names and renderer stderr.\n'
+}
+
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
   exit 0
@@ -148,6 +179,7 @@ fi
 
 TOOLING_JSON="${OUTPUT_DIR}/failure-digest-tooling.json"
 DIGEST_FILE="${OUTPUT_DIR}/failure-digest.md"
+RENDERER_STDERR_FILE="${OUTPUT_DIR}/failure-digest-renderer.stderr"
 
 jq -n \
   --arg homeboy_cli_version "${HOMEBOY_CLI_VERSION}" \
@@ -174,19 +206,13 @@ ARGS=(
   --commands "${COMMANDS_CSV}"
 )
 
-if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2>/dev/null; then
+if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2> "${RENDERER_STDERR_FILE}"; then
   rm -f "${DIGEST_FILE}"
-fi
-
-if [ ! -f "${DIGEST_FILE}" ]; then
-  echo "Failure digest generation returned no file"
-  exit 0
 fi
 
 if [ ! -s "${DIGEST_FILE}" ]; then
-  echo "Failure digest generation returned no file"
   rm -f "${DIGEST_FILE}"
-  exit 0
+  write_fallback_digest "${DIGEST_FILE}" "${RENDERER_STDERR_FILE}"
 fi
 
 append_local_reproduction_commands "${DIGEST_FILE}"
