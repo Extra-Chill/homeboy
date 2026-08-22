@@ -4681,7 +4681,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 
 #[cfg(unix)]
 #[test]
-fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
+fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -4735,13 +4735,10 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
         let workspace = workspace.canonicalize().expect("canonical workspace");
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let provider = provider_dir.path().join("provider");
-        let first_resolve = provider_dir.path().join("first-resolve");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nif test \"$1\" = identity; then\n  if test ! -f '{}'; then : > '{}'; sleep 1; fi\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\nelse\n  printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'\nfi\n",
-                first_resolve.display(),
-                first_resolve.display(),
+                "#!/bin/sh\nsleep 1\nprintf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"unreachable\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\n",
                 workspace.display(),
             ),
         )
@@ -4808,9 +4805,9 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
 
         options.source_worktree_path = Some(workspace.clone());
         let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
-            .expect("Cook retries and materializes the provider workspace");
+            .expect("Cook records exhausted provider timeout");
 
-        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.exit_code, 1, "{:?}", result.value);
         assert_eq!(result.value.cook_id, cook_id);
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         let record = agent_task_lifecycle::status(run_id).expect("durable lookup record");
@@ -4823,6 +4820,10 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
         assert_eq!(
             persisted_plan.metadata["worktree_provider_resolve"]["attempt"],
             2
+        );
+        assert_eq!(
+            persisted_plan.metadata["worktree_provider_resolve"]["retry_disposition"],
+            "exhausted"
         );
         assert!(
             persisted_plan.metadata["worktree_provider_resolve"]["deadline_unix_ms"]
@@ -4849,10 +4850,7 @@ fn provider_resolve_timeout_retries_with_durable_deadline_and_cwd_recovery() {
             persisted_plan.metadata["cook_provision"]["handle"],
             exact_handle
         );
-        assert_eq!(
-            persisted_plan.tasks[0].workspace.root.as_deref(),
-            Some(workspace.to_str().expect("utf8 workspace"))
-        );
+        assert_eq!(persisted_plan.tasks[0].workspace.root, None);
     });
 }
 
@@ -5353,6 +5351,15 @@ fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
             .as_str()
             .expect("replay command")
             .contains(provider.to_string_lossy().as_ref()));
+        let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
+        assert_eq!(plan.metadata["worktree_provider_resolve"]["attempt"], 2);
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["retry_disposition"],
+            "exhausted"
+        );
+        assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert!(record.metadata["provider_executions"].is_null());
         assert!(phases
             .lock()
             .expect("phase lock")
