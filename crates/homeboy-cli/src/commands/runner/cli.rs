@@ -211,7 +211,7 @@ pub(super) enum RunnerCommand {
         #[arg(long, value_enum, default_value_t = RunnerDoctorScopeArg::General)]
         scope: RunnerDoctorScopeArg,
 
-        /// Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon.
+        /// Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon. Without --scope, repairs use lab-offload.
         #[arg(long)]
         repair: bool,
     },
@@ -823,6 +823,28 @@ mod tests {
             "--unknown"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn doctor_repair_without_scope_selects_lab_offload_repair() {
+        let cli = Cli::try_parse_from(["homeboy", "runner", "doctor", "lab", "--repair"])
+            .expect("generated runner recovery command parses");
+        let Commands::Runner(RunnerArgs {
+            command:
+                RunnerCommand::Doctor {
+                    scope,
+                    repair: true,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected runner doctor repair command");
+        };
+
+        assert_eq!(
+            super::doctor::repair_scope(scope.into(), true),
+            doctor::RunnerDoctorScope::LabOffload
+        );
     }
 
     #[test]
