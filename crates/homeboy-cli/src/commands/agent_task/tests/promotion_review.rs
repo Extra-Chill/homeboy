@@ -802,7 +802,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 draft_pr: false,
                 full: true,
                 no_progress: false,
-                base: "main".to_string(),
+                base: Some("main".to_string()),
                 head: None,
                 title: None,
                 commit_message: None,
@@ -813,6 +813,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 acceptance_authority: None,
                 acceptance_policy: None,
                 repository_identity: None,
+                base_resolution: None,
             },
             Arc::new(ExtensionProviderAgentTaskExecutor::default()),
         )
@@ -1202,7 +1203,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 draft_pr: false,
                 full: true,
                 no_progress: false,
-                base: "main".to_string(),
+                base: Some("main".to_string()),
                 head: Some("fixture-promoted".to_string()),
                 title: None,
                 commit_message: None,
@@ -1213,6 +1214,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 acceptance_authority: None,
                 acceptance_policy: None,
                 repository_identity: None,
+                base_resolution: None,
             },
             executor.clone(),
             Some(Arc::new(MirroredAttemptDispatcher {
