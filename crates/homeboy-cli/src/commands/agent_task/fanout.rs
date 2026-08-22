@@ -4164,7 +4164,7 @@ fn render_prompt(
     worktree: &str,
 ) -> String {
     let template = template.unwrap_or(
-        "Fix {issue_url}. Inspect the issue, implement the smallest correct change in {repo}, run the requested verification gates, and report the changed files plus verification results. Homeboy deterministic finalization is enabled: Homeboy will commit, push {branch}, open/update the PR, add AI disclosure, and finalize reviewer-ready evidence after gates pass. Do not inspect credentials, configure git identity, commit, push, or open/update the PR yourself.",
+        "Fix {issue_url}. Inspect the issue, implement the smallest correct change in {repo}, run the requested verification gates, and report the changed files plus verification results. Homeboy deterministic finalization is enabled: Homeboy will commit, push the prepared branch, create or update the PR, add AI disclosure, and finalize reviewer-ready evidence after gates pass. Do not inspect credentials, configure git identity, commit, push, or create or update the PR yourself.",
     );
     template
         .replace("{issue_url}", &issue.url)
@@ -6330,12 +6330,14 @@ fi
                 .expect("prompt")
                 .contains("https://github.com/Extra-Chill/homeboy/issues/6453"));
             let prompt = plan.cooks[0].prompt.as_deref().expect("prompt");
-            assert!(prompt.contains("Homeboy will commit, push fix/issue-6453-homeboy"));
-            assert!(prompt.contains("open/update the PR"));
+            assert!(prompt.contains("Homeboy will commit, push the prepared branch"));
+            assert!(prompt.contains("create or update the PR"));
             assert!(prompt.contains("add AI disclosure"));
             assert!(
                 prompt.contains("Do not inspect credentials, configure git identity, commit, push")
             );
+            crate::commands::agent_task::run::validate_provider_evidence_inputs(&[], Some(prompt))
+                .expect("generated default prompt must pass evidence-path validation");
             assert_eq!(plan.cooks[0].verify, vec!["cargo test --lib"]);
             assert_eq!(plan.cooks[0].backend.as_deref(), Some("sandbox"));
 
