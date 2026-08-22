@@ -231,6 +231,7 @@ pub(crate) fn preview_cook(
                 "mutates": false,
                 "resolved": {
                     "repository": args.dispatch.repo,
+                    "repository_identity": args.repository_identity,
                     "worktree": args.to_worktree,
                     "base": args.base,
                     "head": args.head,
@@ -312,6 +313,7 @@ pub(crate) fn preview_cook(
             "mutates": false,
             "resolved": {
                 "repository": args.dispatch.repo,
+                "repository_identity": args.repository_identity,
                 "worktree": args.to_worktree,
                 "base": args.base,
                 "head": args.head,
@@ -2266,13 +2268,20 @@ fn preview_destination_blocker(handle: &str, problem: &str) -> homeboy::core::Er
 
 #[derive(Debug, Clone)]
 struct CookRepositoryIdentity {
+    repository_name: String,
     slug: String,
+    aliases: Vec<String>,
     remote_identity: String,
     workspace_path: PathBuf,
     provenance: String,
 }
 
 fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if let Some(repository_name) = args.dispatch.repo.as_deref() {
+        // Resolve configured aliases before any workspace or provider operation,
+        // so every Cook invocation form rejects an ambiguous identity equally.
+        cook_components_for_repository_name(repository_name)?;
+    }
     let mut identities = Vec::new();
     let mut source_identities = Vec::new();
     for (flag, value) in [
@@ -2320,7 +2329,7 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
                 candidates
             });
     let selected = match args.dispatch.repo.as_deref() {
-        Some(repo) => candidates.get(repo).cloned().ok_or_else(|| {
+        Some(repo) => select_cook_repository_identity(repo, &candidates)?.ok_or_else(|| {
             repository_identity_error(
                 format!("--repo `{repo}` does not match the supplied workspace repository"),
                 &candidates,
@@ -2339,6 +2348,8 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
     args.dispatch.repo = Some(selected.slug.clone());
     args.repository_identity = Some(serde_json::json!({
         "slug": selected.slug,
+        "repository_name": selected.repository_name,
+        "component_id": selected.slug,
         "remote_identity": selected.remote_identity,
         "workspace_path": selected.workspace_path,
         "provenance": selected.provenance,
@@ -2352,10 +2363,22 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
 fn bind_cook_repository_identity_from_config(
     args: &mut AgentTaskCookArgs,
 ) -> homeboy::core::Result<()> {
-    let Some(repo) = args.dispatch.repo.as_deref() else {
+    let Some(repo) = args.dispatch.repo.clone() else {
         return Ok(());
     };
-    let component = homeboy::core::component::registered_by_id(repo)?;
+    let component = cook_components_for_repository_name(&repo)?
+        .into_iter()
+        .next();
+    let component_id = component
+        .as_ref()
+        .map(|component| component.id.as_str())
+        .unwrap_or(&repo);
+    args.dispatch.repo = Some(component_id.to_string());
+    let repository_name = component
+        .as_ref()
+        .and_then(|component| component.remote_url.as_deref())
+        .map(normalize_repository_name)
+        .unwrap_or_else(|| normalize_repository_name(&repo));
     args.repository_identity = Some(
         match component
             .as_ref()
@@ -2363,18 +2386,111 @@ fn bind_cook_repository_identity_from_config(
             .and_then(canonical_remote_identity)
         {
             Some(remote_identity) => serde_json::json!({
-                "slug": repo,
+                "slug": component_id,
+                "repository_name": repository_name,
+                "component_id": component_id,
                 "remote_identity": remote_identity,
-                "provenance": "--repo:configured-component",
+                "provenance": if component_id == repo { "--repo:configured-component" } else { "--repo:configured-component-alias" },
             }),
             None => serde_json::json!({
                 "slug": repo,
-                "repository_name": normalize_repository_name(repo),
+                "repository_name": normalize_repository_name(&repo),
+                "component_id": repo,
                 "provenance": "--repo:requested-repository",
             }),
         },
     );
     Ok(())
+}
+
+fn cook_components_for_repository_name(
+    repository_name: &str,
+) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
+    if let Some(component) = homeboy::core::component::registered_by_id(repository_name)? {
+        return Ok(vec![component]);
+    }
+    let repository_name = normalize_repository_name(repository_name);
+    let matches = homeboy::core::component::registered()?
+        .into_iter()
+        .filter(|component| {
+            component.id.eq_ignore_ascii_case(&repository_name)
+                || component
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_repository_name(alias) == repository_name)
+                || component
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(repository_component_identity_ambiguity_error(
+            repository_name,
+            &matches,
+        ));
+    }
+    Ok(matches)
+}
+
+fn select_cook_repository_identity(
+    repository_name: &str,
+    candidates: &BTreeMap<String, CookRepositoryIdentity>,
+) -> homeboy::core::Result<Option<CookRepositoryIdentity>> {
+    let repository_name = normalize_repository_name(repository_name);
+    let matches = candidates
+        .values()
+        .filter(|candidate| {
+            candidate.slug.eq_ignore_ascii_case(&repository_name)
+                || candidate.repository_name == repository_name
+                || candidate
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_repository_name(alias) == repository_name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        let matches = matches
+            .into_iter()
+            .map(|candidate| (candidate.slug.clone(), candidate))
+            .collect();
+        return Err(repository_identity_error(
+            format!("--repo `{repository_name}` is ambiguous for the supplied workspace"),
+            &matches,
+        ));
+    }
+    Ok(matches.into_iter().next())
+}
+
+fn repository_component_identity_ambiguity_error(
+    repository_name: String,
+    components: &[homeboy::core::component::Component],
+) -> homeboy::core::Error {
+    let candidates = components
+        .iter()
+        .map(|component| {
+            let repository = component
+                .remote_url
+                .as_deref()
+                .map(normalize_repository_name)
+                .unwrap_or_else(|| "no configured remote".to_string());
+            format!("{} ({repository})", component.id)
+        })
+        .collect::<Vec<_>>();
+    let recovery = components
+        .iter()
+        .map(|component| format!("homeboy agent-task cook --repo {} ...", component.id))
+        .collect();
+    homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        format!(
+            "--repo `{repository_name}` matches multiple configured component identities; candidates: {}",
+            candidates.join(", ")
+        ),
+        None,
+        Some(recovery),
+    )
 }
 
 fn normalize_repository_name(repository: &str) -> String {
@@ -2440,7 +2556,9 @@ fn cook_repository_identities_for_workspace(
             };
             if component_identity == remote_identity {
                 identities.push(CookRepositoryIdentity {
+                    repository_name: normalize_repository_name(&remote_url),
                     slug: component.id.clone(),
+                    aliases: component.aliases.clone(),
                     remote_identity: remote_identity.clone(),
                     workspace_path: git_root.clone(),
                     provenance: format!("{flag}:git-remote:{remote_name}"),
