@@ -8,6 +8,7 @@
 
 use crate::agent_task_lifecycle;
 use homeboy_core::Result;
+use std::collections::HashMap;
 
 use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
 
@@ -550,6 +551,340 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
         serde_json::to_value(&report)
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
     }
+
+    fn reconcile_unmaterialized_cook_admissions(&self) -> Result<serde_json::Value> {
+        reconcile_unmaterialized_cook_admissions()
+    }
+}
+
+/// Advance reference-only Cook admissions from the daemon's serialized tick.
+/// A transition to `queued` is a fenced replay signal; destination provisioning
+/// remains in the established CLI Cook path after that signal is consumed.
+pub fn reconcile_unmaterialized_cook_admissions() -> Result<serde_json::Value> {
+    reconcile_unmaterialized_cook_admissions_with(
+        None,
+        homeboy_core::daemon::orchestration::select_unmaterialized_cook_runner,
+        homeboy_core::daemon::orchestration::replay_unmaterialized_cook_admission,
+    )
+}
+
+/// Reconcile exactly one durable admission. Used by explicit resume so one
+/// operator action never probes or mutates unrelated queued Cooks.
+pub fn reconcile_unmaterialized_cook_admission(run_id: &str) -> Result<serde_json::Value> {
+    reconcile_unmaterialized_cook_admissions_with(
+        Some(run_id),
+        homeboy_core::daemon::orchestration::select_unmaterialized_cook_runner,
+        homeboy_core::daemon::orchestration::replay_unmaterialized_cook_admission,
+    )
+}
+
+#[doc(hidden)]
+pub fn reconcile_unmaterialized_cook_admission_with(
+    run_id: &str,
+    select_runner: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+    replay: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    reconcile_unmaterialized_cook_admissions_with(Some(run_id), select_runner, replay)
+}
+
+fn reconcile_unmaterialized_cook_admissions_with(
+    run_id: Option<&str>,
+    select_runner: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+    replay: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    reconcile_unmaterialized_cook_admissions_with_process_identity(
+        run_id,
+        select_runner,
+        replay,
+        |pid, identity| {
+            homeboy_core::process::process_identity_state_with_start_identity(
+                pid,
+                None,
+                Some(identity),
+            )
+        },
+    )
+}
+
+fn reconcile_unmaterialized_cook_admissions_with_process_identity(
+    run_id: Option<&str>,
+    mut select_runner: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+    mut replay: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+    mut process_identity_state: impl FnMut(
+        u32,
+        &homeboy_core::process::ProcessStartIdentity,
+    ) -> homeboy_core::process::ProcessIdentityState,
+) -> Result<serde_json::Value> {
+    const MAX_ADMISSIONS_PER_PASS: usize = 32;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let now = chrono::Utc::now();
+    let mut considered = 0usize;
+    let mut queued = 0usize;
+    let mut blocked = 0usize;
+    let mut exhausted = 0usize;
+    let mut replayed = 0usize;
+    let mut replay_failed = 0usize;
+    let mut records = match run_id {
+        Some(run_id) => vec![agent_task_lifecycle::exact_record_in_store(&store, run_id)?],
+        None => store.read_records()?,
+    };
+    records.retain(|record| {
+        !record.state.is_terminal() && record.metadata["unmaterialized_cook_admission"].is_object()
+    });
+    records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    let records = if run_id.is_some() || records.len() <= MAX_ADMISSIONS_PER_PASS {
+        records
+    } else {
+        rotate_admission_batch(&store, records, MAX_ADMISSIONS_PER_PASS)?
+    };
+    let mut selection_cache = HashMap::<String, serde_json::Value>::new();
+    for record in records {
+        let record =
+            if record.metadata["unmaterialized_cook_admission"]["state"] == "preparing_inputs" {
+                match agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(
+                    &store,
+                    &record.run_id,
+                ) {
+                    Ok(record) => record,
+                    Err(_) => continue,
+                }
+            } else {
+                record
+            };
+        let admission = &record.metadata["unmaterialized_cook_admission"];
+        if admission["state"] == "preparing_inputs" {
+            continue;
+        }
+        let due = admission["retry"]["next_attempt_at"]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_none_or(|value| value.with_timezone(&chrono::Utc) <= now);
+        let active_lease =
+            unmaterialized_replay_lease_is_active(admission, now, &mut process_identity_state);
+        if !due || active_lease {
+            continue;
+        }
+        considered += 1;
+        let selection_key = admission_selection_cache_key(admission);
+        let selection = selection_cache
+            .entry(selection_key)
+            .or_insert_with(|| {
+                select_runner(&serde_json::json!({
+                    "schema": "homeboy/unmaterialized-cook-runner-selection-request/v1",
+                    "cook_id": record.run_id,
+                    "binding": admission["binding"],
+                }))
+                .unwrap_or_else(|error| {
+                    serde_json::json!({
+                        "state": "blocked_runner_unavailable",
+                        "reason": homeboy_core::redaction::redact_string(&error.message),
+                    })
+                })
+            })
+            .clone();
+        let selected_runner = selection["runner_id"].as_str();
+        let eligible = selected_runner.is_some();
+        let mut should_exhaust = false;
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut claimed_fence = None;
+        let updated = store.mutate_record(&record.run_id, |current| {
+            if current.state.is_terminal() {
+                return false;
+            }
+            let admission = &mut current.metadata["unmaterialized_cook_admission"];
+            let active_lease =
+                unmaterialized_replay_lease_is_active(admission, now, &mut process_identity_state);
+            if active_lease {
+                return false;
+            }
+            let attempts = admission["admission_attempts"].as_u64().unwrap_or(0) + 1;
+            let max = admission["retry"]["max_attempts"].as_u64().unwrap_or(20);
+            admission["admission_attempts"] = serde_json::json!(attempts);
+            if attempts >= max {
+                admission
+                    .as_object_mut()
+                    .expect("unmaterialized admission object")
+                    .remove("lease");
+                admission["state"] = serde_json::json!("exhausted");
+                admission["reason"] =
+                    serde_json::json!("bounded Lab admission retry budget exhausted");
+                should_exhaust = true;
+                exhausted += 1;
+            } else if eligible {
+                let fence = admission["fence"].as_u64().unwrap_or(0) + 1;
+                admission["fence"] = serde_json::json!(fence);
+                admission["state"] = serde_json::json!("queued");
+                admission["lease"] = serde_json::json!({
+                    "state": "claimed",
+                    "fence": fence,
+                    "token": token,
+                    "expires_at": (now + chrono::Duration::seconds(60)).to_rfc3339(),
+                });
+                claimed_fence = Some(fence);
+                queued += 1;
+            } else {
+                admission
+                    .as_object_mut()
+                    .expect("unmaterialized admission object")
+                    .remove("lease");
+                let shift = u32::try_from(attempts.min(5)).unwrap_or(5);
+                let delay = 15_i64.saturating_mul(1_i64 << shift);
+                admission["retry"]["next_attempt_at"] =
+                    serde_json::json!((now + chrono::Duration::seconds(delay)).to_rfc3339());
+                admission["state"] = serde_json::json!(selection["state"]
+                    .as_str()
+                    .filter(|state| matches!(
+                        *state,
+                        "queued" | "blocked_runner_unavailable" | "blocked_runner_stale"
+                    ))
+                    .unwrap_or("blocked_runner_unavailable"));
+                admission["reason"] = serde_json::json!(selection["reason"]
+                    .as_str()
+                    .map(homeboy_core::redaction::redact_string)
+                    .unwrap_or_else(|| "no currently eligible Lab runner".to_string()));
+                blocked += 1;
+            }
+            current.updated_at = Some(now.to_rfc3339());
+            true
+        })?;
+        if should_exhaust {
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &store,
+                &record.run_id,
+                "bounded Lab admission retry budget exhausted",
+            )?;
+        }
+        if let (Some(fence), Some(runner_id), Some(updated)) =
+            (claimed_fence, selected_runner, updated)
+        {
+            let request = serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-replay-request/v1",
+                "cook_id": record.run_id,
+                "fence": fence,
+                "token": token,
+                "runner_id": runner_id,
+                "intent": updated.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"],
+            });
+            let replay_result = replay(&request);
+            let token_for_receipt = token.clone();
+            let _ = store.mutate_record(&record.run_id, |current| {
+                let admission = &mut current.metadata["unmaterialized_cook_admission"];
+                if admission["lease"]["fence"].as_u64() != Some(fence)
+                    || admission["lease"]["token"].as_str() != Some(token_for_receipt.as_str())
+                    || !matches!(
+                        admission["lease"]["state"].as_str(),
+                        Some("claimed" | "consumed" | "materializing")
+                    )
+                {
+                    return false;
+                }
+                match &replay_result {
+                    Ok(receipt) => {
+                        admission["replay_receipt"] = receipt.clone();
+                        admission["replay_receipt"]["recorded_at"] =
+                            serde_json::json!(chrono::Utc::now().to_rfc3339());
+                        replayed += 1;
+                    }
+                    Err(error) => {
+                        admission["state"] = serde_json::json!("blocked_runner_unavailable");
+                        admission["reason"] = serde_json::json!(
+                            homeboy_core::redaction::redact_string(&error.message)
+                        );
+                        admission["lease"]["state"] = serde_json::json!("released");
+                        admission["retry"]["next_attempt_at"] = serde_json::json!(
+                            (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339()
+                        );
+                        replay_failed += 1;
+                    }
+                }
+                true
+            })?;
+        }
+    }
+    Ok(serde_json::json!({
+        "schema": "homeboy/unmaterialized-cook-admission-reconcile/v1",
+        "considered": considered,
+        "queued": queued,
+        "blocked": blocked,
+        "exhausted": exhausted,
+        "replayed": replayed,
+        "replay_failed": replay_failed,
+    }))
+}
+
+fn admission_selection_cache_key(admission: &serde_json::Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "placement": admission["binding"]["placement"],
+        "provider_runtime_refs": admission["binding"]["provider_runtime_refs"],
+    }))
+    .unwrap_or_else(|_| "configured-policy".to_string())
+}
+
+fn rotate_admission_batch(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    records: Vec<agent_task_lifecycle::AgentTaskRunRecord>,
+    limit: usize,
+) -> Result<Vec<agent_task_lifecycle::AgentTaskRunRecord>> {
+    let start = store
+        .unmaterialized_admission_cursor()
+        .and_then(|last| records.iter().position(|record| record.run_id > last))
+        .unwrap_or(0);
+    let count = limit.min(records.len());
+    let mut records = records.into_iter().map(Some).collect::<Vec<_>>();
+    let total = records.len();
+    let selected = (0..count)
+        .map(|offset| {
+            records[(start + offset) % total]
+                .take()
+                .expect("fair admission index is unique")
+        })
+        .collect::<Vec<_>>();
+    if let Some(last) = selected.last() {
+        store.write_unmaterialized_admission_cursor(&last.run_id)?;
+    }
+    Ok(selected)
+}
+
+fn unmaterialized_replay_lease_is_active(
+    admission: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+    process_identity_state: &mut impl FnMut(
+        u32,
+        &homeboy_core::process::ProcessStartIdentity,
+    ) -> homeboy_core::process::ProcessIdentityState,
+) -> bool {
+    let lease = &admission["lease"];
+    match lease["state"].as_str() {
+        Some("claimed") => lease["expires_at"]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|value| value.with_timezone(&chrono::Utc) > now),
+        Some("consumed" | "materializing") => {
+            let owner = &lease["owner"];
+            if owner.is_null() {
+                return false;
+            }
+            let Some(pid) = owner["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+            else {
+                // Malformed identity evidence is indeterminate, not proof that
+                // a potentially live materializer can be superseded safely.
+                return true;
+            };
+            let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+                owner["process_start_identity"].clone(),
+            ) else {
+                return true;
+            };
+            matches!(
+                process_identity_state(pid, &identity),
+                homeboy_core::process::ProcessIdentityState::Live
+                    | homeboy_core::process::ProcessIdentityState::Unverifiable
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Snake_case labels for the run-state vocabulary, matching the enum's own
@@ -593,6 +928,218 @@ mod tests {
             record.metadata["runner_pid"] = serde_json::json!(999_999u32);
         })
         .expect("orphaned owner");
+    }
+
+    fn due_unmaterialized_admission(run_id: &str) {
+        agent_task_lifecycle::record_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({
+                "placement": { "requested": "auto", "local_fallback": false },
+                "provider_runtime_refs": { "required_capabilities": [] },
+            }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                serde_json::json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("make admission due");
+    }
+
+    #[test]
+    fn ordinary_rows_before_an_admission_do_not_consume_the_pass_limit() {
+        with_isolated_home(|_| {
+            for index in 0..32 {
+                let plan = AgentTaskPlan::new(format!("ordinary-plan-{index:02}"), Vec::new());
+                agent_task_lifecycle::submit_plan(&plan, Some(&format!("a-ordinary-{index:02}")))
+                    .expect("ordinary row");
+            }
+            due_unmaterialized_admission("z-unmaterialized");
+            let replayed = std::cell::Cell::new(0usize);
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |_| {
+                    replayed.set(replayed.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker" }))
+                },
+            )
+            .expect("reconcile admission after ordinary rows");
+            assert_eq!(report["replayed"], 1);
+            assert_eq!(replayed.get(), 1);
+        });
+    }
+
+    #[test]
+    fn persisted_admission_cursor_advances_later_rows_after_reconciler_restart() {
+        with_isolated_home(|_| {
+            for index in 0..40 {
+                due_unmaterialized_admission(&format!("fair-admission-{index:02}"));
+            }
+            let replayed = std::cell::RefCell::new(std::collections::BTreeSet::new());
+            let run_pass = || {
+                reconcile_unmaterialized_cook_admissions_with(
+                    None,
+                    |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                    |request| {
+                        replayed
+                            .borrow_mut()
+                            .insert(request["cook_id"].as_str().expect("cook id").to_string());
+                        Ok(serde_json::json!({ "worker_id": "worker" }))
+                    },
+                )
+                .expect("fair reconcile pass");
+            };
+            run_pass();
+            assert_eq!(replayed.borrow().len(), 32);
+            let restarted_store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("restarted store");
+            assert_eq!(
+                restarted_store.unmaterialized_admission_cursor().as_deref(),
+                Some("fair-admission-31")
+            );
+            run_pass();
+            assert_eq!(replayed.borrow().len(), 40);
+        });
+    }
+
+    #[test]
+    fn compatible_admissions_share_one_runner_selection_snapshot_per_pass() {
+        with_isolated_home(|_| {
+            for index in 0..3 {
+                due_unmaterialized_admission(&format!("cached-selection-{index}"));
+            }
+            let selections = std::cell::Cell::new(0usize);
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| {
+                    selections.set(selections.get() + 1);
+                    Ok(serde_json::json!({ "state": "blocked_runner_unavailable" }))
+                },
+                |_| panic!("blocked admission must not replay"),
+            )
+            .expect("cached selection pass");
+            assert_eq!(report["considered"], 3);
+            assert_eq!(selections.get(), 1);
+        });
+    }
+
+    #[test]
+    fn preparing_inputs_admission_is_never_claimed_before_publication() {
+        with_isolated_home(|_| {
+            let cook_id = "preparing-inputs-not-claimable";
+            let root = homeboy_core::paths::homeboy_data()
+                .expect("data root")
+                .join("agent-task-cook-admissions");
+            agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({
+                    "request_ref": "sha256:preparing",
+                    "input_publication": {
+                        "state": "staged",
+                        "staging_root": root.join(".missing-stage"),
+                        "published_root": root.join(cook_id).join("inputs"),
+                    },
+                }),
+                "queued",
+                "eligible",
+            )
+            .expect("prepared admission");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("due");
+            assert!(agent_task_lifecycle::detached_cook_admission_is_live(
+                &agent_task_lifecycle::exact_record(cook_id).expect("prepared record"),
+                chrono::Utc::now(),
+            ));
+
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| panic!("preparing admission must not select a runner"),
+                |_| panic!("preparing admission must not replay"),
+            )
+            .expect("preparing pass");
+            assert_eq!(report["considered"], 0);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(cook_id)
+                    .expect("still preparing")
+                    .metadata["unmaterialized_cook_admission"]["state"],
+                "preparing_inputs"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_same_runner_with_different_requirements_does_not_share_verdict() {
+        with_isolated_home(|_| {
+            for (run_id, capability) in [
+                ("explicit-capability-compatible", "supported"),
+                ("explicit-capability-incompatible", "missing"),
+            ] {
+                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                    run_id,
+                    serde_json::json!({
+                        "placement": {
+                            "requested": "lab",
+                            "runner_ref": "same-runner",
+                            "local_fallback": false,
+                        },
+                        "provider_runtime_refs": {
+                            "backend": "fixture",
+                            "required_capabilities": [capability],
+                            "runtime_generation": "test",
+                        },
+                    }),
+                    "queued",
+                    "eligible",
+                )
+                .expect("admitted");
+                agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                    record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                        serde_json::json!("2000-01-01T00:00:00+00:00");
+                })
+                .expect("due");
+            }
+            let selections = std::cell::Cell::new(0usize);
+            let replays = std::cell::Cell::new(0usize);
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |request| {
+                    selections.set(selections.get() + 1);
+                    let required = request["binding"]["provider_runtime_refs"]
+                        ["required_capabilities"][0]
+                        .as_str();
+                    Ok(if required == Some("supported") {
+                        serde_json::json!({ "state": "eligible", "runner_id": "same-runner" })
+                    } else {
+                        serde_json::json!({
+                            "state": "blocked_runner_unavailable",
+                            "reason": "required capability unavailable",
+                        })
+                    })
+                },
+                |_| {
+                    replays.set(replays.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker" }))
+                },
+            )
+            .expect("capability-aware selection");
+            assert_eq!(selections.get(), 2);
+            assert_eq!(replays.get(), 1);
+            assert_eq!(report["replayed"], 1);
+            assert_eq!(report["blocked"], 1);
+            assert!(
+                agent_task_lifecycle::exact_record("explicit-capability-incompatible")
+                    .expect("blocked record")
+                    .tasks
+                    .is_empty()
+            );
+        });
     }
 
     #[test]
@@ -938,6 +1485,415 @@ mod tests {
                 .expect("wait pass");
             assert_eq!(runs["reconciled"], 0, "{runs}");
             assert_eq!(waits["changed"], 0, "{waits}");
+        });
+    }
+
+    #[test]
+    fn unmaterialized_admission_retries_reconnect_once_under_a_fenced_lease() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-unmaterialized-reconnect";
+            agent_task_lifecycle::record_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({
+                    "placement": {
+                        "local_fallback": false,
+                    }
+                }),
+                "blocked_runner_unavailable",
+                "runner disconnected",
+            )
+            .expect("admitted");
+            let make_due = || {
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                        serde_json::json!("2000-01-01T00:00:00+00:00");
+                })
+                .expect("make retry due");
+            };
+
+            make_due();
+            let blocked = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "blocked_runner_unavailable" })),
+                |_| panic!("blocked admission must not replay"),
+            )
+            .expect("blocked pass");
+            assert_eq!(blocked["blocked"], 1);
+            let blocked_record = agent_task_lifecycle::exact_record(cook_id).expect("blocked");
+            assert_eq!(
+                blocked_record.metadata["unmaterialized_cook_admission"]["state"],
+                "blocked_runner_unavailable"
+            );
+            assert!(blocked_record.tasks.is_empty());
+
+            make_due();
+            let replay_calls = std::cell::Cell::new(0usize);
+            let connected = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |request| {
+                    assert!(request["binding"]["placement"]["candidate_runner_refs"].is_null());
+                    Ok(serde_json::json!({ "state": "eligible", "runner_id": "configured-later" }))
+                },
+                |_| {
+                    replay_calls.set(replay_calls.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker-1" }))
+                },
+            )
+            .expect("reconnect pass");
+            assert_eq!(connected["queued"], 1);
+            assert_eq!(connected["replayed"], 1);
+            assert_eq!(replay_calls.get(), 1);
+            let claimed = agent_task_lifecycle::exact_record(cook_id).expect("claimed");
+            let lease = claimed.metadata["unmaterialized_cook_admission"]["lease"].clone();
+            assert_eq!(lease["state"], "claimed");
+            assert_eq!(
+                claimed.metadata["unmaterialized_cook_admission"]["fence"],
+                1
+            );
+
+            let duplicate = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |_| panic!("active claim must not replay twice"),
+            )
+            .expect("duplicate reconnect pass");
+            assert_eq!(duplicate["queued"], 0);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(cook_id)
+                    .expect("same claim")
+                    .metadata["unmaterialized_cook_admission"]["lease"],
+                lease
+            );
+
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("expire abandoned replay claim");
+            let recovered_calls = std::cell::Cell::new(0usize);
+            let recovered = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |_| {
+                    recovered_calls.set(recovered_calls.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker-2" }))
+                },
+            )
+            .expect("restart recovery pass");
+            assert_eq!(recovered["replayed"], 1);
+            assert_eq!(recovered_calls.get(), 1);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(cook_id)
+                    .expect("reclaimed")
+                    .metadata["unmaterialized_cook_admission"]["fence"],
+                2
+            );
+        });
+    }
+
+    #[test]
+    fn cancelled_unmaterialized_admission_never_invokes_replay() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-unmaterialized-cancelled";
+            agent_task_lifecycle::record_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({
+                    "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false },
+                    "replay_intent": { "schema": "fixture" }
+                }),
+                "queued",
+                "waiting",
+            )
+            .expect("admitted");
+            agent_task_lifecycle::cancel_run(cook_id, Some("operator cancellation"))
+                .expect("cancelled");
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |_| panic!("cancelled admission must not replay"),
+            )
+            .expect("cancelled pass");
+            assert_eq!(report["considered"], 0);
+            assert_eq!(report["replayed"], 0);
+        });
+    }
+
+    #[test]
+    fn live_materializer_identity_blocks_duplicate_replay() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-materializing-fence";
+            agent_task_lifecycle::record_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({ "placement": { "local_fallback": false } }),
+                "queued",
+                "eligible",
+            )
+            .expect("admitted");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["state"] =
+                    serde_json::json!("materializing");
+                record.metadata["unmaterialized_cook_admission"]["fence"] = serde_json::json!(3);
+                record.metadata["unmaterialized_cook_admission"]["lease"] = serde_json::json!({
+                    "state": "materializing",
+                    "fence": 3,
+                    "token": "winner",
+                    "materialization_fence_at": "2000-01-01T00:00:00+00:00",
+                    "owner": {
+                        "pid": 42,
+                        "process_start_identity": {
+                            "platform": "linux",
+                            "starttime_ticks": 100,
+                        },
+                    },
+                });
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("materializing owner");
+            let report = reconcile_unmaterialized_cook_admissions_with_process_identity(
+                None,
+                |_| panic!("materializing admission must not probe another runner"),
+                |_| panic!("materializing admission must not replay"),
+                |pid, identity| {
+                    assert_eq!(pid, 42);
+                    assert_eq!(
+                        identity,
+                        &homeboy_core::process::ProcessStartIdentity::Linux {
+                            starttime_ticks: 100,
+                        }
+                    );
+                    homeboy_core::process::ProcessIdentityState::Live
+                },
+            )
+            .expect("race pass");
+            assert_eq!(report["considered"], 0);
+            let record = agent_task_lifecycle::exact_record(cook_id).expect("winner retained");
+            assert_eq!(record.metadata["unmaterialized_cook_admission"]["fence"], 3);
+            assert_eq!(
+                record.metadata["unmaterialized_cook_admission"]["lease"]["token"],
+                "winner"
+            );
+            assert!(unmaterialized_replay_lease_is_active(
+                &record.metadata["unmaterialized_cook_admission"],
+                chrono::Utc::now(),
+                &mut |_, _| homeboy_core::process::ProcessIdentityState::Unverifiable,
+            ));
+        });
+    }
+
+    #[test]
+    fn dead_reused_and_absent_materializer_identities_are_reclaimed() {
+        with_isolated_home(|_| {
+            for (cook_id, has_owner, identity_state) in [
+                (
+                    "reconcile-dead-materializer",
+                    true,
+                    Some(homeboy_core::process::ProcessIdentityState::Dead),
+                ),
+                (
+                    "reconcile-reused-materializer",
+                    true,
+                    Some(homeboy_core::process::ProcessIdentityState::IdentityMismatch),
+                ),
+                ("reconcile-absent-materializer", false, None),
+            ] {
+                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                    cook_id,
+                    serde_json::json!({ "placement": { "local_fallback": false } }),
+                    "queued",
+                    "eligible",
+                )
+                .expect("admitted");
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    let admission = &mut record.metadata["unmaterialized_cook_admission"];
+                    admission["state"] = serde_json::json!("materializing");
+                    admission["fence"] = serde_json::json!(3);
+                    admission["lease"] = serde_json::json!({
+                        "state": "materializing",
+                        "fence": 3,
+                        "token": "abandoned",
+                        "owner": {
+                            "pid": 42,
+                            "process_start_identity": {
+                                "platform": "linux",
+                                "starttime_ticks": 100,
+                            },
+                        },
+                    });
+                    if !has_owner {
+                        admission["lease"]
+                            .as_object_mut()
+                            .expect("lease object")
+                            .remove("owner");
+                    }
+                    admission["retry"]["next_attempt_at"] =
+                        serde_json::json!("2000-01-01T00:00:00+00:00");
+                })
+                .expect("abandoned materializer");
+
+                let report = reconcile_unmaterialized_cook_admissions_with_process_identity(
+                    Some(cook_id),
+                    |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                    |_| Ok(serde_json::json!({ "worker_id": "replacement" })),
+                    |_, _| identity_state.expect("absent owner is not inspected"),
+                )
+                .expect("recover materializer");
+                assert_eq!(report["replayed"], 1, "{report}");
+                let record = agent_task_lifecycle::exact_record(cook_id).expect("reclaimed");
+                assert_eq!(
+                    record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+                    "claimed"
+                );
+                assert_eq!(record.metadata["unmaterialized_cook_admission"]["fence"], 4);
+            }
+        });
+    }
+
+    #[test]
+    fn restart_replay_converges_to_the_new_live_materializer() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-restart-materializer";
+            agent_task_lifecycle::record_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({ "placement": { "local_fallback": false } }),
+                "queued",
+                "eligible",
+            )
+            .expect("admitted");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                let admission = &mut record.metadata["unmaterialized_cook_admission"];
+                admission["state"] = serde_json::json!("materializing");
+                admission["fence"] = serde_json::json!(1);
+                admission["lease"] = serde_json::json!({
+                    "state": "materializing",
+                    "fence": 1,
+                    "token": "crashed",
+                    "owner": {
+                        "pid": 42,
+                        "process_start_identity": {
+                            "platform": "linux",
+                            "starttime_ticks": 100,
+                        },
+                    },
+                });
+                admission["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("crashed materializer");
+
+            let replay_calls = std::cell::Cell::new(0usize);
+            let recovered = reconcile_unmaterialized_cook_admissions_with_process_identity(
+                Some(cook_id),
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |request| {
+                    replay_calls.set(replay_calls.get() + 1);
+                    let fence = request["fence"].as_u64().expect("fence");
+                    let token = request["token"].as_str().expect("token");
+                    assert!(
+                        agent_task_lifecycle::consume_unmaterialized_cook_replay_claim(
+                            cook_id, fence, token
+                        )?
+                    );
+                    assert!(
+                        agent_task_lifecycle::renew_unmaterialized_cook_replay_claim(
+                            cook_id, fence, token
+                        )?
+                    );
+                    Ok(serde_json::json!({ "worker_id": "replacement" }))
+                },
+                |_, _| homeboy_core::process::ProcessIdentityState::Dead,
+            )
+            .expect("restart recovery");
+            assert_eq!(recovered["replayed"], 1);
+            assert_eq!(replay_calls.get(), 1);
+
+            let duplicate = reconcile_unmaterialized_cook_admissions_with(
+                Some(cook_id),
+                |_| panic!("live replacement must not select again"),
+                |_| panic!("live replacement must not replay again"),
+            )
+            .expect("converged pass");
+            assert_eq!(duplicate["considered"], 0);
+            assert_eq!(replay_calls.get(), 1);
+        });
+    }
+
+    #[test]
+    fn scoped_reconcile_never_scans_or_mutates_a_sibling_admission() {
+        with_isolated_home(|_| {
+            for cook_id in ["scoped-admission-target", "scoped-admission-sibling"] {
+                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                    cook_id,
+                    serde_json::json!({ "placement": { "local_fallback": false } }),
+                    "blocked_runner_unavailable",
+                    "waiting",
+                )
+                .expect("admitted");
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                        serde_json::json!("2000-01-01T00:00:00+00:00");
+                })
+                .unwrap();
+            }
+            let selections = std::cell::Cell::new(0usize);
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                Some("scoped-admission-target"),
+                |_| {
+                    selections.set(selections.get() + 1);
+                    Ok(serde_json::json!({ "state": "blocked_runner_unavailable" }))
+                },
+                |_| panic!("blocked target does not replay"),
+            )
+            .expect("scoped pass");
+            assert_eq!(report["considered"], 1);
+            assert_eq!(selections.get(), 1);
+            assert_eq!(
+                agent_task_lifecycle::exact_record("scoped-admission-sibling")
+                    .unwrap()
+                    .metadata["unmaterialized_cook_admission"]["admission_attempts"],
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn unmaterialized_admission_exhaustion_terminalizes_without_materialization() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-unmaterialized-exhausted";
+            agent_task_lifecycle::record_unmaterialized_cook_admission(
+                cook_id,
+                serde_json::json!({
+                    "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false }
+                }),
+                "blocked_runner_stale",
+                "runner stale",
+            )
+            .expect("admitted");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["retry"]["max_attempts"] =
+                    serde_json::json!(1);
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("exhaust next pass");
+
+            let report = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "blocked_runner_stale" })),
+                |_| panic!("exhausted admission must not replay"),
+            )
+            .expect("exhausted");
+            assert_eq!(report["exhausted"], 1);
+            let terminal = agent_task_lifecycle::exact_record(cook_id).expect("terminal");
+            assert_eq!(
+                terminal.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert!(terminal.tasks.is_empty());
+            assert!(terminal.metadata.get("worktree_provision").is_none());
+            assert!(terminal.metadata.get("provider_execution").is_none());
         });
     }
 }

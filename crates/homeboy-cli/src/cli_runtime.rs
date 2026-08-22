@@ -251,6 +251,7 @@ fn register_startup_providers_after_reconcile(
     // caller: a detached cook whose owner died stayed `running` forever, and a
     // controller parked in `Waiting` never left it.
     crate::agents::agent_task_service::register_orchestration_driver();
+    crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
@@ -1772,6 +1773,9 @@ fn preflight_hot_command_with(
     command_identity: &output::CommandIdentity,
     preflight: impl FnOnce() -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput>,
 ) -> Option<i32> {
+    if controller_owned_unmaterialized_resume(cli) {
+        return None;
+    }
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
@@ -1789,6 +1793,7 @@ fn preflight_hot_command_with(
             if hot_command.lab_offload_supported
                 && cli.runner.is_none()
                 && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+                && !detached_cook_unmaterialized_admission_eligible(cli)
                 && resource_policy::evaluate_with_runner_hint(
                     hot_command,
                     &resources,
@@ -1947,7 +1952,9 @@ fn preflight_hot_command_with(
                         err.details["lab_inventory_admission"] = serde_json::to_value(diagnostic)
                             .expect("Lab inventory admission diagnostic serializes");
                     }
-                    if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload) {
+                    if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload)
+                        || detached_cook_unmaterialized_admission_eligible(cli)
+                    {
                         return None;
                     }
                     output_runtime::emit_json_result_for_identity(
@@ -1963,6 +1970,33 @@ fn preflight_hot_command_with(
     }
 
     None
+}
+
+fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Resume(args),
+    }) = &cli.command
+    else {
+        return false;
+    };
+    crate::agents::agent_tasks::lifecycle::exact_record(&args.run_id).is_ok_and(|record| {
+        !record.state.is_terminal() && record.metadata["unmaterialized_cook_admission"].is_object()
+    })
+}
+
+/// A detached non-local Cook owns a durable queue boundary. Resource pressure
+/// may influence its Lab placement, but must not prevent routing from creating
+/// that boundary. Explicit local placement remains the only authorization for
+/// controller provider execution.
+fn detached_cook_unmaterialized_admission_eligible(cli: &Cli) -> bool {
+    cli.detach_after_handoff
+        && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+        && matches!(
+            cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+            })
+        )
 }
 
 fn review_test_runner_requirements(
@@ -2465,6 +2499,43 @@ mod tests {
                 "{placement:?}"
             );
         }
+    }
+
+    #[test]
+    fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "hot-unmaterialized-resume";
+            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission(
+                run_id,
+                serde_json::json!({
+                    "request_ref": "sha256:resume",
+                    "placement": { "local_fallback": false },
+                }),
+                "blocked_runner_unavailable",
+                "waiting",
+            )
+            .expect("admitted");
+            let cli = Cli::parse_from(["homeboy", "agent-task", "resume", run_id]);
+
+            assert_eq!(
+                preflight_hot_command_with(
+                    &cli,
+                    None,
+                    &output::CommandIdentity::with_operation("agent-task", "resume"),
+                    || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                        panic!("controller lifecycle resume must bypass resource preflight")
+                    },
+                ),
+                None
+            );
+            let record = crate::agents::agent_tasks::lifecycle::exact_record(run_id)
+                .expect("controller-owned admission");
+            assert_eq!(
+                record.metadata["unmaterialized_cook_admission"]["binding"]["placement"]
+                    ["local_fallback"],
+                false
+            );
+        });
     }
 
     #[test]

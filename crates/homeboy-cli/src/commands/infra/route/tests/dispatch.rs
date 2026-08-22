@@ -3233,6 +3233,804 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
     assert!(!detached_cook_can_queue(&local));
 }
 
+#[test]
+fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct() {
+    let readiness = |state| runners::LabRunnerReadiness {
+        state,
+        selected_runner_id: None,
+        available_runner_ids: Vec::new(),
+        reasons: Vec::new(),
+        remediation_commands: Vec::new(),
+    };
+    assert_eq!(
+        unmaterialized_admission_state(Some(&readiness(runners::LabRunnerReadinessState::Stale))),
+        "blocked_runner_stale"
+    );
+    assert_eq!(
+        unmaterialized_admission_state(Some(&readiness(
+            runners::LabRunnerReadinessState::Disconnected
+        ))),
+        "blocked_runner_unavailable"
+    );
+    assert_eq!(
+        unmaterialized_admission_state(Some(&readiness(
+            runners::LabRunnerReadinessState::CapacityBlocked
+        ))),
+        "queued"
+    );
+}
+
+#[test]
+fn admission_capability_contract_accepts_runtime_or_capability_and_rejects_missing() {
+    let inventory = runners::RunnerCapabilityInventory {
+        runtime_ids: ["runtime-a".to_string()].into_iter().collect(),
+        capabilities: ["capability-a".to_string()].into_iter().collect(),
+    };
+    assert!(runner_inventory_satisfies_admission_capabilities(
+        &inventory,
+        &["runtime-a", "capability-a"].into_iter().collect(),
+    ));
+    assert!(!runner_inventory_satisfies_admission_capabilities(
+        &inventory,
+        &["missing"].into_iter().collect(),
+    ));
+}
+
+#[test]
+fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("inputs");
+        let provider = temp.path().join("provider.json");
+        std::fs::write(
+            &provider,
+            r#"{"secret_env":["PROVIDER_TOKEN"],"token_env":"PROVIDER_TOKEN","credential_ref":"configured/provider"}"#,
+        )
+        .expect("provider config");
+        let args = vec![
+            "homeboy".to_string(),
+            "--detach-after-handoff".to_string(),
+            "--placement".to_string(),
+            "auto".to_string(),
+            "--runner-secret-env".to_string(),
+            "API_TOKEN".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            "replay-intent-cook".to_string(),
+            "--to-worktree".to_string(),
+            "repo@fix-12443".to_string(),
+            "--prompt".to_string(),
+            "implement the requested change".to_string(),
+            "--private-verify".to_string(),
+            "test -n \"$API_TOKEN\"".to_string(),
+            "--provider-config".to_string(),
+            format!("@{}", provider.display()),
+        ];
+        let intent = build_unmaterialized_cook_replay_intent(&args, "replay-intent-cook", None)
+            .expect("replay intent");
+        let serialized = serde_json::to_string(&intent).expect("serialize intent");
+        assert!(!serialized.contains("PROVIDER_TOKEN"), "{serialized}");
+        assert!(
+            !serialized.contains("implement the requested change"),
+            "{serialized}"
+        );
+        assert!(!serialized.contains("test -n"), "{serialized}");
+        assert!(
+            serialized.contains("API_TOKEN"),
+            "secret name is a reference"
+        );
+        assert!(intent
+            .argv
+            .iter()
+            .any(|arg| arg == "--detach-after-handoff"));
+        assert!(!intent.argv.iter().any(|arg| arg == "--placement"));
+        assert!(intent.argv.iter().any(|arg| arg == "--prompt"));
+        assert!(intent.argv.iter().any(|arg| arg == "--private-verify-file"));
+        assert_eq!(intent.input_refs.len(), 3);
+        assert!(intent
+            .input_refs
+            .iter()
+            .all(|reference| !reference.path.starts_with(temp.path().to_str().unwrap())));
+        let replayed_intent =
+            build_unmaterialized_cook_replay_intent(&args, "replay-intent-cook", None)
+                .expect("idempotent replay intent");
+        assert_eq!(replayed_intent, intent);
+        assert!(intent
+            .argv
+            .windows(2)
+            .any(|pair| pair[0] == "--prompt" && pair[1].starts_with("homeboy-replay-ref:")));
+        let mut replay = intent.argv.clone();
+        replay.splice(1..1, ["--runner".to_string(), "lab".to_string()]);
+        let replay =
+            Cli::try_parse_from(replay).expect("intent reconstructs normal Cook CLI inputs");
+        assert_eq!(replay.runner.as_deref(), Some("lab"));
+        assert!(
+            replay.runner.is_some() && !replay.placement.is_explicit_local_override(),
+            "replay pins Lab without authorizing local placement"
+        );
+    });
+}
+
+#[test]
+fn replay_intent_snapshots_all_arbitrary_text_and_rejects_credential_urls() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let content = [
+            ("--task", "task body"),
+            ("--goal", "goal body"),
+            ("--title", "title body"),
+            ("--commit-message", "commit body"),
+            ("--command-policy-reason", "policy body"),
+        ];
+        let mut args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            "text-replay".to_string(),
+        ];
+        for (flag, value) in content {
+            args.extend([flag.to_string(), value.to_string()]);
+        }
+        let intent = build_unmaterialized_cook_replay_intent(&args, "text-replay", None)
+            .expect("text-backed intent");
+        let serialized = serde_json::to_string(&intent).unwrap();
+        for (_, value) in content {
+            assert!(!serialized.contains(value), "leaked {value}: {serialized}");
+        }
+        assert_eq!(
+            intent
+                .input_refs
+                .iter()
+                .filter(|reference| reference.argv_token.is_some())
+                .count(),
+            content.len()
+        );
+
+        let unsafe_url = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--run-id",
+            "url-replay",
+            "--task-url",
+            "https://example.test/task?token=secret",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let error = build_unmaterialized_cook_replay_intent(&unsafe_url, "url-replay", None)
+            .expect_err("credential URL rejected");
+        assert!(error.message.contains("unsafe inline value"), "{error:?}");
+    });
+}
+
+#[test]
+fn replay_input_failure_never_commits_a_manifest_and_retry_is_clean() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "missing-replay-input";
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("provider.json");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            cook_id.to_string(),
+            "--prompt".to_string(),
+            "durable prompt".to_string(),
+            "--provider-config".to_string(),
+            format!("@{}", provider.display()),
+        ];
+        build_unmaterialized_cook_replay_intent(&args, cook_id, None)
+            .expect_err("missing input fails intent");
+        let root = replay_intent_storage_root(cook_id).expect("root");
+        assert!(!root.exists(), "failed snapshot must not publish inputs");
+        let parent = root
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("admissions root");
+        assert!(
+            std::fs::read_dir(parent)
+                .expect("read admissions root")
+                .all(|entry| !entry
+                    .expect("admission entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("-inputs-stage-")),
+            "failed snapshot staging bytes must be cleaned"
+        );
+        let manifests = std::fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("manifest"))
+            .count();
+        assert_eq!(manifests, 0);
+        std::fs::write(&provider, "{}").unwrap();
+        let intent = build_unmaterialized_cook_replay_intent(&args, cook_id, None)
+            .expect("retry completes the same immutable input set");
+        assert!(std::path::Path::new(&intent.input_manifest.path).is_file());
+        assert_eq!(intent.input_refs.len(), 2);
+    });
+}
+
+#[test]
+fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "supervised-replay-worker";
+        agent_task_lifecycle::record_unmaterialized_cook_admission(
+            cook_id,
+            serde_json::json!({ "request_ref": "sha256:request" }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = serde_json::json!(1);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = serde_json::json!({
+                "state": "claimed",
+                "fence": 1,
+                "token": "supervised-token",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("claimed");
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 17"])
+            .spawn()
+            .expect("spawn deterministic replay worker");
+        supervise_replay_worker(
+            cook_id.to_string(),
+            1,
+            "supervised-token".to_string(),
+            child,
+        )
+        .join()
+        .expect("supervisor joins");
+        let record = agent_task_lifecycle::exact_record(cook_id).expect("released claim");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "released"
+        );
+    });
+}
+
+#[test]
+fn rejected_admission_rebinding_writes_no_snapshot_bytes() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "snapshot-rebinding";
+        agent_task_lifecycle::record_unmaterialized_cook_admission(
+            cook_id,
+            serde_json::json!({ "request_ref": "sha256:first" }),
+            "queued",
+            "eligible",
+        )
+        .expect("first binding");
+        let root = replay_intent_storage_root(cook_id).expect("snapshot root");
+        assert!(!root.exists());
+
+        let error = agent_task_lifecycle::precheck_unmaterialized_cook_admission(
+            cook_id,
+            "sha256:rejected",
+        )
+        .expect_err("rebound request rejected before staging");
+        assert!(error.message.contains("different unmaterialized admission"));
+        assert!(!root.exists(), "rejected request wrote snapshot bytes");
+        let parent = root.parent().expect("snapshot parent");
+        assert!(
+            !parent.exists()
+                || std::fs::read_dir(parent)
+                    .expect("read snapshot parent")
+                    .next()
+                    .is_none(),
+            "rejected request left bytes in the admission directory"
+        );
+    });
+}
+
+#[test]
+fn daemon_recovers_preparing_snapshot_after_crash_before_publish() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "snapshot-publication-retry";
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--prompt",
+            "retryable snapshot",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let staged = stage_unmaterialized_cook_replay_intent(&args, cook_id, None)
+            .expect("first staged snapshot");
+        let intent = staged.intent.as_ref().expect("staged intent").clone();
+        let binding = serde_json::json!({
+            "request_ref": "sha256:stable-request",
+            "replay_intent": intent,
+            "input_publication": {
+                "state": "staged",
+                "staging_root": staged.staging_root.display().to_string(),
+                "published_root": staged.published_root.display().to_string(),
+            },
+        });
+        let prepared = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            cook_id, binding, "queued", "eligible",
+        )
+        .expect("accepted binding");
+        assert_eq!(
+            prepared.metadata["unmaterialized_cook_admission"]["state"],
+            "preparing_inputs"
+        );
+        assert_eq!(
+            prepared.metadata["detached_cook_handoff"]["cook_id"],
+            cook_id
+        );
+        staged.retain_for_recovery();
+        let root = replay_intent_storage_root(cook_id).expect("published root");
+        assert!(!root.exists(), "simulated crash precedes atomic rename");
+        crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
+            cook_id,
+            |_| panic!("freshly published admission is not due for selection"),
+            |_| panic!("freshly published admission is not replayed"),
+        )
+        .expect("daemon recovers durable staging");
+        let recovered = agent_task_lifecycle::exact_record(cook_id).expect("recovered admission");
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
+        assert!(root.is_dir());
+    });
+}
+
+#[test]
+fn daemon_recovers_preparing_state_after_crash_after_publish() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "snapshot-published-before-state";
+        let args = ["homeboy", "agent-task", "cook", "--run-id", cook_id]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let staged =
+            stage_unmaterialized_cook_replay_intent(&args, cook_id, None).expect("staged snapshot");
+        let binding = serde_json::json!({
+            "request_ref": "sha256:published-request",
+            "replay_intent": staged.intent.as_ref().expect("intent"),
+            "input_publication": {
+                "state": "staged",
+                "staging_root": staged.staging_root.display().to_string(),
+                "published_root": staged.published_root.display().to_string(),
+            },
+        });
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            cook_id,
+            binding,
+            "blocked_runner_unavailable",
+            "waiting",
+        )
+        .expect("prepared");
+        staged.publish().expect("publish before simulated crash");
+
+        crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
+            cook_id,
+            |_| panic!("freshly published admission is not due for selection"),
+            |_| panic!("freshly published admission is not replayed"),
+        )
+        .expect("daemon converges published snapshot");
+        let recovered = agent_task_lifecycle::exact_record(cook_id).expect("recovered admission");
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["state"],
+            "blocked_runner_unavailable"
+        );
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["input_publication"]
+                ["state"],
+            "published"
+        );
+    });
+}
+
+#[derive(Debug)]
+struct ReplayRouteExecutor {
+    executions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter for ReplayRouteExecutor {
+    fn execute(
+        &self,
+        request: homeboy::agents::agent_task::AgentTaskRequest,
+        _context: homeboy::agents::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> homeboy::agents::agent_task::AgentTaskOutcome {
+        self.executions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let workspace = request
+            .workspace
+            .root
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .expect("remote replay workspace");
+        std::fs::write(workspace.join("replay-provider.txt"), "remote provider\n")
+            .expect("remote provider candidate");
+        for args in [
+            vec!["add", "replay-provider.txt"],
+            vec![
+                "-c",
+                "user.name=Replay Provider",
+                "-c",
+                "user.email=replay@example.com",
+                "commit",
+                "-m",
+                "remote replay candidate",
+            ],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&workspace)
+                .status()
+                .expect("remote provider git command");
+            assert!(status.success());
+        }
+        homeboy::agents::agent_task::AgentTaskOutcome {
+            schema: homeboy::agents::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: homeboy::agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("remote replay fixture completed".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: serde_json::Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+}
+
+struct ReplayRouteDispatcher {
+    dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
+}
+
+impl std::fmt::Debug for ReplayRouteDispatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplayRouteDispatcher")
+            .finish_non_exhaustive()
+    }
+}
+
+impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher for ReplayRouteDispatcher {
+    fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "kind": "lab",
+            "runner_id": "fake-reconnected-runner",
+            "execution_placement_decision": {},
+            "allow_local_fallback": false,
+            "allow_dirty_lab_workspace": false,
+            "skip_deps_hydration": false,
+            "detach_after_handoff": false,
+            "source_path": null,
+            "job_overrides": {
+                "env": {},
+                "secret_env_names": [],
+                "workspace_root": null,
+            },
+        }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: homeboy::agents::agent_task_scheduler::AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<
+            &crate::agents::agent_task_service::DerivedCookBaselineCapability,
+        >,
+    ) -> homeboy::core::Result<()> {
+        self.dispatches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        crate::agents::agent_task_service::run_submitted(
+            run_id.to_string(),
+            Arc::clone(&self.executor),
+        )?;
+        Ok(())
+    }
+}
+
+#[test]
+fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materialization() {
+    std::thread::Builder::new()
+        .name("reconnect-replay-e2e".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            crate::test_support::with_isolated_home(|_| {
+                let primary = tempfile::tempdir().expect("primary workspace");
+                git_init(primary.path());
+                let committed = homeboy::core::test_support::bounded_output({
+                    let mut command = std::process::Command::new("git");
+                    command
+                        .args([
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.com",
+                            "commit",
+                            "--allow-empty",
+                            "-m",
+                            "fixture",
+                        ])
+                        .current_dir(primary.path());
+                    command
+                });
+                assert!(committed.status.success(), "{committed:?}");
+                git_add_remote(primary.path(), FIXTURE_REPOSITORY_REMOTE);
+                register_component("replay-fixture", primary.path(), FIXTURE_REPOSITORY_REMOTE);
+                let workspace = primary.path().join("replay-worktree");
+                let output = homeboy::core::test_support::bounded_output({
+                    let mut command = std::process::Command::new("git");
+                    command
+                        .args([
+                            "worktree",
+                            "add",
+                            "-b",
+                            "replay-worktree",
+                            workspace.to_str().expect("workspace path"),
+                        ])
+                        .current_dir(primary.path());
+                    command
+        });
+        assert!(output.status.success(), "{output:?}");
+        let provider_dir = tempfile::tempdir().expect("worktree provider");
+        let provider = provider_dir.path().join("resolve-worktree.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"replay-fixture@replay-worktree\",\"path\":\"{}\",\"branch\":\"replay-worktree\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                workspace.display()
+            ),
+        )
+        .expect("write worktree provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).unwrap();
+        }
+        let mut config = homeboy::core::defaults::load_config();
+        config.worktree_providers.insert(
+            "replay-fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save worktree provider");
+        let promotion_provider = provider_dir.path().join("promotion-provider.sh");
+        std::fs::write(
+            &promotion_provider,
+            format!(
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                workspace.display()
+            ),
+        )
+        .expect("write promotion provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&promotion_provider).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&promotion_provider, permissions).unwrap();
+        }
+                let cook_id = "e2e-unmaterialized-replay";
+                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                    cook_id,
+                    serde_json::json!({
+                        "placement": { "requested": "auto", "local_fallback": false },
+                        "provider_runtime_refs": { "required_capabilities": [] },
+                        "replay_intent": { "schema": "fixture" },
+                    }),
+                    "blocked_runner_unavailable",
+                    "runner disconnected",
+                )
+                .expect("unavailable admission");
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                        serde_json::json!("2000-01-01T00:00:00+00:00");
+                })
+                .expect("due after reconnect");
+
+                let cli = Cli::parse_from([
+                    "homeboy",
+                    "--detach-after-handoff",
+                    "agent-task",
+                    "cook",
+                    "--run-id",
+                    cook_id,
+                    "--prompt",
+                    "complete through the normal Cook service",
+                    "--to-worktree",
+                    "replay-fixture@replay-worktree",
+                    "--backend",
+                    "fixture",
+                    "--provider-command",
+                    promotion_provider.to_str().expect("promotion provider"),
+                    "--no-finalize",
+                ]);
+                let local_executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let remote_executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let local_executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor =
+                    Arc::new(ReplayRouteExecutor {
+                        executions: Arc::clone(&local_executions),
+                    });
+                let dispatcher = Arc::new(ReplayRouteDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                    executor: Arc::new(ReplayRouteExecutor {
+                        executions: Arc::clone(&remote_executions),
+                    }),
+                });
+                let replay_calls = std::cell::Cell::new(0usize);
+                let report =
+            crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
+                cook_id,
+                |_| {
+                    Ok(serde_json::json!({
+                        "state": "eligible",
+                        "runner_id": "fake-reconnected-runner",
+                    }))
+                },
+                |request| {
+                    replay_calls.set(replay_calls.get() + 1);
+                    let fence = request["fence"].as_u64().expect("fence");
+                    let token = request["token"].as_str().expect("token");
+                    let fence_string = fence.to_string();
+                    let _claim_env = EnvGuard::set_many(&[
+                        (COOK_REPLAY_CLAIM_COOK_ENV, Some(cook_id)),
+                        (COOK_REPLAY_CLAIM_FENCE_ENV, Some(&fence_string)),
+                        (COOK_REPLAY_CLAIM_TOKEN_ENV, Some(token)),
+                    ]);
+                    assert_eq!(consume_unmaterialized_replay_claim()?, None);
+                    let result = run_split_placement_cook_with_runtime(
+                        &cli,
+                        None,
+                        Some("fake-reconnected-runner"),
+                        None,
+                        Some(dispatcher.clone()),
+                        Some(Arc::clone(&local_executor)),
+                    )
+                    .expect("normal split Cook route");
+                    assert_eq!(result, Some(0));
+                    Ok(serde_json::json!({ "worker_id": "in-process-replay" }))
+                },
+            )
+            .expect("reconnect replay");
+                assert_eq!(report["replay_failed"], 0);
+                assert_eq!(replay_calls.get(), 1);
+                assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    remote_executions.load(std::sync::atomic::Ordering::SeqCst),
+                    1
+                );
+                assert_eq!(
+                    local_executions.load(std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+                let index = agent_task_lifecycle::cook_index(cook_id).expect("normal Cook index");
+                assert_eq!(index.attempts.len(), 1);
+                let parent =
+                    agent_task_lifecycle::exact_record(cook_id).expect("redirected parent");
+                assert_eq!(
+                    parent.metadata["detached_cook_handoff"]["state"],
+                    "redirected"
+                );
+                assert!(parent.state.is_terminal());
+
+                let duplicate =
+            crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
+                cook_id,
+                |_| panic!("completed parent must not select again"),
+                |_| panic!("completed parent must not replay again"),
+            )
+            .expect("duplicate pass");
+                assert_eq!(duplicate["replayed"], 0);
+                assert_eq!(
+                    agent_task_lifecycle::cook_index(cook_id)
+                        .unwrap()
+                        .attempts
+                        .len(),
+                    1
+                );
+            })
+        })
+        .expect("spawn large-stack replay test")
+        .join()
+        .expect("replay test thread");
+}
+
+#[test]
+fn replay_intent_rejects_inline_secret_bearing_inputs() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        for unsafe_args in [
+            vec!["--runner-env", "TOKEN=value"],
+            vec!["--gate-env", "TOKEN=value"],
+            vec!["--lab-env-json", r#"{"TOKEN":"value"}"#],
+            vec!["--provider-config", r#"{"token":"value"}"#],
+            vec!["--provider-argv", "token=value"],
+            vec!["--provider-evidence", r#"{"password":"value"}"#],
+        ] {
+            let args = [
+                vec!["homeboy", "agent-task", "cook", "--run-id", "unsafe-replay"],
+                unsafe_args,
+            ]
+            .concat()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let error = build_unmaterialized_cook_replay_intent(&args, "unsafe-replay", None)
+                .expect_err("unsafe inline input rejected");
+            assert!(error.message.contains("unsafe inline value"), "{error:?}");
+        }
+
+        let temp = tempfile::tempdir().expect("provider input");
+        for (name, content) in [
+            ("provider.json", r#"{"token":"plaintext-provider-token"}"#),
+            ("client.json", r#"{"authorization":"Bearer plaintext"}"#),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, content).expect("secret fixture");
+            let flag = if name == "provider.json" {
+                "--provider-config"
+            } else {
+                "--client-context"
+            };
+            let args = [
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--run-id".to_string(),
+                format!("unsafe-{name}"),
+                flag.to_string(),
+                format!("@{}", path.display()),
+            ];
+            let error =
+                build_unmaterialized_cook_replay_intent(&args, &format!("unsafe-{name}"), None)
+                    .expect_err("secret-bearing snapshot rejected");
+            assert!(error.message.contains("unsafe inline value"), "{error:?}");
+        }
+    });
+}
+
 /// The failure an operator actually hits is "no ready Lab runner", not
 /// "`--placement lab` is unavailable for this local-only command". Reporting the
 /// portability contract there contradicts the documented wave guidance (#9373).

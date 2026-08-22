@@ -17,6 +17,230 @@ use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
+fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), cook_id, |_| Ok(json!({})))
+        .expect("submit admission parent");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"] = json!({
+                "state": "pending",
+                "admission_state": "pre_supervisor",
+                "admission_deadline_at": (chrono::Utc::now()
+                    + chrono::Duration::hours(1))
+                    .to_rfc3339(),
+                "cook_id": cook_id,
+                "cancellation_fence": { "state": "open" },
+            });
+            true
+        })
+        .expect("seed admission parent");
+}
+
+#[test]
+fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    seed_unmaterialized_admission_parent(&store, "cook-unmaterialized-stale");
+    let binding = json!({
+        "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "worktree_ref": "repo@fix-12443",
+        "task": { "prompt_ref": "sha256:prompt" },
+        "provider_runtime_refs": {
+            "backend": "provider",
+            "secret_env_names": ["TOKEN"],
+            "provider_config_ref": "sha256:config"
+        },
+        "placement": { "local_fallback": false, "candidate_runner_refs": ["lab"] }
+    });
+
+    let first = record_unmaterialized_cook_admission_in_store(
+        &store,
+        "cook-unmaterialized-stale",
+        binding.clone(),
+        "blocked_runner_stale",
+        "runner stale token=must-redact",
+    )
+    .expect("admitted");
+    let replay = record_unmaterialized_cook_admission_in_store(
+        &store,
+        "cook-unmaterialized-stale",
+        binding,
+        "blocked_runner_stale",
+        "runner stale token=must-redact",
+    )
+    .expect("idempotent replay");
+
+    assert_eq!(first.run_id, replay.run_id);
+    assert_eq!(
+        replay.metadata["unmaterialized_cook_admission"]["state"],
+        "blocked_runner_stale"
+    );
+    assert_eq!(
+        replay.metadata["unmaterialized_cook_admission"]["binding"]["placement"]["local_fallback"],
+        false
+    );
+    assert!(detached_cook_admission_is_live(&replay, chrono::Utc::now()));
+    let serialized = serde_json::to_string(&replay).expect("serialize admission");
+    assert!(!serialized.contains("must-redact"), "{serialized}");
+    for command in ["status", "watch", "cancel", "resume"] {
+        assert!(replay.metadata["unmaterialized_cook_admission"]["commands"][command].is_string());
+    }
+}
+
+#[test]
+fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_a_child() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    seed_unmaterialized_admission_parent(&store, "cook-unmaterialized-cancel");
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        "cook-unmaterialized-cancel",
+        json!({ "request_ref": "sha256:first" }),
+        "blocked_runner_unavailable",
+        "runner disconnected",
+    )
+    .expect("admitted");
+    let error = record_unmaterialized_cook_admission_in_store(
+        &store,
+        "cook-unmaterialized-cancel",
+        json!({ "request_ref": "sha256:different" }),
+        "queued",
+        "runner ready",
+    )
+    .expect_err("identity rebinding refused");
+    assert!(error.message.contains("different unmaterialized admission"));
+
+    let cancelled = cancel_run_in_store(
+        &store,
+        "cook-unmaterialized-cancel",
+        Some("operator cancellation"),
+    )
+    .expect("cancel admission");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(
+        cancelled.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
+        "cancelled"
+    );
+    assert!(cancelled.metadata["detached_cook_handoff"]["child_pid"].is_null());
+}
+
+#[test]
+fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-replay-consume";
+        record_unmaterialized_cook_admission(
+            cook_id,
+            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(7);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "claimed",
+                "fence": 7,
+                "token": "token-7",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("claim replay");
+
+        assert!(
+            !consume_unmaterialized_cook_replay_claim(cook_id, 6, "token-7")
+                .expect("wrong fence rejected")
+        );
+        assert!(
+            !consume_unmaterialized_cook_replay_claim(cook_id, 7, "wrong")
+                .expect("wrong token rejected")
+        );
+        assert!(
+            consume_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
+                .expect("exact claim consumed")
+        );
+        assert!(
+            renew_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
+                .expect("exact claim renewed at materialization")
+        );
+        assert!(
+            !renew_unmaterialized_cook_replay_claim(cook_id, 8, "token-7")
+                .expect("superseded fence rejected at materialization")
+        );
+        assert!(
+            !consume_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
+                .expect("duplicate consumption rejected")
+        );
+        let record = exact_record(cook_id).expect("consumed record");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "materializing"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "materializing"
+        );
+        assert!(record.metadata["unmaterialized_cook_admission"]["lease"]
+            .get("expires_at")
+            .is_none());
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["owner"]["pid"],
+            std::process::id()
+        );
+        assert_eq!(
+            serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+                record.metadata["unmaterialized_cook_admission"]["lease"]["owner"]
+                    ["process_start_identity"]
+                    .clone(),
+            )
+            .expect("persisted process identity"),
+            homeboy_core::process::process_start_identity(std::process::id())
+                .expect("inspect test process")
+                .expect("test process identity"),
+        );
+        assert!(record.tasks.is_empty());
+    });
+}
+
+#[test]
+fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners() {
+    with_isolated_home(|_| {
+        for cook_id in ["resume-blocked", "resume-materializing", "resume-terminal"] {
+            record_unmaterialized_cook_admission(
+                cook_id,
+                json!({ "placement": { "local_fallback": false } }),
+                "blocked_runner_unavailable",
+                "waiting",
+            )
+            .expect("admitted");
+        }
+        rewrite_record_for_test("resume-materializing", |record| {
+            record.metadata["unmaterialized_cook_admission"]["state"] = json!("materializing");
+            record.metadata["unmaterialized_cook_admission"]["lease"] =
+                json!({ "state": "materializing", "fence": 1, "token": "owner" });
+        })
+        .unwrap();
+        cancel_run("resume-terminal", Some("cancelled by operator")).unwrap();
+
+        let blocked = rearm_unmaterialized_cook_admission("resume-blocked").unwrap();
+        assert_eq!(
+            blocked.metadata["unmaterialized_cook_admission"]["reason"],
+            "explicit scoped resume requested"
+        );
+        let materializing = rearm_unmaterialized_cook_admission("resume-materializing").unwrap();
+        assert_eq!(
+            materializing.metadata["unmaterialized_cook_admission"]["lease"]["token"],
+            "owner"
+        );
+        let terminal = rearm_unmaterialized_cook_admission("resume-terminal").unwrap();
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            terminal.metadata["unmaterialized_cook_admission"]["reason"],
+            "waiting"
+        );
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The submission, the hand-written running projection and the status
 /// read that judges it are one home, so "the accepted daemon authority kept

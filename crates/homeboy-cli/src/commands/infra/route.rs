@@ -16,6 +16,7 @@ use homeboy::core::Error;
 use homeboy::runner::runners::{self, RunnerExecOptions};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +39,10 @@ pub(crate) fn route_after_parse_with_provenance(
     // letting one through means cook executes a request it already knows it
     // cannot honor (#10917).
     reject_contradictory_cook_arguments(cli)?;
+
+    if let Some(exit_code) = consume_unmaterialized_replay_claim()? {
+        return Ok(Some(exit_code));
+    }
 
     // Preview is a controller-local read-only compilation. It must bypass every
     // placement route before runner selection or split Cook materialization can
@@ -180,7 +185,7 @@ pub(crate) fn route_after_parse_with_provenance(
     // readiness lookup could otherwise turn an admitted Lab attempt into a
     // local fallback before routing constructs its immutable decision.
     let admitted_lab_runner = admitted_lab_runner_id(cli, lab_command.as_ref());
-    let mut lab_readiness =
+    let lab_readiness =
         if lab_command.is_some() && cli.runner.is_none() && admitted_lab_runner.is_none() {
             runners::lab_runner_readiness().ok()
         } else {
@@ -198,17 +203,17 @@ pub(crate) fn route_after_parse_with_provenance(
     } else {
         None
     };
-    if inferred_runner_id.is_none() && admitted_lab_runner.is_none() && detached_cook_can_queue(cli)
-    {
-        // The first readiness observation is intentionally non-mutating. Before
-        // refusing a hot-machine Cook, reconcile the live Lab inventory: a
-        // terminal runner job may have freed capacity since that observation.
-        let queued_runner_id = runners::refresh_detached_queue_runner()?;
-        lab_readiness = runners::lab_runner_readiness().ok();
-        inferred_runner_id = lab_readiness
-            .as_ref()
-            .and_then(|readiness| readiness.selected_runner_id.clone())
-            .or(queued_runner_id);
+    if detached_cook_can_queue(cli) && !is_unmaterialized_replay_worker() {
+        // Persist before any bounded refresh. The scoped replay selector owns
+        // ready and reverse-capacity admission after this durable boundary.
+        return admit_unmaterialized_cook(
+            cli,
+            &normalized_args,
+            lab_readiness.as_ref(),
+            output_file,
+            provenance,
+        )
+        .map(Some);
     }
     let deferred_requirements = review_test_deferred_requirements(cli);
     let deferred_runner_incompatible = inferred_runner_id
@@ -277,7 +282,9 @@ pub(crate) fn route_after_parse_with_provenance(
     // Cooks must resolve provider ownership before the launcher can acknowledge
     // or observe them. Auto without a runner is a local provider placement and
     // needs the same daemon-owned supervision as explicit local execution.
-    if needs_provider_resolved_cook_interception(cli, inferred_runner_id.as_deref()) {
+    if !is_unmaterialized_replay_worker()
+        && needs_provider_resolved_cook_interception(cli, inferred_runner_id.as_deref())
+    {
         let provider_placement = if inferred_runner_id.is_some() {
             "lab"
         } else {
@@ -814,6 +821,1136 @@ fn detached_cook_can_queue(cli: &Cli) -> bool {
         )
 }
 
+fn admission_digest(value: impl AsRef<[u8]>) -> String {
+    format!(
+        "sha256:{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(value.as_ref())
+    )
+}
+
+/// Admit a detached Cook without compiling an executable plan or touching its
+/// destination. Only references, identities, counts, and one-way request
+/// bindings enter durable state; execution inputs remain at their owning source.
+fn admit_unmaterialized_cook(
+    cli: &Cli,
+    normalized_args: &[String],
+    readiness: Option<&runners::LabRunnerReadiness>,
+    output_file: Option<&str>,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<i32> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+    }) = &cli.command
+    else {
+        return Err(Error::internal_unexpected(
+            "unmaterialized admission called for a non-Cook command",
+        ));
+    };
+    let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
+    crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    let cook_id = resolved
+        .dispatch
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+    let readiness_state = readiness
+        .map(|value| value.state.as_str())
+        .unwrap_or("absent");
+    let state = unmaterialized_admission_state(readiness);
+    let reason = readiness
+        .and_then(|value| value.reasons.first())
+        .map(String::as_str)
+        .unwrap_or("no eligible Lab runner is currently available");
+    let digest_json =
+        |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
+    let current_notification = homeboy::core::notification_route::current();
+    let request_ref = digest_json(serde_json::json!({
+        "argv": normalized_args,
+        "notification": current_notification,
+    }));
+    let existing =
+        agent_task_lifecycle::precheck_unmaterialized_cook_admission(&cook_id, &request_ref)?;
+    let notification = current_notification.as_ref().map(|route| {
+        serde_json::json!({
+            "transport": route.transport,
+            "route_ref": admission_digest(&route.route),
+        })
+    });
+    let mut staged_intent = if existing.is_none() {
+        Some(stage_unmaterialized_cook_replay_intent(
+            normalized_args,
+            &cook_id,
+            current_notification.as_ref(),
+        )?)
+    } else {
+        None
+    };
+    let binding = staged_intent.as_ref().map(|staged| serde_json::json!({
+        "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "request_ref": request_ref,
+        "candidate_policy": resolved.candidate_completion,
+        "placement": {
+            "requested": cli.placement,
+            "local_fallback": false,
+            "runner_ref": cli.runner,
+            "resource_policy": homeboy::core::resource_policy_context::captured_context(),
+        },
+        "source": {
+            "repository": resolved.dispatch.repo,
+            "repository_identity": resolved.repository_identity,
+            "task_refs": resolved.dispatch.task_url.iter().collect::<Vec<_>>(),
+        },
+        "base": resolved.base,
+        "base_resolution": resolved.base_resolution,
+        "head": resolved.head,
+        "worktree_ref": resolved.to_worktree,
+        "task": {
+            "goal_ref": resolved.goal.as_ref().map(|value| admission_digest(value)),
+            "prompt_ref": resolved.dispatch.prompt.as_ref().map(|value| admission_digest(value)),
+            "task_count": resolved.dispatch.tasks.len().max(1),
+        },
+        "gates": {
+            "public_count": resolved.gates.verify.len(),
+            "private_count": resolved.gates.private_verify.len(),
+            "binding": digest_json(serde_json::json!({
+                "public": resolved.gates.verify,
+                "private": resolved.gates.private_verify,
+            })),
+        },
+        "provider_runtime_refs": {
+            "backend": resolved.dispatch.backend,
+            "selector": resolved.dispatch.selector,
+            "model": resolved.dispatch.model,
+            "required_capabilities": resolved.dispatch.required_capabilities,
+            "secret_env_names": resolved.dispatch.secret_env,
+            "provider_config_ref": resolved.dispatch.core.provider_config.as_ref().map(|value| admission_digest(value)),
+            "runtime_generation": homeboy::core::build_identity::current().display,
+        },
+        "retry": {
+            "max_attempts": resolved.max_attempts,
+            "provider_executions": resolved.dispatch.core.attempts,
+            "same_provider_retries": resolved.dispatch.core.same_provider_retries,
+            "provider_rotations": resolved.dispatch.core.provider_rotations,
+        },
+        "publication": {
+            "finalize": !resolved.no_finalize,
+            "draft": resolved.draft_pr,
+            "acceptance_required": resolved.require_acceptance,
+        },
+        "notification": notification,
+        "replay_intent": staged.intent.as_ref().expect("staged intent"),
+        "input_publication": {
+            "state": "staged",
+            "staging_root": staged.staging_root.display().to_string(),
+            "published_root": staged.published_root.display().to_string(),
+        },
+    }));
+    let record = if let Some(existing) = existing {
+        if existing.metadata["unmaterialized_cook_admission"]["state"] == "preparing_inputs" {
+            agent_task_lifecycle::recover_unmaterialized_cook_input_publication(&cook_id)?
+        } else {
+            existing
+        }
+    } else {
+        let record = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            &cook_id,
+            binding.expect("new admission binding"),
+            state,
+            reason,
+        )?;
+        staged_intent
+            .take()
+            .expect("new admission snapshot")
+            .retain_for_recovery();
+        let _ = record;
+        agent_task_lifecycle::recover_unmaterialized_cook_input_publication(&cook_id)?
+    };
+    let reconciliation =
+        crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission(&cook_id)
+            .unwrap_or_else(|error| {
+                serde_json::json!({
+                    "replayed": 0,
+                    "error": homeboy::core::redaction::redact_string(&error.message),
+                })
+            });
+    let record = agent_task_lifecycle::exact_record(&cook_id).unwrap_or(record);
+    let admission = record.metadata["unmaterialized_cook_admission"].clone();
+    let output = serde_json::json!({
+        "schema": "homeboy/unmaterialized-cook-admission-result/v1",
+        "status": admission["state"],
+        "cook_id": cook_id,
+        "run_id": cook_id,
+        "materialized": false,
+        "runner_readiness": readiness_state,
+        "commands": admission["commands"],
+        "retry": admission["retry"],
+        "reconciliation": reconciliation,
+    });
+    let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize unmaterialized Cook admission".to_string()),
+        )
+    })?;
+    if let Some(path) = output_file {
+        write_output_file(path, &stdout)?;
+    }
+    println!("{stdout}");
+    Ok(0)
+}
+
+const COOK_REPLAY_INTENT_SCHEMA: &str = "homeboy/unmaterialized-cook-replay-intent/v1";
+const COOK_REPLAY_CLAIM_COOK_ENV: &str = "HOMEBOY_COOK_REPLAY_CLAIM_COOK_ID";
+const COOK_REPLAY_CLAIM_FENCE_ENV: &str = "HOMEBOY_COOK_REPLAY_CLAIM_FENCE";
+const COOK_REPLAY_CLAIM_TOKEN_ENV: &str = "HOMEBOY_COOK_REPLAY_CLAIM_TOKEN";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnmaterializedCookReplayIntent {
+    schema: String,
+    cook_id: String,
+    argv: Vec<String>,
+    input_refs: Vec<UnmaterializedCookReplayInputRef>,
+    input_manifest: UnmaterializedCookReplayInputRef,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnmaterializedCookReplayInputRef {
+    kind: String,
+    path: String,
+    sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    argv_token: Option<String>,
+}
+
+#[cfg(test)]
+fn build_unmaterialized_cook_replay_intent(
+    normalized_args: &[String],
+    cook_id: &str,
+    notification: Option<&homeboy::core::notification_route::NotificationRoute>,
+) -> homeboy::core::Result<UnmaterializedCookReplayIntent> {
+    stage_unmaterialized_cook_replay_intent(normalized_args, cook_id, notification)?.publish()
+}
+
+struct StagedCookReplayIntent {
+    intent: Option<UnmaterializedCookReplayIntent>,
+    staging_root: PathBuf,
+    published_root: PathBuf,
+    published: bool,
+}
+
+impl StagedCookReplayIntent {
+    #[cfg(test)]
+    fn publish(mut self) -> homeboy::core::Result<UnmaterializedCookReplayIntent> {
+        let published_parent = self.published_root.parent().ok_or_else(|| {
+            Error::internal_unexpected("Cook replay publication root has no parent directory")
+        })?;
+        std::fs::create_dir_all(published_parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(published_parent.display().to_string()),
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(published_parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(published_parent.display().to_string()),
+                    )
+                })?;
+        }
+        if self.published_root.exists() {
+            std::fs::remove_dir_all(&self.staging_root).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(self.staging_root.display().to_string()),
+                )
+            })?;
+        } else {
+            std::fs::rename(&self.staging_root, &self.published_root).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "publish {} -> {}",
+                        self.staging_root.display(),
+                        self.published_root.display()
+                    )),
+                )
+            })?;
+        }
+        self.published = true;
+        Ok(self.intent.take().expect("staged replay intent"))
+    }
+
+    fn retain_for_recovery(mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for StagedCookReplayIntent {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_dir_all(&self.staging_root);
+        }
+    }
+}
+
+fn stage_unmaterialized_cook_replay_intent(
+    normalized_args: &[String],
+    cook_id: &str,
+    notification: Option<&homeboy::core::notification_route::NotificationRoute>,
+) -> homeboy::core::Result<StagedCookReplayIntent> {
+    let published_root = replay_intent_storage_root(cook_id)?;
+    let admission_dir = published_root.parent().ok_or_else(|| {
+        Error::internal_unexpected("Cook replay input root has no parent directory")
+    })?;
+    let admissions_root = admission_dir.parent().ok_or_else(|| {
+        Error::internal_unexpected("Cook replay admission directory has no parent")
+    })?;
+    std::fs::create_dir_all(admissions_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(admissions_root.display().to_string()),
+        )
+    })?;
+    let cook_segment = admission_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cook");
+    let root = admissions_root.join(format!(
+        ".{cook_segment}-inputs-stage-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    let mut staged = StagedCookReplayIntent {
+        intent: None,
+        staging_root: root.clone(),
+        published_root: published_root.clone(),
+        published: false,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| Error::internal_io(error.to_string(), Some(root.display().to_string())),
+        )?;
+    }
+    let mut argv = Vec::with_capacity(normalized_args.len() + 2);
+    let mut input_refs = Vec::new();
+    let mut index = 0usize;
+    let mut has_run_id = false;
+    let mut has_notification_route = false;
+    while index < normalized_args.len() {
+        let arg = &normalized_args[index];
+        if arg == "--notification-route" || arg.starts_with("--notification-route=") {
+            has_notification_route = true;
+        }
+        if matches!(arg.as_str(), "--placement" | "--runner") {
+            require_replay_value(normalized_args, index, arg)?;
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--placement=") || arg.starts_with("--runner=") {
+            index += 1;
+            continue;
+        }
+        if unsafe_inline_replay_flag(arg) {
+            return Err(unsafe_inline_replay_error(arg));
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if unsafe_inline_replay_flag(flag) {
+                return Err(unsafe_inline_replay_error(flag));
+            }
+            if matches!(flag, "--prompt" | "--verify" | "--private-verify") {
+                let (replacement_flag, reference) =
+                    snapshot_replay_input(&root, cook_id, flag, value, input_refs.len())?;
+                let replay_value = if replacement_flag == "--prompt" {
+                    reference
+                        .argv_token
+                        .clone()
+                        .expect("prompt replay input has an argv token")
+                } else {
+                    reference.path.clone()
+                };
+                argv.push(format!("{replacement_flag}={replay_value}"));
+                input_refs.push(reference);
+                index += 1;
+                continue;
+            }
+            if replay_file_reference_flag(flag) {
+                let (rendered, reference) =
+                    canonical_replay_file_reference(&root, flag, value, input_refs.len())?;
+                argv.push(format!("{flag}={rendered}"));
+                input_refs.push(reference);
+                index += 1;
+                continue;
+            }
+            if replay_text_value_flag(flag) {
+                let (token, reference) =
+                    snapshot_replay_argv_value(&root, flag, value, input_refs.len())?;
+                argv.push(format!("{flag}={token}"));
+                input_refs.push(reference);
+                index += 1;
+                continue;
+            }
+        }
+        if replay_text_value_flag(arg) {
+            let value = require_replay_value(normalized_args, index, arg)?;
+            let (token, reference) =
+                snapshot_replay_argv_value(&root, arg, value, input_refs.len())?;
+            argv.push(arg.clone());
+            argv.push(token);
+            input_refs.push(reference);
+            index += 2;
+            continue;
+        }
+        if matches!(arg.as_str(), "--prompt" | "--verify" | "--private-verify") {
+            let value = require_replay_value(normalized_args, index, arg)?;
+            let (replacement_flag, reference) =
+                snapshot_replay_input(&root, cook_id, arg, value, input_refs.len())?;
+            argv.push(replacement_flag.to_string());
+            argv.push(if replacement_flag == "--prompt" {
+                reference
+                    .argv_token
+                    .clone()
+                    .expect("prompt replay input has an argv token")
+            } else {
+                reference.path.clone()
+            });
+            input_refs.push(reference);
+            index += 2;
+            continue;
+        }
+        if replay_file_reference_flag(arg) {
+            let value = require_replay_value(normalized_args, index, arg)?;
+            let (rendered, reference) =
+                canonical_replay_file_reference(&root, arg, value, input_refs.len())?;
+            argv.push(arg.clone());
+            argv.push(rendered);
+            input_refs.push(reference);
+            index += 2;
+            continue;
+        }
+        if arg == "--run-id" || arg.starts_with("--run-id=") {
+            has_run_id = true;
+        }
+        if homeboy::core::redaction::redact_string(arg) != *arg {
+            return Err(unsafe_inline_replay_error(
+                arg.split('=').next().unwrap_or(arg),
+            ));
+        }
+        reject_credential_bearing_url(arg)?;
+        argv.push(arg.clone());
+        index += 1;
+    }
+    if !has_run_id {
+        argv.push("--run-id".to_string());
+        argv.push(cook_id.to_string());
+    }
+    if !has_notification_route {
+        if let Some(notification) = notification {
+            let (token, reference) = snapshot_replay_argv_value(
+                &root,
+                "--notification-route",
+                &notification.route,
+                input_refs.len(),
+            )?;
+            argv.extend([
+                "--notification-transport".to_string(),
+                notification.transport.clone(),
+                "--notification-route".to_string(),
+                token,
+            ]);
+            input_refs.push(reference);
+        }
+    }
+    let staging_prefix = root.display().to_string();
+    let published_prefix = published_root.display().to_string();
+    for argument in &mut argv {
+        *argument = argument.replace(&staging_prefix, &published_prefix);
+    }
+    for reference in &mut input_refs {
+        reference.path = reference.path.replace(&staging_prefix, &published_prefix);
+    }
+    let manifest = serde_json::to_string(&input_refs).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize Cook replay input manifest".to_string()),
+        )
+    })?;
+    let mut input_manifest =
+        persist_replay_input(&root, "manifest", &manifest, input_refs.len(), None)?;
+    input_manifest.path = input_manifest
+        .path
+        .replace(&staging_prefix, &published_prefix);
+    staged.intent = Some(UnmaterializedCookReplayIntent {
+        schema: COOK_REPLAY_INTENT_SCHEMA.to_string(),
+        cook_id: cook_id.to_string(),
+        argv,
+        input_refs,
+        input_manifest,
+    });
+    Ok(staged)
+}
+
+fn replay_intent_storage_root(cook_id: &str) -> homeboy::core::Result<PathBuf> {
+    Ok(homeboy::core::paths::homeboy_data()?
+        .join("agent-task-cook-admissions")
+        .join(homeboy::core::paths::sanitize_path_segment(cook_id))
+        .join("inputs"))
+}
+
+fn require_replay_value<'a>(
+    args: &'a [String],
+    index: usize,
+    flag: &str,
+) -> homeboy::core::Result<&'a str> {
+    args.get(index + 1).map(String::as_str).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            format!("{flag} requires a replayable value"),
+            None,
+            None,
+        )
+    })
+}
+
+fn unsafe_inline_replay_flag(flag: &str) -> bool {
+    matches!(
+        flag.split('=').next().unwrap_or(flag),
+        "--runner-env" | "--lab-env-json" | "--gate-env" | "--resolved-provider-policy" | "--tasks"
+    )
+}
+
+fn unsafe_inline_replay_error(flag: &str) -> Error {
+    Error::validation_invalid_argument(
+        "cook_admission.replay_intent",
+        format!(
+            "detached unmaterialized Cook admission refuses unsafe inline value `{flag}`"
+        ),
+        None,
+        Some(vec![
+            "Use --runner-secret-env/--secret-env names, --gate-env-from references, @file provider/client configuration, and file-backed prompt/gate inputs.".to_string(),
+        ]),
+    )
+}
+
+fn replay_file_reference_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--provider-config" | "--client-context" | "--verify-file" | "--private-verify-file"
+    )
+}
+
+fn replay_text_value_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--task"
+            | "--goal"
+            | "--title"
+            | "--commit-message"
+            | "--command-policy-reason"
+            | "--notification-route"
+            | "--deny-command"
+            | "--allow-command"
+            | "--ai-tool"
+            | "--ai-used-for"
+            | "--acceptance-authority"
+            | "--acceptance-policy"
+            | "--gate-toolchain-spec"
+            | "--gate-toolchain"
+            | "--gate-package-artifact"
+            | "--gate-extension-input"
+            | "--provider-evidence"
+            | "--provider-command"
+            | "--provider-argv"
+    )
+}
+
+fn canonical_replay_file_reference(
+    root: &Path,
+    flag: &str,
+    value: &str,
+    index: usize,
+) -> homeboy::core::Result<(String, UnmaterializedCookReplayInputRef)> {
+    let requires_at = matches!(flag, "--provider-config" | "--client-context");
+    let path_value = if requires_at {
+        value
+            .strip_prefix('@')
+            .ok_or_else(|| unsafe_inline_replay_error(flag))?
+    } else {
+        value
+    };
+    if path_value == "-" || path_value.starts_with("prompt:") {
+        return Err(unsafe_inline_replay_error(flag));
+    }
+    let source = std::fs::canonicalize(path_value).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            format!("cannot bind replay input `{path_value}`: {error}"),
+            Some(path_value.to_string()),
+            None,
+        )
+    })?;
+    let content = std::fs::read_to_string(&source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    if requires_at {
+        reject_secret_bearing_replay_content(flag, &content, true)?;
+    }
+    let reference =
+        persist_replay_input(root, flag.trim_start_matches('-'), &content, index, None)?;
+    let rendered = if requires_at {
+        format!("@{}", reference.path)
+    } else {
+        reference.path.clone()
+    };
+    Ok((rendered, reference))
+}
+
+fn snapshot_replay_input(
+    root: &Path,
+    _cook_id: &str,
+    flag: &str,
+    value: &str,
+    index: usize,
+) -> homeboy::core::Result<(&'static str, UnmaterializedCookReplayInputRef)> {
+    let (replacement, kind, content) = match flag {
+        "--prompt" => (
+            "--prompt",
+            "prompt",
+            homeboy::agents::agent_task_prompts::read_prompt_input(value)?,
+        ),
+        "--verify" => ("--verify-file", "verify", value.to_string()),
+        "--private-verify" => ("--private-verify-file", "private-verify", value.to_string()),
+        _ => unreachable!("snapshot input flag is closed"),
+    };
+    if homeboy::core::redaction::redact_string(&content) != content {
+        return Err(unsafe_inline_replay_error(flag));
+    }
+    let argv_token = (flag == "--prompt").then(|| {
+        format!(
+            "homeboy-replay-ref:{index}:{}",
+            admission_digest(content.as_bytes()).trim_start_matches("sha256:")
+        )
+    });
+    let reference = persist_replay_input(root, kind, &content, index, argv_token)?;
+    Ok((replacement, reference))
+}
+
+fn snapshot_replay_argv_value(
+    root: &Path,
+    flag: &str,
+    value: &str,
+    index: usize,
+) -> homeboy::core::Result<(String, UnmaterializedCookReplayInputRef)> {
+    reject_secret_bearing_replay_content(flag, value, false)?;
+    let sha256 = admission_digest(value.as_bytes());
+    let token = format!(
+        "homeboy-replay-ref:{index}:{}",
+        sha256.trim_start_matches("sha256:")
+    );
+    let reference = persist_replay_input(
+        root,
+        flag.trim_start_matches('-'),
+        value,
+        index,
+        Some(token.clone()),
+    )?;
+    Ok((token, reference))
+}
+
+fn reject_secret_bearing_replay_content(
+    flag: &str,
+    content: &str,
+    require_json: bool,
+) -> homeboy::core::Result<()> {
+    let policy = RedactionPolicy::default();
+    let parsed = serde_json::from_str::<serde_json::Value>(content);
+    if require_json && parsed.is_err() {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            format!("{flag} replay input must contain valid JSON"),
+            None,
+            None,
+        ));
+    }
+    if let Ok(value) = parsed {
+        if replay_json_contains_inline_secret(&value, &policy) {
+            return Err(unsafe_inline_replay_error(flag));
+        }
+    } else if policy.redact_string(content) != content {
+        return Err(unsafe_inline_replay_error(flag));
+    }
+    Ok(())
+}
+
+fn replay_json_contains_inline_secret(value: &serde_json::Value, policy: &RedactionPolicy) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key.to_ascii_lowercase().replace('-', "_");
+            let configured_reference = normalized == "secret_env"
+                || normalized.ends_with("_env")
+                || normalized.ends_with("_ref")
+                || normalized.ends_with("_refs");
+            ((policy.is_sensitive_key(key) || policy.is_sensitive_header(key))
+                && !configured_reference
+                && !value.is_null())
+                || replay_json_contains_inline_secret(value, policy)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| replay_json_contains_inline_secret(value, policy)),
+        serde_json::Value::String(value) => policy.redact_env_value(value) != *value,
+        _ => false,
+    }
+}
+
+fn persist_replay_input(
+    root: &Path,
+    kind: &str,
+    content: &str,
+    index: usize,
+    argv_token: Option<String>,
+) -> homeboy::core::Result<UnmaterializedCookReplayInputRef> {
+    let sha256 = admission_digest(content.as_bytes());
+    let safe_kind = kind
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let path = root.join(format!(
+        "{index}-{safe_kind}-{}.txt",
+        sha256.trim_start_matches("sha256:")
+    ));
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        if existing != content {
+            return Err(Error::validation_invalid_argument(
+                "cook_admission.replay_intent",
+                "immutable replay input digest collision",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+    } else {
+        homeboy_engine_primitives::local_files::write_file_owner_only(
+            &path,
+            &content,
+            "persist Cook replay input",
+        )?;
+    }
+    Ok(UnmaterializedCookReplayInputRef {
+        kind: kind.to_string(),
+        path: path.display().to_string(),
+        sha256,
+        argv_token,
+    })
+}
+
+fn reject_credential_bearing_url(value: &str) -> homeboy::core::Result<()> {
+    if !value.contains("://") {
+        return Ok(());
+    }
+    let Some((_, remainder)) = value.split_once("://") else {
+        return Ok(());
+    };
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let credential_query = value
+        .split_once('?')
+        .map(|(_, query)| query.split('#').next().unwrap_or(query))
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .filter_map(|pair| pair.split_once('=').map(|(key, _)| key))
+        .any(|key| {
+            matches!(
+                key.to_ascii_lowercase().as_str(),
+                "token" | "secret" | "password" | "authorization" | "auth" | "api_key" | "apikey"
+            )
+        });
+    if authority.contains('@') || credential_query {
+        return Err(unsafe_inline_replay_error("credential-bearing URL"));
+    }
+    Ok(())
+}
+
+fn consume_unmaterialized_replay_claim() -> homeboy::core::Result<Option<i32>> {
+    let cook_id = std::env::var(COOK_REPLAY_CLAIM_COOK_ENV).ok();
+    let fence = std::env::var(COOK_REPLAY_CLAIM_FENCE_ENV).ok();
+    let token = std::env::var(COOK_REPLAY_CLAIM_TOKEN_ENV).ok();
+    if cook_id.is_none() && fence.is_none() && token.is_none() {
+        return Ok(None);
+    }
+    let (Some(cook_id), Some(fence), Some(token)) = (cook_id, fence, token) else {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.replay_claim",
+            "Cook replay claim environment is incomplete",
+            None,
+            None,
+        ));
+    };
+    let fence = fence.parse::<u64>().map_err(|_| {
+        Error::validation_invalid_argument(
+            "cook_admission.replay_claim",
+            "Cook replay fence is not an unsigned generation",
+            Some(fence),
+            None,
+        )
+    })?;
+    let consumed =
+        agent_task_lifecycle::consume_unmaterialized_cook_replay_claim(&cook_id, fence, &token)?;
+    Ok((!consumed).then_some(0))
+}
+
+fn is_unmaterialized_replay_worker() -> bool {
+    std::env::var_os(COOK_REPLAY_CLAIM_COOK_ENV).is_some()
+}
+
+fn renew_unmaterialized_replay_claim_before_materialization() -> homeboy::core::Result<()> {
+    let Some(cook_id) = std::env::var(COOK_REPLAY_CLAIM_COOK_ENV).ok() else {
+        return Ok(());
+    };
+    let fence = std::env::var(COOK_REPLAY_CLAIM_FENCE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_admission.replay_claim",
+                "Cook replay materialization fence is missing or invalid",
+                None,
+                None,
+            )
+        })?;
+    let token = std::env::var(COOK_REPLAY_CLAIM_TOKEN_ENV).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cook_admission.replay_claim",
+            "Cook replay materialization token is missing",
+            None,
+            None,
+        )
+    })?;
+    if !agent_task_lifecycle::renew_unmaterialized_cook_replay_claim(&cook_id, fence, &token)? {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.replay_claim",
+            "Cook replay worker lost its fenced lease before destination materialization",
+            Some(cook_id),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CliCookAdmissionReplayDriver;
+
+impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
+    for CliCookAdmissionReplayDriver
+{
+    fn select_runner(
+        &self,
+        request: &serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        let placement = &request["binding"]["placement"];
+        let required_capabilities = request["binding"]["provider_runtime_refs"]
+            ["required_capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        if let Some(runner_id) = placement["runner_ref"].as_str() {
+            let mut snapshot = runners::runner_admission_snapshot(runner_id)?;
+            if snapshot.summary.accepting_jobs
+                || crate::runner::refresh_explicit_detached_queue_runner(runner_id)?
+            {
+                if !runner_satisfies_admission_capabilities(runner_id, &required_capabilities)? {
+                    return Ok(serde_json::json!({
+                        "state": "blocked_runner_unavailable",
+                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
+                        "selection": "explicit",
+                    }));
+                }
+                return Ok(serde_json::json!({
+                    "state": "eligible",
+                    "runner_id": runner_id,
+                    "selection": "explicit",
+                }));
+            }
+            snapshot = runners::runner_admission_snapshot(runner_id)?;
+            return Ok(serde_json::json!({
+                "state": if snapshot.summary.daemon_fresh { "blocked_runner_unavailable" } else { "blocked_runner_stale" },
+                "reason": snapshot.summary.next_action.unwrap_or_else(|| format!("runner `{runner_id}` is not accepting jobs")),
+                "selection": "explicit",
+            }));
+        }
+
+        let readiness = runners::refresh_lab_runner_readiness_for_admission()?;
+        if readiness.state == runners::LabRunnerReadinessState::ConnectedReady {
+            if let Some(runner_id) = readiness.selected_runner_id {
+                if !runner_satisfies_admission_capabilities(&runner_id, &required_capabilities)? {
+                    return Ok(serde_json::json!({
+                        "state": "blocked_runner_unavailable",
+                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
+                        "selection": "configured_policy",
+                    }));
+                }
+                return Ok(serde_json::json!({
+                    "state": "eligible",
+                    "runner_id": runner_id,
+                    "selection": "configured_policy",
+                }));
+            }
+        }
+        if readiness.state == runners::LabRunnerReadinessState::CapacityBlocked {
+            if let Some(runner_id) = runners::refresh_detached_queue_runner()? {
+                if !runner_satisfies_admission_capabilities(&runner_id, &required_capabilities)? {
+                    return Ok(serde_json::json!({
+                        "state": "blocked_runner_unavailable",
+                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
+                        "selection": "reverse_capacity_queue",
+                    }));
+                }
+                return Ok(serde_json::json!({
+                    "state": "eligible",
+                    "runner_id": runner_id,
+                    "selection": "reverse_capacity_queue",
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "state": unmaterialized_admission_state(Some(&readiness)),
+            "reason": readiness.reasons.first().cloned().unwrap_or_else(|| "no configured Lab runner currently satisfies admission policy".to_string()),
+            "selection": "configured_policy",
+        }))
+    }
+
+    fn replay(&self, request: &serde_json::Value) -> homeboy::core::Result<serde_json::Value> {
+        if request["schema"] != "homeboy/unmaterialized-cook-replay-request/v1" {
+            return Err(Error::validation_invalid_argument(
+                "cook_admission.replay",
+                "unsupported Cook replay request schema",
+                None,
+                None,
+            ));
+        }
+        let intent: UnmaterializedCookReplayIntent =
+            serde_json::from_value(request["intent"].clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_admission.replay_intent",
+                    format!("invalid Cook replay intent: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        validate_replay_intent(&intent, request)?;
+        let runner_id = request["runner_id"].as_str().expect("validated runner id");
+        let fence = request["fence"].as_u64().expect("validated fence");
+        let token = request["token"].as_str().expect("validated token");
+        let mut replay_argv = intent.argv.clone();
+        for reference in &intent.input_refs {
+            let Some(token) = reference.argv_token.as_deref() else {
+                continue;
+            };
+            let content = std::fs::read_to_string(&reference.path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(reference.path.clone()))
+            })?;
+            for argument in &mut replay_argv {
+                if argument == token {
+                    *argument = content.clone();
+                } else if argument.ends_with(token)
+                    && argument.as_bytes().get(argument.len() - token.len() - 1) == Some(&b'=')
+                {
+                    let flag = argument[..argument.len() - token.len()].to_string();
+                    *argument = format!("{flag}{content}");
+                }
+            }
+        }
+        let mut args = replay_argv.into_iter().skip(1).collect::<Vec<_>>();
+        args.splice(0..0, ["--runner".to_string(), runner_id.to_string()]);
+        let worker_log = Path::new(&intent.input_manifest.path)
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                Error::internal_unexpected("Cook replay manifest has no admission root")
+            })?
+            .join(format!("replay-worker-{fence}.log"));
+        homeboy_engine_primitives::local_files::write_file_owner_only(
+            &worker_log,
+            "",
+            "create Cook replay worker log",
+        )?;
+        let worker_stderr = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&worker_log)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(worker_log.display().to_string()))
+            })?;
+        let worker_stdout = worker_stderr.try_clone().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(worker_log.display().to_string()))
+        })?;
+        let child = std::process::Command::new(std::env::current_exe().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve replay executable".to_string()),
+            )
+        })?)
+        .args(&args)
+        .env(COOK_REPLAY_CLAIM_COOK_ENV, &intent.cook_id)
+        .env(COOK_REPLAY_CLAIM_FENCE_ENV, fence.to_string())
+        .env(COOK_REPLAY_CLAIM_TOKEN_ENV, token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(worker_stdout))
+        .stderr(Stdio::from(worker_stderr))
+        .spawn()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("spawn Cook replay worker".to_string()),
+            )
+        })?;
+        let worker_pid = child.id();
+        supervise_replay_worker(intent.cook_id.clone(), fence, token.to_string(), child);
+        Ok(serde_json::json!({
+            "schema": "homeboy/unmaterialized-cook-replay-receipt/v1",
+            "worker_pid": worker_pid,
+            "worker_log": worker_log,
+            "fence": fence,
+        }))
+    }
+}
+
+fn runner_satisfies_admission_capabilities(
+    runner_id: &str,
+    required: &BTreeSet<&str>,
+) -> homeboy::core::Result<bool> {
+    if required.is_empty() {
+        return Ok(true);
+    }
+    let inventory = runners::runner_capability_inventory(runner_id)?;
+    Ok(runner_inventory_satisfies_admission_capabilities(
+        &inventory, required,
+    ))
+}
+
+fn runner_inventory_satisfies_admission_capabilities(
+    inventory: &runners::RunnerCapabilityInventory,
+    required: &BTreeSet<&str>,
+) -> bool {
+    required.iter().all(|required| {
+        inventory.capabilities.contains(*required) || inventory.runtime_ids.contains(*required)
+    })
+}
+
+fn supervise_replay_worker(
+    cook_id: String,
+    fence: u64,
+    token: String,
+    mut child: std::process::Child,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        let _ = agent_task_lifecycle::release_unmaterialized_cook_replay_claim_after_worker_exit(
+            &cook_id, fence, &token,
+        );
+    })
+}
+
+fn validate_replay_intent(
+    intent: &UnmaterializedCookReplayIntent,
+    request: &serde_json::Value,
+) -> homeboy::core::Result<()> {
+    if intent.schema != COOK_REPLAY_INTENT_SCHEMA
+        || request["cook_id"].as_str() != Some(intent.cook_id.as_str())
+        || request["runner_id"].as_str().is_none()
+        || request["token"].as_str().is_none()
+        || request["fence"].as_u64().is_none()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            "Cook replay intent does not match its fenced request",
+            None,
+            None,
+        ));
+    }
+    for reference in intent
+        .input_refs
+        .iter()
+        .chain(std::iter::once(&intent.input_manifest))
+    {
+        let bytes = std::fs::read(&reference.path).map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_admission.replay_intent",
+                format!("replay input is unavailable: {error}"),
+                Some(reference.path.clone()),
+                None,
+            )
+        })?;
+        if admission_digest(bytes) != reference.sha256 {
+            return Err(Error::validation_invalid_argument(
+                "cook_admission.replay_intent",
+                "replay input changed after admission",
+                Some(reference.path.clone()),
+                None,
+            ));
+        }
+    }
+    let manifest = std::fs::read_to_string(&intent.input_manifest.path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            format!("replay input manifest is unavailable: {error}"),
+            Some(intent.input_manifest.path.clone()),
+            None,
+        )
+    })?;
+    let manifest_refs: Vec<UnmaterializedCookReplayInputRef> = serde_json::from_str(&manifest)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_admission.replay_intent",
+                format!("replay input manifest is invalid: {error}"),
+                Some(intent.input_manifest.path.clone()),
+                None,
+            )
+        })?;
+    if manifest_refs != intent.input_refs {
+        return Err(Error::validation_invalid_argument(
+            "cook_admission.replay_intent",
+            "replay input manifest does not match the typed intent",
+            Some(intent.input_manifest.path.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn register_unmaterialized_cook_replay_driver() {
+    homeboy::core::daemon::orchestration::register_cook_admission_replay_driver(Arc::new(
+        CliCookAdmissionReplayDriver,
+    ));
+}
+
+fn unmaterialized_admission_state(readiness: Option<&runners::LabRunnerReadiness>) -> &'static str {
+    use runners::LabRunnerReadinessState;
+    match readiness.map(|value| value.state) {
+        Some(LabRunnerReadinessState::Stale) => "blocked_runner_stale",
+        // A healthy reverse runner at capacity owns a durable broker queue. It
+        // is waiting for a slot, not unavailable.
+        Some(LabRunnerReadinessState::CapacityBlocked) => "queued",
+        _ => "blocked_runner_unavailable",
+    }
+}
+
 /// Explain a Lab placement that cannot be served, without contradicting the
 /// documented guidance.
 ///
@@ -1070,6 +2207,19 @@ fn run_split_placement_cook(
     runner_id: Option<&str>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<Option<i32>> {
+    run_split_placement_cook_with_runtime(cli, output_file, runner_id, provenance, None, None)
+}
+
+fn run_split_placement_cook_with_runtime(
+    cli: &Cli,
+    output_file: Option<&str>,
+    runner_id: Option<&str>,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+    dispatcher_override: Option<
+        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+    executor_override: Option<homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor>,
+) -> homeboy::core::Result<Option<i32>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
     }) = &cli.command
@@ -1101,6 +2251,7 @@ fn run_split_placement_cook(
         return Ok(None);
     };
 
+    renew_unmaterialized_replay_claim_before_materialization()?;
     let plan = materialize_agent_task_cook_plan(cli, provenance)?.expect("cook plan");
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
         Error::internal_json(
@@ -1130,22 +2281,26 @@ fn run_split_placement_cook(
     controller.dispatch.run_id = Some(cook_id);
     controller.attempt_run_id = Some(attempt_run_id);
     controller.attempt_plan = Some(serialized_plan);
-    let dispatcher = Arc::new(LabCookAttemptDispatcher {
-        runner_id: runner_id.to_string(),
-        placement_decision: placement_decision(
-            cli,
-            Some(runner_id),
-            placement_task,
-            source_path.as_deref(),
-        )?,
-        allow_local_fallback: cli.placement.allows_local_fallback(),
-        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-        skip_deps_hydration: cli.skip_deps_hydration,
-        detach_after_handoff: cli.detach_after_handoff,
-        source_path,
-        job_overrides: lab_job_overrides(cli)?,
-        progress_reporter: progress_reporter.clone(),
-    });
+    let dispatcher = if let Some(dispatcher) = dispatcher_override {
+        dispatcher
+    } else {
+        Arc::new(LabCookAttemptDispatcher {
+            runner_id: runner_id.to_string(),
+            placement_decision: placement_decision(
+                cli,
+                Some(runner_id),
+                placement_task,
+                source_path.as_deref(),
+            )?,
+            allow_local_fallback: cli.runner.is_none() && cli.placement.allows_local_fallback(),
+            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+            skip_deps_hydration: cli.skip_deps_hydration,
+            detach_after_handoff: cli.detach_after_handoff,
+            source_path,
+            job_overrides: lab_job_overrides(cli)?,
+            progress_reporter: progress_reporter.clone(),
+        })
+    };
     let progress = |phase: &str,
                     cook_id: Option<&str>,
                     run_id: Option<&str>,
@@ -1162,9 +2317,9 @@ fn run_split_placement_cook(
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
             *controller,
-            std::sync::Arc::new(
+            executor_override.unwrap_or_else(|| std::sync::Arc::new(
                 homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
-            ),
+            )),
             Some(dispatcher),
             Some(&progress),
             provenance,

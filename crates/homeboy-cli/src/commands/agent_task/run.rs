@@ -5841,6 +5841,55 @@ pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
 
 pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
     let args = args.into();
+    if agent_task_lifecycle::exact_record(&args.run_id)
+        .ok()
+        .is_some_and(|record| {
+            record
+                .metadata
+                .get("unmaterialized_cook_admission")
+                .is_some_and(Value::is_object)
+        })
+    {
+        let before = agent_task_lifecycle::exact_record(&args.run_id)?;
+        if before.state.is_terminal() {
+            let terminal_error = before
+                .metadata
+                .get("cancel_reason")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    before.metadata["unmaterialized_cook_admission"]["reason"]
+                        .as_str()
+                        .map(str::to_string)
+                });
+            return Ok((
+                serde_json::json!({
+                    "schema": "homeboy/unmaterialized-cook-resume/v1",
+                    "status": before.metadata["unmaterialized_cook_admission"]["state"],
+                    "run_id": args.run_id,
+                    "idempotent": true,
+                    "terminal": true,
+                    "terminal_state": before.state,
+                    "error": terminal_error,
+                }),
+                2,
+            ));
+        }
+        agent_task_lifecycle::rearm_unmaterialized_cook_admission(&args.run_id)?;
+        let reconciliation =
+            agent_task_service_direct::reconcile_unmaterialized_cook_admission(&args.run_id)?;
+        let record = agent_task_lifecycle::exact_record(&args.run_id)?;
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-resume/v1",
+                "status": record.metadata["unmaterialized_cook_admission"]["state"],
+                "run_id": args.run_id,
+                "idempotent": true,
+                "reconciliation": reconciliation,
+            }),
+            0,
+        ));
+    }
     run_resume_with_executor_and_bridge(
         args.run_id,
         args.bridge,

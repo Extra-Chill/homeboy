@@ -948,6 +948,38 @@ pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Reconcile and classify one explicitly pinned reverse runner for detached
+/// capacity admission. This never substitutes another configured runner.
+pub fn refresh_explicit_detached_queue_runner(runner_id: &str) -> Result<bool> {
+    let runner = load(runner_id)?;
+    let status = connection::reconcile_status(runner_id)?;
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let capabilities_ready = runner_capability_inventory(runner_id)
+        .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+    Ok(
+        detached_queue_runner_from_candidates([DefaultLabRunnerCandidate {
+            id: runner_id.to_string(),
+            mode,
+            connected: status.connected,
+            capacity: runner.settings.concurrency_limit,
+            stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+            unverified_daemon: status.unverified_daemon().is_some(),
+            admission_fresh: status.daemon_fresh_for_admission(),
+            admission_remediation: status
+                .admission_action()
+                .map(|action| action.render_command()),
+            active_jobs: status.active_job_count.max(status.active_jobs.len()),
+            active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+            capabilities_ready,
+        }])
+        .as_deref()
+            == Some(runner_id),
+    )
+}
+
 fn detached_queue_runner_from_candidates(
     candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
 ) -> Option<String> {

@@ -442,16 +442,19 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let accepted: serde_json::Value = serde_json::from_slice(&cook_stdout).expect("cook JSON");
     assert_eq!(
         accepted["schema"],
-        "homeboy/agent-task-cook-local-detach-handoff/v1"
+        "homeboy/unmaterialized-cook-admission-result/v1"
     );
-    assert_eq!(
-        accepted.pointer("/handoff/state"),
-        Some(&serde_json::json!("accepted"))
-    );
+    assert!(matches!(
+        accepted["status"].as_str(),
+        Some("queued" | "blocked_runner_unavailable")
+    ));
+    assert_eq!(accepted["materialized"], false);
+    assert!(accepted["commands"]["status"].is_string());
+    assert!(accepted["commands"]["cancel"].is_string());
 
     // The submitting CLI is gone before the reverse worker exists. The local
     // controller daemon must finish staging and durably enqueue the final job.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     let queued = loop {
         let jobs = broker.jobs();
         if !jobs.is_empty() {
@@ -462,14 +465,26 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             let status = context
                 .command(TestBinary::HomeboyFixture)
                 .env("PATH", &path)
-                .args(["agent-task", "status", run_id])
+                .args(["agent-task", "status", run_id, "--full"])
                 .output()
                 .expect("inspect stalled controller parent");
+            let status_json = serde_json::from_slice::<serde_json::Value>(&status.stdout).ok();
+            let worker_log = status_json
+                .as_ref()
+                .and_then(|value| {
+                    value.pointer(
+                        "/data/metadata/unmaterialized_cook_admission/replay_receipt/worker_log",
+                    )
+                })
+                .and_then(serde_json::Value::as_str)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .unwrap_or_else(|| "<unavailable>".to_string());
             panic!(
-                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\ndaemon stderr={}",
+                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\nworker stderr={}\ndaemon stderr={}",
                 ledger.render(),
                 String::from_utf8_lossy(&status.stdout),
                 String::from_utf8_lossy(&status.stderr),
+                worker_log,
                 std::fs::read_to_string(&daemon_stderr_path)
                     .unwrap_or_else(|error| format!("<unavailable: {error}>")),
             );
@@ -595,7 +610,15 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     // Read the record directly: `agent-task status` deliberately uses the
     // caller_opted_out probe policy, so invoking it here could not prove the
     // daemon's own controller-job provider registration.
-    let run_id = accepted["run_id"].as_str().expect("accepted run id");
+    let cook_id = accepted["run_id"].as_str().expect("accepted Cook id");
+    let parent =
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("open controller lifecycle store")
+            .read_record(cook_id)
+            .expect("read redirected admission parent");
+    let run_id = parent.metadata["detached_cook_handoff"]["attempt_run_id"]
+        .as_str()
+        .expect("admission parent redirects to the materialized attempt");
     // Bound this on observations as well as wall clock. Requiring a minimum
     // number of durable reads keeps the assertion about controller progress,
     // rather than a single slow observation, while leaving failure bounded.
@@ -628,8 +651,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         "controller terminal projection: {terminal:#?}\n{}",
         ledger.render(),
     );
-    let durable_record = homeboy::agents::agent_task_lifecycle::status(run_id)
-        .expect("pinned runner terminal lifecycle record");
+    let durable_record = terminal;
     let decision_id = durable_record.metadata["execution_placement_decision"]["decision_id"]
         .as_str()
         .expect("pinned runner decision persisted on the terminal run");

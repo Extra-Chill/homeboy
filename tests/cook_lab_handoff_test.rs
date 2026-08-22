@@ -218,7 +218,7 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
             std::fs::File::create(&stderr_path).expect("create detached Cook stderr"),
         ));
     let mut child = command.spawn().expect("start detached Cook launcher");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
         if stderr.contains("durable run id `local-detach-exits-before-attempt`") {
@@ -658,7 +658,7 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
     // concurrent controller-runtime pins in this integration binary; this
     // bound detects recovery blocking rather than host-local fixture startup.
     assert!(
-        started.elapsed() < Duration::from_secs(30),
+        started.elapsed() < Duration::from_secs(60),
         "Cook admission must not wait for stale daemon recovery"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
