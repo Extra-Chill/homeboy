@@ -2551,7 +2551,7 @@ fn lost_runner_actions(runner_id: Option<&str>) -> Vec<CommandNextAction> {
         .with_kind(CommandNextActionKind::Show),
         CommandNextAction::new(
             format!("diagnose and repair runner {runner_id}"),
-            format!("homeboy runner doctor {runner} --repair"),
+            format!("homeboy runner doctor {runner} --scope lab-offload --repair"),
         )
         .with_kind(CommandNextActionKind::Repair),
     ]
@@ -3321,7 +3321,7 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task reconcile run-1 --dry-run",
                 "homeboy runner status homeboy-lab",
-                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
@@ -3330,7 +3330,7 @@ mod diagnose_actionable_tests {
             repair_commands(&actions),
             vec![
                 "homeboy agent-task reconcile run-1 --dry-run",
-                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
         );

@@ -54,8 +54,9 @@ pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
 
 pub fn run_with_options(
     runner_id: &str,
-    options: RunnerDoctorOptions,
+    mut options: RunnerDoctorOptions,
 ) -> CmdResult<RunnerDoctorOutput> {
+    options.scope = repair_scope(options.scope, options.repair);
     let target = target::resolve(runner_id)?;
     let mut report = match &target {
         target::RunnerTarget::Local { id, runner } => {
@@ -101,6 +102,17 @@ pub fn run_with_options(
     }
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
+}
+
+/// A bare `--repair` is the Lab daemon recovery request emitted by runner
+/// recovery guidance. Resolve it before probing so that command both diagnoses
+/// and applies the repair it advertises.
+pub(super) fn repair_scope(scope: RunnerDoctorScope, repair: bool) -> RunnerDoctorScope {
+    if repair && scope == RunnerDoctorScope::General {
+        RunnerDoctorScope::LabOffload
+    } else {
+        scope
+    }
 }
 
 fn runner_summary(

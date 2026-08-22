@@ -27,6 +27,22 @@ fn doctor_options_default_to_general_read_only_scope() {
 }
 
 #[test]
+fn bare_repair_deterministically_selects_the_lab_offload_scope() {
+    assert_eq!(
+        repair_scope(RunnerDoctorScope::General, true),
+        RunnerDoctorScope::LabOffload
+    );
+    assert_eq!(
+        repair_scope(RunnerDoctorScope::General, false),
+        RunnerDoctorScope::General
+    );
+    assert_eq!(
+        repair_scope(RunnerDoctorScope::SecretEnv, true),
+        RunnerDoctorScope::SecretEnv
+    );
+}
+
+#[test]
 fn doctor_output_omits_empty_repairs() {
     let (report, _) = run("local").expect("local doctor report");
     let value = serde_json::to_value(report).expect("serialize report");
