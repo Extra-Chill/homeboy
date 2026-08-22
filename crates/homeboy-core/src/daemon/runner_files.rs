@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use homeboy_engine_primitives::content_hash;
@@ -22,6 +22,13 @@ const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_UNFINISHED_UPLOADS_PER_SCOPE: usize = 8;
 const UPLOAD_EXPIRY: Duration = Duration::from_secs(15 * 60);
+
+/// Versioned contract advertised before a controller chooses the chunk protocol.
+///
+/// The upload endpoint is intentionally not an implicit feature probe: callers
+/// must see this capability before they materialize a workspace.  That keeps an
+/// older reverse broker from failing after it has already created remote state.
+pub(super) const CHUNK_UPLOAD_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct UploadKey {
@@ -62,6 +69,58 @@ fn reap_expired_uploads_locked(registry: &mut UploadRegistry) {
 pub(super) fn reap_expired_uploads() {
     let mut registry = upload_registry().lock().expect("upload registry lock");
     reap_expired_uploads_locked(&mut registry);
+}
+
+/// Recover only files that our chunk naming protocol can have created. This is
+/// safe to run after a daemon restart because it requires a hidden name, a UUID
+/// upload identity, a regular file, and an expired filesystem mtime. The
+/// in-memory quota is intentionally not reconstructed: a restarted daemon
+/// treats surviving partial files as cleanup-only, never as resumable writes.
+fn recover_expired_uploads_in_workspace(workspace: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(workspace) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".upload"))
+        else {
+            continue;
+        };
+        let Some((_, upload_id)) = stem.rsplit_once('.') else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(upload_id).is_err() {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file()
+            || metadata.len() > MAX_UPLOAD_BYTES
+            || metadata
+                .modified()
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_none_or(|age| age < UPLOAD_EXPIRY)
+        {
+            continue;
+        }
+        let _ = fs::remove_file(path);
+    }
+}
+
+pub(super) fn upload_capabilities() -> serde_json::Value {
+    json!({
+        "protocol_version": CHUNK_UPLOAD_PROTOCOL_VERSION,
+        "capabilities": ["private_file_chunk_upload"],
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_chunk_bytes": MAX_CHUNK_BYTES,
+    })
 }
 
 pub(super) fn create_runner_file_directory(
@@ -225,6 +284,11 @@ pub(super) fn upload_runner_file_chunk(
         &request.path,
         request.workspace_root.as_deref(),
     )?;
+    // A restart loses the in-memory registry. Recover stale protocol-owned
+    // files before accepting a new chunk upload in this workspace.
+    if let Some(parent) = path.parent() {
+        recover_expired_uploads_in_workspace(parent, SystemTime::now());
+    }
     // Base64 expands 64 KiB to at most 87384 bytes. Reject before decoding so a
     // JSON client cannot make decoding allocate an arbitrary buffer.
     if request.content_base64.len() > 4 * ((MAX_CHUNK_BYTES + 2) / 3) {
@@ -460,6 +524,11 @@ fn publish_upload_file(upload: &PendingUpload) -> std::io::Result<()> {
         ));
     }
     // The path still names the descriptor we wrote and hashed; refuse a swap before publish.
+    // On Unix the final rename is performed through a checked parent descriptor.
+    // This fails closed when the parent is not owned by this daemon user or is
+    // writable by another user. That is the threat boundary for platforms
+    // without a no-replace rename primitive: an attacker with write access to
+    // the destination directory is outside the supported publication model.
     let path_metadata = fs::symlink_metadata(&upload.temp)?;
     #[cfg(unix)]
     {
@@ -477,6 +546,120 @@ fn publish_upload_file(upload: &PendingUpload) -> std::io::Result<()> {
             "upload temporary path is not a regular file",
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+
+        let parent = upload.destination.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "upload destination has no parent",
+            )
+        })?;
+        let parent_file = fs::File::open(parent)?;
+        let parent_metadata = parent_file.metadata()?;
+        if parent_metadata.uid() != unsafe { libc::geteuid() }
+            || parent_metadata.mode() & 0o022 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "upload parent must be daemon-owned and not group/world writable",
+            ));
+        }
+        let temp_name = CString::new(
+            upload
+                .temp
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "upload temporary path has no name",
+                    )
+                })?
+                .as_bytes(),
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "upload temporary path contains NUL",
+            )
+        })?;
+        let destination_name = CString::new(
+            upload
+                .destination
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "upload destination has no name",
+                    )
+                })?
+                .as_bytes(),
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "upload destination contains NUL",
+            )
+        })?;
+        // Recheck through the same directory descriptor used for publication,
+        // closing the lookup-then-rename swap window in the path-based flow.
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe {
+            libc::fstatat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+            || stat.st_dev as u64 != metadata.dev()
+            || stat.st_ino as u64 != metadata.ino()
+            || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "upload temporary path changed identity before publish",
+            ));
+        }
+        if unsafe {
+            libc::renameat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                parent_file.as_raw_fd(),
+                destination_name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut published = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe {
+            libc::fstatat(
+                parent_file.as_raw_fd(),
+                destination_name.as_ptr(),
+                &mut published,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+            || published.st_dev as u64 != metadata.dev()
+            || published.st_ino as u64 != metadata.ino()
+        {
+            // A post-publish mismatch is fail-closed. Do not path-unlink here:
+            // an attacker could replace the destination between verification
+            // and unlink, so preserving the suspect entry is safer than a
+            // rollback that might delete an unrelated file.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "published upload changed identity",
+            ));
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
     fs::rename(&upload.temp, &upload.destination)
 }
 
@@ -817,5 +1000,49 @@ mod tests {
         .expect("abort recorded upload");
         assert!(!temp.exists());
         assert_eq!(fs::read(other).expect("unrelated remains"), b"unrelated");
+    }
+
+    #[test]
+    fn restart_recovery_reaps_only_expired_protocol_named_uploads() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let upload = workspace
+            .path()
+            .join(format!(".evidence.bin.{}.upload", uuid::Uuid::new_v4()));
+        let unrelated = workspace.path().join(".evidence.bin.not-a-uuid.upload");
+        fs::write(&upload, b"partial").expect("partial upload");
+        fs::write(&unrelated, b"keep").expect("unrelated file");
+        // Supplying a future observation time models a daemon restart after the
+        // idle window without relying on process-global clock mutation.
+        recover_expired_uploads_in_workspace(
+            workspace.path(),
+            SystemTime::now() + UPLOAD_EXPIRY + Duration::from_secs(1),
+        );
+        assert!(!upload.exists());
+        assert_eq!(fs::read(unrelated).expect("unrelated survives"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_refuses_a_temp_path_swapped_after_descriptor_validation_begins() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let temp = workspace.path().join(".evidence.bin.upload");
+        let destination = workspace.path().join("evidence.bin");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .expect("create staged upload");
+        fs::remove_file(&temp).expect("remove staged name");
+        fs::write(&temp, b"attacker replacement").expect("replace staged name");
+        let upload = PendingUpload {
+            temp,
+            destination: destination.clone(),
+            file,
+            size_bytes: 0,
+            reserved_bytes: 0,
+            updated_at: Instant::now(),
+        };
+        assert!(publish_upload_file(&upload).is_err());
+        assert!(!destination.exists());
     }
 }

@@ -2104,6 +2104,14 @@ fn handle_reverse_broker_request(
         let encoded = base64::engine::general_purpose::STANDARD.encode(content);
         return ok(json!({ "content_base64": encoded }));
     }
+    if request.method == "GET" && request.path == "/files/capabilities" {
+        return ok(json!({
+            "protocol_version": 1,
+            "capabilities": ["private_file_chunk_upload"],
+            "max_upload_bytes": 64 * 1024 * 1024,
+            "max_chunk_bytes": 64 * 1024,
+        }));
+    }
     if request.method == "GET" {
         if let Some(job_path) = request.path.strip_prefix("/jobs/") {
             let (job_id, action) = job_path.split_once('/').unwrap_or((job_path, ""));

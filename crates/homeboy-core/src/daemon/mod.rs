@@ -57,7 +57,7 @@ use daemon_lease::{daemon_state_identity, freshness_report_from_validation, vali
 use patch_capture::{capture_baseline, capture_patch_report};
 use runner_files::{
     abort_runner_file_chunk_upload, create_runner_file_directory, download_runner_file,
-    reap_expired_uploads, upload_runner_file, upload_runner_file_chunk,
+    reap_expired_uploads, upload_capabilities, upload_runner_file, upload_runner_file_chunk,
 };
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
@@ -1269,11 +1269,13 @@ where
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
     let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
+    let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
     let orchestration_reconciler = spawn_orchestration_reconciler(orchestration_shutdown_rx);
+    let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
     let mut serve_result = Ok(());
@@ -1301,10 +1303,12 @@ where
     let _ = completion_shutdown_tx.send(());
     let _ = schedule_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
+    let _ = upload_shutdown_tx.send(());
     let _ = local_child_reconciler.join();
     let _ = completion_notifier.join();
     let _ = schedule_ticker.join();
     let _ = orchestration_reconciler.join();
+    let _ = upload_reaper.join();
     serve_result.map(|()| state)
 }
 
@@ -1313,6 +1317,20 @@ where
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
 const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
+const UPLOAD_REAP_INTERVAL_SECS: u64 = 60;
+
+/// Reap abandoned uploads without depending on another request arriving.
+fn spawn_upload_reaper(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        reap_expired_uploads();
+        if shutdown
+            .recv_timeout(std::time::Duration::from_secs(UPLOAD_REAP_INTERVAL_SECS))
+            .is_ok()
+        {
+            return;
+        }
+    })
+}
 
 /// Environment variable overriding how often the daemon checks for due
 /// schedules, in seconds. Defaults to [`SCHEDULE_TICK_DEFAULT_INTERVAL_SECS`].
@@ -1882,6 +1900,9 @@ where
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
+        ("GET", "/files/capabilities") => {
+            daemon_endpoint_response("files.capabilities", upload_capabilities())
+        }
         ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
             HttpResponse {
                 status_code: 405,

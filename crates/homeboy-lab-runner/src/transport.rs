@@ -19,6 +19,7 @@ use super::{broker_http, Runner, RunnerKind};
 use homeboy_core::broker_auth;
 
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_UPLOAD_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunnerSessionHandle {
@@ -190,11 +191,67 @@ impl RunnerFileTransfer {
             }
             RunnerFileTransferCapability::Unsupported { .. } => unreachable!("checked above"),
         };
-        Ok(RunnerFileTransfer {
+        let transfer = RunnerFileTransfer {
             runner_id: runner.id.clone(),
             workspace_root: runner.workspace_root.clone(),
             channel,
-        })
+        };
+        // This is deliberately before any mkdir/upload materializes workspace
+        // state. Older daemons return a bounded typed refusal here, rather than
+        // a late 404 in the middle of evidence publication.
+        transfer.ensure_chunk_upload_protocol()?;
+        Ok(transfer)
+    }
+
+    fn ensure_chunk_upload_protocol(&self) -> Result<()> {
+        let (RunnerFileChannel::DaemonHttp {
+            client,
+            endpoint_url,
+            broker_token,
+        }
+        | RunnerFileChannel::BrokerHttp {
+            client,
+            endpoint_url,
+            broker_token,
+        }) = &self.channel
+        else {
+            // SSH has its own bounded atomic upload protocol and never calls
+            // the daemon chunk endpoint.
+            return Ok(());
+        };
+        let response = match &self.channel {
+            RunnerFileChannel::BrokerHttp { .. } => broker_http::get_json(
+                client,
+                endpoint_url,
+                "/files/capabilities",
+                "runner file capability preflight",
+                broker_token.as_deref(),
+            ),
+            RunnerFileChannel::DaemonHttp { .. } => daemon_file_get_json(
+                client,
+                endpoint_url,
+                "/files/capabilities",
+                broker_token.as_deref(),
+            ),
+            RunnerFileChannel::DirectSsh(_) => unreachable!(),
+        }
+        .map_err(|error| unsupported_chunk_upload_error(&self.runner_id, error.to_string()))?;
+        let version = response.get("protocol_version").and_then(Value::as_u64);
+        let enabled = response
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("private_file_chunk_upload"))
+            });
+        if version != Some(CHUNK_UPLOAD_PROTOCOL_VERSION) || !enabled {
+            return Err(unsupported_chunk_upload_error(
+                &self.runner_id,
+                "daemon did not advertise private_file_chunk_upload protocol version 1",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn ensure_directory(&self, remote_dir: &str) -> Result<()> {
@@ -784,6 +841,42 @@ fn daemon_file_post_json(
         .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data.body"))
 }
 
+fn daemon_file_get_json(
+    client: &Client,
+    base_url: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Value> {
+    let mut request = client.get(format!("{}{}", base_url.trim_end_matches('/'), path));
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = request
+            .header(broker_auth::BROKER_TOKEN_HEADER, token)
+            .bearer_auth(token);
+    }
+    let response = request.send().map_err(|err| {
+        Error::internal_unexpected(format!("runner file daemon capability request: {err}"))
+    })?;
+    let status_code = response.status().as_u16();
+    let envelope: HttpFileEnvelope = response.json().map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse runner file daemon capability response".to_string()),
+        )
+    })?;
+    if status_code >= 400 || !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "runner file daemon capability request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .and_then(|data| data.get("body").cloned())
+        .ok_or_else(|| {
+            Error::internal_unexpected("runner file daemon capability response missing data.body")
+        })
+}
+
 pub(crate) fn select_runner_transport(
     runner: &Runner,
     status: Option<&RunnerStatusReport>,
@@ -843,6 +936,23 @@ fn unsupported_file_transfer_error(
     .with_retryable(false)
         .with_hint("Use a direct SSH runner for Lab @file arguments and structured-output download until the reverse broker exposes a file-transfer API.".to_string())
         .with_hint("Next transport implementation should provide mkdir/upload/download through the selected runner transport instead of calling SSH directly.".to_string())
+}
+
+fn unsupported_chunk_upload_error(runner_id: &str, reason: impl Into<String>) -> Error {
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "Lab offload runner `{runner_id}` cannot negotiate the private chunk-upload protocol: {}",
+            reason.into()
+        ),
+        json!({
+            "runner_id": runner_id,
+            "missing_capability": "private_file_chunk_upload",
+            "required_protocol_version": CHUNK_UPLOAD_PROTOCOL_VERSION,
+        }),
+    )
+    .with_retryable(false)
+    .with_hint("Upgrade the runner daemon or select direct SSH, which uses its native bounded atomic transfer protocol.".to_string())
 }
 
 fn file_transfer_operation_error(
@@ -1087,5 +1197,17 @@ mod tests {
         let request = server.join().expect("server");
         assert!(request.contains("x-homeboy-broker-token: secret-token"));
         assert!(request.contains("authorization: Bearer secret-token"));
+    }
+
+    #[test]
+    fn old_daemon_capability_preflight_is_a_typed_non_retryable_refusal() {
+        let refusal = unsupported_chunk_upload_error("runner-old", "HTTP 404");
+        assert_eq!(refusal.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(refusal.retryable, Some(false));
+        assert_eq!(
+            refusal.details["missing_capability"],
+            "private_file_chunk_upload"
+        );
+        assert_eq!(refusal.details["required_protocol_version"], 1);
     }
 }
