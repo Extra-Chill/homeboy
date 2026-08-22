@@ -3525,16 +3525,21 @@ fn provider_evidence_paths_equivalent(
     reference: &str,
     declared: &AdmittedProviderEvidenceSource,
 ) -> bool {
-    if reference == declared.supplied_path.to_string_lossy() {
-        return true;
+    approved_provider_evidence_spellings(&declared.canonical_path)
+        .iter()
+        .any(|spelling| reference == spelling.to_string_lossy())
+}
+
+fn approved_provider_evidence_spellings(canonical_path: &Path) -> Vec<PathBuf> {
+    let mut spellings = vec![canonical_path.to_path_buf()];
+    #[cfg(target_os = "macos")]
+    if let Some(suffix) = canonical_path
+        .to_str()
+        .and_then(|path| path.strip_prefix("/private/var/"))
+    {
+        spellings.push(Path::new("/var").join(suffix));
     }
-    let reference = Path::new(reference);
-    let Ok(canonical_reference) = reference.canonicalize() else {
-        return false;
-    };
-    canonical_reference == declared.canonical_path
-        && approved_macos_temporary_root(reference, &canonical_reference).is_some()
-        && declared.approved_root.is_some()
+    spellings
 }
 
 fn provider_evidence_controller_provenance(
@@ -3820,9 +3825,10 @@ pub(crate) fn rewrite_provider_evidence_prompt(
             .join(&input.id)
             .join(Path::new(&input.source).file_name().unwrap_or_default());
         let destination = destination.display().to_string();
-        *prompt = prompt.replace(&input.source, &destination);
         if let Ok(source) = admit_provider_evidence_source(&input.source) {
-            *prompt = prompt.replace(&source.canonical_path.display().to_string(), &destination);
+            for spelling in approved_provider_evidence_spellings(&source.canonical_path) {
+                *prompt = prompt.replace(&spelling.display().to_string(), &destination);
+            }
         }
     }
 }
@@ -3965,6 +3971,58 @@ mod provider_evidence_tests {
                 projected[0]["path"].as_str().expect("projected path")
             ))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rewrites_var_prompt_alias_for_private_var_declaration() {
+        let var_temp = std::env::temp_dir();
+        if !var_temp.starts_with("/var/") {
+            return;
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("homeboy-provider-evidence-")
+            .tempdir_in(&var_temp)
+            .expect("temporary workspace under var");
+        let source = temp.path().join("source.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "{}").expect("write source");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let canonical_source = source.canonicalize().expect("canonical source");
+        let var_source = Path::new("/var").join(
+            canonical_source
+                .strip_prefix("/private/var")
+                .expect("temporary file is under private var"),
+        );
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: canonical_source.display().to_string(),
+        };
+        let prompt_source = var_source.display().to_string();
+
+        validate_provider_evidence_inputs(&[input.clone()], Some(&format!("Read {prompt_source}")))
+            .expect("var spelling is declared by its private var alias");
+        let projected = project_provider_evidence_inputs(&[input.clone()], &workspace, None)
+            .expect("project private var source");
+        let config = serde_json::json!({ "evidence_inputs": projected });
+        let encoded_config = config.to_string();
+        assert!(!encoded_config.contains(&canonical_source.display().to_string()));
+        assert!(!encoded_config.contains(&prompt_source));
+
+        let mut prompt = Some(format!("Read {prompt_source}"));
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        let rewritten = prompt.expect("rewritten prompt");
+        assert_eq!(
+            rewritten,
+            format!(
+                "Read {}",
+                config["evidence_inputs"][0]["path"]
+                    .as_str()
+                    .expect("projected path")
+            )
+        );
+        assert!(!rewritten.contains(&canonical_source.display().to_string()));
+        assert!(!rewritten.contains(&prompt_source));
     }
 
     #[cfg(target_os = "macos")]
