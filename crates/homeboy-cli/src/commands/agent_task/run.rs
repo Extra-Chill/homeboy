@@ -3796,15 +3796,6 @@ fn approved_macos_temporary_root(supplied_path: &Path, canonical_path: &Path) ->
     }
 }
 
-fn provider_evidence_paths_equivalent(
-    reference: &str,
-    declared: &AdmittedProviderEvidenceSource,
-) -> bool {
-    approved_provider_evidence_spellings(&declared.canonical_path)
-        .iter()
-        .any(|spelling| reference == spelling.to_string_lossy())
-}
-
 fn approved_provider_evidence_spellings(canonical_path: &Path) -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     let mut spellings = vec![canonical_path.to_path_buf()];
