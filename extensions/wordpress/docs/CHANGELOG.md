@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.17] - 2026-08-22
+
+### Changed
+- support managed CLI preflight fixture
+
+### Fixed
+- enforce managed PHPUnit selection
+
 ## [3.35.16] - 2026-08-21
 
 ### Fixed
