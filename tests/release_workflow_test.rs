@@ -34,6 +34,23 @@ fn release_quality_policy(
         .expect("release quality policy should run")
 }
 
+/// Strip YAML comment lines so an ABSENCE assertion tests configuration rather
+/// than prose.
+///
+/// Every `assert!(!section.contains(..))` over raw workflow text is a trap: the
+/// comment explaining WHY a setting was removed necessarily quotes the setting,
+/// so documenting the removal re-triggers the assertion that pins it. That has
+/// now bitten three separate assertions in this file (`Main Guard`,
+/// `cargo build --workspace`, `source: '.'`). Use this for absence checks; the
+/// raw section is still correct for presence checks.
+fn without_comments(section: &str) -> String {
+    section
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -414,19 +431,76 @@ fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
     }
 }
 
+/// `prepare` and `host` consume the `gate-build` artifact instead of rebuilding.
+///
+/// Homeboy used to be compiled from scratch four times per release run —
+/// `check`, `gate-build`, `prepare`, `host` — at 7-12 minutes each, roughly 40
+/// of a 90-minute critical path, all producing the same binary. `gate-build`
+/// already uploads `homeboy-binary` and the three quality gates already consume
+/// it via `binary-path`; `prepare` and `host` simply did not.
+///
+/// `check` is deliberately NOT included and must keep building from source:
+/// it runs BEFORE `gate-build` exists, and
+/// `release_dry_run_bootstraps_with_the_candidate_binary` pins the reason —
+/// it parses the current extension manifests, which a published binary may
+/// predate.
+#[test]
+fn release_mutation_jobs_reuse_the_gate_build_binary_instead_of_rebuilding() {
+    let workflow = release_workflow();
+
+    for job in ["prepare", "host"] {
+        let section = job_section(workflow, job);
+        assert!(
+            section.contains("binary-path: .homeboy-bin/homeboy"),
+            "{job} must run the gate-build artifact, not compile homeboy again"
+        );
+        assert!(
+            section.contains("name: homeboy-binary"),
+            "{job} must download the shared gate-build artifact"
+        );
+        assert!(
+            !without_comments(section).contains("source: '.'"),
+            "{job} must not rebuild homeboy from source; that is the ~10m of \
+             duplicate release-profile codegen this pins out"
+        );
+    }
+
+    // The dry-run check is the deliberate exception, not an oversight.
+    let check = job_section(workflow, "check");
+    assert!(
+        check.contains("source: '.'"),
+        "check runs before gate-build exists and must still build the candidate"
+    );
+}
+
 #[test]
 fn release_preflight_validates_the_private_workspace_build_before_mutating_release_state() {
     let prepare = job_section(release_workflow(), "prepare");
     let package_preflight = prepare
-        .find("name: Preflight release workspace build")
+        .find("name: Preflight full-workspace compilation")
         .expect("prepare must validate the complete release build");
     let release_action = prepare
         .find("uses: Extra-Chill/homeboy-action@v2")
         .expect("prepare must run the release action");
 
+    // The `--all-targets` check replaced a codegen build that ran immediately
+    // before a narrower `--tests` check. The property under test never was
+    // "codegen happens here" — nothing in `prepare` consumes the object files,
+    // and `gate-build` already proved the release profile links. It is "the
+    // WHOLE workspace, including every test and bench target, compiles against
+    // the LOCKED graph before a tag exists". `--all-targets` asserts that
+    // strictly harder than the pair it replaced, for less wall clock.
     assert!(
-        prepare.contains("run: cargo build --workspace --locked"),
-        "release preflight must build the private workspace with the locked dependency graph"
+        prepare.contains("run: cargo check --workspace --all-targets --locked"),
+        "release preflight must compile every workspace target against the locked dependency graph"
+    );
+    // Asserted against the `run:` line specifically. Matching the bare command
+    // anywhere in the job would also match the comment that explains why the
+    // codegen step was removed, which is how this assertion first failed.
+    assert!(
+        !prepare.contains("run: cargo build --workspace"),
+        "prepare must not re-run codegen that gate-build already proved; the \
+         --all-targets check above is the preflight"
     );
     assert!(
         cargo_manifest().contains("publish = false"),
@@ -861,7 +935,7 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     assert!(host.contains("homeboy.draft-adoption"));
     assert!(host.contains("expected_assets: $expected_assets"));
     assert!(host.contains("Download current Homeboy finalizer"));
-    assert!(host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"));
+    assert!(host.contains("binary-path: .homeboy-bin/homeboy"));
     assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"));
     let authority = release_step_block(
         host,
@@ -1161,7 +1235,7 @@ fn release_fast_path_keeps_every_publication_verification() {
     // fixed in #10560 — keep it fixed).
     let host = job_section(workflow, "host");
     assert!(
-        host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"),
+        host.contains("binary-path: .homeboy-bin/homeboy"),
         "recovery must execute the freshly built control binary, never the stranded tag's"
     );
     assert!(
@@ -1325,30 +1399,42 @@ fn recovery_builds_publish_the_bootstrap_installer_from_the_control_revision() {
 }
 
 /// The control binary is only load-bearing if the finalizer actually runs it.
-/// `source: '.'` alone would rebuild from the recovered tag's tree, which is
-/// the same trap by a different route (#10519).
+/// A source rebuild would compile from the recovered tag's tree, which is the
+/// #10519 trap by a different route.
+///
+/// This assertion used to also require that `binary-path` was bound to
+/// `recovery-release == 'true'`, on the reasoning that "normal releases are
+/// unaffected". That scoping is gone on purpose. The binding is now
+/// unconditional, which makes the #10519 property STRONGER — there is no
+/// longer any path through this step that rebuilds from a tree — while
+/// removing ~11m50s of duplicate release-profile codegen from the fresh-release
+/// path. `gate-build` already produced this binary, and the fresh path already
+/// executed it in "Create fresh artifact source-authority manifest" to author
+/// the very manifest this finalizer validates against.
 #[test]
-fn release_recovery_finalizer_executes_the_main_built_binary() {
+fn release_finalizer_always_executes_the_main_built_binary() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");
 
     let download = release_step_block(host, "name: Download current Homeboy finalizer");
     assert!(
         download.contains("name: homeboy-binary") && download.contains("path: .homeboy-bin"),
-        "recovery must fetch the main-built binary produced by gate-build; got:\n{download}"
+        "the finalizer must fetch the main-built binary produced by gate-build; got:\n{download}"
     );
-    // The download itself is unconditional -- fetching the binary is cheap and
-    // always-available evidence. The recovery binding lives on `binary-path`
-    // below, which is what decides whether it is actually executed.
 
     let finalize = release_step_block(host, "name: Finish Homeboy release pipeline at tag");
     assert!(
-        finalize.contains(".homeboy-bin/homeboy"),
-        "recovery must publish with the downloaded control binary, not a tree rebuild; got:\n{finalize}"
+        finalize.contains("binary-path: .homeboy-bin/homeboy"),
+        "the finalizer must publish with the downloaded control binary on EVERY path, \
+         not just recovery; got:\n{finalize}"
     );
+    // The load-bearing half of #10519: no route through this step may rebuild
+    // from the checked-out tree. `host` checks out the release tag, so a
+    // `source:` input here would compile the stranded/recovered tag's code and
+    // silently discard any publisher fix that merged after it.
     assert!(
-        finalize.contains("recovery-release == 'true'"),
-        "binary-path must be bound to the recovery path so normal releases are unaffected"
+        !without_comments(finalize).contains("source:"),
+        "the finalizer must never rebuild from the tag's tree (#10519); got:\n{finalize}"
     );
 }
 
@@ -2259,7 +2345,22 @@ fn macos_release_shell_scripts_avoid_bash_4_only_constructs() {
     }
 }
 
-/// The exact published inventory of `v0.332.0` — the last healthy release.
+/// A complete, healthy release inventory for the currently declared platform
+/// set.
+///
+/// This began as a verbatim transcript of `v0.332.0`, the last healthy release
+/// at the time. It cannot stay one. The asset contract is an EXACT-SET match —
+/// it rejects unexpected assets as loudly as missing ones — so this fixture
+/// states "what a complete release looks like", and that is a function of
+/// `dist-workspace.toml`, not of history. When `x86_64-apple-darwin` was
+/// dropped from the target list, a fixture frozen at v0.332.0 started failing
+/// as two assets too MANY rather than passing as a historical fact.
+///
+/// Keep it in step with `declared_dist_targets()`: two entries per target
+/// (`.tar.xz` and its `.sha256`), plus the platform-independent tail below.
+/// `asset_contract_covers_every_target_the_repo_declares` is what catches this
+/// drifting — it derives the target list from the manifest and requires each
+/// declared archive to be load-bearing here.
 const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "dist-manifest.json",
     "homeboy-aarch64-apple-darwin.tar.xz",
@@ -2267,8 +2368,6 @@ const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "homeboy-aarch64-unknown-linux-gnu.tar.xz",
     "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256",
     "homeboy-installer.sh",
-    "homeboy-x86_64-apple-darwin.tar.xz",
-    "homeboy-x86_64-apple-darwin.tar.xz.sha256",
     "homeboy-x86_64-unknown-linux-gnu.tar.xz",
     "homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256",
     "homeboy.rb",
@@ -2405,8 +2504,14 @@ fn planned_contract_rejects_host_only_assets_and_accepts_every_supported_platfor
         code, 0,
         "the complete supported-platform plan must pass: {out}"
     );
+    // Derived, not transcribed. A literal `14` here was a second place the
+    // platform count had to be hand-updated, and it silently disagreed with
+    // `HEALTHY_RELEASE_ASSETS` the moment a target was dropped.
+    let expected_count = HEALTHY_RELEASE_ASSETS.len();
     assert!(
-        out.contains("14 assets from cargo-dist release plan"),
+        out.contains(&format!(
+            "{expected_count} assets from cargo-dist release plan"
+        )),
         "the final contract must include every planned asset, including dist-manifest.json: {out}"
     );
 }

@@ -672,8 +672,6 @@ struct PortableChildRefs {
 #[derive(Deserialize)]
 struct PortableChildRunRef {
     id: String,
-    #[serde(default)]
-    location: Option<String>,
 }
 #[derive(Deserialize)]
 struct PortableChildArtifactRef {

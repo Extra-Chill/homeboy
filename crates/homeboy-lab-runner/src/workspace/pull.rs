@@ -155,6 +155,7 @@ fn pull_ssh(runner: &Runner, plan: &RunnerWorkspacePullPlan) -> Result<()> {
             source: format!("{server_id}:{source}"),
             destination: plan.local_destination.clone(),
             recursive: true,
+            directory_contents: false,
             compress: true,
             dry_run: false,
             exclude: Vec::new(),

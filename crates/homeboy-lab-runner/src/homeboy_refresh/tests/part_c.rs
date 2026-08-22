@@ -120,9 +120,13 @@ fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
     assert!(!readiness.daemon_fresh);
     assert!(!readiness.accepting_jobs);
     assert_eq!(readiness.owners, ["lease-new"]);
+    // This fixture carries no typed repair plan, and a stale report without one
+    // is terminal even when its ownership proof is sufficient (#12797): there is
+    // no authorized mutation to prescribe. The readiness therefore falls back to
+    // the read-only status projection rather than a `runner doctor` action.
     assert_eq!(
         readiness.continuation.as_deref(),
-        Some("homeboy runner doctor homeboy-lab --scope lab-offload")
+        Some("homeboy runner status homeboy-lab --full")
     );
 }
 

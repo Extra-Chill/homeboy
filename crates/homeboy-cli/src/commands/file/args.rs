@@ -137,7 +137,7 @@ pub(crate) enum FileCommand {
     },
     /// Copy a file or path between local and remote targets
     Copy(TransferArgs),
-    /// Sync a directory between local and remote targets without deleting extras
+    /// Sync directory contents into a local or remote destination without deleting extras
     Sync(SyncArgs),
     /// Edit file with line-based or pattern-based operations
     Edit(EditArgs),
@@ -179,15 +179,43 @@ pub(crate) struct TransferFlags {
     exclude: Vec<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{SyncArgs, TransferFlags};
+
+    #[test]
+    fn sync_targets_directory_contents() {
+        let config = SyncArgs {
+            source: "local/existing-dir".to_string(),
+            destination: "sandbox:/existing/same-dir".to_string(),
+            flags: TransferFlags {
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            },
+        }
+        .into_config();
+
+        assert!(config.recursive);
+        assert!(config.directory_contents);
+    }
+}
+
 impl TransferArgs {
     pub(crate) fn into_config(self) -> TransferConfig {
-        transfer_config(self.source, self.destination, self.recursive, self.flags)
+        transfer_config(
+            self.source,
+            self.destination,
+            self.recursive,
+            false,
+            self.flags,
+        )
     }
 }
 
 impl SyncArgs {
     pub(crate) fn into_config(self) -> TransferConfig {
-        transfer_config(self.source, self.destination, true, self.flags)
+        transfer_config(self.source, self.destination, true, true, self.flags)
     }
 }
 
@@ -195,12 +223,14 @@ fn transfer_config(
     source: String,
     destination: String,
     recursive: bool,
+    directory_contents: bool,
     flags: TransferFlags,
 ) -> TransferConfig {
     TransferConfig {
         source,
         destination,
         recursive,
+        directory_contents,
         compress: flags.compress,
         dry_run: flags.dry_run,
         exclude: flags.exclude,

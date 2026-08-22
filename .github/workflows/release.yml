@@ -622,25 +622,65 @@ jobs:
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Preflight release workspace build
+      # ── One codegen-free preflight, not two compiles (release critical path) ──
+      #
+      # This replaced a pair of steps: a full workspace codegen build followed
+      # by a `--tests` check, 5m14s combined. The codegen half was the
+      # redundant one — `prepare` consumes none of the object files it emitted,
+      # `gate-build` had already proved those same lib/bin targets link in
+      # release profile, and the check below covers a strict superset of its
+      # error surface. Paying for codegen twice bought nothing.
+      #
+      # `--all-targets` rather than `--tests`: `--tests` alone can miss a plain
+      # `[[bin]]` (e.g. `bench-audit-self`) in its non-test configuration, and
+      # benches are real compile surface too. Same cost class, wider net.
+      #
+      # This step is LOAD-BEARING and must not be deleted as "the test gate
+      # already did it". It did not. `gate-test` runs `review test` with
+      # `--changed-since`, so it compiles only the changed scope — a green Test
+      # gate routinely builds a single binary. The full-scope post-merge job
+      # that used to backstop it was deliberately removed in #10696 (an absence
+      # now pinned by `tests/audit_debt_workflow_test.rs`), and `audit-debt`
+      # only runs weekly. That makes this the ONLY full-workspace target
+      # compile anywhere on the merge path. It is what catches a test file
+      # still referencing a module a crate extraction moved out from under it.
+      #
+      # `--locked` is also the only enforcement that `Cargo.lock` is current
+      # before the version bump rewrites it; `gate-build` does not pass it.
+      - name: Preflight full-workspace compilation
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo build --workspace --locked
+        run: cargo check --workspace --all-targets --locked
 
-      # Compile every crate's TEST target too. `cargo build --workspace` above
-      # only builds lib/bin targets, so a test file that references a module
-      # moved during a crate extraction (e.g. a donor's orphaned `super::foo`
-      # after `foo` was extracted) compiles fine here yet breaks the test gate.
-      # `check --tests` is codegen-free and cheap; it fails the release closed
-      # before shipping a workspace whose tests don't build.
-      - name: Preflight workspace test-target compilation
-        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo check --workspace --tests --locked
+      # The same `gate-build` artifact the three quality gates already run.
+      #
+      # `prepare` used to rebuild homeboy from source here (~10m of
+      # release-profile codegen) despite `gate-build` having compiled that exact
+      # tree minutes earlier: both check out `github.sha`, so unlike the `host`
+      # job there is not even a version-skew question to answer — the binary is
+      # built from precisely the commit it is about to bump.
+      #
+      # This does NOT remove the Rust toolchain requirement above. The release
+      # run still shells out to cargo to regenerate `Cargo.lock` after rewriting
+      # the version in `Cargo.toml`, and the preflight check needs it too.
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a fault in this release. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
 
       - uses: Extra-Chill/homeboy-action@v2
         id: release
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           commands: release
           expected-commands: review audit,review lint,review test
           args: --skip-checks=audit,lint,test
@@ -1313,13 +1353,43 @@ jobs:
       # object to inspect yet. Keep that lifecycle and its validation together
       # in the finalizer so both recovery states use the same fail-closed path.
 
+      # `binary-path` is now unconditional, and `source: '.'` is gone with it.
+      #
+      # This step used to rebuild homeboy from source on the fresh-release path
+      # — ~11m50s of release-profile codegen — while `binary-path` was supplied
+      # only for recovery. That was the single largest avoidable block in the
+      # run, and the binary it produced was already sitting in the workspace:
+      # "Download current Homeboy finalizer" above has NO `if:`, so the
+      # `gate-build` artifact is fetched into `.homeboy-bin/` on every path.
+      #
+      # It was also already TRUSTED on this path. "Create fresh artifact
+      # source-authority manifest" runs `.homeboy-bin/homeboy release
+      # artifact-source-authority` under `recovery-release != 'true'` — the
+      # fresh path — and that manifest is precisely what this finalizer then
+      # validates against. The pre-bump binary already authors the release's
+      # authoritative tag/version/commit record here.
+      #
+      # On the version-skew question: `gate-build` builds at `github.sha`, one
+      # commit before the version bump, so this binary reports the PREVIOUS
+      # version. That is cosmetic. `release --head` takes its version from the
+      # checked-out tree (`read_component_version` -> `read_target` -> the file
+      # on disk) and its tag from `git tags_pointing_at_commit` at HEAD; the
+      # compile-time `HOMEBOY_PRODUCT_VERSION` is never consulted. The only
+      # `build_identity::current()` calls in `homeboy-release` are in
+      # `containment.rs`, backing the `release contains` / `release gap`
+      # subcommands, which return before `run_execute` and cannot be reached
+      # with `--head`.
+      #
+      # `binary-path` short-circuits `source` inside the action anyway — every
+      # source-build step is gated on `inputs.binary-path == ''` — so leaving
+      # `source: '.'` here would have been dead config that reads like a
+      # fallback.
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2
         with:
-          source: '.'
           component: homeboy
           commands: release
-          binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}
+          binary-path: .homeboy-bin/homeboy
           release-head: 'true'
           release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}
           release-skip-publish: 'true'

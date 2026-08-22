@@ -7,6 +7,7 @@ use homeboy_core::redaction::RedactionPolicy;
 
 pub(crate) const RUNNER_PROGRESS_LINE_PREFIX: &str = "HOMEBOY_RUNNER_PROGRESS ";
 pub(crate) const RUNNER_PROGRESS_SCHEMA: &str = "homeboy/runner-progress/v1";
+pub(crate) const PROMOTION_PROGRESS_FRAME_SCHEMA: &str = "homeboy/promotion-progress-frame/v1";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +63,21 @@ pub(crate) fn parse_child_progress_line(
         "metadata": envelope.metadata,
     });
     Some(redact_progress_value(value, env, secret_env_names))
+}
+
+/// Protocol frames are control data, not command output. Only remove a line
+/// after it passed the same strict parser used for durable progress events.
+pub(crate) fn remove_child_progress_lines(
+    stdout: &str,
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
+) -> String {
+    stdout
+        .split_inclusive('\n')
+        .filter(|line| {
+            parse_child_progress_line(line.trim_end_matches('\n'), env, secret_env_names).is_none()
+        })
+        .collect()
 }
 
 fn redact_progress_value(
@@ -143,5 +159,19 @@ mod tests {
             &[]
         )
         .is_none());
+    }
+
+    #[test]
+    fn removes_only_valid_protocol_frames_from_terminal_stdout() {
+        let env = HashMap::new();
+        let frame = format!(
+            "{RUNNER_PROGRESS_LINE_PREFIX}{{\"schema\":\"{RUNNER_PROGRESS_SCHEMA}\",\"phase\":\"promotion\",\"metadata\":{{\"promotion\":{{\"schema\":\"{PROMOTION_PROGRESS_FRAME_SCHEMA}\",\"message\":\"promotion progress\"}}}}}}\n"
+        );
+        let stdout = format!("{frame}result\n{RUNNER_PROGRESS_LINE_PREFIX}not-json\n");
+
+        assert_eq!(
+            remove_child_progress_lines(&stdout, &env, &[]),
+            format!("result\n{RUNNER_PROGRESS_LINE_PREFIX}not-json\n")
+        );
     }
 }
