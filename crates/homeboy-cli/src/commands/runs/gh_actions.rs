@@ -114,7 +114,7 @@ pub enum GhActionsImportedArtifactStatus {
     Existing,
 }
 
-pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput> {
     let gh = GhClient::from_repo_arg(&args.repo)?;
     gh.ensure_ready()?;
     let repo = gh.repo_path()?.to_string();

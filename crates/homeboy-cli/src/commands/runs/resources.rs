@@ -187,7 +187,7 @@ pub struct RunsResourcesDiagnosticOutput {
     pub force_release_warning: String,
 }
 
-pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
     validate_cleanup_args(&args)?;
 
     let loaded = load_indexes(&args)?;

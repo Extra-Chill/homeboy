@@ -89,7 +89,7 @@ struct HotspotAccumulator {
     sources: BTreeSet<String>,
 }
 
-pub fn runs_hotspots(args: RunsHotspotsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_hotspots(args: RunsHotspotsArgs) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
     validate_hotspot_args(&args)?;
     let store = ObservationStore::open_initialized()?;

@@ -72,7 +72,7 @@ pub struct CategoryDistributionValue {
     pub run_count: usize,
 }
 
-pub fn runs_distribution(
+pub(crate) fn runs_distribution(
     args: RunsDistributionArgs,
     command: &'static str,
 ) -> CmdResult<RunsOutput> {

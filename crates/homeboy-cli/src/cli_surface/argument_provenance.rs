@@ -37,7 +37,7 @@ impl ArgumentSource {
 pub struct CommandArgumentProvenance(BTreeMap<String, ArgumentSource>);
 
 impl CommandArgumentProvenance {
-    pub fn from_matches(matches: &ArgMatches) -> Self {
+    pub(crate) fn from_matches(matches: &ArgMatches) -> Self {
         let mut provenance = Self::default();
         provenance.collect(matches);
         provenance
@@ -55,7 +55,7 @@ impl CommandArgumentProvenance {
 
     /// Rejects a source policy before a caller starts workspace, provider, or
     /// other external work. A single policy can cover an argument group.
-    pub fn require_sources(
+    pub(crate) fn require_sources(
         &self,
         arguments: &[&str],
         allowed: &[ArgumentSource],
@@ -84,7 +84,7 @@ impl CommandArgumentProvenance {
     }
 
     /// Adds durable provenance to a plan or evidence JSON object.
-    pub fn project_into(&self, value: &mut serde_json::Value) {
+    pub(crate) fn project_into(&self, value: &mut serde_json::Value) {
         if !value.is_object() {
             *value = serde_json::json!({});
         }
@@ -168,7 +168,7 @@ impl TrackerCookArgumentAdapter {
 
     /// Tracker policy can reject caller overrides before it provisions a
     /// worktree or discovers a provider.
-    pub fn require_policy_owned(
+    fn require_policy_owned(
         provenance: &CommandArgumentProvenance,
         arguments: &[&str],
     ) -> Result<(), ArgumentSourcePolicyError> {

@@ -36,7 +36,7 @@ pub struct RunSummary {
     pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
-pub fn run_summaries_with_artifact_indexes(
+pub(crate) fn run_summaries_with_artifact_indexes(
     store: &ObservationStore,
     run_records: Vec<RunRecord>,
 ) -> homeboy::core::Result<Vec<RunSummary>> {
@@ -78,7 +78,7 @@ fn run_summary_with_artifact_index(
 /// Accepts the same forms as elsewhere in the runs surface (s, m, h, d).
 /// Returned timestamp is `now - duration` so the caller can compare with
 /// `started_at >= threshold` semantics.
-pub fn since_threshold(raw: &str) -> homeboy::core::Result<String> {
+pub(crate) fn since_threshold(raw: &str) -> homeboy::core::Result<String> {
     let duration = parse_duration(raw)?;
     let chrono_duration = chrono::Duration::from_std(duration).map_err(|e| {
         Error::validation_invalid_argument("since", e.to_string(), Some(raw.to_string()), None)
@@ -91,14 +91,14 @@ pub fn since_threshold(raw: &str) -> homeboy::core::Result<String> {
 /// The unit table lives in `commands::utils::watch` so every duration-taking
 /// flag in the CLI accepts the same units; this only names the field the error
 /// is attributed to.
-pub fn parse_duration(raw: &str) -> homeboy::core::Result<Duration> {
+pub(crate) fn parse_duration(raw: &str) -> homeboy::core::Result<Duration> {
     crate::commands::utils::watch::parse_duration("since", raw)
 }
 
 /// Compile a JSONPath expression. Returns a structured validation error on
 /// invalid syntax instead of panicking. Schema-blind: the engine doesn't know
 /// what the JSON looks like, only how to walk it.
-pub fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::JsonPath> {
+pub(crate) fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::JsonPath> {
     serde_json_path::JsonPath::parse(expr).map_err(|e| {
         Error::validation_invalid_argument(
             "jsonpath",
@@ -111,7 +111,7 @@ pub fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::Js
 
 /// Apply a compiled JSONPath to a JSON value and return all matched nodes,
 /// each as an owned `Value` clone.
-pub fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Value> {
+pub(crate) fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Value> {
     path.query(value).all().into_iter().cloned().collect()
 }
 
@@ -120,7 +120,7 @@ pub fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Val
 /// nodes: `null` for no match, the single match, or an array for many. Backs
 /// the `-q`/`--field` selectors on `runs show` and `runs artifact get` so a
 /// caller extracts only the fields it needs instead of the whole structure.
-pub fn select_fields(
+pub(crate) fn select_fields(
     root: &Value,
     exprs: &[String],
 ) -> homeboy::core::Result<Vec<(String, Value)>> {
@@ -195,7 +195,7 @@ pub struct SkippedArtifactRow {
 /// Schema-blind: artifacts whose stored file is missing, unreadable, not valid
 /// JSON, or metadata-only are skipped with diagnostics. Non-file artifact types
 /// like images, zips, and URLs are ignored because callers project JSON rows.
-pub fn load_artifact_rows(
+pub(crate) fn load_artifact_rows(
     store: &ObservationStore,
     filter: RunListFilter,
     since: Option<&str>,
@@ -294,7 +294,7 @@ fn skipped_artifact(
 /// Schema-blind: returns `(value, count, share)` tuples sorted by descending
 /// count. Non-scalar matches and missing matches are tallied under
 /// `missing_count` so callers can report coverage.
-pub fn distribution_share(
+pub(crate) fn distribution_share(
     rows: &[ArtifactJsonRow],
     metric_path: &serde_json_path::JsonPath,
 ) -> DistributionSnapshot {

@@ -16,7 +16,7 @@ const LAB_CLI_ARGUMENT_IDS: &[&str] = &[
     "runner_workspace_root",
 ];
 
-pub fn scope_lab_cli_arguments(command: Command) -> Command {
+pub(crate) fn scope_lab_cli_arguments(command: Command) -> Command {
     let lab_args = command
         .get_arguments()
         .filter(|arg| LAB_CLI_ARGUMENT_IDS.contains(&arg.get_id().as_str()))

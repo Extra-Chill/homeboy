@@ -167,7 +167,7 @@ pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
     }
 }
 
-pub fn is_plain_mode(args: &RuntimeArgs) -> bool {
+pub(crate) fn is_plain_mode(args: &RuntimeArgs) -> bool {
     match &args.command {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { plain, .. } => *plain,
@@ -185,7 +185,7 @@ impl RuntimeArgs {
     }
 }
 
-pub fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)> {
+pub(crate) fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)> {
     match args.command {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { helper, .. } => {

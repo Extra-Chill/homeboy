@@ -108,7 +108,7 @@ fn normalize_topic(topic: &[String]) -> (String, String, Vec<String>) {
     (user_label, key, segments)
 }
 
-pub fn available_topics() -> Vec<String> {
+pub(crate) fn available_topics() -> Vec<String> {
     let mut topics: BTreeSet<String> = GENERATED_DOCS
         .iter()
         .map(|(key, _)| key.to_string())

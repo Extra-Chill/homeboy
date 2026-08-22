@@ -64,7 +64,7 @@ pub enum CommandCapability {
 /// — "which arguments may Homeboy read" ([`homeboy_owned_args`]) and "where
 /// does the passthrough begin" (`mark_explicit_passthrough`) — resolves through
 /// this one answer rather than through a private rescan (#11755).
-pub fn argv_separator_index(args: &[String]) -> Option<usize> {
+pub(crate) fn argv_separator_index(args: &[String]) -> Option<usize> {
     args.iter().position(|arg| arg == "--")
 }
 
@@ -81,7 +81,7 @@ pub fn argv_separator_index(args: &[String]) -> Option<usize> {
 /// `owned_args_guard_test` fails the build when a new raw argv flag scan
 /// appears outside it, because the two sites above were written months apart
 /// and nothing but review stood between them and a third.
-pub fn homeboy_owned_args(args: &[String]) -> &[String] {
+pub(crate) fn homeboy_owned_args(args: &[String]) -> &[String] {
     match argv_separator_index(args) {
         Some(separator) => &args[..separator],
         None => args,
@@ -157,7 +157,7 @@ pub fn classify(args: &[String]) -> CommandCapability {
 /// Recovery may contact a previously selected runner, so only `runner exec`
 /// may start it. Other mutations must not turn routine commands into an
 /// unrelated background-recovery admission path.
-pub fn requires_startup_reconciliation(args: &[String]) -> bool {
+pub(crate) fn requires_startup_reconciliation(args: &[String]) -> bool {
     homeboy_owned_args(args.get(1..).unwrap_or_default())
         .windows(2)
         .any(|args| args == ["runner", "exec"])

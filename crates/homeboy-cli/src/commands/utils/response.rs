@@ -90,7 +90,7 @@ impl CommandIdentity {
         }
     }
 
-    pub fn with_operation(command: impl Into<String>, operation: impl Into<String>) -> Self {
+    pub(crate) fn with_operation(command: impl Into<String>, operation: impl Into<String>) -> Self {
         Self {
             command: command.into(),
             operation: Some(operation.into()),
@@ -132,18 +132,18 @@ impl CommandActionableMetadata {
         }
     }
 
-    pub fn with_next_action(mut self, action: CommandNextAction) -> Self {
+    pub(crate) fn with_next_action(mut self, action: CommandNextAction) -> Self {
         self.next_actions.push(action);
         self
     }
 
-    pub fn with_artifact(mut self, artifact: CommandArtifactRef) -> Self {
+    fn with_artifact(mut self, artifact: CommandArtifactRef) -> Self {
         self.artifacts.push(artifact);
         self
     }
 }
 
-pub fn actionable_metadata_for_run_ref(
+pub(crate) fn actionable_metadata_for_run_ref(
     run_id: impl Into<String>,
     kind: impl Into<String>,
     source: impl Into<String>,
@@ -170,7 +170,7 @@ pub fn actionable_metadata_for_run_ref(
     )
 }
 
-pub fn actionable_metadata_value_for_run_ref(
+pub(crate) fn actionable_metadata_value_for_run_ref(
     run_id: impl Into<String>,
     kind: impl Into<String>,
     source: impl Into<String>,
@@ -222,7 +222,7 @@ impl CommandNextAction {
         self
     }
 
-    pub fn from_action(action: ExecutableAction) -> Self {
+    pub(crate) fn from_action(action: ExecutableAction) -> Self {
         Self {
             label: action.label.clone(),
             command: action.render_command(),
@@ -417,11 +417,11 @@ fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<(
     Ok(())
 }
 
-pub fn print_success<T: Serialize>(data: T) -> Result<()> {
+fn print_success<T: Serialize>(data: T) -> Result<()> {
     print_response(&CommandResultEnvelope::success("unknown", data))
 }
 
-pub fn print_result<T: Serialize>(result: Result<T>) -> Result<()> {
+pub(crate) fn print_result<T: Serialize>(result: Result<T>) -> Result<()> {
     match result {
         Ok(data) => print_success(data),
         Err(err) => print_response(&CommandResultEnvelope::<()>::from_error(
@@ -432,7 +432,7 @@ pub fn print_result<T: Serialize>(result: Result<T>) -> Result<()> {
     }
 }
 
-pub fn map_cmd_result_to_json<T: Serialize>(
+pub(crate) fn map_cmd_result_to_json<T: Serialize>(
     result: Result<(T, i32)>,
 ) -> (Result<serde_json::Value>, i32) {
     match result {
@@ -524,7 +524,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
     }
 }
 
-pub fn print_json_result_for_identity(
+pub(crate) fn print_json_result_for_identity(
     result: Result<Value>,
     exit_code: i32,
     identity: &CommandIdentity,
@@ -538,7 +538,7 @@ pub fn print_json_result_for_identity(
     ))
 }
 
-pub fn cli_response_for_json_result_for_command(
+pub(crate) fn cli_response_for_json_result_for_command(
     result: &Result<serde_json::Value>,
     exit_code: i32,
     command: &str,
@@ -552,7 +552,7 @@ pub fn cli_response_for_json_result_for_command(
     )
 }
 
-pub fn cli_response_for_json_result_for_identity(
+pub(crate) fn cli_response_for_json_result_for_identity(
     result: &Result<serde_json::Value>,
     exit_code: i32,
     identity: &CommandIdentity,
@@ -1251,7 +1251,7 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
 
 /// Write the JSON output envelope to a file. Best-effort — failures are
 /// logged to stderr but don't affect the command's exit code.
-pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_code: i32) {
+pub(crate) fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_code: i32) {
     write_json_to_file_for_command(result, path, exit_code, "unknown", None);
 }
 
@@ -1271,7 +1271,7 @@ pub(crate) fn write_json_to_file_for_command(
     );
 }
 
-pub fn write_json_to_file_for_identity(
+pub(crate) fn write_json_to_file_for_identity(
     result: &Result<serde_json::Value>,
     path: &str,
     exit_code: i32,

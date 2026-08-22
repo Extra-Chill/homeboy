@@ -241,7 +241,7 @@ fn reconcile_workers(
 /// Homeboy installation. Resolving them independently let a five-second poll
 /// re-resolve the root up to 250 times, and left the spawned worker free to
 /// disagree with the probe that was waiting on it.
-pub fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
+pub(crate) fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
     let _start_lock = deferred_workload::acquire_worker_start_lock_in_roots(config_root)?;
     ensure_worker_with(
         config_root,
@@ -326,7 +326,7 @@ pub fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
     )
 }
 
-pub fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
+pub(crate) fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
     restart_worker_if_pending_with(
         config_root,
         |status: &deferred_workload::DeferredWorkloadWorkerStatus| {

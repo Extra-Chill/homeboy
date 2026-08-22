@@ -16,7 +16,7 @@ pub struct RunnerArgs {
 }
 
 impl RunnerArgs {
-    pub fn compact_exec_stdout(&self) -> bool {
+    pub(crate) fn compact_exec_stdout(&self) -> bool {
         matches!(
             &self.command,
             RunnerCommand::Exec {

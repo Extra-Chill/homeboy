@@ -103,7 +103,7 @@ impl WatchPoller for StorePoller<'_> {
     }
 }
 
-pub fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
     let interval = parse_duration(&args.interval)?;
     let timeout = (!args.forever)
         .then(|| parse_duration(&args.timeout))

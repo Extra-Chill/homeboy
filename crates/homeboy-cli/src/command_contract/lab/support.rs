@@ -11,13 +11,13 @@ pub struct LabRunnerSupportSummary {
     pub hint: String,
 }
 
-pub fn lab_runner_supported_labels() -> Vec<&'static str> {
+pub(crate) fn lab_runner_supported_labels() -> Vec<&'static str> {
     lab_support_summaries()
         .map(|summary| summary.message_label)
         .collect()
 }
 
-pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
+pub(crate) fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
     lab_support_summaries()
         .flat_map(|summary| summary.contract_labels.iter().copied())
         .collect::<BTreeSet<_>>()
@@ -25,11 +25,11 @@ pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
         .collect()
 }
 
-pub fn lab_runner_supports_contract_label(contract_label: &str) -> bool {
+pub(crate) fn lab_runner_supports_contract_label(contract_label: &str) -> bool {
     lab_support_summaries().any(|summary| summary.contract_labels.contains(&contract_label))
 }
 
-pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
+pub(crate) fn lab_runner_support_summary() -> LabRunnerSupportSummary {
     let supported_labels = lab_runner_supported_labels();
     let hint_labels = lab_runner_supported_hint_labels();
 
@@ -43,11 +43,11 @@ pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
     }
 }
 
-pub fn lab_runner_unsupported_message() -> String {
+pub(crate) fn lab_runner_unsupported_message() -> String {
     lab_runner_support_summary().unsupported_message
 }
 
-pub fn lab_runner_unsupported_hint() -> String {
+pub(crate) fn lab_runner_unsupported_hint() -> String {
     lab_runner_support_summary().hint
 }
 

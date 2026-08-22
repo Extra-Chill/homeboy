@@ -17,7 +17,7 @@ pub(crate) use crate::core::markdown::escape_markdown_table_cell;
 
 /// Parse a `KEY=value` string into a (key, value) tuple.
 /// Used by clap `value_parser` attributes on `--setting` and `--input` flags.
-pub fn parse_key_val(s: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_key_val(s: &str) -> Result<(String, String), String> {
     let pos = s
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
@@ -38,7 +38,7 @@ pub fn parse_key_val(s: &str) -> Result<(String, String), String> {
 ///   --setting-json my_array=[1,2,3]
 ///   --setting-json my_flag=true
 ///   --setting-json my_string="literal"
-pub fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
+pub(crate) fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
     let pos = s
         .find('=')
         .ok_or_else(|| format!("invalid KEY=<json>: no `=` found in `{s}`"))?;
@@ -61,7 +61,7 @@ pub fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
 /// default `u64` parser would emit a raw `invalid digit found in string`
 /// error that gives no guidance. This parser points them at `--run-id`
 /// instead.
-pub fn parse_runs_count(s: &str) -> Result<u64, String> {
+pub(crate) fn parse_runs_count(s: &str) -> Result<u64, String> {
     s.parse::<u64>().map_err(|_| {
         format!(
             "`{s}` is not a valid number. --runs is a numeric repetition count \
@@ -136,7 +136,7 @@ impl DynamicSetArgs {
 // ============================================================================
 
 /// Parse the canonical JSON spec for a set-style update.
-pub fn merge_json_sources(spec: Option<&str>) -> homeboy::core::Result<Value> {
+pub(crate) fn merge_json_sources(spec: Option<&str>) -> homeboy::core::Result<Value> {
     let base = if let Some(spec) = spec {
         let raw = homeboy::core::config::read_json_spec_to_string(spec)?;
         serde_json::from_str(&raw).map_err(|e| {
@@ -173,7 +173,7 @@ pub fn merge_json_sources(spec: Option<&str>) -> homeboy::core::Result<Value> {
 
 /// Merge JSON sources from `DynamicSetArgs` into a single JSON value.
 /// Returns `None` if no JSON/base64 input was provided.
-pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::core::Result<Option<Value>> {
+pub(crate) fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::core::Result<Option<Value>> {
     let spec = args.json_spec()?;
     if spec.is_none() {
         return Ok(None);
@@ -183,7 +183,7 @@ pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::core::Result<Option
 
 /// Serialize a merged JSON value to a string and compute the full replace
 /// fields list (explicit `--replace` flags + auto-detected array fields).
-pub fn finalize_set_spec(
+pub(crate) fn finalize_set_spec(
     merged: &Value,
     explicit_replace: &[String],
 ) -> homeboy::core::Result<(String, Vec<String>)> {

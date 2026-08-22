@@ -260,11 +260,11 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
     },
 ];
 
-pub fn registered_contracts() -> &'static [ContractRegistryEntry] {
+pub(crate) fn registered_contracts() -> &'static [ContractRegistryEntry] {
     CONTRACT_REGISTRY
 }
 
-pub fn registered_contract(value: &str) -> Option<&'static ContractRegistryEntry> {
+pub(crate) fn registered_contract(value: &str) -> Option<&'static ContractRegistryEntry> {
     CONTRACT_REGISTRY.iter().find(|entry| entry.matches(value))
 }
 

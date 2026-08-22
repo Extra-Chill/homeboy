@@ -25,7 +25,7 @@ use homeboy::core::{join_remote_path, project};
 
 use super::CmdResult;
 
-pub fn is_raw_read(args: &FileArgs) -> bool {
+pub(crate) fn is_raw_read(args: &FileArgs) -> bool {
     matches!(&args.command, FileCommand::Read { raw: true, .. })
 }
 

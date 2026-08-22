@@ -22,7 +22,7 @@ pub enum AgentTaskToolCommand {
 #[derive(Args, Debug)]
 pub struct AgentTaskToolDispatchArgs {}
 
-pub fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
+pub(crate) fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
     // homeboy-audit: allow-thin-command-adapter
     match dispatch_raw_result() {
         // homeboy-audit: allow-thin-command-adapter

@@ -1,7 +1,7 @@
 use super::*;
 use types::{RunnerCheck, RunnerDoctorStatus, ToolProbe};
 
-pub fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
+pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
     if probe.available {
         ok(
             spec.check_id,
@@ -24,7 +24,7 @@ pub fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
     }
 }
 
-pub fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
+pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
     let mut details = BTreeMap::new();
     details.insert("command".to_string(), command.to_string());
     if let Some(path) = &probe.path {
@@ -49,7 +49,7 @@ pub fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
     }
 }
 
-pub fn playwright_check(playwright: bool, browser_ready: bool) -> RunnerCheck {
+pub(crate) fn playwright_check(playwright: bool, browser_ready: bool) -> RunnerCheck {
     match (playwright, browser_ready) {
         (true, true) => ok(
             "playwright.browser_ready",
@@ -77,7 +77,7 @@ pub fn playwright_check(playwright: bool, browser_ready: bool) -> RunnerCheck {
     }
 }
 
-pub fn headed_browser_check(
+pub(crate) fn headed_browser_check(
     headed_browser_ready: bool,
     display_ready: bool,
     xvfb_ready: bool,
@@ -101,7 +101,7 @@ pub fn headed_browser_check(
     }
 }
 
-pub fn path_writable_check(
+pub(crate) fn path_writable_check(
     id: &'static str,
     writable: bool,
     path: &Path,
@@ -125,7 +125,7 @@ pub fn path_writable_check(
     }
 }
 
-pub fn homeboy_version_skew_check(
+pub(crate) fn homeboy_version_skew_check(
     local_version: &str,
     local_build_identity: &str,
     remote_build_identity: &str,
@@ -241,7 +241,7 @@ pub fn overall_status(checks: &[RunnerCheck]) -> RunnerDoctorStatus {
     }
 }
 
-pub fn lab_offload_status(
+pub(crate) fn lab_offload_status(
     checks: &[RunnerCheck],
     eligible_provider_ids: &[String],
 ) -> (RunnerDoctorStatus, types::RunnerDoctorProviderReadiness) {

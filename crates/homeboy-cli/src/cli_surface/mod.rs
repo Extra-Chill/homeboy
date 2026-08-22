@@ -125,11 +125,11 @@ pub struct Cli {
 impl Cli {
     /// Builds the user-facing command tree with Lab options shown only where
     /// the Lab portability contract can honor them.
-    pub fn command_with_scoped_lab_args() -> Command {
+    pub(crate) fn command_with_scoped_lab_args() -> Command {
         crate::command_contract::scope_lab_cli_arguments(Self::command())
     }
 
-    pub fn from_registered_arg_matches(
+    pub(crate) fn from_registered_arg_matches(
         matches: &ArgMatches,
     ) -> Result<(Self, &'static crate::command_contract::CommandSpec), clap::Error> {
         let cli = Self::from_arg_matches(matches)?;
@@ -141,7 +141,7 @@ impl Cli {
     }
 
     /// Compiles parser matches into typed values plus durable source metadata.
-    pub fn compile_registered_arg_matches(
+    pub(crate) fn compile_registered_arg_matches(
         matches: &ArgMatches,
     ) -> Result<
         (
@@ -418,7 +418,7 @@ pub struct CommandSurface {
 }
 
 impl CommandSurface {
-    pub fn contains_path(&self, path: &[&str]) -> bool {
+    pub(crate) fn contains_path(&self, path: &[&str]) -> bool {
         let Some((first, rest)) = path.split_first() else {
             return false;
         };
@@ -481,7 +481,7 @@ pub struct CommandSurfaceDoctorReport {
 }
 
 impl CommandSafetyManifest {
-    pub fn find_path(&self, path: &[&str]) -> Option<&CommandSafetyEntry> {
+    pub(crate) fn find_path(&self, path: &[&str]) -> Option<&CommandSafetyEntry> {
         let (first, rest) = path.split_first()?;
 
         self.commands
@@ -630,7 +630,7 @@ mod dynamic_impls {
     use super::*;
 
     impl DynamicCommandDescriptor {
-        pub fn extension_command(name: String, about: String) -> Self {
+        fn extension_command(name: String, about: String) -> Self {
             Self {
                 docs_path: Some(format!("docs/commands/{name}.md")),
                 name,
@@ -640,7 +640,7 @@ mod dynamic_impls {
             }
         }
 
-        pub fn installed_extension_command(
+        pub(crate) fn installed_extension_command(
             name: String,
             about: String,
             docs_path: Option<String>,
@@ -674,7 +674,7 @@ mod dynamic_impls {
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
 mod safety_manifest;
-pub use safety_manifest::{
+pub(crate) use safety_manifest::{
     command_safety_manifest_audit, command_safety_manifest_from,
     command_safety_manifest_from_dynamic, current_command_safety_manifest,
 };
@@ -682,21 +682,21 @@ pub use safety_manifest::{
 mod surface {
     use super::*;
 
-    pub fn current_command_surface() -> CommandSurface {
+    pub(crate) fn current_command_surface() -> CommandSurface {
         command_surface_from(Cli::command())
     }
 
-    pub fn command_surface_from(command: Command) -> CommandSurface {
+    pub(crate) fn command_surface_from(command: Command) -> CommandSurface {
         command_surface_from_with_depth(command, DEFAULT_COMMAND_SURFACE_DEPTH)
     }
 
-    pub fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
+    fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
         CommandSurface {
             commands: visible_subcommands(&command, depth),
         }
     }
 
-    pub fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
+    pub(crate) fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
         let surface = current_command_surface();
         let manifest = command_safety_manifest_from(surface.clone());
         let source_registry_commands = manifest
@@ -723,7 +723,7 @@ mod surface {
         )
     }
 
-    pub fn command_surface_doctor_report(
+    fn command_surface_doctor_report(
         source_registry_commands: BTreeSet<String>,
         docs_index_commands: BTreeSet<String>,
         help_commands: BTreeSet<String>,
@@ -809,10 +809,7 @@ mod surface {
         }
     }
 
-    pub fn visible_subcommands(
-        command: &Command,
-        remaining_depth: usize,
-    ) -> Vec<CommandSurfaceEntry> {
+    fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
         command
             .get_subcommands()
             .map(|subcommand| CommandSurfaceEntry {
@@ -1604,7 +1601,7 @@ pub mod reference_docs;
 ///
 /// `placement` carries a default, so presence is not enough to detect: this
 /// keys on argument provenance and fires only when both were actually typed.
-pub fn reject_conflicting_placement_selection(
+pub(crate) fn reject_conflicting_placement_selection(
     matches: &clap::ArgMatches,
 ) -> Result<(), clap::Error> {
     use crate::cli_surface::argument_provenance::{ArgumentSource, CommandArgumentProvenance};

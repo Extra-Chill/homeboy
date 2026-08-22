@@ -100,7 +100,7 @@ pub(crate) fn reset_entity_suggestion_cache_for_test() {
     }
 }
 
-pub fn find_entity_match(input: &str) -> Option<EntityMatch> {
+pub(crate) fn find_entity_match(input: &str) -> Option<EntityMatch> {
     let input_lower = input.to_lowercase();
 
     for entry in entity_suggestion_snapshot() {
@@ -141,7 +141,7 @@ fn find_match_in_list(input_lower: &str, ids: &[String]) -> Option<(String, bool
     None
 }
 
-pub fn generate_entity_hints(
+pub(crate) fn generate_entity_hints(
     entity_match: &EntityMatch,
     parent_command: &str,
     unrecognized: &str,

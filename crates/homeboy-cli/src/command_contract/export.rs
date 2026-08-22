@@ -26,7 +26,7 @@ pub struct WrittenContractExport {
 
 /// Create `dir` and write each export document into it as pretty JSON with a
 /// trailing newline. Returns the written files in input order.
-pub fn write_contract_export_documents(
+pub(crate) fn write_contract_export_documents(
     dir: &Path,
     documents: Vec<ContractExportDocument>,
 ) -> crate::core::Result<Vec<WrittenContractExport>> {

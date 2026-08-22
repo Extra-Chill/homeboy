@@ -112,7 +112,7 @@ pub struct QueryGroup {
     pub count: usize,
 }
 
-pub fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
     if args.select.iter().any(|s| s.trim().is_empty()) {
         return Err(Error::validation_invalid_argument(
             "select",

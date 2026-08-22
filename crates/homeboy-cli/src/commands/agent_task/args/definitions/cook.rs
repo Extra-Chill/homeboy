@@ -161,7 +161,7 @@ pub struct VerifyGateArgs {
     pub no_gate_shared_cargo_target: bool,
 }
 impl VerifyGateArgs {
-    pub fn has_deterministic_gate(&self) -> bool {
+    pub(crate) fn has_deterministic_gate(&self) -> bool {
         !self.verify.is_empty()
             || !self.verify_file.is_empty()
             || !self.private_verify.is_empty()
@@ -170,7 +170,7 @@ impl VerifyGateArgs {
 
     /// Resolve file inputs while the controller invocation directory still owns
     /// relative-path semantics, before Cook can provision or dispatch anything.
-    pub fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
+    pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
         if !self.input_sources.is_empty() {
             return Ok(());
         }

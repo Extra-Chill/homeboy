@@ -49,7 +49,7 @@ impl Commands {
         Some(contract)
     }
 
-    pub fn portability_contract(&self) -> CommandPortabilityContract {
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
         let contract = match self {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Cook(args),
@@ -249,7 +249,7 @@ impl Commands {
         CommandPortabilityContract::lab(contract)
     }
 
-    pub fn lab_route_contract(
+    pub(crate) fn lab_route_contract(
         &self,
     ) -> crate::core::Result<Option<crate::command_contract::LabCommandRouteContract>> {
         let Some(contract) = self.lab_contract() else {
@@ -265,12 +265,12 @@ impl Commands {
         Ok(Some(route))
     }
 
-    pub fn supports_lab_runner(&self) -> bool {
+    pub(crate) fn supports_lab_runner(&self) -> bool {
         self.lab_contract()
             .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable))
     }
 
-    pub fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
+    pub(crate) fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
         self.lab_contract()
             .and_then(|contract| match contract.portability {
                 LabCommandPortability::Portable => None,
@@ -278,12 +278,12 @@ impl Commands {
             })
     }
 
-    pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
+    pub(crate) fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
         self.lab_contract()
             .and_then(|contract| contract.mutation_flag)
     }
 
-    pub fn lab_offload_captures_mutation_patch(&self) -> bool {
+    pub(crate) fn lab_offload_captures_mutation_patch(&self) -> bool {
         if matches!(
             self,
             Commands::AgentTask(agent_task::AgentTaskArgs {

@@ -111,7 +111,7 @@ pub struct RunsRefsArtifactRef {
     pub get_command: String,
 }
 
-pub fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let filter = RunListFilter {
         kind: args.kind.clone(),

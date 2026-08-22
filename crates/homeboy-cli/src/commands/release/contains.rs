@@ -64,7 +64,7 @@ pub struct GapArgs {
 /// Exits 0 for every answered query: the verdict is the `status` field, not the
 /// exit code. "Not yet released" is a legitimate answer, not a command failure,
 /// and failing on it would break every wrapper that asks the question routinely.
-pub fn run_contains(args: ContainsArgs) -> CmdResult<ReleaseContainsReport> {
+pub(crate) fn run_contains(args: ContainsArgs) -> CmdResult<ReleaseContainsReport> {
     let report = containment::contains(&ContainsQuery {
         component_id: args.component,
         path: args.path,
@@ -77,7 +77,7 @@ pub fn run_contains(args: ContainsArgs) -> CmdResult<ReleaseContainsReport> {
 }
 
 /// Report how far the installed build is behind the newest release.
-pub fn run_gap(args: GapArgs) -> CmdResult<ReleaseGapReport> {
+pub(crate) fn run_gap(args: GapArgs) -> CmdResult<ReleaseGapReport> {
     let report = containment::gap(
         args.component.as_deref(),
         args.path.as_deref(),

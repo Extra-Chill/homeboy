@@ -69,7 +69,7 @@ pub fn proof(run_id: &str) -> CmdResult<RunsOutput> {
 /// Project a loaded run into its compact proof signals. Pure over the run
 /// record so non-CLI callers and tests can reuse it without an observation
 /// store.
-pub fn build_proof(run: &RunRecord) -> RunsProofOutput {
+fn build_proof(run: &RunRecord) -> RunsProofOutput {
     let failure = evidence_failure_summary(run);
     let passed = if failure.failed {
         Some(false)

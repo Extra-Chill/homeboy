@@ -77,11 +77,11 @@ impl BoundCommandAdapter {
 }
 
 impl<Args> TypedCommandAdapter<Args> {
-    pub fn output_descriptor(&self) -> CommandOutputDescriptor {
+    pub(crate) fn output_descriptor(&self) -> CommandOutputDescriptor {
         self.contract.to_output_descriptor()
     }
 
-    pub fn json_only(
+    pub(crate) fn json_only(
         json_family: CommandJsonFamily,
         output_file_mode: CommandOutputFileMode,
         execute_json: JsonCommandExecutor<Args>,
@@ -96,7 +96,7 @@ impl<Args> TypedCommandAdapter<Args> {
         }
     }
 
-    pub fn with_lab_contract(mut self, lab_contract: LabContractResolver<Args>) -> Self {
+    pub(crate) fn with_lab_contract(mut self, lab_contract: LabContractResolver<Args>) -> Self {
         self.lab_contract = Some(lab_contract);
         self
     }

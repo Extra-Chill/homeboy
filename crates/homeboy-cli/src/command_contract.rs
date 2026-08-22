@@ -29,7 +29,7 @@ mod spec;
 pub use crate::core::artifact_ref::{
     validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
 };
-pub use constants::{
+pub(crate) use constants::{
     artifact_manifest_constants, artifact_paths_constants, artifact_postprocess_constants,
     contract_constants, env_materialization_plan_constants, loop_constants,
     path_materialization_plan_constants, resource_lifecycle_index_constants,
@@ -45,7 +45,7 @@ pub use constants::{
     RuntimeArtifactConstants, RuntimeArtifactFilenames, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
 };
-pub use lab::{
+pub(crate) use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
     lab_runner_unsupported_message, run_location_index_path, scope_lab_cli_arguments,
@@ -77,10 +77,10 @@ pub use output::{
     CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
-pub use registry::{
+pub(crate) use registry::{
     registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
 };
-pub use spec::{
+pub(crate) use spec::{
     non_core_command_doc_slugs, registered_command, registered_command_json_family,
     runtime_extension_command_doc_slugs, support_command_doc_slugs, CommandDocKind, CommandDocSpec,
     CommandLabSupportSummary, CommandPathSafetySpec, CommandSafetySpec, CommandSpec,

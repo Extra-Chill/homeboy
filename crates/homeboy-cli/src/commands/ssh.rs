@@ -111,12 +111,12 @@ pub(super) struct RawSshExecution {
 }
 
 impl RawSshExecution {
-    pub fn completion_phase_stderr(&self) -> String {
+    pub(crate) fn completion_phase_stderr(&self) -> String {
         let command_phase = ssh_terminal_phase_name(self.observation, self.observation_lost);
         format!("[ssh] phase={command_phase}\n[ssh] phase=cleanup-finished\n")
     }
 
-    pub fn output_file_evidence(&self) -> serde_json::Value {
+    pub(crate) fn output_file_evidence(&self) -> serde_json::Value {
         serde_json::json!({
             "stdout_tail": bounded_tail(&self.stdout),
             "stderr_tail": bounded_tail(&self.stderr),

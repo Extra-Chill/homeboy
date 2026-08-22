@@ -72,7 +72,7 @@ impl BenchArgs {
     /// Whether the caller asked for the full JSON payload on stdout
     /// (suppressing the compact human summary presentation), via either
     /// the legacy `--json` bool or the canonical `--format json`.
-    pub fn wants_full_json(&self) -> bool {
+    pub(crate) fn wants_full_json(&self) -> bool {
         self.presentation.json_or_legacy(self.json)
     }
 
@@ -90,7 +90,7 @@ impl BenchArgs {
     /// Whether this invocation is a bench *run* (the variants that emit the
     /// large `BenchCommandOutput`/comparison envelopes the compact summary
     /// targets). Subcommands like `list` keep their existing output.
-    pub fn is_run_invocation(&self) -> bool {
+    pub(crate) fn is_run_invocation(&self) -> bool {
         matches!(self.command, None | Some(BenchCommand::Matrix(_)))
     }
 
@@ -117,16 +117,16 @@ impl BenchArgs {
         CommandPortabilityContract::lab_optional(self.lab_contract())
     }
 
-    pub fn is_lab_offload_command(&self) -> bool {
+    pub(crate) fn is_lab_offload_command(&self) -> bool {
         matches!(self.command, None | Some(BenchCommand::Matrix(_)))
     }
 
-    pub fn lab_offload_writes_local_state(&self) -> bool {
+    pub(crate) fn lab_offload_writes_local_state(&self) -> bool {
         self.run_args_for_lab_offload()
             .is_some_and(|run| run.baseline_args.baseline || run.baseline_args.ratchet)
     }
 
-    pub fn extension_override_ids(&self) -> &[String] {
+    fn extension_override_ids(&self) -> &[String] {
         self.run_args_for_lab_offload()
             .map(|run| run.extension_override.extensions.as_slice())
             .unwrap_or(&[])

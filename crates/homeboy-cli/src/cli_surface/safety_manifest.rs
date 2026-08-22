@@ -25,15 +25,15 @@ use crate::cli_surface::{
 };
 use crate::command_contract::{registered_command, CommandSafetySpec};
 
-pub fn current_command_safety_manifest() -> CommandSafetyManifest {
+pub(crate) fn current_command_safety_manifest() -> CommandSafetyManifest {
     command_safety_manifest_from(current_command_surface())
 }
 
-pub fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
+pub(crate) fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
     command_safety_manifest_from_dynamic(surface, &[])
 }
 
-pub fn command_safety_manifest_from_dynamic(
+pub(crate) fn command_safety_manifest_from_dynamic(
     surface: CommandSurface,
     dynamic_commands: &[DynamicCommandDescriptor],
 ) -> CommandSafetyManifest {
@@ -46,7 +46,9 @@ pub fn command_safety_manifest_from_dynamic(
     }
 }
 
-pub fn command_safety_manifest_audit(manifest: &CommandSafetyManifest) -> CommandSafetyAuditReport {
+pub(crate) fn command_safety_manifest_audit(
+    manifest: &CommandSafetyManifest,
+) -> CommandSafetyAuditReport {
     let mut missing_action_metadata = Vec::new();
 
     for entry in flatten_manifest_entries(&manifest.commands) {

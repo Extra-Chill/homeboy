@@ -221,7 +221,7 @@ impl ReviewArgs {
 /// True when the caller asked for a markdown PR-comment section instead of
 /// the structured JSON envelope. Used by the top-level dispatcher to route
 /// the response through `RawOutputMode::Markdown`.
-pub fn is_markdown_mode(args: &ReviewArgs) -> bool {
+pub(crate) fn is_markdown_mode(args: &ReviewArgs) -> bool {
     args.command.is_none() && args.report.as_deref() == Some("pr-comment")
 }
 
@@ -433,7 +433,7 @@ fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
     args
 }
 
-pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
+pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     if let Some(run_id) = args.run_id.as_deref() {
         return attach_to_persisted_review(run_id);
     }
@@ -837,7 +837,7 @@ fn preflight_review_scope(
 /// envelope into a PR-comment section. The body is just the section content;
 /// the consumer (`homeboy git pr comment --header`) owns the wrapping
 /// section header.
-pub fn run_markdown(args: ReviewArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: ReviewArgs) -> CmdResult<String> {
     let banners = args.banner.clone();
     let (output, exit_code) = run_umbrella(args)?;
     let md = if banners.is_empty() {
@@ -851,7 +851,7 @@ pub fn run_markdown(args: ReviewArgs) -> CmdResult<String> {
 /// Write the stable review artifact to `--output` for automated consumers.
 /// Falls back to the generic JSON envelope if the review command failed before
 /// producing an artifact.
-pub fn write_artifact_to_file(
+pub(crate) fn write_artifact_to_file(
     result: &homeboy::core::Result<Value>,
     path: &str,
     _exit_code: i32,
