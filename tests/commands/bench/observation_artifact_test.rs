@@ -272,6 +272,7 @@ fn bench_observation_resolves_shared_state_mount_artifacts() {
             runner: None,
             rig_package: None,
             lifecycle: None,
+            stages: Vec::new(),
             diagnostics: Vec::new(),
         });
         results.scenarios[0].artifacts.insert(
