@@ -419,7 +419,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
             source_run_id: Some("v2-run".to_string()),
             source_path: None,
             source_worktree_path: None,
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: "fixture@target".to_string(),
@@ -489,7 +489,7 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
             source_worktree_path: None,
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: "repo@recoverable".to_string(),
@@ -822,19 +822,27 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "historical base"]);
     let historical_base = git_head(&repo, "HEAD");
+    let remote = temp.path().join("origin.git");
+    std::fs::create_dir(&remote).expect("create remote");
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-u", "origin", "main"]);
 
     git(&repo, &["checkout", "-b", "candidate"]);
     std::fs::write(repo.join("candidate.txt"), "candidate\n").expect("write candidate");
     git(&repo, &["add", "candidate.txt"]);
     git(&repo, &["commit", "-m", "candidate change"]);
     let candidate_parent = git_head(&repo, "HEAD");
-    let candidate_delta_base = git_head(&repo, "HEAD~1");
 
     git(&repo, &["checkout", "main"]);
     std::fs::write(repo.join("base-advance.txt"), "advanced\n").expect("advance base");
     git(&repo, &["add", "base-advance.txt"]);
     git(&repo, &["commit", "-m", "base advance"]);
     let resolved_base_parent = git_head(&repo, "HEAD");
+    git(&repo, &["push", "origin", "main"]);
     git(&repo, &["checkout", "candidate"]);
     git(
         &repo,
@@ -853,7 +861,7 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: Some(historical_base),
             candidate_ref: Some(merged_candidate.clone()),
             to_worktree: "repo@adopted".to_string(),
@@ -873,7 +881,7 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.changed_files, vec!["candidate.txt"]);
-    assert_eq!(report.provenance["base_ref"], candidate_delta_base);
+    assert_eq!(report.provenance["base_ref"], resolved_base_parent);
     assert_eq!(
         report.provenance["adoption_merge"]["candidate_parent"],
         candidate_parent
@@ -933,7 +941,7 @@ fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
-            base_ref: None,
+            base_ref: Some("unrelated".to_string()),
             task_base_sha: Some(historical_base),
             candidate_ref: Some(git_head(&repo, "HEAD")),
             to_worktree: "repo@adopted".to_string(),

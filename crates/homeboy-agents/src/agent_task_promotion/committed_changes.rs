@@ -26,7 +26,8 @@ pub(crate) struct CommittedChangesPatch {
 pub(crate) struct AdoptionMergeProof {
     pub(crate) candidate_parent: String,
     pub(crate) resolved_base_parent: String,
-    pub(crate) candidate_delta_base: String,
+    pub(crate) candidate_tree: String,
+    pub(crate) resolved_base_tree: String,
 }
 
 pub(crate) fn committed_changes_patch(
@@ -59,6 +60,7 @@ pub(crate) fn committed_changes_patch(
             worktree_path,
             &candidate,
             options.task_base_sha.as_deref(),
+            options.base_ref.as_deref(),
         )?
     } else {
         let Some(base_ref) = resolve_committed_changes_base(
@@ -85,15 +87,9 @@ pub(crate) fn committed_changes_patch(
             None,
         ));
     }
-    // The merge itself incorporates the advanced base. Promotion must project
-    // only the authenticated candidate-side commit, not that base-side tree.
-    let delta_candidate = adoption_merge
-        .as_ref()
-        .map(|proof| proof.candidate_parent.as_str())
-        .unwrap_or(&candidate);
     let changed_files = git_lines(
         worktree_path,
-        &["diff", "--name-only", &base_ref, delta_candidate],
+        &["diff", "--name-only", &base_ref, &candidate],
     )?;
     if changed_files.is_empty() {
         return Ok(None);
@@ -106,13 +102,13 @@ pub(crate) fn committed_changes_patch(
             "--full-index",
             "--find-renames",
             &base_ref,
-            delta_candidate,
+            &candidate,
         ],
     )?;
     if patch.trim().is_empty() {
         return Ok(None);
     }
-    let commit_range = format!("{base_ref}..{delta_candidate}");
+    let commit_range = format!("{base_ref}..{candidate}");
     let commits = committed_change_evidence(worktree_path, &commit_range)?;
     if commits.is_empty() {
         return Ok(None);
@@ -147,6 +143,7 @@ fn resolve_adoption_candidate_base(
     cwd: &Path,
     candidate: &str,
     task_base_sha: Option<&str>,
+    resolved_base_ref: Option<&str>,
 ) -> Result<(String, Option<String>, Option<AdoptionMergeProof>)> {
     let parents = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", candidate])?;
     let mut identities = parents.split_whitespace();
@@ -173,13 +170,28 @@ fn resolve_adoption_candidate_base(
             Ok((parent.clone(), historical_task_base, None))
         }
         [candidate_parent, resolved_base_parent] => {
-            let candidate_parents = git_commit_parents(cwd, candidate_parent)?;
-            let [candidate_delta_base] = candidate_parents.as_slice() else {
+            let resolved_base = resolved_base_ref
+                .filter(|base| !base.trim().is_empty())
+                .map(|base| {
+                    git_stdout(
+                        cwd,
+                        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                    )
+                })
+                .transpose()?
+                .map(|base| base.trim().to_string())
+                .ok_or_else(|| {
+                    adoption_graph_error(
+                        candidate,
+                        "merge candidate requires the resolved immutable base ref",
+                    )
+                })?;
+            if resolved_base != *resolved_base_parent {
                 return Err(adoption_graph_error(
                     candidate,
-                    "merge candidate's first parent must have exactly one parent",
+                    "merge candidate's second parent does not equal the resolved immutable base",
                 ));
-            };
+            }
             let historical = historical_task_base.as_deref().ok_or_else(|| {
                 adoption_graph_error(
                     candidate,
@@ -187,7 +199,6 @@ fn resolve_adoption_candidate_base(
                 )
             })?;
             for (role, revision) in [
-                ("candidate delta base", candidate_delta_base.as_str()),
                 ("candidate-side parent", candidate_parent.as_str()),
                 ("resolved base parent", resolved_base_parent.as_str()),
             ] {
@@ -206,12 +217,19 @@ fn resolve_adoption_candidate_base(
                 ));
             }
             Ok((
-                candidate_delta_base.clone(),
+                resolved_base_parent.clone(),
                 historical_task_base,
                 Some(AdoptionMergeProof {
                     candidate_parent: candidate_parent.clone(),
                     resolved_base_parent: resolved_base_parent.clone(),
-                    candidate_delta_base: candidate_delta_base.clone(),
+                    candidate_tree: git_stdout(
+                        cwd,
+                        &["rev-parse", &format!("{candidate}^{{tree}}")],
+                    )?,
+                    resolved_base_tree: git_stdout(
+                        cwd,
+                        &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
+                    )?,
                 }),
             ))
         }

@@ -1536,7 +1536,8 @@ fn promote_committed_changes(
         json!({
             "candidate_parent": &proof.candidate_parent,
             "resolved_base_parent": &proof.resolved_base_parent,
-            "candidate_delta_base": &proof.candidate_delta_base,
+            "candidate_tree": &proof.candidate_tree,
+            "resolved_base_tree": &proof.resolved_base_tree,
             "candidate": &committed_patch.candidate,
             "changed_files": &normalized_patch.changed_files,
             "patch_sha256": &committed_patch.sha256,
@@ -1555,14 +1556,7 @@ fn promote_committed_changes(
             path: retained_patch_path.display().to_string(),
             sha256: Some(committed_patch.sha256),
         },
-        // A merge candidate's workspace fingerprint may include base-side files
-        // after the provider applies its candidate-only patch. Its durable review
-        // scope is the graph-proven candidate delta, never those base changes.
-        changed_files: if adoption_merge.is_some() {
-            normalized_patch.changed_files.clone()
-        } else {
-            persisted_changed_files(normalized_patch.changed_files, candidate.as_ref())
-        },
+        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
