@@ -4,6 +4,78 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.353.0] - 2026-08-22
+
+### Changed
+- format daemon control imports
+- Revert "fix(ci): converge required gates ruleset"
+- bound short deadline provider resolve
+- cover persistent resolve timeout recovery
+- remove blanket dead_code suppression and delete what it hid
+- root the recipe freeze boundary
+- free two tests the rooted admission unblocked
+- let the controller admission follow the store's root
+- give every controller-runtime entry point a rooted form
+- clear the last dead items, one verified name at a time
+- delete test-only functions and the tests that call them
+- delete pass-through shims, point tests at the real entry
+- stop suppressing dead_code and delete what it finds
+
+### Fixed
+- reconcile live Cook ownership during upgrade admission
+- lease isolated source build output
+- admit verified source upgrade targets
+- reject bypassable required gates
+- preserve private upload admission
+- isolate daemon projection test state
+- repair main after the dead_code suppression removals
+- remove unused evidence alias helper
+- rearm local placement admission
+- restore legacy deferred provision
+- bound watch and prompt parsing
+- stabilize runtime overlay snapshots
+- bound provider resolve by deadline
+- keep evidence aliases warning-clean
+- dispatch materialized provider workspace
+- preserve compatible Cargo lease
+- preflight and isolate evidence uploads
+- bind projected evidence prompt paths
+- harden chunk upload lifecycle
+- harden provider evidence paths
+- project detached reverse broker terminal state
+- bind provider evidence admission
+- plan issue-derived preview workspaces
+- harden chunk evidence uploads
+- bootstrap target admission recovery
+- bound component list inventory
+- select providers from project targets
+- rewrite macOS evidence path aliases
+- honor local continuation placement
+- persist deferred workspace provision
+- bound chunked evidence uploads
+- reject merged unpushed candidates
+- stream provider evidence handoff
+- tighten provider evidence aliases
+- stream bounded provider artifacts
+- mirror evidence into the home holding the run's lease
+- admit macOS provider evidence aliases
+- normalize repository identity
+- unify candidate inventory projections
+- drop the contract scenario a stale branch resurrected
+- detect rig service implementation instead of the word for it
+- authorize runner artifact paths against the store's root
+- restore the admission lock entry point as test-only scaffolding
+- complete command output fixtures
+- root the run observer's store at the rig entry points
+- bound inline stdin cleanup
+- supervise untimed child output
+- distinguish unstarted commands
+- preserve wait observation failures
+- report lost transport observation
+- bound raw output artifacts
+- retain typed raw transport state
+- flush raw output before terminal phases
+
 ## [0.352.0] - 2026-08-22
 
 ### Added
