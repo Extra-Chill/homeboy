@@ -3504,6 +3504,19 @@ pub(crate) fn reverse_broker_job_snapshot_at(
     Ok((job, events))
 }
 
+/// Return the current controller's persisted reverse-broker endpoint without a
+/// liveness/status probe. A controller job may outlive the reverse worker, but
+/// the broker remains the durable authority for its accepted job.
+pub(crate) fn recorded_reverse_broker_url(runner_id: &str) -> Result<Option<String>> {
+    let Some(session) = read_session(runner_id)? else {
+        return Ok(None);
+    };
+    if session.mode != RunnerTunnelMode::Reverse || session.local_url.is_some() {
+        return Ok(None);
+    }
+    Ok(session.broker_url.filter(|url| !url.trim().is_empty()))
+}
+
 /// Reconcile terminal runner jobs through the session's authoritative transport.
 /// The returned body is transport-neutral so callers retain one command contract.
 pub fn reconcile_terminal_jobs(runner_id: &str) -> Result<Value> {
