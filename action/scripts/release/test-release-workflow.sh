@@ -77,7 +77,7 @@ assert_not_contains 'actions/checkout@v4' "${WORKFLOW}" "release workflow has no
 assert_not_contains 'actions/create-github-app-token@v2' "${WORKFLOW}" "release workflow has no app-token v2 references"
 assert_contains 'actions/checkout@v6' "${SELF_TEST_WORKFLOW}" "self-test workflow uses checkout v6"
 assert_not_contains 'actions/checkout@v4' "${SELF_TEST_WORKFLOW}" "self-test workflow has no checkout v4 references"
-assert_count 'actions/upload-artifact@v7' '3' "${ROOT_DIR}/action.yml" "composite action uses artifact upload v7"
+assert_count 'actions/upload-artifact@v7' '4' "${ROOT_DIR}/action.yml" "composite action uses artifact upload v7"
 assert_count 'actions/download-artifact@v7' '1' "${ROOT_DIR}/action.yml" "composite action uses artifact download v7"
 assert_not_contains 'actions/\(upload\|download\)-artifact@v4' "${ROOT_DIR}/action.yml" "composite action has no artifact v4 references"
 

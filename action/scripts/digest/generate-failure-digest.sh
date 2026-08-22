@@ -155,7 +155,7 @@ write_fallback_digest() {
 
   {
     printf '## Failure digest unavailable\n\n'
-    printf 'The Homeboy failure-digest renderer returned no output. Per-command result JSON and logs remain in the CI results artifact.\n\n'
+    printf 'The Homeboy failure-digest renderer returned no output. Per-command result JSON and logs remain in the CI results artifact; this fallback and renderer stderr are in the matching `-failure-digest` artifact.\n\n'
     printf '### Failed commands\n'
     if [ -n "${failed_commands}" ]; then
       printf '%s\n' "${failed_commands}"
@@ -167,9 +167,9 @@ write_fallback_digest() {
 
   while IFS= read -r command; do
     [ -n "${command}" ] || continue
-    printf '::error::homeboy %s failed, but its failure digest was unavailable; inspect the CI results artifact.\n' "${command}"
+    printf '::error::homeboy %s failed, but its failure digest was unavailable; inspect the CI results and -failure-digest artifacts.\n' "${command}"
   done < <(jq -r 'to_entries[] | select(.value == "fail" or .value == "timeout") | .key' <<< "${RESULTS_JSON}" 2>/dev/null || true)
-  printf '::error::Failure digest renderer returned no file; inspect the CI results artifact and the fallback digest for failed command names and renderer stderr.\n'
+  printf '::error::Failure digest renderer returned no file; inspect the CI results and -failure-digest artifacts for failed command names and renderer stderr.\n'
 }
 
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
