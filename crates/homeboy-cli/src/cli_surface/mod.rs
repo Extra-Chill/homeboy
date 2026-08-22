@@ -630,16 +630,6 @@ mod dynamic_impls {
     use super::*;
 
     impl DynamicCommandDescriptor {
-        fn extension_command(name: String, about: String) -> Self {
-            Self {
-                docs_path: Some(format!("docs/commands/{name}.md")),
-                name,
-                about,
-                extension: None,
-                safety: None,
-            }
-        }
-
         pub(crate) fn installed_extension_command(
             name: String,
             about: String,

@@ -248,26 +248,7 @@ fn claim_next_in_roots(
     runner_id: &str,
     owner: &str,
 ) -> Result<Option<DeferredWorkload>> {
-    claim_next_at_in_roots(config_root, runner_id, owner, now_ms())
-}
-
-/// Claim the next record using the supplied clock. The worker uses this seam to
-/// make lease recovery deterministic without changing the durable protocol.
-pub(crate) fn claim_next_at(
-    runner_id: &str,
-    owner: &str,
-    now: u64,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at(runner_id, owner, now, |_| true)
-}
-
-fn claim_next_at_in_roots(
-    config_root: &Path,
-    runner_id: &str,
-    owner: &str,
-    now: u64,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at_in_roots(config_root, runner_id, owner, now, |_| true)
+    claim_next_matching_at_in_roots(config_root, runner_id, owner, now_ms(), |_| true)
 }
 
 /// Claim the next deferred workload accepted by the selected runner. Records
@@ -1157,7 +1138,7 @@ mod tests {
         let mut later_input = input();
         later_input.args.push("later".to_string());
         let later = defer_in_roots(&config_root, later_input).expect("later workload");
-        claim_next_at_in_roots(&config_root, "other-runner", "other-worker", 1)
+        claim_next_matching_at_in_roots(&config_root, "other-runner", "other-worker", 1, |_| true)
             .expect("claim first")
             .expect("first workload is claimed");
 
@@ -1385,7 +1366,8 @@ mod tests {
         let config_root = ctx.config_dir();
 
         let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
-        claim_next_at_in_roots(&config_root, "runner", "doomed-worker", 1).expect("claim workload");
+        claim_next_matching_at_in_roots(&config_root, "runner", "doomed-worker", 1, |_| true)
+            .expect("claim workload");
 
         let released = release_claims_for_owner_in_roots(&config_root, "doomed-worker")
             .expect("release claims");

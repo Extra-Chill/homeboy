@@ -136,11 +136,6 @@ impl CommandActionableMetadata {
         self.next_actions.push(action);
         self
     }
-
-    fn with_artifact(mut self, artifact: CommandArtifactRef) -> Self {
-        self.artifacts.push(artifact);
-        self
-    }
 }
 
 pub(crate) fn actionable_metadata_for_run_ref(

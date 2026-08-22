@@ -71,7 +71,7 @@ fn linked_local_rig_check_stays_local_without_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("linked local rig check should skip automatic Lab offload");
 
     assert_eq!(outcome, None);
@@ -163,7 +163,7 @@ fn extension_update_routes_locally_without_explicit_lab_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("extension update without --runner should not offload");
 
     assert_eq!(outcome, None);
@@ -189,7 +189,7 @@ fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("dev-run should execute its own runner lifecycle");
 
     assert_eq!(outcome, None);
@@ -265,7 +265,7 @@ fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse(&cli, &normalized, None)
+    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("fuzz doctor without --runner should remain a local diagnostic");
 
     assert_eq!(outcome, None);
@@ -292,7 +292,7 @@ fn global_runner_for_runs_show_has_local_mirror_guidance() {
         "run-123",
     ]);
 
-    let err = route_after_parse(
+    let err = route_after_parse_with_provenance(
         &cli,
         &[
             "homeboy".into(),
@@ -302,6 +302,7 @@ fn global_runner_for_runs_show_has_local_mirror_guidance() {
             "show".into(),
             "run-123".into(),
         ],
+        None,
         None,
     )
     .expect_err("runs show rejects global runner with guidance");
@@ -340,7 +341,7 @@ fn runs_list_runner_option_after_subcommand_routes_locally() {
     ] {
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse(&cli, &normalized, None)
+        let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect("runs list subcommand runner option should not be rejected");
 
         assert_eq!(outcome, None);
@@ -359,7 +360,7 @@ fn global_runner_for_runs_list_keeps_placement_guidance() {
     ];
     let cli = Cli::parse_from(&normalized);
 
-    let err = route_after_parse(&cli, &normalized, None)
+    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect_err("top-level runner on runs list should keep placement guidance");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -399,7 +400,7 @@ fn runs_artifact_attach_runner_option_routes_locally() {
     ] {
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse(&cli, &normalized, None)
+        let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect("runs artifact attach command-local runner option should not be rejected");
 
         assert_eq!(outcome, None);
@@ -797,7 +798,7 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
     assert!(!command.routing_policy.default_lab_offload);
     assert!(!command.routing_policy.infer_source_path_tools);
 
-    let err = route_after_parse(&cli, &normalized, None)
+    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect_err("fanout submit-batch must not run locally under Lab placement");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");

@@ -126,12 +126,6 @@ impl BenchArgs {
             .is_some_and(|run| run.baseline_args.baseline || run.baseline_args.ratchet)
     }
 
-    fn extension_override_ids(&self) -> &[String] {
-        self.run_args_for_lab_offload()
-            .map(|run| run.extension_override.extensions.as_slice())
-            .unwrap_or(&[])
-    }
-
     fn run_args_for_lab_offload(&self) -> Option<&BenchRunArgs> {
         match &self.command {
             None => Some(&self.run),

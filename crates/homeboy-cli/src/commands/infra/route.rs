@@ -24,14 +24,6 @@ use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 use crate::commands::utils::resource_policy;
 use crate::core::io::output_file::write_output_file;
 
-pub(crate) fn route_after_parse(
-    cli: &Cli,
-    normalized_args: &[String],
-    output_file: Option<&str>,
-) -> homeboy::core::Result<Option<i32>> {
-    route_after_parse_with_provenance(cli, normalized_args, output_file, None)
-}
-
 /// Routes typed commands while retaining their parser-source contract through
 /// controller-side plan materialization and Lab handoff.
 pub(crate) fn route_after_parse_with_provenance(

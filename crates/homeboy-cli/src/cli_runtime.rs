@@ -141,13 +141,6 @@ pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManife
     )
 }
 
-/// Installed command/capability metadata for admission checks. Extension
-/// discovery intentionally skips readiness probes at this phase.
-fn current_augmented_command_surface() -> crate::cli_surface::CommandSurface {
-    let discovery = collect_extension_cli_info_metadata_only();
-    command_surface_from(build_augmented_command(&discovery.info, &discovery.health))
-}
-
 pub(crate) fn current_augmented_command_contract() -> clap::Command {
     let discovery = collect_extension_cli_info_metadata_only();
     build_augmented_command(&discovery.info, &discovery.health)
@@ -3481,7 +3474,7 @@ mod tests {
         );
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        let err = crate::commands::route::route_after_parse(
+        let err = crate::commands::route::route_after_parse_with_provenance(
             &cli,
             &[
                 "homeboy".into(),
@@ -3491,6 +3484,7 @@ mod tests {
                 "show".into(),
                 "run-123".into(),
             ],
+            None,
             None,
         )
         .expect_err("runs show still rejects global runner");
@@ -3535,7 +3529,7 @@ mod tests {
         };
         assert!(args.is_artifact_get());
         assert_eq!(args.artifact_get_runner(), Some("homeboy-lab"));
-        crate::commands::route::route_after_parse(
+        crate::commands::route::route_after_parse_with_provenance(
             &cli,
             &[
                 "homeboy".into(),
@@ -3547,6 +3541,7 @@ mod tests {
                 "--runner".into(),
                 "homeboy-lab".into(),
             ],
+            None,
             None,
         )
         .expect("runs artifact get command-local runner is allowed");
@@ -3585,7 +3580,7 @@ mod tests {
             panic!("expected runs command");
         };
         assert_eq!(args.artifact_get_runner(), Some("homeboy-lab"));
-        crate::commands::route::route_after_parse(
+        crate::commands::route::route_after_parse_with_provenance(
             &cli,
             &[
                 "homeboy".into(),
@@ -3597,6 +3592,7 @@ mod tests {
                 "run-123".into(),
                 "report-json".into(),
             ],
+            None,
             None,
         )
         .expect("runs artifact get accepts global runner for command-local fetch");
@@ -3637,7 +3633,7 @@ mod tests {
             };
             assert!(args.is_artifacts());
             assert_eq!(args.artifacts_runner(), Some("homeboy-lab"));
-            crate::commands::route::route_after_parse(&cli, &argv, None)
+            crate::commands::route::route_after_parse_with_provenance(&cli, &argv, None, None)
                 .expect("command-local runner query is accepted");
         }
     }

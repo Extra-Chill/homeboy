@@ -1121,7 +1121,10 @@ mod tests {
     fn restarted_worker_reclaims_an_expired_claim() {
         crate::test_support::with_isolated_home(|_| {
             let deferred = deferred_workload::defer(input()).expect("defer workload");
-            let first = deferred_workload::claim_next_at("first-runner", "dead-worker", 1)
+            let first =
+                deferred_workload::claim_next_matching_at("first-runner", "dead-worker", 1, |_| {
+                    true
+                })
                 .expect("claim workload")
                 .expect("deferred workload");
             let dispatched = Rc::new(Cell::new(0));

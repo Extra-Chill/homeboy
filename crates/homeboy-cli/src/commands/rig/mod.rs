@@ -41,10 +41,6 @@ impl RigArgs {
         )
     }
 
-    fn is_check_command(&self) -> bool {
-        matches!(self.command, RigCommand::Check { .. })
-    }
-
     pub(crate) fn is_runner_source_management_command(&self) -> bool {
         matches!(
             self.command,
