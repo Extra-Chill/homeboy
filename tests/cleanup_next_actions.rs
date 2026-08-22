@@ -285,11 +285,6 @@ fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
         .env("HOME", home)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("PATH", path)
-        // This fixture inventories its isolated local runner. A parent Lab
-        // handoff is unrelated ambient provenance and would add a second runner
-        // with the same fixture workspace root.
-        .env_remove("HOMEBOY_LAB_EXECUTION_RUNNER_ID")
-        .env_remove("HOMEBOY_RUNNER_HOSTED_EXEC")
         .output()
         .expect("run cleanup");
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
