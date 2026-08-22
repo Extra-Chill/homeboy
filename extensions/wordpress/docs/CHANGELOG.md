@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.36.0] - 2026-08-22
+
+### Added
+- summarize actionable fixture failures
+
 ## [3.35.17] - 2026-08-22
 
 ### Changed
