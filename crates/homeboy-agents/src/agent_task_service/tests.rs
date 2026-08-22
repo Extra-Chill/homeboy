@@ -2580,6 +2580,80 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
 }
 
 #[test]
+fn verified_target_bootstrap_recovers_only_fixture_residue_and_keeps_live_or_unknown_owners_blocked(
+) {
+    with_isolated_home(|_| {
+        let fixture_run_id = "concurrent-first-cook-run";
+        let mut fixture_plan = discovery_plan();
+        fixture_plan.tasks[0].executor.backend = "fixture".to_string();
+        agent_task_lifecycle::submit_plan(&fixture_plan, Some(fixture_run_id))
+            .expect("persist previous-release fixture residue");
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: fixture_run_id,
+            runner_id: "fixture-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .expect("attach fixture runner record");
+
+        let live_run_id = "live-owner-control";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(live_run_id))
+            .expect("persist live control");
+        agent_task_lifecycle::mark_running(live_run_id).expect("mark live");
+        agent_task_lifecycle::rewrite_record_for_test(live_run_id, |record| {
+            record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+        })
+        .expect("record live owner");
+
+        let unknown_run_id = "unverifiable-owner-control";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(unknown_run_id))
+            .expect("persist unknown control");
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: unknown_run_id,
+            runner_id: "unknown-runner",
+            runner_job_id: "unknown-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .expect("attach unknown runner record");
+        for run_id in [fixture_run_id, unknown_run_id] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                record.updated_at = None;
+            })
+            .expect("age previous-release ownership");
+        }
+
+        // The target-only mutation has a narrow proof: fixture executor plan +
+        // accepted runner handoff. It cannot touch either control record.
+        assert_eq!(
+            agent_task_lifecycle::quarantine_verified_fixture_runner_records()
+                .expect("target recovery"),
+            1
+        );
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 2);
+        assert!(admission
+            .blockers
+            .iter()
+            .any(|blocker| blocker.run_id == live_run_id));
+        assert!(admission.blockers.iter().any(|blocker| {
+            blocker.run_id == unknown_run_id
+                && blocker.recovery_command == "homeboy runner reconcile unknown-runner"
+        }));
+        assert_eq!(
+            agent_task_lifecycle::record_health_summary()
+                .expect("health")
+                .quarantined,
+            1
+        );
+    });
+}
+
+#[test]
 fn discovery_rejects_invalid_submitted_after_timestamps() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-invalid-timestamp-filter"))
