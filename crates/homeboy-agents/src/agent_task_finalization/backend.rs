@@ -736,6 +736,14 @@ fn validate_adoption_merge_proof(
         &["rev-list", "--parents", "-n", "1", &fingerprint.head],
     )?;
     let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
+    if parents.len() > 2 {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "promoted candidate has more than two parents; finalization accepts only one-parent candidates or authenticated two-parent merges",
+            None,
+            None,
+        ));
+    }
     let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
         if parents.len() == 2 {
             return Err(Error::validation_invalid_argument(

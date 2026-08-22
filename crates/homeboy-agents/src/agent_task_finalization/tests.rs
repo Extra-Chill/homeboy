@@ -2357,6 +2357,99 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
     });
 }
 
+#[test]
+fn production_validator_rejects_an_octopus_candidate_at_finalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let git_output = |args: &[&str]| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .expect("git runs")
+                    .stdout,
+            )
+            .expect("git output")
+            .trim()
+            .to_string()
+        };
+        let base_branch = git_output(&["branch", "--show-current"]);
+        git(&["checkout", "-b", "candidate"]);
+        std::fs::write(repo.path().join("candidate"), "candidate\n").unwrap();
+        git(&["add", "candidate"]);
+        git(&["commit", "-m", "candidate"]);
+        git(&["checkout", "-b", "side-a", &base_branch]);
+        std::fs::write(repo.path().join("side-a"), "side a\n").unwrap();
+        git(&["add", "side-a"]);
+        git(&["commit", "-m", "side a"]);
+        git(&["checkout", "-b", "side-b", &base_branch]);
+        std::fs::write(repo.path().join("side-b"), "side b\n").unwrap();
+        git(&["add", "side-b"]);
+        git(&["commit", "-m", "side b"]);
+        git(&["checkout", "candidate"]);
+        git(&[
+            "merge",
+            "--no-ff",
+            "side-a",
+            "side-b",
+            "-m",
+            "octopus candidate",
+        ]);
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .expect("fingerprint octopus candidate");
+        assert_eq!(
+            git_output(&["rev-list", "--parents", "-n", "1", "HEAD"])
+                .split_whitespace()
+                .count(),
+            4
+        );
+
+        let run_id = "octopus-finalization-rejection";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec![
+            "candidate".to_string(),
+            "side-a".to_string(),
+            "side-b".to_string(),
+        ];
+        promotion.provenance = json!({ "candidate": candidate });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).expect("serialize promotion"),
+        )
+        .expect("persist malformed historical promotion");
+
+        let mut options = real_git_finalization_options(
+            repo.path(),
+            vec![
+                "candidate".to_string(),
+                "side-a".to_string(),
+                "side-b".to_string(),
+            ],
+        );
+        options.run_id = run_id.to_string();
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("octopus candidate rejected at finalization");
+        assert!(error.message.contains("more than two parents"));
+    });
+}
+
 fn successful_lifecycle(model: &str) -> RunLifecycleRecord {
     RunLifecycleRecord {
         execution: RunExecutionLifecycle {
