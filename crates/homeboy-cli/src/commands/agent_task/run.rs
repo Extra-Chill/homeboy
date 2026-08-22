@@ -3447,23 +3447,101 @@ pub(crate) fn admit_provider_evidence_inputs(
         admitted_sources.push(source);
     }
     if let Some(prompt) = prompt {
-        for token in prompt.split_whitespace() {
-            let path = token.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
-                )
-            });
-            if path.starts_with('/')
+        for path in absolute_host_paths_in_provider_prompt(prompt)? {
+            if !is_projected_provider_evidence_path(&path)
                 && !admitted_sources
                     .iter()
-                    .any(|source| provider_evidence_paths_equivalent(path, source))
+                    .any(|source| provider_evidence_paths_equivalent(&path, source))
             {
                 return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
             }
         }
     }
     Ok(admitted_sources)
+}
+
+const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
+
+/// Extract Unix absolute paths from the bounded provider prompt surface. The
+/// scanner recognizes paths after punctuation and file URIs without treating
+/// ordinary HTTPS URLs as host paths.
+fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
+    if prompt.len() > MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            "provider prompt exceeds the absolute-path scan limit",
+            Some(format!("{} bytes", prompt.len())),
+            None,
+        ));
+    }
+
+    fn boundary(byte: u8) -> bool {
+        !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'.' | b'~' | b'%')
+    }
+    fn path_end(byte: u8) -> bool {
+        byte.is_ascii_whitespace()
+            || matches!(
+                byte,
+                b'\''
+                    | b'"'
+                    | b'`'
+                    | b'('
+                    | b')'
+                    | b'['
+                    | b']'
+                    | b'{'
+                    | b'}'
+                    | b'<'
+                    | b'>'
+                    | b','
+                    | b';'
+            )
+    }
+    fn scan(bytes: &[u8], start: usize) -> Option<String> {
+        let end = bytes[start..]
+            .iter()
+            .position(|byte| path_end(*byte))
+            .map_or(bytes.len(), |offset| start + offset);
+        let mut end = end;
+        while end > start
+            && matches!(
+                bytes[end - 1],
+                b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' | b'}'
+            )
+        {
+            end -= 1;
+        }
+        (end > start).then(|| String::from_utf8_lossy(&bytes[start..end]).into_owned())
+    }
+
+    let bytes = prompt.as_bytes();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let file_uri = bytes[index..].starts_with(b"file://");
+        let start = if file_uri {
+            index + b"file://".len()
+        } else {
+            index
+        };
+        if start < bytes.len()
+            && bytes[start] == b'/'
+            && (file_uri
+                || (bytes[start - 1] != b'/'
+                    && bytes[start + 1..].first() != Some(&b'/')
+                    && (start == 0 || boundary(bytes[start - 1]))))
+        {
+            if let Some(path) = scan(bytes, start) {
+                paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    Ok(paths)
+}
+
+fn is_projected_provider_evidence_path(path: &str) -> bool {
+    path.contains("/.homeboy/evidence/")
 }
 
 #[derive(Debug, Clone)]
@@ -3764,7 +3842,9 @@ fn secure_provider_evidence_copy(
         libc::openat(
             source_parent.as_raw_fd(),
             source_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            // A replacement FIFO must not block admission before we can reject
+            // its descriptor type and identity below.
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if source_fd < 0 {
@@ -3797,6 +3877,15 @@ fn secure_provider_evidence_copy(
             "provider evidence must be a bounded regular file",
             Some(source_path.display().to_string()),
             None,
+        ));
+    }
+    let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(input.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0
+    {
+        return Err(homeboy::core::Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some(source_path.display().to_string()),
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -3902,11 +3991,20 @@ fn secure_provider_evidence_copy(
             Some(source_path.display().to_string()),
         )
     })?;
+    let current_canonical = source_path.canonicalize().ok();
+    if current_canonical.as_ref() != Some(&source.canonical_path) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(source_path.display().to_string()),
+            None,
+        ));
+    }
     if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence exceeds the maximum size",
-            Some(source.display().to_string()),
+            Some(source_path.display().to_string()),
             None,
         ));
     }
@@ -4021,6 +4119,65 @@ mod provider_evidence_tests {
             .expect_err("undeclared prompt path is rejected");
         assert_eq!(error.details["field"], "prompt");
         assert!(error.message.contains("undeclared absolute evidence path"));
+    }
+
+    #[test]
+    fn scans_absolute_paths_across_provider_prompt_syntaxes() {
+        for prompt in [
+            "Read file:///private/evidence.json",
+            "evidence=/private/evidence.json",
+            "[evidence](/private/evidence.json)",
+            "Read '/private/evidence.json', please.",
+            "See </private/evidence.json>.",
+        ] {
+            let error = validate_provider_evidence_inputs(&[], Some(prompt))
+                .expect_err("undeclared host path is rejected");
+            assert_eq!(error.details["field"], "prompt", "{prompt}");
+            assert!(
+                error.message.contains("undeclared absolute evidence path"),
+                "{prompt}: {}",
+                error.message
+            );
+        }
+
+        validate_provider_evidence_inputs(
+            &[],
+            Some("Read https://example.test/evidence.json and /.homeboy/evidence/source/evidence.json"),
+        )
+        .expect("HTTPS URLs and projected evidence paths are not host evidence");
+    }
+
+    #[test]
+    fn rewrites_declared_paths_across_provider_prompt_syntaxes() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "{}").expect("write source");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: source.display().to_string(),
+        };
+        let mut prompt = Some(format!(
+            "file://{} key={} [source]({}) '{}'",
+            source.display(),
+            source.display(),
+            source.display(),
+            source.display(),
+        ));
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+            .expect("admit declared path spellings");
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
+            .expect("rewrite declared paths");
+        let rewritten = prompt.expect("rewritten prompt");
+        let destination = workspace.join(".homeboy/evidence/source/source.json");
+        assert!(!rewritten.contains(&source.display().to_string()));
+        assert_eq!(
+            rewritten
+                .matches(&destination.display().to_string())
+                .count(),
+            4
+        );
     }
 
     #[cfg(unix)]
@@ -4303,6 +4460,28 @@ mod provider_evidence_tests {
         let error = secure_provider_evidence_copy(&admitted, &destination)
             .expect_err("secure reopen rejects the replacement symlink");
         assert!(error.message.contains("could not be securely opened"));
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_source_replaced_with_a_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let destination = temp.path().join("workspace/evidence.json");
+        std::fs::write(&source, "accepted").expect("write source");
+        let admitted = admit_provider_evidence_source(&source.display().to_string())
+            .expect("admit regular source");
+        std::fs::remove_file(&source).expect("remove admitted source");
+        let source_name =
+            std::ffi::CString::new(source.as_os_str().as_bytes()).expect("FIFO source name");
+        assert_eq!(unsafe { libc::mkfifo(source_name.as_ptr(), 0o600) }, 0);
+
+        let error = secure_provider_evidence_copy(&admitted, &destination)
+            .expect_err("replacement FIFO is rejected without a writer");
+        assert!(error.message.contains("identity changed after validation"));
         assert!(!destination.exists());
     }
 
