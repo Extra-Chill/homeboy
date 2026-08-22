@@ -145,17 +145,12 @@ gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main
   -f operation=reconcile
 ```
 
-The reconciliation job applies the versioned payload only when the existing
-ruleset differs, records the before/desired/after documents, and fails unless
-they exactly match. It then runs the same fail-closed effective-enforcement
-verification used below. For an administrator recovery outside Actions:
-
-```bash
-gh api --method PUT repos/Extra-Chill/homeboy/rulesets/13680120 \
-  --input .github/required-gates-ruleset.json
-bash .github/validate-required-gates.sh --github
-gh api repos/Extra-Chill/homeboy/rulesets/13680120
-```
+The approved workflow is the only reconciliation path. The reconciliation job
+checks that its checkout remains the live `main` tip, requires a successful
+`homeboy / Test` check for that exact SHA, and repeats the tip check immediately
+before it can update the existing ruleset. It records the before/desired/after
+documents and fails unless they exactly match, then runs the same fail-closed
+effective-enforcement verification used below.
 
 `--github` is the administrator verification path and is the one mode that
 **fails closed on enforcement** — `divergent`, `unenforced`, and `unverified`
