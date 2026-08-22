@@ -1,6 +1,6 @@
 {
   "schema": "homeboy/ci-capacity/v1",
-  "test_shards": 4,
+  "test_shards": 1,
   "queue_delay_slo_seconds": {
     "window_days": 7,
     "p95": 300,
