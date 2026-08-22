@@ -1,7 +1,5 @@
 //! User-facing summaries of commands that support Lab runners.
 
-use std::collections::BTreeSet;
-
 use crate::command_contract::spec::{CommandLabSupportSummary, COMMAND_SPECS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

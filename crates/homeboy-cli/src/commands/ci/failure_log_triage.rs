@@ -726,7 +726,7 @@ mod engine {
     }
 }
 
-pub use engine::*;
+pub(crate) use engine::*;
 pub use types::*;
 
 #[cfg(test)]

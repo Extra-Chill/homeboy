@@ -2,11 +2,13 @@
 
 mod export_import;
 
+use super::bench::bench_compare;
+use super::dossier::runs_dossier;
 use super::handlers::{artifact_get, artifacts, env, show_run};
 use super::reconcile::{reconcile_runs, RunsReconcileArgs};
 use super::{
-    bench_compare, dead_owned_run, findings, latest, list_runs, runs_dossier, RunsArtifactGetArgs,
-    RunsListArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER,
+    dead_owned_run, findings, latest, list_runs, RunsArtifactGetArgs, RunsListArgs, RunsOutput,
+    HOSTED_BLUEPRINT_VIEWER,
 };
 
 use crate::cli_surface::Cli;

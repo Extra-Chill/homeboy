@@ -18,7 +18,7 @@ use crate::core::engine::execution_context::{self, ResolveOptions};
 use homeboy_extension::ExtensionCapability;
 
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, LabCommandPortability, LabWorkspaceModePolicy,
+    CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,
     LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES,
 };
 
@@ -263,19 +263,6 @@ impl Commands {
             _ => None,
         };
         Ok(Some(route))
-    }
-
-    pub(crate) fn supports_lab_runner(&self) -> bool {
-        self.lab_contract()
-            .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable))
-    }
-
-    pub(crate) fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
-        self.lab_contract()
-            .and_then(|contract| match contract.portability {
-                LabCommandPortability::Portable => None,
-                LabCommandPortability::LocalOnly(reason) => Some(reason),
-            })
     }
 
     pub(crate) fn lab_offload_mutation_flag(&self) -> Option<&'static str> {

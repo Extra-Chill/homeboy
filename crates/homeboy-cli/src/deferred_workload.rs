@@ -965,28 +965,6 @@ mod tests {
         }
     }
 
-    fn owner_status(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerStatus {
-        DeferredWorkloadWorkerStatus {
-            schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
-            pid,
-            owner_token: owner_token.to_string(),
-            linux_starttime_ticks: Some(1),
-            state: "waiting_for_runner".to_string(),
-            updated_at_ms: 0,
-            detail: String::new(),
-        }
-    }
-
-    fn worker_process(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerProcess {
-        DeferredWorkloadWorkerProcess {
-            pid,
-            startup_token: Some(owner_token.to_string()),
-            owns_startup_token: true,
-            working_directory: None,
-            working_directory_deleted: false,
-        }
-    }
-
     #[test]
     fn deferred_workload_is_idempotent_and_survives_restart_before_claim() {
         let ctx = homeboy_core::test_support::HermeticTestContext::new();

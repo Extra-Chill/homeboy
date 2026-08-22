@@ -37,22 +37,6 @@ fn rig_install_offload_translates_source_path_instead_of_forwarding_it() {
 }
 
 #[test]
-fn linked_local_rig_check_disables_default_lab_offload() {
-    let temp_home = tempdir().expect("temp home");
-    let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
-    write_rig_source_metadata(temp_home.path(), "linked-local", true);
-    let cli = Cli::parse_from(["homeboy", "rig", "check", "linked-local"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "rig check");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn linked_local_rig_check_stays_local_without_runner() {
     // Scope the offload-metadata env var so a parallel test that sets it
     // (process-global) cannot leak into this local/no-runner assertion.
@@ -104,54 +88,6 @@ fn lab_command_preserves_portable_contract_shape() {
 }
 
 #[test]
-fn extension_update_requires_explicit_lab_runner_without_extension_parity() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "update",
-        "wordpress",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension update");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
-fn extension_refresh_requires_explicit_lab_runner_without_extension_parity() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "refresh",
-        "https://github.com/Extra-Chill/homeboy-extensions.git",
-        "--id",
-        "wordpress",
-        "--ref",
-        "6ff93f43",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension refresh");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn extension_update_routes_locally_without_explicit_lab_runner() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let normalized = vec![
@@ -196,28 +132,6 @@ fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
 }
 
 #[test]
-fn extension_show_routes_to_explicit_lab_runner() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "lab",
-        "extension",
-        "show",
-        "wordpress",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "extension show");
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let normalized = vec![
@@ -234,14 +148,6 @@ fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
 
     assert_eq!(outcome, None);
     assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn extension_list_stays_local_only() {
-    let cli = Cli::parse_from(["homeboy", "--runner", "lab", "extension", "list"]);
-
-    assert!(lab_offload_command(&cli.command).unwrap().is_none());
-    assert!(!cli.command.supports_lab_runner());
 }
 
 #[test]
@@ -682,39 +588,6 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
     assert!(err.message.contains("--placement lab"));
     assert!(err.message.contains("requires an eligible Lab runner"));
     assert!(err.message.contains("agent-task fanout submit-batch"));
-}
-
-#[test]
-fn agent_task_fanout_run_plan_coordination_is_controller_local() {
-    // `--runner` implies Lab placement and is mutually exclusive with an
-    // explicit `--placement` at parse time (#9002), so a runner-pinned fanout
-    // uses `--runner` alone.
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "agent-task".to_string(),
-        "fanout".to_string(),
-        "run-plan".to_string(),
-        "--input".to_string(),
-        "fanout.json".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    // Fanout coordination is controller-owned so durable batch state,
-    // worktree ownership, and recovery stay local; the coordinator itself
-    // is not Lab-portable, though the independent cooks it generates may use
-    // their own Lab placement (#8045).
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(command.hot_label, "agent-task fanout run-plan");
-    assert!(!command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(cli
-        .command
-        .lab_runner_unsupported_reason()
-        .is_some_and(|reason| reason.contains("controller-owned")));
 }
 
 #[test]

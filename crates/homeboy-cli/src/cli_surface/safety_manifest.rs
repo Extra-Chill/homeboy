@@ -19,9 +19,9 @@
 //! rather than a silently ignored entry.
 
 use crate::cli_surface::{
-    current_command_surface, CommandDocsMetadata, CommandDryRunMetadata, CommandLabMetadata,
-    CommandOutputMetadata, CommandSafetyAuditFinding, CommandSafetyAuditReport, CommandSafetyEntry,
-    CommandSafetyManifest, CommandSurface, CommandSurfaceEntry, DynamicCommandDescriptor,
+    CommandDocsMetadata, CommandDryRunMetadata, CommandLabMetadata, CommandOutputMetadata,
+    CommandSafetyEntry, CommandSafetyManifest, CommandSurface, CommandSurfaceEntry,
+    DynamicCommandDescriptor,
 };
 use crate::command_contract::{registered_command, CommandSafetySpec};
 

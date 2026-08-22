@@ -17,7 +17,6 @@ use super::reference_docs::{
 };
 use super::Cli;
 use clap::CommandFactory;
-use homeboy_command_contract::cli_reference::CliReference;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 

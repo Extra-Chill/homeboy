@@ -1636,11 +1636,6 @@ pub struct DryRunArgs {
 }
 
 impl DryRunArgs {
-    /// True when this run must not mutate anything.
-    fn is_dry_run(&self) -> bool {
-        self.dry_run
-    }
-
     /// The resolved plan/execute mode.
     pub fn mode(&self) -> MutationMode {
         if self.dry_run {
@@ -1660,12 +1655,6 @@ mod mutation_args_tests {
     struct MutationCli {
         #[command(flatten)]
         mutation: MutationArgs,
-    }
-
-    fn parse(args: &[&str]) -> MutationArgs {
-        MutationCli::try_parse_from(args)
-            .expect("mutation args should parse")
-            .mutation
     }
 
     #[test]

@@ -1477,7 +1477,6 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::current_command_surface;
     use serde_json::json;
     use tempfile::TempDir;
 

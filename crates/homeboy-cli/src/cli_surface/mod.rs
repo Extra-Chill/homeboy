@@ -554,22 +554,7 @@ pub struct ExtensionCommandHealth {
 mod entry_command_impls {
     use super::*;
 
-    impl CommandSurfaceEntry {
-        pub(super) fn matches(&self, name: &str) -> bool {
-            self.name == name || self.visible_aliases.iter().any(|alias| alias == name)
-        }
-
-        pub(super) fn contains_rest(&self, path: &[&str]) -> bool {
-            let Some((first, rest)) = path.split_first() else {
-                return true;
-            };
-
-            self.subcommands
-                .iter()
-                .find(|entry| !entry.hidden && entry.matches(first))
-                .is_some_and(|entry| entry.contains_rest(rest))
-        }
-    }
+    impl CommandSurfaceEntry {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -781,12 +766,11 @@ mod surface {
             .collect()
     }
 }
-pub use surface::*;
+pub(crate) use surface::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     /// Repo-root-relative paths (docs/, README.md) resolve from the workspace
     /// root, not this crate's manifest dir. After homeboy-cli was extracted into

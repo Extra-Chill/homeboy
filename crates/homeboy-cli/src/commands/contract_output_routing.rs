@@ -121,23 +121,6 @@ impl Commands {
         }
     }
 
-    pub(crate) fn response_mode(
-        &self,
-        spec: &CommandSpec,
-        has_output_file: bool,
-    ) -> CommandResponseMode {
-        self.output_descriptor(spec, has_output_file).response_mode
-    }
-
-    pub(crate) fn output_file_mode(
-        &self,
-        spec: &CommandSpec,
-        has_output_file: bool,
-    ) -> CommandOutputFileMode {
-        self.output_descriptor(spec, has_output_file)
-            .output_file_mode
-    }
-
     pub(crate) fn consumes_output_file_as_command_arg(&self) -> bool {
         matches!(self, Commands::Runs(args) if args.is_artifact_get())
     }

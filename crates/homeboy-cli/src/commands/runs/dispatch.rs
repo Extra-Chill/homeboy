@@ -94,22 +94,8 @@ impl RunsArgs {
         }
     }
 
-    pub(crate) fn list_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::List(args) => args.runner.as_deref(),
-            _ => None,
-        }
-    }
-
     pub(crate) fn is_artifacts(&self) -> bool {
         matches!(self.command, RunsCommand::Artifacts(_))
-    }
-
-    pub(crate) fn artifacts_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::Artifacts(args) => args.runner.as_deref(),
-            _ => None,
-        }
     }
 
     pub(crate) fn is_markdown_mode(&self) -> bool {
@@ -128,15 +114,6 @@ impl RunsArgs {
                 command: RunsArtifactCommand::Get(_),
             })
         )
-    }
-
-    pub(crate) fn artifact_get_runner(&self) -> Option<&str> {
-        match &self.command {
-            RunsCommand::Artifact(RunsArtifactArgs {
-                command: RunsArtifactCommand::Get(args),
-            }) => args.runner.as_deref(),
-            _ => None,
-        }
     }
 
     pub(crate) fn has_command_local_runner_option(&self) -> bool {

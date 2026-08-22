@@ -51,7 +51,6 @@
 
 use super::Cli;
 use clap::{Arg, ArgAction, Command, CommandFactory};
-use homeboy_command_contract::cli_reference::checked_in_cli_reference;
 use std::collections::BTreeMap;
 
 /// Repo-root-relative directory owned entirely by this generator.
