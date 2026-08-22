@@ -12,8 +12,7 @@
 //! ```
 
 use super::reference_docs::{
-    commands_without_description, documented_subcommands, generated_command_index,
-    live_generated_reference_docs, write_cli_reference, WRITE_ENV,
+    commands_without_description, documented_subcommands, write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
