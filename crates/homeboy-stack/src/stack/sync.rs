@@ -51,6 +51,7 @@ use super::pr_meta::fetch_pr_meta;
 pub(crate) use super::pr_meta::StackPrMeta as PrMeta;
 use super::spec::{resolve_existing_component_path, save, StackPrEntry, StackSpec};
 use super::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
+use std::path::Path;
 
 /// Output envelope for `homeboy stack sync`.
 #[derive(Debug, Clone, Serialize)]
@@ -573,6 +574,7 @@ pub fn diff(spec: &StackSpec) -> Result<DiffOutput> {
 /// Sync a stack: rebuild target from base, auto-drop merged PRs, replay
 /// the rest.
 pub fn sync(
+    config_root: &Path,
     spec: &mut StackSpec,
     dry_run: bool,
     conflict_policy: ConflictPolicy,
@@ -607,7 +609,7 @@ pub fn sync(
     )?;
 
     let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
-    let preflight = preflight(spec, &plan.preview.component_path, &base_ref)?;
+    let preflight = preflight(config_root, spec, &plan.preview.component_path, &base_ref)?;
     if preflight.blocked {
         return Err(stale_stack_error(spec, &preflight));
     }
@@ -617,7 +619,7 @@ pub fn sync(
     //    cleanly rebuilds.
     if plan.preview.dropped_count > 0 {
         spec.prs = plan.kept_entries.clone();
-        save(spec)?;
+        save(config_root, spec)?;
     } else {
         // No spec mutation needed — but keep `spec.prs` aligned with the
         // plan so the pick loop has consistent indexing.

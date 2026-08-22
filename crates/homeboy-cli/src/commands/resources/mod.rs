@@ -297,8 +297,11 @@ fn compare_cpu_desc(a: &ProcessRow, b: &ProcessRow) -> Ordering {
 }
 
 fn collect_rig_leases() -> Result<RigLeaseSummary, String> {
-    let leases =
-        homeboy::rig::active_run_leases().map_err(|e| format!("rig lease probe failed: {e}"))?;
+    // Boundary: one resource probe is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()
+        .map_err(|e| format!("rig lease probe failed: {e}"))?;
+    let leases = homeboy::rig::active_run_leases(roots.config())
+        .map_err(|e| format!("rig lease probe failed: {e}"))?;
     let rows: Vec<RigLeaseRow> = leases
         .into_iter()
         .map(|lease| RigLeaseRow {

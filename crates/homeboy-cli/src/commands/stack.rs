@@ -12,6 +12,7 @@ use homeboy_stack::stack::{
 };
 
 use super::{CmdResult, CommandReport};
+use std::path::Path;
 
 #[derive(Args)]
 pub struct StackArgs {
@@ -224,10 +225,15 @@ pub type StackDiffOutput = CommandReport<DiffOutput>;
 pub type StackInspectOutput = CommandReport<InspectOutput>;
 
 pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
+    // Boundary: one `homeboy stack` invocation is one unit of work, so the
+    // config root is resolved exactly once here and handed to every handler
+    // below. Nothing under this point resolves again (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     match args.command {
-        StackCommand::List => list(),
-        StackCommand::Show { stack_id } => show(&stack_id),
-        StackCommand::Candidates { stack_id } => candidates(&stack_id),
+        StackCommand::List => list(config_root),
+        StackCommand::Show { stack_id } => show(config_root, &stack_id),
+        StackCommand::Candidates { stack_id } => candidates(config_root, &stack_id),
         StackCommand::Create {
             stack_id,
             component,
@@ -236,6 +242,7 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
             target,
             description,
         } => create(
+            config_root,
             &stack_id,
             &component,
             &component_path,
@@ -248,16 +255,17 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
             repo,
             number,
             note,
-        } => add_pr(&stack_id, &repo, number, note),
+        } => add_pr(config_root, &stack_id, &repo, number, note),
         StackCommand::RemovePr {
             stack_id,
             number,
             repo,
-        } => remove_pr(&stack_id, number, repo.as_deref()),
+        } => remove_pr(config_root, &stack_id, number, repo.as_deref()),
         StackCommand::Apply {
             stack_id,
             abort_on_conflict,
         } => apply(
+            config_root,
             &stack_id,
             ConflictPolicy::from_abort_flag(abort_on_conflict),
         ),
@@ -265,21 +273,23 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
             stack_id,
             abort_on_conflict,
         } => rebase(
+            config_root,
             &stack_id,
             ConflictPolicy::from_abort_flag(abort_on_conflict),
         ),
-        StackCommand::Status { stack_id } => status(&stack_id),
+        StackCommand::Status { stack_id } => status(config_root, &stack_id),
         StackCommand::Sync {
             stack_id,
             dry_run,
             abort_on_conflict,
         } => sync(
+            config_root,
             &stack_id,
             dry_run,
             ConflictPolicy::from_abort_flag(abort_on_conflict),
         ),
-        StackCommand::Push { stack_id } => push(&stack_id),
-        StackCommand::Diff { stack_id } => diff(&stack_id),
+        StackCommand::Push { stack_id } => push(config_root, &stack_id),
+        StackCommand::Diff { stack_id } => diff(config_root, &stack_id),
         StackCommand::Inspect {
             component_id,
             base,
@@ -290,9 +300,9 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
     }
 }
 
-fn candidates(stack_id: &str) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
-    let candidates = stack::discover_candidates(&spec)?;
+fn candidates(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
+    let candidates = stack::discover_candidates(config_root, &spec)?;
     Ok((
         StackCommandOutput::Candidates(StackCandidatesOutput {
             command: "stack.candidates",
@@ -303,8 +313,8 @@ fn candidates(stack_id: &str) -> CmdResult<StackCommandOutput> {
     ))
 }
 
-fn list() -> CmdResult<StackCommandOutput> {
-    let stacks = stack::list()?;
+fn list(config_root: &Path) -> CmdResult<StackCommandOutput> {
+    let stacks = stack::list(config_root)?;
     let summaries = stacks
         .into_iter()
         .map(|s| StackSummary {
@@ -326,8 +336,8 @@ fn list() -> CmdResult<StackCommandOutput> {
     ))
 }
 
-fn show(stack_id: &str) -> CmdResult<StackCommandOutput> {
-    let stack = stack::load(stack_id)?;
+fn show(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let stack = stack::load(config_root, stack_id)?;
     Ok((
         StackCommandOutput::Show(StackShowOutput {
             command: "stack.show",
@@ -338,6 +348,7 @@ fn show(stack_id: &str) -> CmdResult<StackCommandOutput> {
 }
 
 fn create(
+    config_root: &Path,
     stack_id: &str,
     component: &str,
     component_path: &str,
@@ -347,7 +358,7 @@ fn create(
 ) -> CmdResult<StackCommandOutput> {
     // Refuse to silently overwrite an existing stack — `add-pr`/`remove-pr`
     // are the right verbs for editing a live spec.
-    if stack::exists(stack_id)? {
+    if stack::exists(config_root, stack_id)? {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "stack_id",
             format!("Stack '{}' already exists", stack_id),
@@ -373,7 +384,7 @@ fn create(
         provenance: None,
         requirements: Default::default(),
     };
-    stack::save(&spec)?;
+    stack::save(config_root, &spec)?;
     Ok((
         StackCommandOutput::Create(StackMutationOutput {
             command: "stack.create",
@@ -384,12 +395,13 @@ fn create(
 }
 
 fn add_pr(
+    config_root: &Path,
     stack_id: &str,
     repo: &str,
     number: u64,
     note: Option<String>,
 ) -> CmdResult<StackCommandOutput> {
-    let mut spec = stack::load(stack_id)?;
+    let mut spec = stack::load(config_root, stack_id)?;
 
     // Refuse to silently double-add the same PR — keeps the spec tidy and
     // makes "did I already add this?" obvious.
@@ -414,7 +426,7 @@ fn add_pr(
         number,
         note,
     });
-    stack::save(&spec)?;
+    stack::save(config_root, &spec)?;
     Ok((
         StackCommandOutput::AddPr(StackMutationOutput {
             command: "stack.add_pr",
@@ -424,8 +436,13 @@ fn add_pr(
     ))
 }
 
-fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<StackCommandOutput> {
-    let mut spec = stack::load(stack_id)?;
+fn remove_pr(
+    config_root: &Path,
+    stack_id: &str,
+    number: u64,
+    repo: Option<&str>,
+) -> CmdResult<StackCommandOutput> {
+    let mut spec = stack::load(config_root, stack_id)?;
 
     let matches: Vec<usize> = spec
         .prs
@@ -464,7 +481,7 @@ fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<Stack
     }
 
     spec.prs.remove(matches[0]);
-    stack::save(&spec)?;
+    stack::save(config_root, &spec)?;
     Ok((
         StackCommandOutput::RemovePr(StackMutationOutput {
             command: "stack.remove_pr",
@@ -474,9 +491,13 @@ fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<Stack
     ))
 }
 
-fn apply(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
-    let report = stack::apply(&spec, conflict_policy)?;
+fn apply(
+    config_root: &Path,
+    stack_id: &str,
+    conflict_policy: ConflictPolicy,
+) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
+    let report = stack::apply(config_root, &spec, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Apply(StackApplyOutput {
@@ -487,9 +508,13 @@ fn apply(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackComm
     ))
 }
 
-fn rebase(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
-    let report = stack::rebase(&spec, conflict_policy)?;
+fn rebase(
+    config_root: &Path,
+    stack_id: &str,
+    conflict_policy: ConflictPolicy,
+) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
+    let report = stack::rebase(config_root, &spec, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Rebase(StackRebaseOutput {
@@ -500,8 +525,8 @@ fn rebase(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackCom
     ))
 }
 
-fn status(stack_id: &str) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
+fn status(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
     let report = stack::status(&spec)?;
     Ok((
         StackCommandOutput::Status(StackStatusOutput {
@@ -513,12 +538,13 @@ fn status(stack_id: &str) -> CmdResult<StackCommandOutput> {
 }
 
 fn sync(
+    config_root: &Path,
     stack_id: &str,
     dry_run: bool,
     conflict_policy: ConflictPolicy,
 ) -> CmdResult<StackCommandOutput> {
-    let mut spec = stack::load(stack_id)?;
-    let report = stack::sync(&mut spec, dry_run, conflict_policy)?;
+    let mut spec = stack::load(config_root, stack_id)?;
+    let report = stack::sync(config_root, &mut spec, dry_run, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Sync(StackSyncOutput {
@@ -529,8 +555,8 @@ fn sync(
     ))
 }
 
-fn push(stack_id: &str) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
+fn push(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
     let report = stack::push(&spec)?;
     Ok((
         StackCommandOutput::Push(StackPushOutput {
@@ -541,8 +567,8 @@ fn push(stack_id: &str) -> CmdResult<StackCommandOutput> {
     ))
 }
 
-fn diff(stack_id: &str) -> CmdResult<StackCommandOutput> {
-    let spec = stack::load(stack_id)?;
+fn diff(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(config_root, stack_id)?;
     let report = stack::diff(&spec)?;
     Ok((
         StackCommandOutput::Diff(StackDiffOutput {

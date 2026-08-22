@@ -71,18 +71,23 @@ pub struct RigRunLeaseDiagnostic {
 /// error. Process crashes are handled by stale-PID cleanup on the next acquire.
 #[derive(Debug)]
 pub struct ActiveRigRunLease {
+    /// The config root the lease was acquired against.
+    ///
+    /// The guard must release into the same home it acquired from. Resolving
+    /// ambiently in `Drop` would let a guard delete a lease in whatever home is
+    /// current at teardown, which is a different home whenever the acquiring
+    /// work owned an explicit root (#7505).
+    config_root: PathBuf,
     rig_id: String,
     pid: u32,
 }
 
 impl Drop for ActiveRigRunLease {
     fn drop(&mut self) {
-        let Ok(_lock) = acquire_lease_index_lock() else {
+        let Ok(_lock) = acquire_lease_index_lock(&self.config_root) else {
             return;
         };
-        let Ok(path) = lease_path(&self.rig_id) else {
-            return;
-        };
+        let path = lease_path(&self.config_root, &self.rig_id);
         let Ok(Some(lease)) = read_lease(&path) else {
             return;
         };
@@ -93,13 +98,18 @@ impl Drop for ActiveRigRunLease {
 }
 
 /// Acquire an active-run lease for a mutating rig command.
-pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<ActiveRigRunLease>> {
-    acquire_active_run_lease_with_settings(rig, command, &[])
+pub fn acquire_active_run_lease(
+    config_root: &Path,
+    rig: &RigSpec,
+    command: &str,
+) -> Result<Option<ActiveRigRunLease>> {
+    acquire_active_run_lease_with_settings(config_root, rig, command, &[])
 }
 
 /// Acquire an active-run lease after materializing rig settings as env values
 /// for resource interpolation.
 pub fn acquire_active_run_lease_with_settings(
+    config_root: &Path,
     rig: &RigSpec,
     command: &str,
     settings: &[(String, String)],
@@ -109,16 +119,16 @@ pub fn acquire_active_run_lease_with_settings(
         return Ok(None);
     }
 
-    let _lock = acquire_lease_index_lock()?;
-    fs::create_dir_all(paths::rig_leases_dir()?).map_err(|e| {
+    let _lock = acquire_lease_index_lock(config_root)?;
+    fs::create_dir_all(paths::rig_leases_dir_in_root(config_root)).map_err(|e| {
         Error::internal_unexpected(format!("Failed to create rig lease directory: {}", e))
     })?;
 
-    prune_stale_leases()?;
-    if has_covering_parent_lease(rig, command)? {
+    prune_stale_leases(config_root)?;
+    if has_covering_parent_lease(config_root, rig, command)? {
         return Ok(None);
     }
-    if let Some(conflict) = find_conflict(rig, command, &resources)? {
+    if let Some(conflict) = find_conflict(config_root, rig, command, &resources)? {
         let held_age_seconds = lease_age_seconds(&conflict.lease.started_at);
         return Err(Error::rig_resource_conflict(RigResourceConflictInfo {
             rig_id: rig.id.clone(),
@@ -147,11 +157,12 @@ pub fn acquire_active_run_lease_with_settings(
     };
     let json = serde_json::to_string_pretty(&lease)
         .map_err(|e| Error::internal_unexpected(format!("Failed to serialize rig lease: {}", e)))?;
-    fs::write(lease_path(&rig.id)?, json).map_err(|e| {
+    fs::write(lease_path(config_root, &rig.id), json).map_err(|e| {
         Error::internal_unexpected(format!("Failed to write rig lease for '{}': {}", rig.id, e))
     })?;
 
     Ok(Some(ActiveRigRunLease {
+        config_root: config_root.to_path_buf(),
         rig_id: rig.id.clone(),
         pid,
     }))
@@ -164,11 +175,12 @@ struct ResourceConflict {
 }
 
 fn find_conflict(
+    config_root: &Path,
     rig: &RigSpec,
     command: &str,
     resources: &RigResourcesSpec,
 ) -> Result<Option<ResourceConflict>> {
-    for lease in live_leases()? {
+    for lease in live_leases(config_root)? {
         if lease.rig_id == rig.id {
             if lease_allows_child_command(&lease, command) {
                 continue;
@@ -190,8 +202,8 @@ fn find_conflict(
     Ok(None)
 }
 
-fn has_covering_parent_lease(rig: &RigSpec, command: &str) -> Result<bool> {
-    Ok(live_leases()?
+fn has_covering_parent_lease(config_root: &Path, rig: &RigSpec, command: &str) -> Result<bool> {
+    Ok(live_leases(config_root)?
         .iter()
         .any(|lease| lease.rig_id == rig.id && lease_allows_child_command(lease, command)))
 }
@@ -312,8 +324,8 @@ fn lease_is_reclaimable(lease: &RigRunLease) -> bool {
     false
 }
 
-fn prune_stale_leases() -> Result<()> {
-    for path in lease_files()? {
+fn prune_stale_leases(config_root: &Path) -> Result<()> {
+    for path in lease_files(config_root)? {
         let Some(lease) = read_lease(&path)? else {
             continue;
         };
@@ -330,9 +342,9 @@ fn prune_stale_leases() -> Result<()> {
     Ok(())
 }
 
-fn live_leases() -> Result<Vec<RigRunLease>> {
+fn live_leases(config_root: &Path) -> Result<Vec<RigRunLease>> {
     let mut leases = Vec::new();
-    for path in lease_files()? {
+    for path in lease_files(config_root)? {
         if let Some(lease) = read_lease(&path)? {
             if !lease_is_reclaimable(&lease) {
                 leases.push(lease);
@@ -370,9 +382,13 @@ pub enum ReleaseLeaseOutcome {
 /// Releasing the lock does not terminate the holder process; it only frees the
 /// local guardrail so a new run can proceed. With `force`, the caller is
 /// asserting the holder is dead or wedged.
-pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeaseOutcome> {
-    let _lock = acquire_lease_index_lock()?;
-    let path = lease_path(rig_id)?;
+pub fn release_active_run_lease(
+    config_root: &Path,
+    rig_id: &str,
+    force: bool,
+) -> Result<ReleaseLeaseOutcome> {
+    let _lock = acquire_lease_index_lock(config_root)?;
+    let path = lease_path(config_root, rig_id);
     let Some(lease) = read_lease(&path)? else {
         return Ok(ReleaseLeaseOutcome::NoLease {
             rig_id: rig_id.to_string(),
@@ -414,13 +430,13 @@ pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeas
 }
 
 /// List active rig run leases without acquiring or mutating leases.
-pub fn active_run_leases() -> Result<Vec<RigRunLease>> {
-    live_leases()
+pub fn active_run_leases(config_root: &Path) -> Result<Vec<RigRunLease>> {
+    live_leases(config_root)
 }
 
-pub fn run_lease_diagnostics() -> Result<Vec<RigRunLeaseDiagnostic>> {
+pub fn run_lease_diagnostics(config_root: &Path) -> Result<Vec<RigRunLeaseDiagnostic>> {
     let mut diagnostics = Vec::new();
-    for path in lease_files()? {
+    for path in lease_files(config_root)? {
         let Some(lease) = read_lease(&path)? else {
             continue;
         };
@@ -461,8 +477,8 @@ fn run_lease_diagnostic(lease: RigRunLease) -> RigRunLeaseDiagnostic {
     }
 }
 
-fn lease_files() -> Result<Vec<PathBuf>> {
-    let dir = paths::rig_leases_dir()?;
+fn lease_files(config_root: &Path) -> Result<Vec<PathBuf>> {
+    let dir = paths::rig_leases_dir_in_root(config_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -505,8 +521,9 @@ fn read_lease(path: &Path) -> Result<Option<RigRunLease>> {
     })
 }
 
-fn lease_path(rig_id: &str) -> Result<PathBuf> {
-    Ok(paths::rig_leases_dir()?.join(format!("{}.json", paths::sanitize_path_segment(rig_id))))
+fn lease_path(config_root: &Path, rig_id: &str) -> PathBuf {
+    paths::rig_leases_dir_in_root(config_root)
+        .join(format!("{}.json", paths::sanitize_path_segment(rig_id)))
 }
 
 #[cfg(test)]
