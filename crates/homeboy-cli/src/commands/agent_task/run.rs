@@ -1842,6 +1842,26 @@ fn cook_continuation_status(
         .get("runner_liveness")
         .and_then(Value::as_str)
         == Some("disconnected");
+    let placement_authority = record
+        .metadata
+        .get("execution_placement_decision")
+        .and_then(|decision| {
+            let requested = decision.get("requested").and_then(Value::as_str);
+            let runner_source = decision.pointer("/runner/source").and_then(Value::as_str);
+            let operator_override = decision
+                .pointer("/override_authorization/authorized")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(if operator_override {
+                "operator_overridable"
+            } else if runner_source == Some("explicit") {
+                "operator_pinned"
+            } else if requested == Some("auto") || runner_source == Some("policy") {
+                "policy_pinned"
+            } else {
+                "recipe_pinned"
+            })
+        });
     let (status, guidance) = if runner_disconnected {
         (
             "recovery_required",
@@ -1890,6 +1910,7 @@ fn cook_continuation_status(
             "runner_id": runner_id,
             "runner_job_status": record.metadata.get("runner_job_status"),
         },
+        "placement_authority": placement_authority,
         "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
         "guidance": guidance,
     })
@@ -4494,6 +4515,11 @@ mod tests {
                         "runner_id": "fixture-lab",
                         "runner_job_status": "queued",
                         "runner_queue": { "state": "waiting_for_capacity" },
+                        "execution_placement_decision": {
+                            "requested": "auto",
+                            "runner": { "source": "policy" },
+                            "override_authorization": { "authorized": false }
+                        },
                     });
                 },
             )
@@ -4510,6 +4536,7 @@ mod tests {
                 "homeboy runner status fixture-lab"
             );
             assert!(report.get("continuation_command").is_none());
+            assert_eq!(report["placement_authority"], "policy_pinned");
         });
     }
 

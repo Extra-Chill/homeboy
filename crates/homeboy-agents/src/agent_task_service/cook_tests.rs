@@ -3186,6 +3186,22 @@ impl AgentTaskExecutorAdapter for ImmediateSuccessExecutor {
 }
 
 #[derive(Clone)]
+struct RecordingImmediateSuccessExecutor {
+    starts: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for RecordingImmediateSuccessExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        ImmediateSuccessExecutor.execute(request, context)
+    }
+}
+
+#[derive(Clone)]
 struct SucceedingExecutor;
 
 impl AgentTaskExecutorAdapter for SucceedingExecutor {
@@ -8203,6 +8219,177 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
                 "transient"
             );
         }
+    });
+}
+
+#[test]
+fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_replaying_lab() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let config_root = homeboy_core::paths::homeboy().expect("resolve isolated config root");
+        std::fs::create_dir_all(&config_root).expect("create isolated config root");
+        std::fs::write(
+            config_root.join("homeboy.json"),
+            r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+        )
+        .expect("disable host-capacity admission for local continuation");
+        let (_checkout_guard, checkout) =
+            homeboy_core::test_support::shared_committed_git_repo_fixture(
+                "local-placement-override",
+            );
+        let worktree_parent = tempfile::tempdir().expect("create worktree parent");
+        let worktree = worktree_parent.path().join("candidate");
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "local-placement-override",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let lab_dispatches = Arc::new(AtomicUsize::new(0));
+        let local_starts = Arc::new(AtomicUsize::new(0));
+        let cook_id = "cook-local-placement-override";
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RetryableTransportFailingAttemptDispatcher {
+                dispatches: Arc::clone(&lab_dispatches),
+            }),
+        );
+        options.provider_command = Some("fixture-provider".to_string());
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.to_worktree = "fixture@local-placement-override".to_string();
+        options.source_worktree_path = Some(worktree.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(worktree.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.to_worktree,
+            "root": worktree,
+            "branch": "local-placement-override",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.to_worktree.clone(),
+            path: worktree.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register original Cook worktree");
+        let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "fixture-policy",
+            "v1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture-worktree".to_string(),
+                task: "provider".to_string(),
+                candidate: Some("candidate-a".to_string()),
+                base: Some("base-a".to_string()),
+            },
+            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            Some(
+                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                    runner_id: "fixture-lab".to_string(),
+                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
+                },
+            ),
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: true,
+                reason: Some("fixture policy allows local recovery".to_string()),
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        options.initial_plan.metadata["execution_placement_decision"] =
+            serde_json::to_value(&prior).expect("serialize auto Lab decision");
+
+        let exhausted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("exhaust the bounded Lab transport retry");
+        assert_eq!(exhausted.value.status, "pre_execution_failure");
+        assert_eq!(lab_dispatches.load(Ordering::SeqCst), 2);
+        let exhausted_run_id = exhausted
+            .value
+            .latest_run_id
+            .expect("exhausted transport attempt is durable");
+        let recipe_before = super::super::load_recipe(cook_id).expect("durable recipe");
+
+        let local = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            prior.policy_id.clone(),
+            prior.policy_revision.clone(),
+            prior.identity.clone(),
+            homeboy_lab_runner_contract::Placement::Local,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            None,
+            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: true,
+                authority: Some("operator --placement local".to_string()),
+            },
+        );
+        agent_task_lifecycle::transition_execution_placement_for_continuation(
+            &exhausted_run_id,
+            local.clone(),
+        )
+        .expect("authorize local continuation after auto Lab preacceptance failure");
+
+        options.initial_run_id = exhausted_run_id.clone();
+        options.initial_plan = agent_task_lifecycle::load_controller_plan(&exhausted_run_id)
+            .expect("load transitioned plan");
+        options.attempt_dispatcher = None;
+        let continued = run_cook(CookContext::new(
+            options,
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&local_starts),
+            }),
+        ))
+        .expect("local continuation starts provider work");
+
+        assert_eq!(
+            lab_dispatches.load(Ordering::SeqCst),
+            2,
+            "no Lab connection after override"
+        );
+        assert_eq!(
+            local_starts.load(Ordering::SeqCst),
+            1,
+            "one local provider start: {continued:#?}"
+        );
+        assert_eq!(continued.value.cook_id, cook_id);
+        let recipe_after =
+            super::super::load_recipe(cook_id).expect("durable recipe after override");
+        assert_eq!(
+            recipe_after.promotion_transport,
+            recipe_before.promotion_transport
+        );
+        assert_eq!(recipe_after.gate_policy, recipe_before.gate_policy);
+        assert_eq!(recipe_after.retry_budget, recipe_before.retry_budget);
+        assert_eq!(recipe_after.finalization, recipe_before.finalization);
+        assert_eq!(
+            recipe_after.attempts[0].plan.tasks[0].instructions,
+            recipe_before.attempts[0].plan.tasks[0].instructions
+        );
+        let transitioned =
+            agent_task_lifecycle::status(&exhausted_run_id).expect("transition evidence");
+        assert_eq!(
+            transitioned.metadata["execution_placement_decision"]["decision_id"],
+            local.decision_id
+        );
+        assert_eq!(
+            transitioned.metadata["execution_placement_decision"]["identity"]["candidate"],
+            "candidate-a"
+        );
+        assert_eq!(
+            transitioned.metadata["transport_admission_reset"]["kind"],
+            "placement_transition"
+        );
     });
 }
 

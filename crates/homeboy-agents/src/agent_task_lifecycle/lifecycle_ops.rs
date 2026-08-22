@@ -1077,10 +1077,15 @@ pub fn transition_execution_placement_for_continuation_in_store(
     if prior.required == ExecutionPlacementRequirement::Lab
         || !replacement.permits_local_execution()
         || !pre_provider_failure
+        || prior.identity != replacement.identity
+        || prior.policy_id != replacement.policy_id
+        || prior.policy_revision != replacement.policy_revision
+        || record.metadata["execution_placement_transition"].is_object()
+        || record.metadata["transport_admission_reset"].is_object()
     {
         return Err(Error::validation_invalid_argument(
             "placement",
-            "explicit local continuation is permitted only after a pre-provider failure from a non-Lab-required placement",
+            "explicit local continuation is permitted once after a pre-provider failure from a non-Lab-required placement with the same execution identity",
             Some(run_id.to_string()),
             None,
         ));
@@ -1103,6 +1108,14 @@ pub fn transition_execution_placement_for_continuation_in_store(
         "prior_decision_id": prior.decision_id,
         "replacement_decision_id": replacement.decision_id,
         "reason": "pre_provider_failure",
+    });
+    // This is a one-shot admission reset, not a retry-budget reset. The
+    // replacement run consumes it by receiving a new transport identity.
+    record.metadata["transport_admission_reset"] = json!({
+        "kind": "placement_transition",
+        "prior_decision_id": prior.decision_id,
+        "replacement_decision_id": replacement.decision_id,
+        "reason": "explicit_local_continuation_after_pre_provider_failure",
     });
     lifecycle_store.write_record(&record)
 }
@@ -1241,6 +1254,27 @@ mod execution_placement_tests {
             .expect("record pre-provider failure");
 
             let replacement = local_continuation(&prior);
+            let mut stale_identity = prior.identity.clone();
+            stale_identity.candidate = Some("candidate-b".to_string());
+            let stale = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+                prior.policy_id.clone(),
+                prior.policy_revision.clone(),
+                stale_identity,
+                Placement::Local,
+                ExecutionPlacementRequirement::Either,
+                EffectiveExecutionPlacement::Local,
+                None,
+                ExecutionPlacementFallback {
+                    local_allowed: false,
+                    reason: None,
+                },
+                ExecutionPlacementOverrideAuthorization {
+                    authorized: true,
+                    authority: Some("operator --placement local".to_string()),
+                },
+            );
+            transition_execution_placement_for_continuation("local-continuation", stale)
+                .expect_err("a stale placement decision is rejected");
             transition_execution_placement_for_continuation(
                 "local-continuation",
                 replacement.clone(),
@@ -1262,6 +1296,12 @@ mod execution_placement_tests {
                     .metadata["execution_placement_decision"]["decision_id"],
                 replacement.decision_id
             );
+            assert_eq!(
+                record.metadata["transport_admission_reset"]["replacement_decision_id"],
+                replacement.decision_id
+            );
+            transition_execution_placement_for_continuation("local-continuation", replacement)
+                .expect_err("the placement transition cannot mint another admission reset");
         });
     }
 
