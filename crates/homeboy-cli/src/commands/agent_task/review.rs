@@ -1,6 +1,9 @@
 use clap::Args;
 use serde_json::Value;
-use std::sync::Arc;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
@@ -260,6 +263,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         aggregate_review.as_ref(),
         args.to_worktree.as_deref(),
     );
+    let (review_record, cleanup_evidence) = review_record_projection(&record);
 
     let mut value = serde_json::json!({
             "schema": "homeboy/agent-task-review/v1",
@@ -268,7 +272,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "plan_id": record.plan_id,
             "plan_path": record.plan_path,
             "aggregate_path": record.aggregate_path,
-            "record": record,
+            "record": review_record,
             "logs": log,
             "artifacts": artifacts,
             "aggregate": aggregate,
@@ -278,6 +282,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "execution_states": execution_states,
             "promotion_candidates": promotion_candidates,
             "next_actions": next_actions,
+            "cleanup_evidence": cleanup_evidence,
             "transport": {
                 "authoritative": "homeboy-agent-task-lifecycle",
                 "chat_state_required": false
@@ -314,6 +319,34 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         value["candidate_selection"] = selection;
     }
     Ok((compact_review(value, args.full), 0))
+}
+
+/// Cleanup retention is persisted with a run because it happened while that
+/// run completed, but its inventory can cover sibling worktrees. Keep that
+/// operational evidence addressable without making it review evidence.
+fn review_record_projection(
+    record: &homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord,
+) -> (Value, Vec<Value>) {
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return (value, Vec::new());
+    };
+    let mut cleanup_evidence = Vec::new();
+    for key in [
+        "automatic_artifact_retention",
+        "automatic_artifact_retention_inaccessible_roots",
+    ] {
+        if metadata.remove(key).is_some() {
+            cleanup_evidence.push(serde_json::json!({
+                "kind": key,
+                "details_omitted": true,
+                "ref": format!("homeboy://agent-task/run/{}/status#metadata.{key}", record.run_id),
+                "command": format!("homeboy agent-task status {} --full", record.run_id),
+                "export_command": format!("homeboy agent-task status {} --full --output <path>", record.run_id),
+            }));
+        }
+    }
+    (value, cleanup_evidence)
 }
 
 /// Default review output is an actionable handoff, not a second copy of every
@@ -467,7 +500,17 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             ..Default::default()
         }),
     };
-    let report = agent_task_service::execute_promotion(promotion_request)?;
+    let reporter = PromotionProgressReporter::new(
+        source_run_id.as_deref(),
+        &to_worktree,
+        promotion_request.gates.gate_heartbeat_interval(),
+    );
+    let report = agent_task_service::execute_promotion_with_progress(
+        promotion_request,
+        Some(reporter.callback()),
+    );
+    reporter.finish();
+    let report = report?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1
     } else {
@@ -485,6 +528,117 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     }
 
     Ok((value, exit_code))
+}
+
+#[derive(Clone)]
+struct PromotionProgressState {
+    phase: &'static str,
+    gate: Option<String>,
+    last_progress: String,
+}
+
+struct PromotionProgressReporter {
+    state: Arc<Mutex<PromotionProgressState>>,
+    stopped: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PromotionProgressReporter {
+    fn new(run_id: Option<&str>, to_worktree: &str, interval: std::time::Duration) -> Self {
+        let source = run_id.unwrap_or("unrecorded-promotion");
+        promotion_progress_line(&format!(
+            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source} --full"
+        ));
+        promotion_progress_line(&format!(
+            "promotion: resume -> homeboy agent-task promote {source} --to-worktree {to_worktree}"
+        ));
+        let state = Arc::new(Mutex::new(PromotionProgressState {
+            phase: "apply",
+            gate: None,
+            last_progress: "promotion accepted".to_string(),
+        }));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_state = state.clone();
+        let worker_stopped = stopped.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            while !worker_stopped.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + interval;
+                while !worker_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if worker_stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                let state = worker_state
+                    .lock()
+                    .expect("promotion progress state")
+                    .clone();
+                let gate = state.gate.as_deref().unwrap_or("none");
+                promotion_progress_line(&format!(
+                    "promotion heartbeat: phase={} gate={} elapsed={}s last-progress={}",
+                    state.phase,
+                    gate,
+                    started.elapsed().as_secs(),
+                    state.last_progress,
+                ));
+            }
+        });
+        Self {
+            state,
+            stopped,
+            worker: Some(worker),
+        }
+    }
+
+    fn callback(&self) -> homeboy::agents::agent_tasks::promotion::PromotionProgressCallback {
+        let state = self.state.clone();
+        Arc::new(move |progress| {
+            let mut state = state.lock().expect("promotion progress state");
+            state.phase = progress.phase;
+            state.gate = progress.gate.clone();
+            if let Some(last_progress) = &progress.last_progress {
+                state.last_progress = last_progress.clone();
+            }
+            promotion_progress_line(&format!(
+                "promotion progress: phase={} gate={} last-progress={}",
+                state.phase,
+                state.gate.as_deref().unwrap_or("none"),
+                state.last_progress,
+            ));
+            Ok(())
+        })
+    }
+
+    fn finish(mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn promotion_progress_line(message: &str) {
+    let message = homeboy::core::redaction::redact_string(message);
+    if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
+        let frame = serde_json::json!({
+            "schema": "homeboy/runner-progress/v1",
+            "phase": "promotion",
+            "metadata": {
+                "promotion": {
+                    "schema": "homeboy/promotion-progress-frame/v1",
+                    "message": message,
+                }
+            }
+        });
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "HOMEBOY_RUNNER_PROGRESS {frame}");
+        let _ = stdout.flush();
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+    let _ = stderr.flush();
 }
 
 pub(crate) fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {

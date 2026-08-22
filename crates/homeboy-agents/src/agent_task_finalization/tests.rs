@@ -2156,6 +2156,300 @@ fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
     });
 }
 
+#[test]
+fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolution_tree() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let git_output = |args: &[&str]| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .expect("git runs")
+                    .stdout,
+            )
+            .expect("git output")
+            .trim()
+            .to_string()
+        };
+        let base_branch = git_output(&["branch", "--show-current"]);
+        let historical_base = git_output(&["rev-parse", "HEAD"]);
+        let remote = tempfile::tempdir().expect("bare origin");
+        assert!(Command::new("git")
+            .args(["init", "--bare", remote.path().to_str().unwrap()])
+            .status()
+            .expect("create origin")
+            .success());
+        git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(&["push", "-u", "origin", &base_branch]);
+        git(&["checkout", "-b", "candidate"]);
+        std::fs::write(repo.path().join("conflict"), "candidate\n").unwrap();
+        std::fs::write(repo.path().join("candidate-only"), "candidate\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "candidate"]);
+        let candidate_parent = git_output(&["rev-parse", "HEAD"]);
+        git(&["checkout", &base_branch]);
+        std::fs::write(repo.path().join("conflict"), "advanced base\n").unwrap();
+        std::fs::write(repo.path().join("base-only"), "advanced base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "advance verified base"]);
+        let resolved_base_parent = git_output(&["rev-parse", "HEAD"]);
+        git(&["push", "origin", &base_branch]);
+        git(&["checkout", "candidate"]);
+        assert!(!Command::new("git")
+            .args(["merge", &base_branch, "-m", "merge verified base"])
+            .current_dir(repo.path())
+            .status()
+            .expect("merge runs")
+            .success());
+        std::fs::write(repo.path().join("conflict"), "fully resolved candidate\n").unwrap();
+        git(&["add", "conflict"]);
+        git(&["commit", "--no-edit"]);
+        let merged_candidate = git_output(&["rev-parse", "HEAD"]);
+        let candidate_tree = git_output(&["rev-parse", "HEAD^{tree}"]);
+        let resolved_base_tree = git_output(&["rev-parse", &format!("{base_branch}^{{tree}}")]);
+
+        let run_id = "adopted-merge-finalization-recovery";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let outcome = tempfile::NamedTempFile::new().expect("adoption outcome");
+        let source = json!({
+            "schema": crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task",
+            "status": "no_op",
+            "artifacts": []
+        })
+        .to_string();
+        std::fs::write(outcome.path(), &source).expect("write adoption outcome");
+        let provider = tempfile::NamedTempFile::new().expect("promotion provider");
+        std::fs::write(
+            provider.path(),
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\",\"command_evidence\":[]}}'\n",
+                repo.path().display()
+            ),
+        )
+        .expect("write promotion provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(provider.path())
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(provider.path(), permissions)
+                .expect("make provider executable");
+        }
+        let promotion = crate::agent_task_promotion::promote_with_checkpoint(
+            crate::agent_task_promotion::AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some(run_id.to_string()),
+                source_path: Some(outcome.path().to_path_buf()),
+                source_worktree_path: Some(repo.path().to_path_buf()),
+                base_ref: Some(base_branch.clone()),
+                task_base_sha: Some(historical_base),
+                candidate_ref: Some(merged_candidate.clone()),
+                to_worktree: "repo@adopted".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions {
+                    verify: vec!["true".to_string()],
+                    ..Default::default()
+                },
+                provider_command: Some(provider.path().display().to_string()),
+                provider_invocation: None,
+            },
+            |checkpoint| {
+                crate::agent_task_lifecycle::record_promotion(
+                    run_id,
+                    serde_json::to_value(checkpoint).expect("serialize adoption checkpoint"),
+                )
+                .map(|_| ())
+            },
+        )
+        .expect("two-parent candidate adopts and persists promotion provenance");
+        assert_eq!(
+            promotion.provenance["adoption_merge"]["candidate"],
+            merged_candidate
+        );
+        assert_eq!(
+            promotion.provenance["adoption_merge"]["candidate_parent"],
+            candidate_parent
+        );
+        assert_eq!(
+            promotion.provenance["adoption_merge"]["resolved_base_parent"],
+            resolved_base_parent
+        );
+        assert_eq!(
+            promotion.provenance["adoption_merge"]["candidate_tree"],
+            candidate_tree
+        );
+        assert_eq!(
+            promotion.provenance["adoption_merge"]["resolved_base_tree"],
+            resolved_base_tree
+        );
+        // Cook adoption persists the returned report after it adds its adoption
+        // provenance; the earlier checkpoint is only the recovery boundary.
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(&promotion).expect("serialize adopted promotion"),
+        )
+        .expect("persist adopted promotion provenance");
+
+        // An empty recovery commit preserves the complete conflict-resolution tree.
+        git(&["commit", "--allow-empty", "-m", "finalization recovery"]);
+        let mut options = real_git_finalization_options(
+            repo.path(),
+            vec!["conflict".to_string(), "candidate-only".to_string()],
+        );
+        options.run_id = run_id.to_string();
+        validate_real_candidate_fingerprint(&options).expect("exact merge recovery accepted");
+
+        let mut stripped_proof = promotion.clone();
+        stripped_proof.provenance["adoption_merge"] = serde_json::Value::Null;
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(stripped_proof).unwrap(),
+        )
+        .unwrap();
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("two-parent candidate without proof rejected");
+        assert!(error
+            .message
+            .contains("missing its required adoption merge proof"));
+
+        let mut mismatched_base = promotion.clone();
+        mismatched_base.provenance["adoption_merge"]["resolved_base_parent"] =
+            json!(candidate_parent);
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(mismatched_base).unwrap(),
+        )
+        .unwrap();
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("mismatched resolved-base parent rejected");
+        assert!(error.message.contains("parents do not match"));
+
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("conflict"), "tree drift\n").unwrap();
+        git(&["add", "conflict"]);
+        git(&["commit", "-m", "recovery tree drift"]);
+        let error = validate_real_candidate_fingerprint(&options).expect_err("tree drift rejected");
+        assert!(error.message.contains("parent and tree exactly match"));
+    });
+}
+
+#[test]
+fn production_validator_rejects_an_octopus_candidate_at_finalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let git_output = |args: &[&str]| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .expect("git runs")
+                    .stdout,
+            )
+            .expect("git output")
+            .trim()
+            .to_string()
+        };
+        let base_branch = git_output(&["branch", "--show-current"]);
+        git(&["checkout", "-b", "candidate"]);
+        std::fs::write(repo.path().join("candidate"), "candidate\n").unwrap();
+        git(&["add", "candidate"]);
+        git(&["commit", "-m", "candidate"]);
+        git(&["checkout", "-b", "side-a", &base_branch]);
+        std::fs::write(repo.path().join("side-a"), "side a\n").unwrap();
+        git(&["add", "side-a"]);
+        git(&["commit", "-m", "side a"]);
+        git(&["checkout", "-b", "side-b", &base_branch]);
+        std::fs::write(repo.path().join("side-b"), "side b\n").unwrap();
+        git(&["add", "side-b"]);
+        git(&["commit", "-m", "side b"]);
+        git(&["checkout", "candidate"]);
+        git(&[
+            "merge",
+            "--no-ff",
+            "side-a",
+            "side-b",
+            "-m",
+            "octopus candidate",
+        ]);
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .expect("fingerprint octopus candidate");
+        assert_eq!(
+            git_output(&["rev-list", "--parents", "-n", "1", "HEAD"])
+                .split_whitespace()
+                .count(),
+            4
+        );
+
+        let run_id = "octopus-finalization-rejection";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec![
+            "candidate".to_string(),
+            "side-a".to_string(),
+            "side-b".to_string(),
+        ];
+        promotion.provenance = json!({ "candidate": candidate });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).expect("serialize promotion"),
+        )
+        .expect("persist malformed historical promotion");
+
+        let mut options = real_git_finalization_options(
+            repo.path(),
+            vec![
+                "candidate".to_string(),
+                "side-a".to_string(),
+                "side-b".to_string(),
+            ],
+        );
+        options.run_id = run_id.to_string();
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("octopus candidate rejected at finalization");
+        assert!(error.message.contains("more than two parents"));
+    });
+}
+
 fn successful_lifecycle(model: &str) -> RunLifecycleRecord {
     RunLifecycleRecord {
         execution: RunExecutionLifecycle {

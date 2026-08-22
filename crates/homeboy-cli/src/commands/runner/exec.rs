@@ -14,56 +14,6 @@ use homeboy_engine_primitives::content_hash;
 use super::super::CmdResult;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn exec(
-    runner_id: &str,
-    cwd: Option<String>,
-    sync_workspace: Option<String>,
-    project_id: Option<String>,
-    allow_diagnostic_ssh: bool,
-    capture_patch: bool,
-    require_paths: Vec<String>,
-    script_file: Option<String>,
-    env: Vec<String>,
-    secret_env: Vec<String>,
-    secret_env_plan: Option<String>,
-    secret_env_plan_file: Option<String>,
-    dry_run: bool,
-    run_id: Option<String>,
-    artifact_outputs: Vec<String>,
-    artifact_dir_outputs: Vec<String>,
-    summary_outputs: Vec<String>,
-    read_only_artifact: bool,
-    raw: bool,
-    command: Vec<String>,
-    extension_env_providers: Vec<String>,
-) -> CmdResult<RunnerExecOutput> {
-    exec_with_hydration(
-        runner_id,
-        cwd,
-        sync_workspace,
-        false,
-        project_id,
-        allow_diagnostic_ssh,
-        capture_patch,
-        require_paths,
-        script_file,
-        env,
-        secret_env,
-        secret_env_plan,
-        secret_env_plan_file,
-        dry_run,
-        run_id,
-        artifact_outputs,
-        artifact_dir_outputs,
-        summary_outputs,
-        read_only_artifact,
-        raw,
-        command,
-        extension_env_providers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn exec_with_hydration(
     runner_id: &str,
     cwd: Option<String>,

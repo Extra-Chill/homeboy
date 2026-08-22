@@ -914,17 +914,17 @@ impl AgentTaskScheduler {
                     // late artifacts to this exact execution before selecting a
                     // recoverable candidate for promotion.
                     finalize_candidate_artifacts(&mut outcome, &running_task);
-                    // CandidateRecoverable means "a controller must handle this
-                    // candidate", and rotation deliberately refuses to act on it
-                    // (#8809). Both the timeout downgrade below and the
-                    // base-bound patch retention set that status, so an
-                    // explicitly configured rotation policy was being disabled
-                    // for exactly the providers that produce patches. Decide
-                    // eligibility from the pre-downgrade outcome and give
-                    // rotation first refusal; both retentions are the fallback
-                    // for when nothing will rotate.
-                    let rotation_takes_over =
-                        AgentTaskScheduleSupport::rotation_policy_for_request(
+                    // A fingerprinted, non-empty patch is a durable candidate.
+                    // Let Cook admit and gate it before spending another full
+                    // implementation-provider budget. Independent candidate
+                    // tasks still follow the plan's candidate-completion policy;
+                    // this only prevents sequential rotation of the same task.
+                    let candidate_ready_for_convergence = outcome
+                        .artifacts
+                        .iter()
+                        .any(is_fingerprinted_actionable_patch_artifact);
+                    let rotation_takes_over = !candidate_ready_for_convergence
+                        && AgentTaskScheduleSupport::rotation_policy_for_request(
                             &running_task.request,
                             plan.options.rotation.as_ref(),
                         )
@@ -988,6 +988,21 @@ impl AgentTaskScheduler {
                                 "provider timed out after producing a recoverable candidate; promote the fingerprinted patch through controller gates".to_string(),
                             );
                         }
+                    }
+                    if candidate_ready_for_convergence
+                        && outcome.status == AgentTaskOutcomeStatus::Timeout
+                    {
+                        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+                        outcome.summary = Some(
+                            "provider reported a timeout after producing a recoverable candidate; promote the fingerprinted patch through controller gates".to_string(),
+                        );
+                        outcome.diagnostics.push(AgentTaskDiagnostic {
+                            class: "agent_task.provider_timeout_recoverable_candidate".to_string(),
+                            message: "a fingerprinted, non-empty patch was retained from a provider-reported timeout".to_string(),
+                            data: serde_json::json!({
+                                "required_validation": ["fresh_review", "deterministic_gates"],
+                            }),
+                        });
                     }
                     if !rotation_takes_over {
                         AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
@@ -1062,97 +1077,99 @@ impl AgentTaskScheduler {
                         &running_task.request,
                         plan.options.rotation.as_ref(),
                     );
-                    if let Some(policy) = &rotation_policy {
-                        if AgentTaskScheduleSupport::should_rotate_provider(
-                            &outcome,
-                            policy,
-                            running_task.rotation_index,
-                            result.attempt,
-                            execution_budget.max_provider_executions,
-                            execution_budget.max_provider_rotations,
-                        ) {
-                            let authorization = cleanup_attempt_workspace(
-                                &mut outcome,
-                                &running_task,
-                                Some("provider_rotation"),
-                            );
-                            release_and_compact_attempt_workspace(
-                                &result.scratch,
-                                "provider_rotation",
-                                &mut outcome,
-                                &running_task,
-                                authorization,
-                            );
-                            let mut rotation_attempts = running_task.rotation_attempts.clone();
-                            rotation_attempts.push(
-                                AgentTaskScheduleSupport::rotation_attempt_record(
-                                    &running_task.request,
-                                    &outcome,
-                                    result.attempt,
-                                    running_task.rotation_index,
-                                ),
-                            );
-                            let entry = &policy.entries[running_task.rotation_index];
-                            let adoption = match entry.adoption.as_ref() {
-                                Some(template) => {
-                                    let mut candidate_artifacts =
-                                        running_task.candidate_artifacts.clone();
-                                    append_unique_artifacts(
-                                        &mut candidate_artifacts,
-                                        outcome
-                                            .artifacts
-                                            .iter()
-                                            .filter(|artifact| {
-                                                is_actionable_patch_artifact(artifact)
-                                            })
-                                            .cloned()
-                                            .collect(),
-                                    );
-                                    match select_candidate_adoption(
-                                        template,
-                                        &candidate_artifacts,
-                                        &running_task,
-                                    ) {
-                                        Ok(adoption) => Some(adoption),
-                                        Err(message) => {
-                                            let mut outcome = outcome;
-                                            outcome.diagnostics.push(AgentTaskDiagnostic {
-                                                class: "agent_task.candidate_adoption".to_string(),
-                                                message,
-                                                data: serde_json::Value::Null,
-                                            });
-                                            record_completed_outcome(
-                                                &mut completed_by_task,
-                                                &mut outcomes,
-                                                outcome,
-                                            );
-                                            continue;
+                    if !candidate_ready_for_convergence {
+                        if let Some(policy) = &rotation_policy {
+                            if AgentTaskScheduleSupport::should_rotate_provider(
+                                &outcome,
+                                policy,
+                                running_task.rotation_index,
+                                result.attempt,
+                                execution_budget.max_provider_executions,
+                                execution_budget.max_provider_rotations,
+                            ) {
+                                let authorization = cleanup_attempt_workspace(
+                                    &mut outcome,
+                                    &running_task,
+                                    Some("provider_rotation"),
+                                );
+                                release_and_compact_attempt_workspace(
+                                    &result.scratch,
+                                    "provider_rotation",
+                                    &mut outcome,
+                                    &running_task,
+                                    authorization,
+                                );
+                                let mut rotation_attempts = running_task.rotation_attempts.clone();
+                                rotation_attempts.push(
+                                    AgentTaskScheduleSupport::rotation_attempt_record(
+                                        &running_task.request,
+                                        &outcome,
+                                        result.attempt,
+                                        running_task.rotation_index,
+                                    ),
+                                );
+                                let entry = &policy.entries[running_task.rotation_index];
+                                let adoption = match entry.adoption.as_ref() {
+                                    Some(template) => {
+                                        let mut candidate_artifacts =
+                                            running_task.candidate_artifacts.clone();
+                                        append_unique_artifacts(
+                                            &mut candidate_artifacts,
+                                            outcome
+                                                .artifacts
+                                                .iter()
+                                                .filter(|artifact| {
+                                                    is_actionable_patch_artifact(artifact)
+                                                })
+                                                .cloned()
+                                                .collect(),
+                                        );
+                                        match select_candidate_adoption(
+                                            template,
+                                            &candidate_artifacts,
+                                            &running_task,
+                                        ) {
+                                            Ok(adoption) => Some(adoption),
+                                            Err(message) => {
+                                                let mut outcome = outcome;
+                                                outcome.diagnostics.push(AgentTaskDiagnostic {
+                                                    class: "agent_task.candidate_adoption"
+                                                        .to_string(),
+                                                    message,
+                                                    data: serde_json::Value::Null,
+                                                });
+                                                record_completed_outcome(
+                                                    &mut completed_by_task,
+                                                    &mut outcomes,
+                                                    outcome,
+                                                );
+                                                continue;
+                                            }
                                         }
                                     }
+                                    None => None,
+                                };
+                                let (mut request, candidate_artifacts) = reset_attempt_request(
+                                    running_task.request,
+                                    running_task.source_workspace_root,
+                                    running_task.candidate_artifacts,
+                                    &outcome,
+                                );
+                                if request.metadata["model_selection"]["requested"].is_null() {
+                                    if !request.metadata.is_object() {
+                                        request.metadata = serde_json::json!({});
+                                    }
+                                    request.metadata["model_selection"]["requested"] =
+                                        serde_json::json!(request.executor.model());
                                 }
-                                None => None,
-                            };
-                            let (mut request, candidate_artifacts) = reset_attempt_request(
-                                running_task.request,
-                                running_task.source_workspace_root,
-                                running_task.candidate_artifacts,
-                                &outcome,
-                            );
-                            if request.metadata["model_selection"]["requested"].is_null() {
-                                if !request.metadata.is_object() {
-                                    request.metadata = serde_json::json!({});
-                                }
-                                request.metadata["model_selection"]["requested"] =
-                                    serde_json::json!(request.executor.model());
-                            }
-                            AgentTaskScheduleSupport::apply_rotation_entry(
-                                &mut request,
-                                entry,
-                                policy,
-                            );
-                            request.parent_plan_id = Some(plan.plan_id.clone());
-                            let next_attempt = result.attempt + 1;
-                            events.push(event(
+                                AgentTaskScheduleSupport::apply_rotation_entry(
+                                    &mut request,
+                                    entry,
+                                    policy,
+                                );
+                                request.parent_plan_id = Some(plan.plan_id.clone());
+                                let next_attempt = result.attempt + 1;
+                                events.push(event(
                                 &request.task_id,
                                 AgentTaskState::Queued,
                                 next_attempt,
@@ -1164,19 +1181,22 @@ impl AgentTaskScheduler {
                                     request.executor.model().unwrap_or("not recorded")
                                 )),
                             ));
-                            queued.push_back(ScheduledTask {
-                                workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
-                                request,
-                                resource_wait: None,
-                                attempt: next_attempt,
-                                rotation_index: running_task.rotation_index + 1,
-                                rotation_attempts,
-                                candidate_artifacts,
-                                retry_attempts: running_task.retry_attempts,
-                                task_base_sha: running_task.task_base_sha,
-                                adoption,
-                            });
-                            continue;
+                                queued.push_back(ScheduledTask {
+                                    workspace_key: AgentTaskScheduleSupport::workspace_key(
+                                        &request,
+                                    ),
+                                    request,
+                                    resource_wait: None,
+                                    attempt: next_attempt,
+                                    rotation_index: running_task.rotation_index + 1,
+                                    rotation_attempts,
+                                    candidate_artifacts,
+                                    retry_attempts: running_task.retry_attempts,
+                                    task_base_sha: running_task.task_base_sha,
+                                    adoption,
+                                });
+                                continue;
+                            }
                         }
                     }
                     #[expect(
@@ -1377,6 +1397,14 @@ impl AgentTaskScheduler {
             artifact_bindings,
         }
     }
+}
+
+fn is_fingerprinted_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    is_actionable_patch_artifact(artifact)
+        && artifact
+            .sha256
+            .as_deref()
+            .is_some_and(|fingerprint| !fingerprint.trim().is_empty())
 }
 
 pub(crate) fn persist_resolved_provider_model(

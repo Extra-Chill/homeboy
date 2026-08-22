@@ -10,6 +10,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
+
+/// These cases run inside `with_isolated_home`, so reading the environment here
+/// observes that isolated home. Naming the roots keeps the call sites explicit
+/// about which installation the evidence is being mirrored into.
+fn test_roots() -> homeboy_core::paths::PathRoots {
+    homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+}
+
 use homeboy_core::api_jobs::{
     Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RemoteRunnerObservationRunDetail,
     RunnerJobLifecycleMetadata, RunnerJobProjection,
@@ -545,29 +553,32 @@ fn direct_failure_mirror_projects_bounded_typed_diagnostics_without_artifacts() 
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut job = terminal_runner_job();
         job.status = JobStatus::Failed;
-        let mirrored = mirror_daemon_evidence(MirrorEvidenceRequest::new(
-            &ssh_runner(),
-            "/runner/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            &json!({
-                "exit_code": 2,
-                "stderr": "secret=redacted\nvalidation failed",
-                "phase": "path_materialization",
-                "signal": "SIGTERM",
-                "error": {
-                    "code": "validation.invalid_argument",
-                    "message": "required path is missing",
-                    "details": { "field": "path" }
-                },
-                "data": { "execution_record": { "orchestration_provenance": {
-                    "job_command_binary": { "version": "0.321.1" }
-                }}}
-            }),
-            None,
-            None,
-        ))
+        let mirrored = mirror_daemon_evidence(
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner/project",
+                &["homeboy".to_string(), "bench".to_string()],
+                &job,
+                &[],
+                &json!({
+                    "exit_code": 2,
+                    "stderr": "secret=redacted\nvalidation failed",
+                    "phase": "path_materialization",
+                    "signal": "SIGTERM",
+                    "error": {
+                        "code": "validation.invalid_argument",
+                        "message": "required path is missing",
+                        "details": { "field": "path" }
+                    },
+                    "data": { "execution_record": { "orchestration_provenance": {
+                        "job_command_binary": { "version": "0.321.1" }
+                    }}}
+                }),
+                None,
+                None,
+            ),
+            &test_roots(),
+        )
         .expect("direct failure mirror")
         .expect("mirrored failure");
 
@@ -621,6 +632,7 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
                 None,
             )
             .with_generic_runner_exec_run(),
+            &test_roots(),
         )
         .expect("controller-owned run does not require a remote run lookup")
         .expect("terminal evidence");
@@ -1999,16 +2011,19 @@ fn direct_result_refresh_treats_preterminal_absence_as_pending() {
         let mut job = terminal_runner_job();
         job.status = JobStatus::Running;
         job.finished_at_ms = None;
-        let evidence = mirror_daemon_evidence(MirrorEvidenceRequest::new(
-            &ssh_runner(),
-            "/runner/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        ))
+        let evidence = mirror_daemon_evidence(
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner/project",
+                &["homeboy".to_string(), "bench".to_string()],
+                &job,
+                &[],
+                &json!({}),
+                None,
+                None,
+            ),
+            &test_roots(),
+        )
         .expect("preterminal direct result is pending")
         .expect("pending direct evidence");
 

@@ -245,6 +245,10 @@ fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance()
             plan.metadata["cook_repository_identity"],
             args.repository_identity.expect("identity")
         );
+        assert_eq!(
+            plan.metadata["cook_base_resolution"]["source"],
+            "compatibility_fallback"
+        );
     });
 }
 
@@ -303,6 +307,255 @@ fn repo_only_cook_without_registered_component_persists_requested_repository_exp
         assert_eq!(identity["repository_name"], "unidentified");
         assert_eq!(identity["provenance"], "--repo:requested-repository");
     });
+}
+
+#[test]
+fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_branches() {
+    with_isolated_home(|_| {
+        for branch in ["main", "master", "trunk", "release/2026"] {
+            let source = tempfile::tempdir().expect("source checkout");
+            let remote = tempfile::tempdir().expect("bare remote");
+            for args in [
+                vec!["init", "-b", branch],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Test"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(source.path())
+                    .status()
+                    .expect("configure source")
+                    .success());
+            }
+            std::fs::write(source.path().join("README"), branch).expect("write source");
+            assert!(Command::new("git")
+                .args(["add", "README"])
+                .current_dir(source.path())
+                .status()
+                .expect("stage source")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "-m", "initial"])
+                .current_dir(source.path())
+                .status()
+                .expect("commit source")
+                .success());
+            assert!(Command::new("git")
+                .args([
+                    "init",
+                    "--bare",
+                    "--initial-branch",
+                    branch,
+                    remote.path().to_str().unwrap()
+                ])
+                .status()
+                .expect("create remote")
+                .success());
+            add_remote(source.path(), "origin", remote.path().to_str().unwrap());
+            assert!(Command::new("git")
+                .args(["push", "-u", "origin", branch])
+                .current_dir(source.path())
+                .status()
+                .expect("push upstream")
+                .success());
+            let component_remote = format!("https://github.com/example/{branch}.git");
+            assert!(Command::new("git")
+                .args(["remote", "set-url", "origin", &component_remote])
+                .current_dir(source.path())
+                .status()
+                .expect("normalize fixture remote")
+                .success());
+            register_component("fixture", source.path(), &component_remote);
+
+            let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "resolve base".to_string(),
+                "--workspace".to_string(),
+                source.path().display().to_string(),
+                "--to-worktree".to_string(),
+                source.path().display().to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("resolve workspace upstream");
+            assert_eq!(args.base.as_deref(), Some(branch));
+            assert_eq!(
+                args.base_resolution.as_ref().expect("base evidence")["source"],
+                "workspace_upstream"
+            );
+        }
+    });
+}
+
+#[test]
+fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback() {
+    with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source checkout");
+        init_runtime_component_checkout(source.path());
+        let remote = tempfile::tempdir().expect("bare remote");
+        assert!(Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch",
+                "trunk",
+                remote.path().to_str().unwrap()
+            ])
+            .status()
+            .expect("create remote")
+            .success());
+        add_remote(source.path(), "origin", remote.path().to_str().unwrap());
+        assert!(Command::new("git")
+            .args(["push", "origin", "HEAD:trunk"])
+            .current_dir(source.path())
+            .status()
+            .expect("push trunk")
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "set-head", "origin", "trunk"])
+            .current_dir(source.path())
+            .status()
+            .expect("set remote head")
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "-b", "feature", "origin/trunk"])
+            .current_dir(source.path())
+            .status()
+            .expect("leave the old default branch")
+            .success());
+        assert!(Command::new("git")
+            .args(["branch", "-D", "main"])
+            .current_dir(source.path())
+            .status()
+            .expect("remove unavailable main")
+            .success());
+        let component_remote = "https://github.com/example/fixture.git";
+        assert!(Command::new("git")
+            .args(["remote", "set-url", "origin", component_remote])
+            .current_dir(source.path())
+            .status()
+            .expect("normalize fixture remote")
+            .success());
+        register_component("fixture", source.path(), component_remote);
+
+        let metadata = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "resolve metadata".to_string(),
+            "--repo".to_string(),
+            "fixture".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@missing".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("resolve repository metadata");
+        assert_eq!(metadata.base.as_deref(), Some("trunk"));
+        assert_eq!(
+            metadata.base_resolution.as_ref().expect("base evidence")["source"],
+            "repository_metadata"
+        );
+
+        let mut mismatch = metadata;
+        mismatch.base = Some("main".to_string());
+        mismatch.base_resolution = Some(json!({ "base": "main", "source": "explicit" }));
+        let error = super::super::run::provision_cook_destination(&mismatch)
+            .expect_err("invalid base must fail before provisioning");
+        assert_eq!(error.details["field"], "base");
+        assert!(error.details["tried"].as_array().is_some_and(|replays| {
+            replays.iter().any(|replay| {
+                replay
+                    .as_str()
+                    .is_some_and(|replay| replay.contains("--base trunk"))
+            })
+        }));
+        assert_eq!(
+            error.details["correction_argv"],
+            json!([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "resolve metadata",
+                "--repo",
+                "fixture",
+                "--to-worktree",
+                "fixture@missing",
+                "--base",
+                "trunk",
+                "--no-finalize",
+            ])
+        );
+
+        let fallback = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "fallback".to_string(),
+            "--repo".to_string(),
+            "unavailable".to_string(),
+            "--to-worktree".to_string(),
+            "unavailable@missing".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("fall back without metadata");
+        assert_eq!(fallback.base.as_deref(), Some("main"));
+        assert_eq!(
+            fallback.base_resolution.expect("base evidence")["source"],
+            "compatibility_fallback"
+        );
+    });
+}
+
+#[test]
+fn corrected_cook_base_replay_keeps_adversarial_values_as_typed_argv() {
+    let worktree = "fixture@work tree;$(touch pwned) 'quoted'";
+    let branch = "trunk;$(touch pwned) 'quoted'";
+    let args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "resolve safely".to_string(),
+        "--repo".to_string(),
+        "fixture".to_string(),
+        "--to-worktree".to_string(),
+        worktree.to_string(),
+        "--base".to_string(),
+        "main".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+
+    let argv = super::super::run::corrected_cook_base_replay_argv(&args, branch);
+    assert_eq!(
+        argv,
+        vec![
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "resolve safely",
+            "--repo",
+            "fixture",
+            "--to-worktree",
+            worktree,
+            "--base",
+            branch,
+            "--no-finalize",
+        ]
+    );
+    assert_eq!(
+        homeboy::core::engine::shell::quote_args(&argv),
+        "homeboy agent-task cook --prompt 'resolve safely' --repo fixture --to-worktree 'fixture@work tree;$(touch pwned) '\\''quoted'\\''' --base 'trunk;$(touch pwned) '\\''quoted'\\''' --no-finalize"
+    );
 }
 
 #[test]

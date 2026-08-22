@@ -35,7 +35,10 @@ pub use lab_contract as command_contract;
 
 // Stable domain facades for new command/core integrations.
 pub mod artifacts;
-pub use cleanup::{acquire_managed_cargo_target, ManagedCargoTarget};
+pub use cleanup::{
+    acquire_managed_cargo_target, acquire_managed_cargo_target_with_compatibility,
+    ManagedCargoTarget,
+};
 pub use homeboy_engine_primitives::cargo_target::CargoTargetEvidence;
 
 // Public extensions (config first — exports entity_crud! macro used by entity extensions)

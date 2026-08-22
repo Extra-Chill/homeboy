@@ -200,7 +200,11 @@ pub fn target_triple_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") | ("linux", "arm64") => Some("aarch64-unknown-linux-gnu"),
-        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        // `("macos", "x86_64")` is deliberately absent. `x86_64-apple-darwin`
+        // was dropped from `dist-workspace.toml`, so no release publishes that
+        // asset any more. Keeping the mapping would resolve a triple whose
+        // tarball does not exist and produce exactly the 404 this function's
+        // contract exists to prevent.
         ("macos", "aarch64") | ("macos", "arm64") => Some("aarch64-apple-darwin"),
         _ => None,
     }
@@ -546,6 +550,12 @@ mod tests {
         );
         assert_eq!(target_triple_for("windows", "x86_64"), None);
         assert_eq!(target_triple_for("linux", "riscv64"), None);
+        // Intel macOS resolved to `x86_64-apple-darwin` until that target was
+        // dropped from `dist-workspace.toml`. It must now report undetermined
+        // rather than name a triple no release publishes; the whole point of
+        // this function is that a resolvable triple implies a downloadable
+        // asset.
+        assert_eq!(target_triple_for("macos", "x86_64"), None);
     }
 
     #[test]

@@ -730,7 +730,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 }
 
 #[test]
-fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
+fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion() {
     homeboy_core::test_support::with_isolated_home(|_| {
         // The in-process daemon's /exec endpoint drives runner processes through
         // the RunnerExecDriver hook (production wires this at CLI startup); register
@@ -768,7 +768,7 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"provider_dispatch\",\"current_item\":\"task-8341\",\"metadata\":{\"event\":\"provider_selected\",\"provider\":\"fixture\"}}\\n'; printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+                "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"promotion\",\"metadata\":{\"promotion\":{\"schema\":\"homeboy/promotion-progress-frame/v1\",\"message\":\"promotion progress: applying patch\"}}}\\n'; printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
                 "sh".to_string(),
                 started.display().to_string(),
                 release.display().to_string(),
@@ -835,13 +835,31 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
                     .then(|| event.data.as_ref())
                     .flatten()
             })
-            .find(|data| data["phase"] == "provider_dispatch")
-            .expect("provider progress is forwarded before process completion");
-        assert_eq!(progress["phase"], "provider_dispatch");
-        assert_eq!(progress["metadata"]["event"], "provider_selected");
+            .find(|data| {
+                data.pointer("/metadata/promotion/schema")
+                    .and_then(Value::as_str)
+                    == Some("homeboy/promotion-progress-frame/v1")
+            })
+            .expect("promotion progress is forwarded before process completion");
+        assert_eq!(progress["phase"], "promotion");
+        assert_eq!(
+            progress["metadata"]["promotion"]["message"],
+            "promotion progress: applying patch"
+        );
 
         std::fs::write(&release, "release").expect("release workload");
         wait_for_terminal_daemon_job(&client, &daemon_url, &job_id);
+        let late_events = fetch_daemon_events(&client, &daemon_url, &job_id)
+            .expect("late observer reads retained daemon events");
+        assert!(late_events.iter().any(|event| {
+            event.sequence > 0
+                && event
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.pointer("/metadata/promotion/message"))
+                    .and_then(Value::as_str)
+                    == Some("promotion progress: applying patch")
+        }));
         let terminal_jobs: Value = client
             .get(format!("{daemon_url}/jobs"))
             .send()

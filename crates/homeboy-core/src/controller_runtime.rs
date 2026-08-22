@@ -310,14 +310,14 @@ pub struct ControllerRuntimePruneResult {
 /// still operate on them. The active admission generation is retained as well.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
-    retention_report_with_references_at(&referenced, SystemTime::now())
+    retention_report_with_references_at(&runtime_root()?, &referenced, SystemTime::now())
 }
 
 fn retention_report_with_references_at(
+    root: &Path,
     referenced: &[PathBuf],
     now: SystemTime,
 ) -> Result<ControllerRuntimeRetentionReport> {
-    let root = runtime_root()?;
     let mut retained = BTreeSet::new();
 
     for path in referenced {
@@ -426,7 +426,14 @@ pub fn prune_pins(
 /// Inventory and reclaim immutable runtime identities. The admission lock makes
 /// the final reachability check atomic with activation and materialization.
 pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRuntimePruneResult> {
-    let root = runtime_root()?;
+    cleanup_in_root(&runtime_root()?, options)
+}
+
+/// [`cleanup`] under an already-resolved runtime root.
+pub fn cleanup_in_root(
+    root: &Path,
+    options: ControllerRuntimeCleanupOptions,
+) -> Result<ControllerRuntimePruneResult> {
     // Lifecycle inventory may migrate legacy records, which itself needs the
     // admission lock. Collect reachability before taking the runtime lock.
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
@@ -434,7 +441,7 @@ pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRun
     if options.apply {
         recover_cleanup_tombstones(&root)?;
     }
-    let mut report = retention_report_with_references_at(&referenced, SystemTime::now())?;
+    let mut report = retention_report_with_references_at(root, &referenced, SystemTime::now())?;
     let mut total = report
         .snapshots
         .iter()
@@ -663,7 +670,11 @@ impl Drop for AdmissionLock {
 }
 
 pub fn pin_current() -> Result<Value> {
-    let root = runtime_root()?;
+    pin_current_in_root(&runtime_root()?)
+}
+
+/// [`pin_current`] under an already-resolved runtime root.
+pub fn pin_current_in_root(root: &Path) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     pin_current_unlocked()
 }
@@ -685,7 +696,15 @@ pub fn pin_current_queued(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<Value> {
-    let root = runtime_root()?;
+    pin_current_queued_in_root(&runtime_root()?, request_id, cancellation_requested)
+}
+
+/// [`pin_current_queued`] under an already-resolved runtime root.
+pub fn pin_current_queued_in_root(
+    root: &Path,
+    request_id: &str,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<Value> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let request_id = request_id.trim();
     if request_id.is_empty() {
@@ -864,7 +883,19 @@ pub fn admit_current_for_with_cancellation_check(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<RuntimeAdmission> {
-    let root = runtime_root()?;
+    admit_current_for_with_cancellation_check_in_root(
+        &runtime_root()?,
+        request_id,
+        cancellation_requested,
+    )
+}
+
+/// [`admit_current_for_with_cancellation_check`] under an already-resolved runtime root.
+pub fn admit_current_for_with_cancellation_check_in_root(
+    root: &Path,
+    request_id: &str,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<RuntimeAdmission> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let request_id = request_id.trim();
     if request_id.is_empty() {
@@ -898,8 +929,7 @@ pub fn admit_current_for_with_cancellation_check(
 
 /// Return the durable admission view used by lifecycle status output.
 pub fn admission_status(request_id: &str) -> Result<Value> {
-    let root = runtime_root()?;
-    admission_status_at(&root, request_id)
+    admission_status_at(&runtime_root()?, request_id)
 }
 
 /// Read the durable admission view from an explicitly selected
@@ -952,8 +982,7 @@ fn admission_status_at_lock_path(lock_path: &Path, request_id: &str) -> Result<V
 /// Remove a waiting request. An owner is intentionally never force-released:
 /// the advisory lock remains the authority while a process is alive.
 pub fn cancel_admission(request_id: &str) -> Result<()> {
-    let root = runtime_root()?;
-    cancel_admission_at(&root, request_id)
+    cancel_admission_at(&runtime_root()?, request_id)
 }
 
 /// Remove a waiting request from an explicitly selected controller-runtime
@@ -993,7 +1022,11 @@ pub fn activate_current_generation() -> Result<Value> {
 /// does not use the upgrading process's executable: after an on-disk swap that
 /// process can still be running the previous generation.
 pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
-    let root = runtime_root()?;
+    activate_installed_generation_in_root(&runtime_root()?, executable)
+}
+
+/// [`activate_installed_generation`] under an already-resolved runtime root.
+pub fn activate_installed_generation_in_root(root: &Path, executable: &Path) -> Result<Value> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let _lock = acquire_admission_lock(&lock_path)?;
     let runtime = pin_executable(executable, &activated_executable_identity(executable)?)?;
@@ -1049,7 +1082,11 @@ pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result
 /// Upgrade a legacy pin into the immutable content-addressed v2 format.
 /// The caller persists the returned metadata only after this has completed.
 pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
-    let root = runtime_root()?;
+    migrate_legacy_pin_in_root(&runtime_root()?, runtime)
+}
+
+/// [`migrate_legacy_pin`] under an already-resolved runtime root.
+pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     migrate_legacy_pin_unlocked(runtime)
 }
@@ -1138,7 +1175,16 @@ pub fn recover_pin(
     artifact: Option<&Path>,
     source: Option<&Path>,
 ) -> Result<Value> {
-    let root = runtime_root()?;
+    recover_pin_in_root(&runtime_root()?, runtime, artifact, source)
+}
+
+/// [`recover_pin`] under an already-resolved runtime root.
+pub fn recover_pin_in_root(
+    root: &Path,
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     recover_pin_unlocked(runtime, artifact, source)
 }

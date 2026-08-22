@@ -713,7 +713,107 @@ fn validate_real_candidate_fingerprint_from_record(
             &promotion.changed_files,
         ));
     }
+    validate_adoption_merge_proof(
+        options,
+        &expected,
+        promotion.provenance.get("adoption_merge"),
+    )?;
     validate_candidate_fingerprint(options, &expected)
+}
+
+/// Adoption records the authenticated parent roles separately because a merge
+/// candidate's first-parent fingerprint alone cannot prove which base it merged.
+fn validate_adoption_merge_proof(
+    options: &AgentTaskPrFinalizationOptions,
+    expected: &AgentTaskPromotionCandidate,
+    adoption_merge: Option<&serde_json::Value>,
+) -> Result<()> {
+    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
+        return Ok(());
+    };
+    let parents = git_output(
+        &options.path,
+        &["rev-list", "--parents", "-n", "1", &fingerprint.head],
+    )?;
+    let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
+    if parents.len() > 2 {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "promoted candidate has more than two parents; finalization accepts only one-parent candidates or authenticated two-parent merges",
+            None,
+            None,
+        ));
+    }
+    let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
+        if parents.len() == 2 {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "two-parent promoted candidate is missing its required adoption merge proof",
+                None,
+                None,
+            ));
+        }
+        return Ok(());
+    };
+    let field = |name| {
+        proof
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    format!("adoption merge proof is missing `{name}`"),
+                    None,
+                    None,
+                )
+            })
+    };
+    let candidate = field("candidate")?;
+    let candidate_parent = field("candidate_parent")?;
+    let resolved_base_parent = field("resolved_base_parent")?;
+    let candidate_tree = field("candidate_tree")?;
+    let resolved_base_tree = field("resolved_base_tree")?;
+    if candidate != fingerprint.head || candidate_tree != fingerprint.tree {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "adoption merge proof does not match the exact promoted candidate SHA and tree",
+            None,
+            None,
+        ));
+    }
+    if parents.as_slice() != [candidate_parent, resolved_base_parent] {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "adoption merge proof parents do not match the promoted merge candidate",
+            None,
+            None,
+        ));
+    }
+    let actual_candidate_tree = git_output(
+        &options.path,
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?;
+    if actual_candidate_tree != candidate_tree {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "adoption merge proof candidate tree does not match the promoted merge candidate",
+            None,
+            None,
+        ));
+    }
+    let actual_base_tree = git_output(
+        &options.path,
+        &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
+    )?;
+    if actual_base_tree != resolved_base_tree {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "adoption merge proof resolved-base tree does not match its recorded parent",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_candidate_fingerprint(

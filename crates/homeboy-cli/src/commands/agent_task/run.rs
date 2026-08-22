@@ -21,6 +21,7 @@ use homeboy::agents::agent_tasks::scheduler::{
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::defaults;
+use homeboy::core::engine::shell::quote_args;
 use homeboy::core::worktree_providers::{
     provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
 };
@@ -370,9 +371,13 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
         );
     }
 
-    // Unit callers do not have the original process argv. Keep their fallback
-    // useful for embedding while the CLI path above preserves every supplied
-    // advanced flag exactly.
+    redact_preview_replay_argv(cook_replay_argv(args))
+}
+
+// Unit callers do not have the original process argv. Keep their fallback
+// useful for embedding while the CLI path above preserves every supplied
+// advanced flag exactly.
+fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     let mut argv = vec![
         "homeboy".to_string(),
         "agent-task".to_string(),
@@ -390,13 +395,24 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
     if let Some(task_url) = &args.dispatch.task_url {
         argv.extend(["--task-url".to_string(), task_url.clone()]);
     }
+    if let Some(backend) = &args.dispatch.backend {
+        argv.extend(["--backend".to_string(), backend.clone()]);
+    }
+    if let Some(selector) = &args.dispatch.selector {
+        argv.extend(["--selector".to_string(), selector.clone()]);
+    }
+    if let Some(model) = &args.dispatch.model {
+        argv.extend(["--model".to_string(), model.clone()]);
+    }
     if let Some(worktree) = &args.to_worktree {
         argv.extend(["--to-worktree".to_string(), worktree.clone()]);
     }
     for gate in &args.gates.verify {
         argv.extend(["--verify".to_string(), gate.clone()]);
     }
-    argv.extend(["--base".to_string(), args.base.clone()]);
+    if let Some(base) = &args.base {
+        argv.extend(["--base".to_string(), base.clone()]);
+    }
     if let Some(head) = &args.head {
         argv.extend(["--head".to_string(), head.clone()]);
     }
@@ -406,7 +422,7 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
     if args.draft_pr {
         argv.push("--draft-pr".to_string());
     }
-    redact_preview_replay_argv(argv)
+    argv
 }
 
 fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
@@ -1850,6 +1866,7 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
+    validate_cook_base_before_provisioning(args)?;
     let to_worktree = args.to_worktree.as_deref().ok_or_else(|| {
         homeboy::core::Error::validation_missing_argument(vec![
             "--to-worktree is required before provisioning a Cook destination".to_string(),
@@ -2013,7 +2030,10 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         &WorktreeProviderCreateIntent {
             handle: to_worktree.to_string(),
             repo,
-            base: args.base.clone(),
+            base: args
+                .base
+                .clone()
+                .expect("Cook base is resolved before provisioning"),
             head,
             task_url,
         },
@@ -2124,6 +2144,7 @@ pub(crate) fn resolve_cook_destination(
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
     normalize_cook_repository_identity(&mut args)?;
     if args.to_worktree.is_some() {
+        resolve_cook_base(&mut args)?;
         return Ok(args);
     }
     if let Some(cwd) = args.dispatch.cwd.as_deref() {
@@ -2133,6 +2154,7 @@ pub(crate) fn resolve_cook_destination(
         // A supplied checkout is the writable Cook authority. Preserve its
         // canonical path instead of deriving an unrelated issue handle.
         args.to_worktree = Some(cwd.display().to_string());
+        resolve_cook_base(&mut args)?;
         return Ok(args);
     }
     let repo = args.dispatch.repo.as_deref().ok_or_else(|| {
@@ -2162,7 +2184,153 @@ pub(crate) fn resolve_cook_destination(
     if args.head.is_none() {
         args.head = Some(derived_cook_branch(task_url)?);
     }
+    resolve_cook_base(&mut args)?;
     Ok(args)
+}
+
+fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if let Some(base) = args.base.clone() {
+        args.base_resolution = Some(serde_json::json!({ "base": base, "source": "explicit" }));
+        return Ok(());
+    }
+
+    let workspace = args
+        .dispatch
+        .workspace
+        .as_deref()
+        .or(args.dispatch.cwd.as_deref())
+        .and_then(|path| homeboy::core::git::repo_root(Path::new(path)));
+    if let Some(workspace) = workspace {
+        if let Some(upstream) = git_upstream_branch(&workspace) {
+            set_resolved_cook_base(args, upstream, "workspace_upstream", &workspace);
+            return Ok(());
+        }
+    }
+
+    if let Some(component) = args
+        .dispatch
+        .repo
+        .as_deref()
+        .map(homeboy::core::component::registered_by_id)
+        .transpose()?
+        .flatten()
+    {
+        let path = PathBuf::from(component.local_path);
+        if let Some(base) = homeboy::core::git::default_branch_name(&path) {
+            set_resolved_cook_base(args, base, "repository_metadata", &path);
+            return Ok(());
+        }
+    }
+
+    if let Some(path) = args
+        .to_worktree
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    {
+        if let Some(base) = homeboy::core::git::default_branch_name(&path) {
+            set_resolved_cook_base(args, base, "remote_head", &path);
+            return Ok(());
+        }
+    }
+
+    args.base = Some("main".to_string());
+    args.base_resolution = Some(serde_json::json!({
+        "base": "main",
+        "source": "compatibility_fallback",
+        "evidence": "repository default-branch evidence unavailable",
+    }));
+    Ok(())
+}
+
+fn git_upstream_branch(path: &Path) -> Option<String> {
+    homeboy::core::git::output_optional(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .and_then(|upstream| {
+            upstream
+                .trim()
+                .split_once('/')
+                .map(|(_, branch)| branch.to_string())
+        })
+        .filter(|branch| !branch.is_empty())
+}
+
+fn set_resolved_cook_base(args: &mut AgentTaskCookArgs, base: String, source: &str, path: &Path) {
+    args.base = Some(base.clone());
+    args.base_resolution = Some(serde_json::json!({
+        "base": base,
+        "source": source,
+        "evidence_path": path,
+    }));
+}
+
+fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let base = args
+        .base
+        .as_deref()
+        .expect("Cook base is resolved before provisioning");
+    let path = args
+        .dispatch
+        .workspace
+        .as_deref()
+        .or(args.dispatch.cwd.as_deref())
+        .map(PathBuf::from)
+        .or_else(|| {
+            args.to_worktree
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+        })
+        .or_else(|| {
+            args.dispatch.repo.as_deref().and_then(|repo| {
+                homeboy::core::component::registered_by_id(repo)
+                    .ok()
+                    .flatten()
+                    .map(|component| PathBuf::from(component.local_path))
+            })
+        });
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let remote = homeboy::core::git::resolve_default_remote(&path);
+    let remote_base = format!("{remote}/{base}");
+    if homeboy::core::git::output_optional(
+        &path,
+        &["rev-parse", "--verify", "--quiet", &remote_base],
+    )
+    .is_some()
+        || homeboy::core::git::output_optional(&path, &["rev-parse", "--verify", "--quiet", base])
+            .is_some()
+    {
+        return Ok(());
+    }
+    let replay_argv = homeboy::core::git::default_branch_name(&path)
+        .map(|corrected| corrected_cook_base_replay_argv(args, &corrected));
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "base",
+        format!("resolved Cook base `{base}` is unavailable before worktree provisioning"),
+        Some(base.to_string()),
+        replay_argv.as_ref().map(|argv| {
+            vec![format!(
+                "Replay with the repository default base: {}",
+                quote_args(argv)
+            )]
+        }),
+    );
+    if let Some(argv) = replay_argv {
+        error.details["correction_argv"] = serde_json::json!(argv);
+    }
+    Err(error)
+}
+
+/// Build the correction as typed argv first. The rendered shell command is a
+/// display projection only, so branch and worktree values never become syntax.
+pub(crate) fn corrected_cook_base_replay_argv(
+    args: &AgentTaskCookArgs,
+    corrected_base: &str,
+) -> Vec<String> {
+    let mut corrected = args.clone();
+    corrected.base = Some(corrected_base.to_string());
+    cook_replay_argv(&corrected)
 }
 
 /// Preview performs only bounded provider identity resolution. It never invokes
@@ -2235,6 +2403,7 @@ fn resolve_cook_preview_destination(
         if homeboy::core::worktree_providers::worktree_provider_path_requires_materialization(
             &identity.path,
         ) {
+            resolve_cook_base(&mut args)?;
             return Ok((
                 args,
                 serde_json::json!({
@@ -2253,6 +2422,7 @@ fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     };
+    resolve_cook_base(&mut args)?;
     Ok((
         args,
         serde_json::json!({
@@ -3009,7 +3179,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             max_attempts: args.max_attempts,
             no_finalize: args.no_finalize,
             draft_pr: args.draft_pr,
-            base: args.base,
+            base: args.base.expect("Cook base is resolved before execution"),
             task_base_sha,
             head: args.head,
             title,
@@ -3366,6 +3536,9 @@ pub(crate) fn compile_cook_plan(
     if let Some(identity) = &args.repository_identity {
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
+    if let Some(resolution) = &args.base_resolution {
+        plan.metadata["cook_base_resolution"] = resolution.clone();
+    }
     for task in &mut plan.tasks {
         if pending_lookup {
             continue;
@@ -3459,10 +3632,22 @@ fn validate_provider_evidence_prompt(
     projected_paths: &std::collections::BTreeSet<String>,
 ) -> homeboy::core::Result<()> {
     let Some(prompt) = prompt else { return Ok(()) };
-    for path in absolute_host_paths_in_provider_prompt(prompt)? {
-        if !is_projected_provider_evidence_path(&path, projected_paths) {
-            return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
-        }
+    let undeclared = absolute_host_paths_in_provider_prompt(prompt)?
+        .into_iter()
+        .filter(|path| !is_projected_provider_evidence_path(path, projected_paths))
+        .collect::<Vec<_>>();
+    if !undeclared.is_empty() {
+        let paths = undeclared
+            .iter()
+            .map(|path| format!("`{path}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            format!("prompt names undeclared absolute evidence paths: {paths}"),
+            Some(undeclared.join(", ")),
+            Some(vec!["Declare each path with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()]),
+        ));
     }
     Ok(())
 }
@@ -3482,69 +3667,47 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
         ));
     }
 
-    fn boundary(byte: u8) -> bool {
-        !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'.' | b'~' | b'%')
-    }
-    fn path_end(byte: u8) -> bool {
-        byte.is_ascii_whitespace()
-            || matches!(
-                byte,
-                b'\''
-                    | b'"'
-                    | b'`'
-                    | b'('
-                    | b')'
-                    | b'['
-                    | b']'
-                    | b'{'
-                    | b'}'
-                    | b'<'
-                    | b'>'
-                    | b','
-                    | b';'
-            )
-    }
-    fn scan(bytes: &[u8], start: usize) -> Option<String> {
-        let end = bytes[start..]
-            .iter()
-            .position(|byte| path_end(*byte))
-            .map_or(bytes.len(), |offset| start + offset);
-        let mut end = end;
-        while end > start
-            && matches!(
-                bytes[end - 1],
-                b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' | b'}'
-            )
-        {
-            end -= 1;
+    let mut paths = std::collections::BTreeSet::new();
+    for token in prompt.split_whitespace() {
+        if token.contains("://") && !token.contains("file://") {
+            continue;
         }
-        (end > start).then(|| String::from_utf8_lossy(&bytes[start..end]).into_owned())
-    }
-
-    let bytes = prompt.as_bytes();
-    let mut paths = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let file_uri = bytes[index..].starts_with(b"file://");
-        let start = if file_uri {
-            index + b"file://".len()
-        } else {
-            index
-        };
-        if start < bytes.len()
-            && bytes[start] == b'/'
-            && (file_uri
-                || (bytes[start - 1] != b'/'
-                    && bytes[start + 1..].first() != Some(&b'/')
-                    && (start == 0 || boundary(bytes[start - 1]))))
-        {
-            if let Some(path) = scan(bytes, start) {
-                paths.push(path);
+        let mut candidate = token;
+        if let Some(file) = token.find("file://") {
+            let rest = &token[file + "file://".len()..];
+            candidate = if rest.starts_with('/') {
+                rest
+            } else {
+                rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
+            };
+        }
+        let bytes = candidate.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let Some(relative) = candidate[offset..].find('/') else {
+                break;
+            };
+            let start = offset + relative;
+            let path = &candidate[start..];
+            let end = path.find(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
+                    )
+            });
+            let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
+            if path.starts_with('/')
+                && path
+                    .trim_start_matches('/')
+                    .contains(|character: char| character != '/')
+            {
+                paths.insert(path.to_string());
             }
+            offset = start.saturating_add(path.len()).max(start + 1);
         }
-        index += 1;
     }
-    Ok(paths)
+    Ok(paths.into_iter().collect())
 }
 
 fn is_projected_provider_evidence_path(
@@ -4239,6 +4402,53 @@ mod provider_evidence_tests {
         );
     }
 
+    #[test]
+    fn prompt_path_validation_distinguishes_separators_urls_and_real_paths() {
+        let prompt = r#"
+These functions route through `write_batch` / `mutate_batch` / `read_batch`.
+Issue: https://github.com/Extra-Chill/homeboy/issues/7505
+    struct AgentTaskBatchStore { root: PathBuf }   // NOTE: private
+```
+let comment = "// not evidence";
+let path = "/also/not-evidence";
+```
+Read /private/one.json and //private/two.json.
+Evidence=file:///private/three.json path=/private/four.json.
+"#;
+        let error = validate_provider_evidence_inputs(&[], Some(prompt))
+            .expect_err("only real prose paths are rejected");
+
+        assert_eq!(error.details["field"], "prompt");
+        assert!(error.message.contains("/private/one.json"));
+        assert!(error.message.contains("//private/two.json"));
+        assert!(error.message.contains("/private/three.json"));
+        assert!(error.message.contains("/private/four.json"));
+        assert!(error.message.contains("/also/not-evidence"));
+        assert!(!error.message.contains("`/`"));
+        assert!(!error.message.contains("// not evidence"));
+    }
+
+    #[test]
+    fn prompt_path_scanner_handles_embedded_json_quotes_angles_and_local_file_urls() {
+        let paths = absolute_host_paths_in_provider_prompt(
+            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///file/url.json //double/path.md / // https://example.com/ignore/me"#,
+        )
+        .expect("scan bounded prompt");
+
+        assert_eq!(
+            paths,
+            vec![
+                "//double/path.md",
+                "/angle/path.rs",
+                "/assigned/path.toml",
+                "/file/url.json",
+                "/json/path.md",
+                "/local/file.json",
+                "/quoted/path.txt",
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_evidence_source() {
@@ -4822,10 +5032,6 @@ pub(super) fn run_next(args: RunNextArgs) -> CmdResult<Value> {
     )
 }
 
-pub(super) fn run_next_with_executor(executor: SharedAgentTaskExecutor) -> CmdResult<Value> {
-    run_next_with_executor_and_fanout(executor, None)
-}
-
 pub(super) fn run_next_with_executor_and_fanout(
     executor: SharedAgentTaskExecutor,
     fanout_id: Option<String>,
@@ -4874,13 +5080,6 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
         args.full,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
-}
-
-pub(super) fn run_resume_with_executor(
-    run_id: String,
-    executor: SharedAgentTaskExecutor,
-) -> CmdResult<Value> {
-    run_resume_with_executor_and_bridge(run_id, false, None, false, executor)
 }
 
 pub(super) fn run_resume_with_executor_and_bridge(
