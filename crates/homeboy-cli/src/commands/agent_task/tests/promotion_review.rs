@@ -202,6 +202,60 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
 }
 
 #[test]
+fn full_review_excludes_unrelated_worktree_cleanup_inventory() {
+    with_temp_home(|| {
+        let run_id = "run-review-scoped-cleanup";
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        let unrelated_worktrees = (0..59)
+            .map(|index| format!("/workspace/unrelated-worktree-{index}"))
+            .collect::<Vec<_>>();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["automatic_artifact_retention"] = json!({
+                "status": "completed",
+                "worktree_count": unrelated_worktrees.len(),
+                "worktrees": unrelated_worktrees,
+            });
+        })
+        .expect("persist unrelated cleanup inventory");
+
+        let (review_value, exit_code) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review loaded");
+
+        assert_eq!(exit_code, 0);
+        assert!(review_value["record"]["metadata"]
+            .get("automatic_artifact_retention")
+            .is_none());
+        assert_eq!(
+            review_value["cleanup_evidence"][0]["kind"],
+            "automatic_artifact_retention"
+        );
+        assert_eq!(
+            review_value["cleanup_evidence"][0]["command"],
+            format!("homeboy agent-task status {run_id} --full")
+        );
+        assert_eq!(
+            review_value["cleanup_evidence"][0]["export_command"],
+            format!("homeboy agent-task status {run_id} --full --output <path>")
+        );
+        assert!(!review_value.to_string().contains("unrelated-worktree-58"));
+        let persisted = agent_task_lifecycle::status(run_id).expect("cleanup evidence persists");
+        assert_eq!(
+            persisted.metadata["automatic_artifact_retention"]["worktrees"]
+                .as_array()
+                .map(Vec::len),
+            Some(59)
+        );
+    });
+}
+
+#[test]
 fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
     struct PatchExecutor {
         path: String,

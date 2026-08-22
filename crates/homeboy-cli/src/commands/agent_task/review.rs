@@ -260,6 +260,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         aggregate_review.as_ref(),
         args.to_worktree.as_deref(),
     );
+    let (review_record, cleanup_evidence) = review_record_projection(&record);
 
     let mut value = serde_json::json!({
             "schema": "homeboy/agent-task-review/v1",
@@ -268,7 +269,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "plan_id": record.plan_id,
             "plan_path": record.plan_path,
             "aggregate_path": record.aggregate_path,
-            "record": record,
+            "record": review_record,
             "logs": log,
             "artifacts": artifacts,
             "aggregate": aggregate,
@@ -278,6 +279,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "execution_states": execution_states,
             "promotion_candidates": promotion_candidates,
             "next_actions": next_actions,
+            "cleanup_evidence": cleanup_evidence,
             "transport": {
                 "authoritative": "homeboy-agent-task-lifecycle",
                 "chat_state_required": false
@@ -314,6 +316,34 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         value["candidate_selection"] = selection;
     }
     Ok((compact_review(value, args.full), 0))
+}
+
+/// Cleanup retention is persisted with a run because it happened while that
+/// run completed, but its inventory can cover sibling worktrees. Keep that
+/// operational evidence addressable without making it review evidence.
+fn review_record_projection(
+    record: &homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord,
+) -> (Value, Vec<Value>) {
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return (value, Vec::new());
+    };
+    let mut cleanup_evidence = Vec::new();
+    for key in [
+        "automatic_artifact_retention",
+        "automatic_artifact_retention_inaccessible_roots",
+    ] {
+        if metadata.remove(key).is_some() {
+            cleanup_evidence.push(serde_json::json!({
+                "kind": key,
+                "details_omitted": true,
+                "ref": format!("homeboy://agent-task/run/{}/status#metadata.{key}", record.run_id),
+                "command": format!("homeboy agent-task status {} --full", record.run_id),
+                "export_command": format!("homeboy agent-task status {} --full --output <path>", record.run_id),
+            }));
+        }
+    }
+    (value, cleanup_evidence)
 }
 
 /// Default review output is an actionable handoff, not a second copy of every
