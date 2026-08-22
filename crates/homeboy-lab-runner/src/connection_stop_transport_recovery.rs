@@ -1364,6 +1364,7 @@ mod tests {
             success: false,
             exit_code: 124,
             timed_out: true,
+            observation: Default::default(),
             child_resource: None,
         };
         let timeout_error = validate_remote_lease_bound_daemon_stop_output(&timeout)
@@ -1376,6 +1377,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
         let malformed_error = validate_remote_lease_bound_daemon_stop_output(&malformed)
@@ -1391,6 +1393,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 
@@ -1410,6 +1413,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 

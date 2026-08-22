@@ -1141,6 +1141,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                         stderr: "could not journal replacement operation".to_string(),
                         exit_code: 1,
                         timed_out: false,
+                        observation: Default::default(),
                         child_resource: None,
                     };
                 }
@@ -1939,6 +1940,7 @@ fn fenced_remote_mutation(
             stderr: error.message,
             exit_code: 1,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         },
     }

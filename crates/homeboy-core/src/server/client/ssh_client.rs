@@ -82,26 +82,106 @@ pub(crate) fn build_secret_env_stdin_block(secret_env: &BTreeMap<String, String>
     block.into_bytes()
 }
 
-/// Map a finished `ssh` invocation's captured output into a [`CommandOutput`].
-fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutput {
-    match output {
-        Ok(out) => CommandOutput {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            success: out.status.success(),
-            exit_code: out.status.code().unwrap_or(-1),
-            timed_out: false,
+fn write_inline_stdin(writer: &mut impl Write, stdin: &[u8]) -> std::io::Result<()> {
+    writer.write_all(stdin)
+}
+
+fn collect_ssh_child_output(
+    child: &mut std::process::Child,
+    pid: u32,
+    status: Option<std::io::Result<std::process::ExitStatus>>,
+    stdin_failed: bool,
+    stdout: Option<Receiver<String>>,
+    stderr: Option<Receiver<String>>,
+) -> CommandOutput {
+    let wait_failed = status.as_ref().is_some_and(|status| status.is_err());
+    let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+    if wait_failed {
+        let _ = terminate_process_group_with_deadline(child, pid, deadline);
+    }
+    let (stdout, mut stderr, streams_stalled) = collect_streams_before(stdout, stderr, deadline);
+    if streams_stalled {
+        terminate_unreaped_process_group(pid);
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline.");
+    }
+    if stdin_failed {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
+    }
+    if status.is_none() {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH cleanup outcome is indeterminate after its bounded deadline.");
+    }
+    match status {
+        Some(Ok(status)) => CommandOutput {
+            stdout,
+            stderr,
+            success: status.success() && !stdin_failed && !streams_stalled,
+            exit_code: if streams_stalled {
+                124
+            } else if stdin_failed && status.code().unwrap_or(-1) == 0 {
+                1
+            } else {
+                status.code().unwrap_or(-1)
+            },
+            timed_out: streams_stalled,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else if streams_stalled {
+                super::CommandObservation::StreamDrainTimedOut
+            } else {
+                super::CommandObservation::Complete
+            },
             child_resource: None,
         },
-        Err(err) => CommandOutput {
-            stdout: String::new(),
-            stderr: format!("SSH error: {}", err),
+        Some(Err(error)) => CommandOutput {
+            stdout,
+            stderr: format!("{stderr}\nSSH error: {error}"),
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else {
+                super::CommandObservation::TransportObservationFailed
+            },
+            child_resource: None,
+        },
+        None => CommandOutput {
+            stdout,
+            stderr,
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            observation: if stdin_failed {
+                super::CommandObservation::StdinDeliveryFailed
+            } else {
+                super::CommandObservation::TransportObservationFailed
+            },
             child_resource: None,
         },
     }
+}
+
+pub(super) fn run_ssh_with_child(mut cmd: Command) -> CommandOutput {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return ssh_process_error(error),
+    };
+    let pid = child.id();
+    let stdout = child.stdout.take().map(read_stream);
+    let stderr = child.stderr.take().map(read_stream);
+    let status = child.wait();
+    collect_ssh_child_output(&mut child, pid, Some(status), false, stdout, stderr)
 }
 
 impl SshClient {
@@ -593,10 +673,12 @@ pub(super) fn run_command_with_stdin_source(
     mut cmd: Command,
     source: StdinSource,
 ) -> CommandOutput {
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => return ssh_process_error(error),
     };
+    let pid = child.id();
     let writer = child
         .stdin
         .take()
@@ -604,11 +686,24 @@ pub(super) fn run_command_with_stdin_source(
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let status = child.wait();
+    let cleanup_deadline = status.as_ref().err().map(|_| {
+        let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+        let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
+        deadline
+    });
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result: std::io::Result<()>| result.is_err());
-    let stdout = collect_stream(stdout);
-    let mut stderr = collect_stream(stderr);
+    let (stdout, mut stderr, streams_stalled) = match cleanup_deadline {
+        Some(deadline) => collect_streams_before(stdout, stderr, deadline),
+        None => (collect_stream(stdout), collect_stream(stderr), false),
+    };
+    if streams_stalled {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline after a transport observation failure.");
+    }
     if stdin_failed {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
@@ -628,6 +723,11 @@ pub(super) fn run_command_with_stdin_source(
                     exit_code
                 },
                 timed_out: false,
+                observation: if stdin_failed {
+                    super::CommandObservation::StdinDeliveryFailed
+                } else {
+                    super::CommandObservation::Complete
+                },
                 child_resource: None,
             }
         }
@@ -637,6 +737,7 @@ pub(super) fn run_command_with_stdin_source(
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: super::CommandObservation::TransportObservationFailed,
             child_resource: None,
         },
     }
@@ -688,6 +789,7 @@ fn ssh_process_error(error: std::io::Error) -> CommandOutput {
         success: false,
         exit_code: -1,
         timed_out: false,
+        observation: super::CommandObservation::SpawnFailed,
         child_resource: None,
     }
 }
@@ -741,6 +843,7 @@ impl ProbeLimits {
                 success: false,
                 exit_code: 124,
                 timed_out: true,
+                observation: super::CommandObservation::StreamDrainTimedOut,
                 child_resource: None,
             };
         }
@@ -838,6 +941,7 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
+    let mut transport_observation_failed = false;
     let mut interrupted_signal = None;
     let mut cleanup_deadline = None;
     let status = loop {
@@ -845,7 +949,13 @@ pub(super) fn execute_command_with_stdin_source_timeout(
             interrupted_signal = Some(signal);
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            break terminate_process_group_with_deadline(&mut child, pid, deadline);
+            break match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(status) => status,
+                Err(()) => {
+                    transport_observation_failed = true;
+                    None
+                }
+            };
         }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -854,9 +964,18 @@ pub(super) fn execute_command_with_stdin_source_timeout(
                 timed_out = true;
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
                 cleanup_deadline = Some(deadline);
-                break terminate_process_group_with_deadline(&mut child, pid, deadline);
+                break match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                    Ok(status) => status,
+                    Err(()) => {
+                        transport_observation_failed = true;
+                        None
+                    }
+                };
             }
-            Err(_) => break None,
+            Err(_) => {
+                transport_observation_failed = true;
+                break None;
+            }
         }
     };
     let stdin_failed = writer
@@ -883,6 +1002,7 @@ pub(super) fn execute_command_with_stdin_source_timeout(
             succeeded: status.is_some_and(|status| status.success()),
             timed_out,
             stdin_failed,
+            transport_observation_failed,
             interrupted_signal,
         },
         timeout,
@@ -979,6 +1099,7 @@ mod bounded_probe_tests {
             success: false,
             exit_code: 255,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 
@@ -1028,6 +1149,7 @@ where
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             }
         }
@@ -1038,6 +1160,7 @@ where
     let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
     let mut stdin_failed = false;
+    let mut transport_observation_failed = false;
     let mut interrupted_signal = None;
     let mut status = None;
     let mut cleanup_deadline = None;
@@ -1052,14 +1175,20 @@ where
             interrupted_signal = Some(signal);
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+            match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(observed) => status = observed,
+                Err(()) => transport_observation_failed = true,
+            }
             break;
         }
         if matches!(writer_rx.try_recv(), Ok(Err(_))) {
             stdin_failed = true;
             let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
             cleanup_deadline = Some(deadline);
-            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+            match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                Ok(observed) => status = observed,
+                Err(()) => transport_observation_failed = true,
+            }
             break;
         }
         match child.try_wait() {
@@ -1072,10 +1201,16 @@ where
                 timed_out = true;
                 let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
                 cleanup_deadline = Some(deadline);
-                status = terminate_process_group_with_deadline(&mut child, pid, deadline);
+                match terminate_process_group_with_deadline(&mut child, pid, deadline) {
+                    Ok(observed) => status = observed,
+                    Err(()) => transport_observation_failed = true,
+                }
                 break;
             }
-            Err(_) => break,
+            Err(_) => {
+                transport_observation_failed = true;
+                break;
+            }
         }
     }
     if let Some(writer) = writer {
@@ -1102,6 +1237,7 @@ where
             succeeded: status.is_some_and(|status| status.success()),
             timed_out,
             stdin_failed,
+            transport_observation_failed,
             interrupted_signal,
         },
         timeout,
@@ -1117,6 +1253,7 @@ pub(super) struct BoundedProbeOutcome {
     pub(super) succeeded: bool,
     pub(super) timed_out: bool,
     pub(super) stdin_failed: bool,
+    pub(super) transport_observation_failed: bool,
     pub(super) interrupted_signal: Option<i32>,
 }
 
@@ -1156,6 +1293,7 @@ pub(super) fn bounded_probe_output(
         stderr,
         success: !outcome.timed_out
             && !outcome.stdin_failed
+            && !outcome.transport_observation_failed
             && outcome.interrupted_signal.is_none()
             && outcome.succeeded,
         exit_code: if outcome.timed_out {
@@ -1167,6 +1305,17 @@ pub(super) fn bounded_probe_output(
             )
         },
         timed_out: outcome.timed_out,
+        observation: if outcome.transport_observation_failed {
+            super::CommandObservation::TransportObservationFailed
+        } else if outcome.stdin_failed {
+            super::CommandObservation::StdinDeliveryFailed
+        } else if outcome.interrupted_signal.is_some() {
+            super::CommandObservation::Cancelled
+        } else if outcome.timed_out {
+            super::CommandObservation::StreamDrainTimedOut
+        } else {
+            super::CommandObservation::Complete
+        },
         child_resource: None,
     }
 }
@@ -1212,6 +1361,76 @@ mod bounded_probe_output_tests {
         assert!(output.timed_out);
         assert_eq!(output.exit_code, 124);
         assert!(output.stderr.contains("timed out after 15000ms"));
+    }
+
+    #[test]
+    fn a_lost_transport_wait_is_indeterminate_without_rewriting_stderr() {
+        let output = bounded_probe_output(
+            "partial".to_string(),
+            "remote stderr".to_string(),
+            BoundedProbeOutcome {
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+            Duration::from_secs(15),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, -1);
+        assert_eq!(output.stderr, "remote stderr");
+        assert_eq!(
+            output.observation,
+            super::super::CommandObservation::TransportObservationFailed
+        );
+    }
+
+    #[test]
+    fn transport_wait_failure_overrides_timeout_and_cancellation() {
+        for outcome in [
+            BoundedProbeOutcome {
+                timed_out: true,
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+            BoundedProbeOutcome {
+                interrupted_signal: Some(15),
+                transport_observation_failed: true,
+                ..BoundedProbeOutcome::default()
+            },
+        ] {
+            assert_eq!(
+                bounded_probe_output(
+                    String::new(),
+                    String::new(),
+                    outcome,
+                    Duration::from_secs(1)
+                )
+                .observation,
+                super::super::CommandObservation::TransportObservationFailed
+            );
+        }
+    }
+
+    #[test]
+    fn inline_stdin_write_failures_are_observable() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            write_inline_stdin(&mut FailingWriter, b"secret")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
     }
 
     #[test]
@@ -1262,7 +1481,7 @@ fn terminate_process_group_with_deadline(
     child: &mut std::process::Child,
     pid: u32,
     deadline: Instant,
-) -> Option<std::process::ExitStatus> {
+) -> std::result::Result<Option<std::process::ExitStatus>, ()> {
     #[cfg(unix)]
     unsafe {
         libc::kill(-(pid as i32), libc::SIGTERM);
@@ -1272,8 +1491,11 @@ fn terminate_process_group_with_deadline(
         let _ = child.kill();
     }
     let graceful_deadline = std::cmp::min(deadline, Instant::now() + PROCESS_TERMINATION_GRACE);
-    if let Some(status) = poll_child_until(child, graceful_deadline) {
-        return Some(status);
+    let mut observation_failed = false;
+    match poll_child_until(child, graceful_deadline) {
+        Ok(Some(status)) => return Ok(Some(status)),
+        Ok(None) => {}
+        Err(()) => observation_failed = true,
     }
     #[cfg(unix)]
     unsafe {
@@ -1283,7 +1505,10 @@ fn terminate_process_group_with_deadline(
     {
         let _ = child.kill();
     }
-    poll_child_until(child, deadline)
+    match poll_child_until(child, deadline) {
+        Ok(_) if observation_failed => Err(()),
+        result => result,
+    }
 }
 
 fn terminate_unreaped_process_group(pid: u32) {
@@ -1296,12 +1521,13 @@ fn terminate_unreaped_process_group(pid: u32) {
 fn poll_child_until(
     child: &mut std::process::Child,
     deadline: Instant,
-) -> Option<std::process::ExitStatus> {
+) -> std::result::Result<Option<std::process::ExitStatus>, ()> {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) | Err(_) => return None,
+            Ok(None) => return Ok(None),
+            Err(_) => return Err(()),
         }
     }
 }
@@ -1339,6 +1565,7 @@ impl SshClient {
                     success: true,
                     exit_code: 0,
                     timed_out: false,
+                    observation: super::CommandObservation::Complete,
                     child_resource: None,
                 },
                 Err(err) => CommandOutput {
@@ -1350,6 +1577,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 },
             };
@@ -1364,6 +1592,7 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 };
             }
@@ -1382,6 +1611,7 @@ impl SshClient {
                 success: out.status.success(),
                 exit_code: out.status.code().unwrap_or(-1),
                 timed_out: false,
+                observation: super::CommandObservation::Complete,
                 child_resource: None,
             },
             Err(err) => CommandOutput {
@@ -1390,6 +1620,7 @@ impl SshClient {
                 success: false,
                 exit_code: -1,
                 timed_out: false,
+                observation: super::CommandObservation::SpawnFailed,
                 child_resource: None,
             },
         }
@@ -1433,6 +1664,7 @@ impl SshClient {
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: super::CommandObservation::SpawnFailed,
             child_resource: None,
         }
     }
@@ -1461,7 +1693,7 @@ impl SshClient {
             SshStdin::File(stdin_file_path) => match std::fs::File::open(stdin_file_path) {
                 Ok(file) => {
                     cmd.stdin(file);
-                    map_ssh_output(cmd.output())
+                    run_ssh_with_child(cmd)
                 }
                 Err(err) => CommandOutput {
                     stdout: String::new(),
@@ -1469,11 +1701,12 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 },
             },
             SshStdin::Inline(bytes) => self.run_ssh_with_inline_stdin(cmd, bytes),
-            SshStdin::None => map_ssh_output(cmd.output()),
+            SshStdin::None => run_ssh_with_child(cmd),
         }
     }
 
@@ -1482,11 +1715,12 @@ impl SshClient {
     /// Used for the secret-env block: the bytes carry `NAME=VALUE` secret pairs
     /// the remote read loop imports, so they stay off the `ssh` argv. The block
     /// is small (a handful of tokens) and fits the OS pipe buffer, so writing it
-    /// before `wait_with_output` never deadlocks against captured stdout/stderr.
+    /// before collecting the child cannot deadlock against captured stdout/stderr.
     fn run_ssh_with_inline_stdin(&self, mut cmd: Command, stdin: &[u8]) -> CommandOutput {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {
@@ -1496,15 +1730,28 @@ impl SshClient {
                     success: false,
                     exit_code: -1,
                     timed_out: false,
+                    observation: super::CommandObservation::SpawnFailed,
                     child_resource: None,
                 };
             }
         };
+        let pid = child.id();
+        let stdout = child.stdout.take().map(read_stream);
+        let stderr = child.stderr.take().map(read_stream);
         if let Some(mut pipe) = child.stdin.take() {
-            let _ = pipe.write_all(stdin);
+            if write_inline_stdin(&mut pipe, stdin).is_err() {
+                drop(pipe);
+                let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+                let status = terminate_process_group_with_deadline(&mut child, pid, deadline)
+                    .ok()
+                    .flatten()
+                    .map(Ok);
+                return collect_ssh_child_output(&mut child, pid, status, true, stdout, stderr);
+            }
             // Drop closes stdin (EOF) so the remote read loop terminates.
         }
-        map_ssh_output(child.wait_with_output())
+        let status = child.wait();
+        collect_ssh_child_output(&mut child, pid, Some(status), false, stdout, stderr)
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {

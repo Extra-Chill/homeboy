@@ -88,6 +88,7 @@ pub(super) fn command_output(
         success,
         exit_code: if success { 0 } else { 1 },
         timed_out,
+        observation: Default::default(),
         child_resource: None,
     }
 }

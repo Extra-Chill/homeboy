@@ -163,6 +163,7 @@ fn try_execute_direct(
         success: out.status.success(),
         exit_code: out.status.code().unwrap_or(-1),
         timed_out: false,
+        observation: Default::default(),
         child_resource: None,
     })
 }
