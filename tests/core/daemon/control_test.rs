@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
-#[cfg(unix)]
-use std::process::Command;
 
 use super::{
     artifact_content_url, can_recover_startup_attempt, ensure_running_with_operations,

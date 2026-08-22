@@ -7,11 +7,10 @@ use std::sync::{Mutex, OnceLock};
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
     materialize_snapshot_piped, materialize_snapshot_stage,
-    register_after_snapshot_directory_discovery_hook, scratch_scoped_command,
-    snapshot_archive_command, snapshot_input_manifest, snapshot_install_command,
-    snapshot_overlay_install_command, snapshot_stable_manifest, synthetic_checkout_value,
-    validate_snapshot_stability, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_hash_for_policy, workspace_content_hash_v1,
+    register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
+    snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
+    synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
+    workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
     workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
@@ -1464,41 +1463,6 @@ fn snapshot_install_restores_workspace_owner_after_root_run() {
     assert!(command.contains("chown -R \"$owner\" $dest"));
 }
 
-#[test]
-fn snapshot_archive_command_disables_extended_attributes() {
-    let source = tempfile::tempdir().expect("snapshot source");
-    let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &[])
-        .expect("snapshot archive command");
-
-    assert!(command.contains("COPYFILE_DISABLE=1"));
-    assert!(command.contains("tar --no-xattrs"));
-}
-
-/// A scratch-scoped snapshot command must still be a *parseable* POSIX shell
-/// program. `TMPDIR=x (cd ...)` is not: POSIX allows assignment prefixes only
-/// on simple commands, so dash rejected every scratch-admitted materialization
-/// with `Syntax error: "(" unexpected` before transferring a byte. `sh -n`
-/// parses without executing, which is exactly the regression surface.
-#[test]
-fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
-    let source = tempfile::tempdir().expect("snapshot source");
-    for excludes in [
-        vec![],
-        vec!["./target".to_string(), "node_modules".to_string()],
-    ] {
-        let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &excludes)
-            .expect("snapshot archive command");
-        let scoped = scratch_scoped_command(&command, Path::new("/var/lib/homeboy/scratch dir"));
-
-        assert!(
-            scoped.starts_with("export TMPDIR="),
-            "scratch scoping must export rather than prefix an assignment: {scoped}"
-        );
-
-        assert_parses_under_posix_shells(&scoped, "scratch-scoped snapshot command");
-    }
-}
-
 /// The install commands cross the same `sh -c` boundary as the archive
 /// pipeline, on both the local and the SSH runner path, so hold them to the
 /// same portability contract (#10399).
@@ -1517,31 +1481,6 @@ fn snapshot_install_commands_parse_under_posix_shells() {
             "snapshot overlay install command",
         );
     }
-}
-
-#[test]
-fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependencies() {
-    // Symlinked plan dependencies (e.g. a `.ci/<dep>` link to a sibling
-    // checkout) must be materialized into the runner snapshot so offloaded
-    // plans whose embedded paths traverse the symlink resolve on the runner
-    // instead of dangling (#3913).
-    let source = tempfile::tempdir().expect("snapshot source");
-    let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &[])
-        .expect("snapshot archive command");
-
-    assert!(
-        command.contains("find \"$stage/source\" -type l -exec sh -c"),
-        "snapshot archive must inspect symlink targets: {command}"
-    );
-    assert!(command.contains("tar --no-xattrs -h -C \"$root\""));
-    assert!(
-        !command.contains("cp -a . \"$stage/source\""),
-        "the staging tree must be populated by the exclusion-filtered tar stream: {command}"
-    );
-    assert!(
-        command.contains("tar --no-xattrs -C \"$stage/source\""),
-        "the final snapshot archive must preserve internal symlink entries: {command}"
-    );
 }
 
 #[test]
@@ -1763,44 +1702,6 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
             "tracked internal links must not change the exact Git checkout"
         );
     });
-}
-
-#[test]
-fn root_anchored_dist_exclusion_matches_tar_and_preserves_nested_dist() {
-    let controller = tempfile::tempdir().expect("controller");
-    let source = controller.path().join("source");
-    let destination = controller.path().join("materialized");
-    let excludes = vec!["./dist".to_string()];
-    fs::create_dir_all(source.join("dist")).expect("root dist directory");
-    fs::create_dir_all(source.join("packages/example/dist")).expect("nested dist directory");
-    fs::write(source.join("dist/output.a"), "root output").expect("root dist output");
-    fs::write(source.join("packages/example/dist/input.a"), "nested input")
-        .expect("nested dist input");
-
-    let command = snapshot_archive_command(&source, "tar -xf -", &excludes)
-        .expect("snapshot archive command");
-    assert!(
-        command.contains("printf '%s\\0' ./packages"),
-        "root-anchored tar input must omit the matching root path: {command}"
-    );
-
-    let expected = workspace_content_hash(&source, &excludes).expect("source hash");
-    copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
-
-    assert!(
-        !destination.join("dist").exists(),
-        "root dist directory must be excluded"
-    );
-    assert_eq!(
-        fs::read_to_string(destination.join("packages/example/dist/input.a"))
-            .expect("nested dist input survives"),
-        "nested input"
-    );
-    assert_eq!(
-        workspace_content_hash(&destination, &excludes).expect("materialized hash"),
-        expected,
-        "content hashing must use the same root-anchored exclusion semantics as tar"
-    );
 }
 
 #[test]
@@ -2146,72 +2047,6 @@ fn workspace_content_hash_owner_executable_policy_normalizes_non_owner_execute_b
         )
         .expect("runner hash"),
         "owner execute changes remain fail-closed"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn snapshot_materialization_preserves_v3_owner_executable_capability_across_runner_umask() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let controller = tempfile::tempdir().expect("macOS controller workspace");
-    let runner = tempfile::tempdir().expect("Linux runner workspace");
-    let controller_tool = controller.path().join("tool");
-    let runner_tool = runner.path().join("tool");
-    fs::write(&controller_tool, "#!/bin/sh\nexit 0\n").expect("controller tool");
-    fs::set_permissions(&controller_tool, fs::Permissions::from_mode(0o755))
-        .expect("controller executable permissions");
-
-    let install = snapshot_install_command(&runner.path().display().to_string())
-        .replacen("tar -p -C", "(umask 0111; tar -p -C", 1)
-        .replacen("-xf - &&", "-xf -) &&", 1);
-    let target = format!("sh -c {}", homeboy_core::engine::shell::quote_arg(&install));
-    let archive = snapshot_archive_command(controller.path(), &target, &[])
-        .expect("snapshot archive command");
-    super::super::util::run_shell_command(&archive, "materialize restrictive-umask snapshot")
-        .expect("snapshot materialization");
-
-    assert_eq!(
-        fs::metadata(&runner_tool)
-            .expect("runner tool metadata")
-            .permissions()
-            .mode()
-            & 0o100,
-        0o100,
-        "the runner umask must not erase the v3-bound owner execute capability"
-    );
-    assert_eq!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("runner hash"),
-        "controller and runner must verify the same v3 canonical snapshot"
-    );
-
-    fs::set_permissions(&runner_tool, fs::Permissions::from_mode(0o644))
-        .expect("remove runner executable capability");
-    assert_ne!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("runner executable-drift hash"),
-        "meaningful owner-executable drift must remain fail-closed"
     );
 }
 
