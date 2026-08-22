@@ -1924,10 +1924,11 @@ pub fn record_completed_run(
 /// aggregate write in another leaves a queued record that never completes and a
 /// terminal projection with no run behind it, and neither write ever fails.
 ///
-/// The controller-runtime admission that `submit_plan_in_store` performs stays
-/// process-global by design — it is a content-addressed executable pin shared
-/// across homes, not durable lifecycle state, so it is not one of this store's
-/// roots.
+/// The controller-runtime admission that `submit_plan_in_store` performs
+/// follows this store's root as well (#12859, #12862). The pin itself is
+/// content-addressed and shared, but the admission queue and its cross-process
+/// lock are per-installation: resolving them from the ambient home made every
+/// rooted caller serialize on one machine-global lock.
 pub fn record_completed_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
