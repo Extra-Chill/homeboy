@@ -296,6 +296,10 @@ pub(crate) fn preview_cook(
             task.executor.config["evidence_inputs"] = serde_json::to_value(&evidence)
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
         }
+        plan.metadata["controller_provider_evidence"] = serde_json::to_value(
+            provider_evidence_controller_provenance(&args.provider_evidence_inputs)?,
+        )
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
     plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
@@ -3502,9 +3506,13 @@ fn admit_provider_evidence_source(
 fn approved_macos_temporary_root(supplied_path: &Path, canonical_path: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let supplied_suffix = supplied_path.strip_prefix("/var").ok()?;
-        let canonical_suffix = canonical_path.strip_prefix("/private/var").ok()?;
-        (supplied_suffix == canonical_suffix).then(|| PathBuf::from("/private/var"))
+        let supplied_path = supplied_path.to_str()?;
+        let canonical_path = canonical_path.to_str()?;
+        let canonical_suffix = canonical_path.strip_prefix("/private/var/")?;
+        if supplied_path == canonical_path {
+            return Some(PathBuf::from("/private/var"));
+        }
+        (supplied_path == format!("/var/{canonical_suffix}")).then(|| PathBuf::from("/private/var"))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3517,7 +3525,7 @@ fn provider_evidence_paths_equivalent(
     reference: &str,
     declared: &AdmittedProviderEvidenceSource,
 ) -> bool {
-    if Path::new(reference) == declared.supplied_path {
+    if reference == declared.supplied_path.to_string_lossy() {
         return true;
     }
     let reference = Path::new(reference);
@@ -3525,8 +3533,31 @@ fn provider_evidence_paths_equivalent(
         return false;
     };
     canonical_reference == declared.canonical_path
-        && (approved_macos_temporary_root(reference, &canonical_reference).is_some()
-            || declared.approved_root.is_some())
+        && approved_macos_temporary_root(reference, &canonical_reference).is_some()
+        && declared.approved_root.is_some()
+}
+
+fn provider_evidence_controller_provenance(
+    inputs: &[AgentTaskProviderEvidenceInput],
+) -> homeboy::core::Result<Vec<Value>> {
+    inputs
+        .iter()
+        .map(|input| {
+            let source = admit_provider_evidence_source(&input.source)?;
+            Ok(serde_json::json!({
+                "id": input.id,
+                "supplied_path": "[redacted]",
+                "canonical_path": "[redacted]",
+                "canonical_path_sha256": format!(
+                    "sha256:{}",
+                    homeboy_engine_primitives::content_hash::sha256_hex(
+                        source.canonical_path.as_os_str().as_encoded_bytes()
+                    )
+                ),
+                "approved_root": source.approved_root.as_ref().map(|_| "[redacted]"),
+            }))
+        })
+        .collect()
 }
 
 pub(crate) fn projected_provider_evidence(
@@ -3561,11 +3592,6 @@ pub(crate) fn project_provider_evidence_inputs(
         let (bytes, digest) = secure_provider_evidence_copy(source.copy_path(), &destination)?;
         projection["size_bytes"] = serde_json::json!(bytes);
         projection["sha256"] = serde_json::json!(digest);
-        projection["supplied_path"] = serde_json::json!(source.supplied_path);
-        projection["canonical_path"] = serde_json::json!(source.canonical_path);
-        if let Some(root) = source.approved_root {
-            projection["approved_root"] = serde_json::json!(root);
-        }
     }
     Ok(projected)
 }
@@ -3917,15 +3943,18 @@ mod provider_evidence_tests {
         .expect("private var spelling is declared by its var alias");
         let projected = project_provider_evidence_inputs(&[input.clone()], &workspace, None)
             .expect("project var alias");
-        assert_eq!(
-            projected[0]["supplied_path"],
-            supplied_source.display().to_string()
-        );
-        assert_eq!(
-            projected[0]["canonical_path"],
+        assert!(projected[0].get("supplied_path").is_none());
+        assert!(projected[0].get("canonical_path").is_none());
+        assert!(projected[0].get("approved_root").is_none());
+        let provenance = provider_evidence_controller_provenance(&[input.clone()])
+            .expect("controller provenance");
+        assert_eq!(provenance[0]["supplied_path"], "[redacted]");
+        assert_eq!(provenance[0]["canonical_path"], "[redacted]");
+        assert_eq!(provenance[0]["approved_root"], "[redacted]");
+        assert_ne!(
+            provenance[0]["canonical_path_sha256"],
             canonical_source.display().to_string()
         );
-        assert_eq!(projected[0]["approved_root"], "/private/var");
 
         let mut prompt = Some(format!("Read {}", canonical_source.display()));
         rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
@@ -3958,6 +3987,80 @@ mod provider_evidence_tests {
             Path::new("/private/var/folders/example/evidence.json")
         )
         .is_none());
+        assert!(approved_macos_temporary_root(
+            Path::new("/private/var/folders/example/./evidence.json"),
+            Path::new("/private/var/folders/example/evidence.json")
+        )
+        .is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_dot_segments_and_arbitrary_symlink_prompt_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let var_temp = std::env::temp_dir();
+        if !var_temp.starts_with("/var/") {
+            return;
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("homeboy-provider-evidence-")
+            .tempdir_in(&var_temp)
+            .expect("temporary workspace under var");
+        let source = temp.path().join("source.json");
+        std::fs::write(&source, "{}").expect("write source");
+        let canonical_source = source.canonicalize().expect("canonical source");
+        let supplied_source = Path::new("/var").join(
+            canonical_source
+                .strip_prefix("/private/var")
+                .expect("temporary file is under private var"),
+        );
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: supplied_source.display().to_string(),
+        };
+        let dotted = canonical_source
+            .parent()
+            .expect("source parent")
+            .join(".")
+            .join(canonical_source.file_name().expect("source name"));
+        let error = validate_provider_evidence_inputs(
+            &[input.clone()],
+            Some(&format!("Read {}", dotted.display())),
+        )
+        .expect_err("dot segment alias is not an approved spelling");
+        assert_eq!(error.details["field"], "prompt");
+
+        let arbitrary_alias = temp.path().join("arbitrary-alias.json");
+        symlink(&canonical_source, &arbitrary_alias).expect("create arbitrary alias");
+        let error = validate_provider_evidence_inputs(
+            &[input],
+            Some(&format!("Read {}", arbitrary_alias.display())),
+        )
+        .expect_err("arbitrary symlink alias is not an approved spelling");
+        assert_eq!(error.details["field"], "prompt");
+    }
+
+    #[test]
+    fn provider_executor_config_excludes_host_source_paths() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("external.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "{}").expect("write source");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: source.display().to_string(),
+        };
+
+        let projected =
+            project_provider_evidence_inputs(&[input], &workspace, None).expect("project evidence");
+        let config = serde_json::json!({ "evidence_inputs": projected });
+        let encoded = config.to_string();
+        assert!(!encoded.contains(&source.display().to_string()));
+        assert!(config["evidence_inputs"][0].get("supplied_path").is_none());
+        assert!(config["evidence_inputs"][0].get("canonical_path").is_none());
+        assert!(config["evidence_inputs"][0].get("approved_root").is_none());
     }
 
     #[cfg(unix)]
