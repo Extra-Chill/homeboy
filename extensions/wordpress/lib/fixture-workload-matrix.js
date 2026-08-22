@@ -122,6 +122,7 @@ function normalizeFixtureWorkloadMatrixResult(input = {}) {
 	});
 	const diagnostics = dedupeDiagnosticPackets(fixtureResults.flatMap((result) => diagnosticPacketsForFixtureResult(result, { matrix })));
 	const grouped = groupDiagnosticPackets(diagnostics);
+	const summaryLimit = boundedSummaryLimit(input);
 
 	return {
 		schema: FIXTURE_WORKLOAD_MATRIX_RESULT_SCHEMA,
@@ -134,11 +135,80 @@ function normalizeFixtureWorkloadMatrixResult(input = {}) {
 			not_run: fixtureResults.filter((result) => result.status === 'not_run').length,
 			diagnostic_count: diagnostics.length,
 			groups: Object.fromEntries(Object.entries(grouped).map(([key, items]) => [key, items.length])),
+			failure_summaries: projectFailureSummaries(fixtureResults, diagnostics, summaryLimit),
+			top_diagnostic_kinds: topDiagnosticValues(diagnostics, 'kind', summaryLimit),
+			top_fixtures_by_finding_count: topFixtureFindingCounts(diagnostics, summaryLimit),
+			top_severities: topDiagnosticValues(diagnostics, 'severity', summaryLimit),
+			top_categories: topDiagnosticValues(diagnostics, 'category', summaryLimit),
+			top_runtime_target_selectors: topDiagnosticValues(diagnostics, 'selector', summaryLimit),
+			top_core_html_sources: topCoreHtmlSources(diagnostics, summaryLimit),
 		},
 		fixtures: fixtureResults,
 		diagnostics,
 		fanout_groups: Object.entries(grouped).map(([group_key, items], index) => ({ key: group_key, index, diagnostics: items })),
 	};
+}
+
+function projectFailureSummaries(fixtureResults, diagnostics, limit) {
+	const resultsByFixture = new Map(fixtureResults.map((result) => [result.fixture_id, result]));
+	return diagnostics
+		.filter((diagnostic) => ['failed', 'not_run'].includes(resultsByFixture.get(diagnostic.fixture_id)?.status))
+		.map((diagnostic) => {
+			const result = resultsByFixture.get(diagnostic.fixture_id) || {};
+			return {
+				fixture_id: diagnostic.fixture_id,
+				status: result.status,
+				kind: diagnostic.kind,
+				category: diagnostic.category,
+				severity: diagnostic.severity,
+				reason: diagnostic.reason,
+				artifact_refs: dedupeArtifactRefs([...normalizeArray(diagnostic.artifact_refs), ...normalizeArray(result.artifact_refs)]).slice(0, 5),
+				retryable: retryability(diagnostic, result),
+			};
+		})
+		.sort((left, right) => `${left.fixture_id}\u0000${left.category}\u0000${left.reason}`.localeCompare(`${right.fixture_id}\u0000${right.category}\u0000${right.reason}`))
+		.slice(0, limit);
+}
+
+function retryability(diagnostic, result) {
+	for (const value of [diagnostic.raw?.retryable, diagnostic.raw?.retry, result.raw?.retryable, result.raw?.retry, result.retryable, result.retry]) {
+		if (typeof value === 'boolean') {
+			return value;
+		}
+	}
+	return null;
+}
+
+function topDiagnosticValues(diagnostics, key, limit) {
+	return topCounts(diagnostics.map((diagnostic) => diagnostic[key]).filter(Boolean), limit);
+}
+
+function topFixtureFindingCounts(diagnostics, limit) {
+	return topCounts(diagnostics.map((diagnostic) => diagnostic.fixture_id).filter(Boolean), limit).map(({ value, count }) => ({ fixture_id: value, finding_count: count }));
+}
+
+function topCoreHtmlSources(diagnostics, limit) {
+	return topCounts(diagnostics
+		.filter((diagnostic) => ['core/html', 'core-html'].includes(String(diagnostic.raw?.block_name || diagnostic.raw?.blockName || diagnostic.raw?.source_block || diagnostic.raw?.sourceBlock || '').toLowerCase()))
+		.map((diagnostic) => diagnostic.raw?.element || diagnostic.raw?.tag || diagnostic.raw?.html_element || diagnostic.raw?.htmlElement || diagnostic.source_path)
+		.filter(Boolean), limit);
+}
+
+function topCounts(values, limit) {
+	const counts = new Map();
+	for (const value of values) {
+		const normalized = String(value).trim();
+		if (normalized) {
+			counts.set(normalized, (counts.get(normalized) || 0) + 1);
+		}
+	}
+	return Array.from(counts, ([value, count]) => ({ value, count }))
+		.sort((left, right) => right.count - left.count || left.value.localeCompare(right.value))
+		.slice(0, limit);
+}
+
+function boundedSummaryLimit(input) {
+	return Math.min(integerOption(input.summaryLimit || input.summary_limit || input.failureSummaryLimit || input.failure_summary_limit, 20), 50);
 }
 
 function collectFixtureWorkloadMatrixRunResults(input = {}) {
