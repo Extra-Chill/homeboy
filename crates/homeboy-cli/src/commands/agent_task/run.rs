@@ -268,10 +268,10 @@ pub(crate) fn preview_cook(
         .as_str()
         .expect("preview local workspace")
         .to_string();
-    let evidence = if !args.provider_evidence_inputs.is_empty() {
+    let (evidence, evidence_provenance) = if !args.provider_evidence_inputs.is_empty() {
         let mut dispatch = dispatch_args_for_cook(&args);
         resolve_dispatch_prompt(&mut dispatch)?;
-        validate_provider_evidence_inputs(
+        let admitted_evidence = admit_provider_evidence_inputs(
             &args.provider_evidence_inputs,
             dispatch.prompt.as_deref(),
         )?;
@@ -281,11 +281,18 @@ pub(crate) fn preview_cook(
         rewrite_provider_evidence_prompt(
             &mut compile_args.dispatch.prompt,
             &args.provider_evidence_inputs,
+            &admitted_evidence,
             Some(&workspace),
-        );
-        Some(evidence)
+        )?;
+        (
+            Some(evidence),
+            Some(provider_evidence_controller_provenance_from_admitted(
+                &args.provider_evidence_inputs,
+                &admitted_evidence,
+            )),
+        )
     } else {
-        None
+        (None, None)
     };
     let mut plan = compile_cook_plan(&compile_args, provision)?;
     if let Some(evidence) = evidence {
@@ -296,10 +303,9 @@ pub(crate) fn preview_cook(
             task.executor.config["evidence_inputs"] = serde_json::to_value(&evidence)
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
         }
-        plan.metadata["controller_provider_evidence"] = serde_json::to_value(
-            provider_evidence_controller_provenance(&args.provider_evidence_inputs)?,
-        )
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        plan.metadata["controller_provider_evidence"] =
+            serde_json::to_value(evidence_provenance)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
     plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
@@ -2868,11 +2874,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // Resolve @file / stdin / stored-ref prompts before anything consumes the
     // prompt, so the executor receives the exact bytes (#10100).
     resolve_dispatch_prompt(&mut dispatch_args)?;
-    rewrite_provider_evidence_prompt(
-        &mut dispatch_args.prompt,
-        &args.provider_evidence_inputs,
-        provision.get("path").and_then(Value::as_str),
-    );
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -3309,18 +3310,37 @@ pub(crate) fn compile_cook_plan(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
+    if !args.provider_evidence_inputs.is_empty() && workspace.is_none() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence requires a bound Cook workspace",
+            None,
+            None,
+        ));
+    }
     let mut dispatch = dispatch_args_for_cook(args);
     resolve_dispatch_prompt(&mut dispatch)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
     dispatch.workspace = workspace.clone();
-    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
+    let admitted_evidence =
+        admit_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
+    let evidence = if let Some(workspace) = workspace.as_deref() {
+        project_admitted_provider_evidence_inputs(
+            &args.provider_evidence_inputs,
+            &admitted_evidence,
+            Path::new(workspace),
+        )?
+    } else {
+        Vec::new()
+    };
     rewrite_provider_evidence_prompt(
         &mut dispatch.prompt,
         &args.provider_evidence_inputs,
+        &admitted_evidence,
         workspace.as_deref(),
-    );
+    )?;
     if let Some(workspace) = workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
@@ -3364,19 +3384,6 @@ pub(crate) fn compile_cook_plan(
         .validate_explicit_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
-        let workspace = workspace.as_deref().ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "provider-evidence",
-                "provider evidence cannot be projected until Cook has a resolved workspace path",
-                None,
-                None,
-            )
-        })?;
-        let evidence = project_provider_evidence_inputs(
-            &args.provider_evidence_inputs,
-            Path::new(workspace),
-            None,
-        )?;
         for task in &mut plan.tasks {
             if !task.executor.config.is_object() {
                 task.executor.config = serde_json::json!({});
@@ -3392,6 +3399,13 @@ pub(crate) fn validate_provider_evidence_inputs(
     inputs: &[AgentTaskProviderEvidenceInput],
     prompt: Option<&str>,
 ) -> homeboy::core::Result<()> {
+    admit_provider_evidence_inputs(inputs, prompt).map(|_| ())
+}
+
+pub(crate) fn admit_provider_evidence_inputs(
+    inputs: &[AgentTaskProviderEvidenceInput],
+    prompt: Option<&str>,
+) -> homeboy::core::Result<Vec<AdmittedProviderEvidenceSource>> {
     let mut ids = std::collections::BTreeSet::new();
     let mut sources = std::collections::BTreeSet::new();
     let mut canonical_sources = std::collections::BTreeSet::new();
@@ -3449,14 +3463,18 @@ pub(crate) fn validate_provider_evidence_inputs(
             }
         }
     }
-    Ok(())
+    Ok(admitted_sources)
 }
 
-#[derive(Debug)]
-struct AdmittedProviderEvidenceSource {
+#[derive(Debug, Clone)]
+pub(crate) struct AdmittedProviderEvidenceSource {
     supplied_path: PathBuf,
     canonical_path: PathBuf,
     approved_root: Option<PathBuf>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
 }
 
 impl AdmittedProviderEvidenceSource {
@@ -3496,10 +3514,16 @@ fn admit_provider_evidence_source(
             None,
         )
     })?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     Ok(AdmittedProviderEvidenceSource {
         approved_root: approved_macos_temporary_root(&supplied_path, &canonical_path),
         supplied_path,
         canonical_path,
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
     })
 }
 
@@ -3542,14 +3566,66 @@ fn approved_provider_evidence_spellings(canonical_path: &Path) -> Vec<PathBuf> {
     spellings
 }
 
-fn provider_evidence_controller_provenance(
+fn verify_admitted_provider_evidence_source(
+    source: &AdmittedProviderEvidenceSource,
+) -> homeboy::core::Result<()> {
+    let metadata = std::fs::symlink_metadata(source.copy_path()).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(format!("{}: {error}", source.copy_path().display())),
+            None,
+        )
+    })?;
+    let canonical = source.copy_path().canonicalize().map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(format!("{}: {error}", source.copy_path().display())),
+            None,
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.dev() != source.device
+            || metadata.ino() != source.inode
+            || canonical != source.canonical_path
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence source identity changed after validation",
+                Some(source.copy_path().display().to_string()),
+                None,
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || canonical != source.canonical_path
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(source.copy_path().display().to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn provider_evidence_controller_provenance_from_admitted(
     inputs: &[AgentTaskProviderEvidenceInput],
-) -> homeboy::core::Result<Vec<Value>> {
+    admitted: &[AdmittedProviderEvidenceSource],
+) -> Vec<Value> {
     inputs
         .iter()
-        .map(|input| {
-            let source = admit_provider_evidence_source(&input.source)?;
-            Ok(serde_json::json!({
+        .zip(admitted)
+        .map(|(input, source)| {
+            serde_json::json!({
                 "id": input.id,
                 "supplied_path": "[redacted]",
                 "canonical_path": "[redacted]",
@@ -3560,7 +3636,7 @@ fn provider_evidence_controller_provenance(
                     )
                 ),
                 "approved_root": source.approved_root.as_ref().map(|_| "[redacted]"),
-            }))
+            })
         })
         .collect()
 }
@@ -3589,12 +3665,20 @@ pub(crate) fn project_provider_evidence_inputs(
     workspace: &Path,
     prompt: Option<&str>,
 ) -> homeboy::core::Result<Vec<Value>> {
-    validate_provider_evidence_inputs(inputs, prompt)?;
+    let admitted = admit_provider_evidence_inputs(inputs, prompt)?;
+    project_admitted_provider_evidence_inputs(inputs, &admitted, workspace)
+}
+
+pub(crate) fn project_admitted_provider_evidence_inputs(
+    inputs: &[AgentTaskProviderEvidenceInput],
+    admitted: &[AdmittedProviderEvidenceSource],
+    workspace: &Path,
+) -> homeboy::core::Result<Vec<Value>> {
     let mut projected = projected_provider_evidence(inputs, workspace.to_str())?;
-    for (input, projection) in inputs.iter().zip(&mut projected) {
+    for (source, projection) in admitted.iter().zip(&mut projected) {
+        verify_admitted_provider_evidence_source(source)?;
         let destination = PathBuf::from(projection["path"].as_str().expect("evidence path"));
-        let source = admit_provider_evidence_source(&input.source)?;
-        let (bytes, digest) = secure_provider_evidence_copy(source.copy_path(), &destination)?;
+        let (bytes, digest) = secure_provider_evidence_copy(source, &destination)?;
         projection["size_bytes"] = serde_json::json!(bytes);
         projection["sha256"] = serde_json::json!(digest);
     }
@@ -3603,7 +3687,7 @@ pub(crate) fn project_provider_evidence_inputs(
 
 #[cfg(unix)]
 fn secure_provider_evidence_copy(
-    source: &Path,
+    source: &AdmittedProviderEvidenceSource,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
     use std::io::{Read, Write};
@@ -3671,9 +3755,11 @@ fn secure_provider_evidence_copy(
         }
         Ok(current)
     }
-    let source_parent = directory(source.parent().expect("source parent"), false)?;
-    let source_name = std::ffi::CString::new(source.file_name().expect("source name").as_bytes())
-        .expect("source name");
+    let source_path = source.copy_path();
+    let source_parent = directory(source_path.parent().expect("source parent"), false)?;
+    let source_name =
+        std::ffi::CString::new(source_path.file_name().expect("source name").as_bytes())
+            .expect("source name");
     let source_fd = unsafe {
         libc::openat(
             source_parent.as_raw_fd(),
@@ -3685,19 +3771,31 @@ fn secure_provider_evidence_copy(
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence source could not be securely opened",
-            Some(source.display().to_string()),
+            Some(source_path.display().to_string()),
             None,
         ));
     }
     let input = unsafe { std::fs::File::from_raw_fd(source_fd) };
     let metadata = input.metadata().map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(source_path.display().to_string()),
+        )
     })?;
-    if !metadata.is_file() || metadata.len() > MAX_PROVIDER_EVIDENCE_BYTES {
+    use std::os::unix::fs::MetadataExt;
+    if !metadata.is_file() || metadata.dev() != source.device || metadata.ino() != source.inode {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(source_path.display().to_string()),
+            None,
+        ));
+    }
+    if metadata.len() > MAX_PROVIDER_EVIDENCE_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence must be a bounded regular file",
-            Some(source.display().to_string()),
+            Some(source_path.display().to_string()),
             None,
         ));
     }
@@ -3706,13 +3804,16 @@ fn secure_provider_evidence_copy(
         .take(MAX_PROVIDER_EVIDENCE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(source_path.display().to_string()),
+            )
         })?;
     if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence exceeds the maximum size",
-            Some(source.display().to_string()),
+            Some(source_path.display().to_string()),
             None,
         ));
     }
@@ -3775,11 +3876,31 @@ fn secure_provider_evidence_copy(
 
 #[cfg(not(unix))]
 fn secure_provider_evidence_copy(
-    source: &Path,
+    source: &AdmittedProviderEvidenceSource,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
-    let bytes = std::fs::read(source).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    let source_path = source.copy_path();
+    let canonical = source_path.canonicalize().map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(format!("{}: {error}", source_path.display())),
+            None,
+        )
+    })?;
+    if canonical != source.canonical_path {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source identity changed after validation",
+            Some(source_path.display().to_string()),
+            None,
+        ));
+    }
+    let bytes = std::fs::read(source_path).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(source_path.display().to_string()),
+        )
     })?;
     if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -3815,22 +3936,27 @@ fn secure_provider_evidence_copy(
 pub(crate) fn rewrite_provider_evidence_prompt(
     prompt: &mut Option<String>,
     inputs: &[AgentTaskProviderEvidenceInput],
+    admitted: &[AdmittedProviderEvidenceSource],
     workspace: Option<&str>,
-) {
-    let Some(prompt) = prompt else { return };
-    let Some(workspace) = workspace else { return };
-    for input in inputs {
+) -> homeboy::core::Result<()> {
+    let Some(prompt) = prompt else { return Ok(()) };
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+    let mut rewritten = prompt.clone();
+    for (input, source) in inputs.iter().zip(admitted) {
+        verify_admitted_provider_evidence_source(source)?;
         let destination = Path::new(workspace)
             .join(".homeboy/evidence")
             .join(&input.id)
             .join(Path::new(&input.source).file_name().unwrap_or_default());
         let destination = destination.display().to_string();
-        if let Ok(source) = admit_provider_evidence_source(&input.source) {
-            for spelling in approved_provider_evidence_spellings(&source.canonical_path) {
-                *prompt = prompt.replace(&spelling.display().to_string(), &destination);
-            }
+        for spelling in approved_provider_evidence_spellings(&source.canonical_path) {
+            rewritten = rewritten.replace(&spelling.display().to_string(), &destination);
         }
     }
+    *prompt = rewritten;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3879,7 +4005,10 @@ mod provider_evidence_tests {
         );
 
         let mut prompt = Some(format!("Read {} before editing.", source.display()));
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+            .expect("admit evidence");
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
+            .expect("rewrite evidence prompt");
         assert_eq!(
             prompt.expect("rewritten prompt"),
             format!("Read {} before editing.", path.display())
@@ -3952,8 +4081,10 @@ mod provider_evidence_tests {
         assert!(projected[0].get("supplied_path").is_none());
         assert!(projected[0].get("canonical_path").is_none());
         assert!(projected[0].get("approved_root").is_none());
-        let provenance = provider_evidence_controller_provenance(&[input.clone()])
-            .expect("controller provenance");
+        let admitted =
+            admit_provider_evidence_inputs(&[input.clone()], None).expect("admit evidence");
+        let provenance =
+            provider_evidence_controller_provenance_from_admitted(&[input.clone()], &admitted);
         assert_eq!(provenance[0]["supplied_path"], "[redacted]");
         assert_eq!(provenance[0]["canonical_path"], "[redacted]");
         assert_eq!(provenance[0]["approved_root"], "[redacted]");
@@ -3963,7 +4094,10 @@ mod provider_evidence_tests {
         );
 
         let mut prompt = Some(format!("Read {}", canonical_source.display()));
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+            .expect("admit evidence");
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
+            .expect("rewrite evidence prompt");
         assert_eq!(
             prompt,
             Some(format!(
@@ -4010,7 +4144,10 @@ mod provider_evidence_tests {
         assert!(!encoded_config.contains(&prompt_source));
 
         let mut prompt = Some(format!("Read {prompt_source}"));
-        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+            .expect("admit evidence");
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
+            .expect("rewrite evidence prompt");
         let rewritten = prompt.expect("rewritten prompt");
         assert_eq!(
             rewritten,
@@ -4163,10 +4300,58 @@ mod provider_evidence_tests {
         std::fs::remove_file(&source).expect("remove admitted source");
         symlink(&outside, &source).expect("replace source with symlink");
 
-        let error = secure_provider_evidence_copy(admitted.copy_path(), &destination)
+        let error = secure_provider_evidence_copy(&admitted, &destination)
             .expect_err("secure reopen rejects the replacement symlink");
         assert!(error.message.contains("could not be securely opened"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn aborts_projection_when_source_is_removed_after_validation() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "accepted").expect("write source");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: source.display().to_string(),
+        };
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], None)
+            .expect("validate and admit source");
+        std::fs::remove_file(&source).expect("remove admitted source");
+
+        let error = project_admitted_provider_evidence_inputs(&[input], &admitted, &workspace)
+            .expect_err("removed source aborts projection");
+        assert!(error.message.contains("identity changed after validation"));
+        assert!(!workspace
+            .join(".homeboy/evidence/source/source.json")
+            .exists());
+    }
+
+    #[test]
+    fn aborts_rewrite_when_source_is_replaced_after_validation() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let replacement = temp.path().join("replacement.json");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "accepted").expect("write source");
+        std::fs::write(&replacement, "replaced").expect("write replacement");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: source.display().to_string(),
+        };
+        let mut prompt = Some(format!("Read {}", source.display()));
+        let admitted = admit_provider_evidence_inputs(&[input.clone()], prompt.as_deref())
+            .expect("validate and admit source");
+        std::fs::rename(&replacement, &source).expect("replace admitted source");
+
+        let error =
+            rewrite_provider_evidence_prompt(&mut prompt, &[input], &admitted, workspace.to_str())
+                .expect_err("replaced source aborts rewrite");
+        assert!(error.message.contains("identity changed after validation"));
+        assert_eq!(prompt, Some(format!("Read {}", source.display())));
     }
 
     #[test]

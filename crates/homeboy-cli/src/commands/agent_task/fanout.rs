@@ -3519,10 +3519,14 @@ impl BatchCookSpec {
         let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
         let mut provider_config = self.provider_config.clone();
         if let Some(workspace) = workspace_root {
-            let evidence = super::run::project_provider_evidence_inputs(
+            let admitted_evidence = super::run::admit_provider_evidence_inputs(
                 &self.provider_evidence_inputs,
+                prompt.as_deref(),
+            )?;
+            let evidence = super::run::project_admitted_provider_evidence_inputs(
+                &self.provider_evidence_inputs,
+                &admitted_evidence,
                 Path::new(workspace),
-                None,
             )?;
             if !evidence.is_empty() {
                 let raw = provider_config.as_deref().unwrap_or("{}");
@@ -3539,8 +3543,9 @@ impl BatchCookSpec {
             super::run::rewrite_provider_evidence_prompt(
                 &mut prompt,
                 &self.provider_evidence_inputs,
+                &admitted_evidence,
                 Some(workspace),
-            );
+            )?;
         }
         let dispatch = AgentTaskDispatchCommand {
             prompt,
