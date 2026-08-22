@@ -1902,6 +1902,8 @@ fn cook_batch_inner(
     // pins every child cook to the same resolved backend.
     resolve_and_validate_effective_backend(&mut args)?;
     let mut plan = build_cook_batch_plan(&args)?;
+    let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
+    let plan_ref = batch_plan_reference(&plan)?;
     let plan_has_private_gates = plan
         .cooks
         .iter()
@@ -2047,11 +2049,12 @@ fn cook_batch_inner(
                 "worktrees": worktrees,
                 "plan": public_batch_cook_plan(&plan),
                 "run_result": run_result,
-        "commands": cook_batch_commands(&args, plan_has_private_gates, private_artifact_path.as_deref()),
+        "plan_ref": plan_ref,
+        "commands": cook_batch_commands(&replay_args, plan_has_private_gates, private_artifact_path.as_deref()),
                 // Named run-plan persists before worktree/provider preflight, so
                 // status and artifacts remain available when admission is blocked.
                 "next_actions": cook_batch_next_actions(
-                    &args,
+                    &replay_args,
                     &plan.fanout_id,
                     status,
                     persisted,
@@ -2144,6 +2147,8 @@ fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value
         "supplied issue URLs and gate declarations",
         move || build_static_cook_batch_plan(&static_args),
     )?;
+    let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
+    let plan_ref = batch_plan_reference(&plan)?;
     let workspace_args = args.clone();
     let workspace = planner.run_bounded(
         "gate_workspace",
@@ -2180,9 +2185,10 @@ fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value
             },
             "worktrees": worktrees,
             "plan": public_batch_cook_plan(&plan),
+            "plan_ref": plan_ref,
             "run_result": Value::Null,
-            "commands": cook_batch_commands(&args, plan_has_private_gates, None),
-            "next_actions": cook_batch_next_actions(&args, &plan.fanout_id, "ready", false, false, &worktrees, plan_has_private_gates, None),
+            "commands": cook_batch_commands(&replay_args, plan_has_private_gates, None),
+            "next_actions": cook_batch_next_actions(&replay_args, &plan.fanout_id, "ready", false, false, &worktrees, plan_has_private_gates, None),
         }),
         0,
     ))
@@ -2933,6 +2939,19 @@ fn private_plan_digest(plan: &Value) -> Result<String> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+fn batch_plan_reference(plan: &BatchCookFanoutPlan) -> Result<Value> {
+    let plan = serde_json::to_value(plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize batch cook plan reference".to_string()),
+        )
+    })?;
+    Ok(serde_json::json!({
+        "fanout_id": plan["fanout_id"],
+        "sha256": private_plan_digest(&plan)?,
+    }))
+}
+
 fn private_batch_plan_path(fanout_id: &str) -> Result<PathBuf> {
     Ok(private_batch_plan_path_in_roots(
         &homeboy::core::paths::homeboy_data()?,
@@ -3596,6 +3615,13 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
 fn build_static_cook_batch_plan(
     args: &AgentTaskFanoutCookBatchArgs,
 ) -> Result<BatchCookFanoutPlan> {
+    // This is the same prompt/evidence authority live Cook applies before it
+    // constructs child plans. Static planning must reject an input that replay
+    // would reject before worktree mutation.
+    super::run::validate_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        args.prompt_template.as_deref(),
+    )?;
     let profiles = match args.verification_profiles.as_deref() {
         Some(spec) => serde_json::from_str(spec).map_err(|error| {
             Error::validation_invalid_argument(
@@ -4210,6 +4236,15 @@ fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
     planned.dry_run = true;
     planned.run_plan = false;
     quote_args(&cook_batch_argv(&planned))
+}
+
+fn pin_cook_batch_replay(
+    args: &AgentTaskFanoutCookBatchArgs,
+    fanout_id: &str,
+) -> AgentTaskFanoutCookBatchArgs {
+    let mut pinned = args.clone();
+    pinned.fanout_id = Some(fanout_id.to_string());
+    pinned
 }
 
 /// Error envelopes must be safe to persist or render. A private gate can only
@@ -6994,6 +7029,53 @@ fi
     }
 
     #[test]
+    fn dry_run_and_live_plan_reject_the_same_undeclared_prompt_path() {
+        let mut args = cook_batch_args();
+        args.prompt_template = Some("Compare before/after results for {issue_ref}.".to_string());
+
+        let dry_run = build_static_cook_batch_plan(&args)
+            .expect_err("dry-run must validate undeclared prompt paths");
+        let live = build_cook_batch_plan(&args)
+            .expect_err("live planning must reject the same prompt path");
+
+        assert_eq!(dry_run.code, live.code);
+        assert_eq!(dry_run.message, live.message);
+        assert_eq!(dry_run.details, live.details);
+    }
+
+    #[test]
+    fn dry_run_replay_pins_fanout_child_and_worktree_owners() {
+        let mut args = cook_batch_args();
+        args.fanout_id = None;
+
+        let dry_plan = build_static_cook_batch_plan(&args).expect("dry-run plan");
+        let replay = pin_cook_batch_replay(&args, &dry_plan.fanout_id);
+        let live_plan = build_cook_batch_plan(&replay).expect("replayed live plan");
+
+        assert_eq!(live_plan.fanout_id, dry_plan.fanout_id);
+        assert_eq!(
+            live_plan
+                .cooks
+                .iter()
+                .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
+                .collect::<Vec<_>>(),
+            dry_plan
+                .cooks
+                .iter()
+                .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
+                .collect::<Vec<_>>(),
+            "replay must retain each child cook, worktree owner, and branch identity"
+        );
+        assert!(cook_batch_run_command(&replay)
+            .contains(&format!("--fanout-id {}", dry_plan.fanout_id)));
+        assert_eq!(
+            batch_plan_reference(&dry_plan).expect("plan reference"),
+            batch_plan_reference(&live_plan).expect("plan reference"),
+            "the replayed plan must retain its immutable input digest"
+        );
+    }
+
+    #[test]
     fn cook_batch_preserves_explicit_prompt_template_for_manual_pr_modes() {
         let mut args = cook_batch_args();
         args.prompt_template = Some(
@@ -7031,6 +7113,15 @@ fi
             );
             assert_eq!(value["worktrees"]["dry_run"], true);
             assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
+            assert_eq!(value["plan_ref"]["fanout_id"], value["fanout_id"]);
+            assert!(value["plan_ref"]["sha256"]
+                .as_str()
+                .expect("plan digest")
+                .starts_with("sha256:"));
+            assert!(value["commands"]["run"]
+                .as_str()
+                .expect("pinned run command")
+                .contains("--fanout-id issue-wave"));
             assert!(value["commands"]["resume_from_plan"]
                 .as_str()
                 .expect("resume command")
