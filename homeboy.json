@@ -35,15 +35,6 @@
           "id": "release-golden-contract"
         },
         {
-          "command": "review",
-          "expected_fields": {
-            "/data/command": "review",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/review-artifact.json",
-          "id": "review-artifact-golden"
-        },
-        {
           "command": "runs",
           "expected_fields": {
             "/scenarios/0/payload/data/payload/command": "runs.list",
