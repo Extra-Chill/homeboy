@@ -537,9 +537,21 @@ pub(crate) fn controller_upgrade_admission_for_records(
                         {
                             format!("homeboy runner reconcile {runner}")
                         }
+                        // A live local owner blocks replacement, but cancelling
+                        // it would discard work. Inspect its authoritative
+                        // status instead of prescribing a destructive action.
                         _ if liveness == AgentTaskLiveness::Active => {
-                            format!("homeboy agent-task cancel {group_run_id}")
+                            format!("homeboy --placement local agent-task status {group_run_id}")
                         }
+                        // Process evidence that cannot prove a dead owner stays
+                        // fail-closed. The dry run is read-only and reconciles
+                        // all durable/provider evidence before any mutation.
+                        _ if matches!(
+                            liveness,
+                            AgentTaskLiveness::Suspect | AgentTaskLiveness::Unreconciled
+                        ) => format!(
+                            "homeboy --placement local agent-task reconcile {group_run_id} --dry-run"
+                        ),
                         _ => format!(
                             "homeboy --placement local agent-task reconcile {group_run_id} --apply"
                         ),
@@ -687,6 +699,17 @@ fn classify_liveness(
         return AgentTaskLiveness::Active;
     }
 
+    match record.local_owner_liveness() {
+        // Heartbeats are a projection, while a verified owner is authoritative.
+        // Check this before honoring an older stale marker.
+        agent_task_lifecycle::LocalOwnerLiveness::Live => return AgentTaskLiveness::Active,
+        agent_task_lifecycle::LocalOwnerLiveness::Unverifiable => {
+            return AgentTaskLiveness::Unreconciled;
+        }
+        agent_task_lifecycle::LocalOwnerLiveness::Dead => return AgentTaskLiveness::Stale,
+        agent_task_lifecycle::LocalOwnerLiveness::Absent => {}
+    }
+
     if record.is_stale_running() {
         return AgentTaskLiveness::Stale;
     }
@@ -698,7 +721,8 @@ fn classify_liveness(
     // ghost `running` record instead of classifying it Active because the
     // owner_pid is merely PRESENT (#9718). A runner-backed job with a fresh
     // heartbeat is authoritative liveness and is deliberately left alone.
-    let owner_process_dead = record.owner_pid().is_some() && !record.owner_process_is_running();
+    let owner_process_dead = record.owner_pid().is_some()
+        && record.local_owner_liveness() == agent_task_lifecycle::LocalOwnerLiveness::Dead;
     let runner_backed_and_fresh = record.runner_job_id().is_some() && record.has_fresh_update();
     if owner_process_dead && !runner_backed_and_fresh {
         return AgentTaskLiveness::Stale;

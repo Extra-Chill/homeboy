@@ -30,6 +30,19 @@ pub(crate) const METADATA_KEY_RETRYABLE: &str = "retryable";
 pub(crate) const METADATA_KEY_RECLAIMED_STALE_RUNNING: &str = "reclaimed_stale_running";
 pub(crate) const METADATA_KEY_CANCELLED_STALE_RUNNING: &str = "cancelled_stale_running";
 
+/// Reconciled local ownership evidence for a running record.
+///
+/// A PID is only live when its persisted process identity still matches. An
+/// unavailable probe is intentionally distinct from a dead owner: callers may
+/// inspect it, but must not reclaim work from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalOwnerLiveness {
+    Absent,
+    Live,
+    Dead,
+    Unverifiable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskRecordHealthReason {
@@ -547,7 +560,14 @@ impl AgentTaskRunRecord {
 
     pub(crate) fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
         let metadata = self.ensure_metadata_object();
-        metadata.insert("runner_pid".to_string(), json!(std::process::id()));
+        let runner_pid = std::process::id();
+        metadata.insert("runner_pid".to_string(), json!(runner_pid));
+        metadata.insert(
+            "runner_process_start_identity".to_string(),
+            json!(homeboy_core::process::process_start_identity(runner_pid)
+                .ok()
+                .flatten()),
+        );
         metadata.insert("runner_started_at".to_string(), json!(now_timestamp()));
         if reclaimed_stale {
             metadata.insert(
@@ -637,8 +657,82 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn owner_process_is_running(&self) -> bool {
-        self.owner_pid()
-            .is_some_and(homeboy_core::process::pid_is_running)
+        self.local_owner_liveness() == LocalOwnerLiveness::Live
+    }
+
+    /// Reconcile every local ownership projection before a caller classifies a
+    /// running record. A live supervisor or provider wins over stale heartbeat
+    /// metadata; an ambiguous process probe never becomes dead by inference.
+    pub(crate) fn local_owner_liveness(&self) -> LocalOwnerLiveness {
+        let provider_states = self
+            .metadata
+            .get("provider_executions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|execution| execution["state"] == "running")
+            .map(|execution| {
+                let Some(pid) = execution["owner_pid"]
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                else {
+                    return homeboy_core::process::ProcessIdentityState::Unverifiable;
+                };
+                homeboy_core::process::process_identity_state(
+                    pid,
+                    execution
+                        .get("owner_linux_starttime_ticks")
+                        .and_then(Value::as_u64),
+                )
+            })
+            .collect::<Vec<_>>();
+        if provider_states
+            .iter()
+            .any(|state| *state == homeboy_core::process::ProcessIdentityState::Live)
+        {
+            return LocalOwnerLiveness::Live;
+        }
+        if !provider_states.is_empty() {
+            return if provider_states.iter().all(|state| {
+                matches!(
+                    state,
+                    homeboy_core::process::ProcessIdentityState::Dead
+                        | homeboy_core::process::ProcessIdentityState::IdentityMismatch
+                )
+            }) {
+                LocalOwnerLiveness::Dead
+            } else {
+                LocalOwnerLiveness::Unverifiable
+            };
+        }
+
+        let Some(pid) = self
+            .metadata
+            .get("runner_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            return LocalOwnerLiveness::Absent;
+        };
+        let start_identity = self
+            .metadata
+            .get("runner_process_start_identity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        match homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            start_identity.as_ref(),
+        ) {
+            homeboy_core::process::ProcessIdentityState::Live => LocalOwnerLiveness::Live,
+            homeboy_core::process::ProcessIdentityState::Dead
+            | homeboy_core::process::ProcessIdentityState::IdentityMismatch => {
+                LocalOwnerLiveness::Dead
+            }
+            homeboy_core::process::ProcessIdentityState::Unverifiable => {
+                LocalOwnerLiveness::Unverifiable
+            }
+        }
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {
