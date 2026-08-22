@@ -2245,6 +2245,8 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             "homeboy".to_string(),
             "--task-url".to_string(),
             "https://github.com/Extra-Chill/homeboy/issues/12601".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
             "--no-finalize".to_string(),
         ]))
         .expect("derive issue destination without provisioning it");
@@ -2252,6 +2254,13 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             .expect("ensure-only provider is deferred until durable Cook admission");
 
         assert_eq!(provision["action"], "lookup_pending");
+        let plan = super::super::run::compile_cook_plan(&args, provision.clone())
+            .expect("compile issue-derived Cook with its deferred provision intent");
+        assert_eq!(plan.metadata["cook_provision"], provision);
+        assert_eq!(
+            plan.tasks[0].metadata["worktree_provision"],
+            plan.metadata["cook_provision"]
+        );
         assert!(
             !ensured.exists(),
             "provider ensure must wait for durable Cook admission"

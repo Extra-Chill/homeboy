@@ -5084,6 +5084,11 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
                 .success());
         }
         std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        std::fs::write(
+            source.join("package.json"),
+            r#"{"scripts":{"test":"true"}}"#,
+        )
+        .expect("write package manifest");
         assert!(Command::new("git")
             .args(["add", "."])
             .current_dir(&source)
@@ -5173,7 +5178,8 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
         // durable retry and workspace lifecycle rather than local execution.
         options.initial_run_id = run_id.to_string();
         options.max_attempts = 2;
-        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+        options.gates.verify = vec!["npm test".to_string()];
+        options.initial_plan.tasks[0].metadata["worktree_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
             "handle": options.to_worktree,
@@ -5224,10 +5230,85 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
         let recipe = super::super::load_recipe(cook_id).expect("durable Cook identity");
         assert_eq!(recipe.attempts[0].run_id, run_id);
         assert_eq!(
-            persisted_plan.metadata["cook_provision"]["handle"],
+            persisted_plan.tasks[0].metadata["worktree_provision"]["handle"],
             exact_handle
         );
         assert_eq!(persisted_plan.tasks[0].workspace.root, None);
+        assert!(persisted_plan.metadata.get("cook_provision").is_none());
+        assert!(persisted_plan.tasks[0]
+            .metadata
+            .get("cook_workspace_identity")
+            .is_none());
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nif test \"$1\" = identity; then printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; else printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
+                workspace.display()
+            ),
+        )
+        .expect("recover provider");
+        std::fs::set_permissions(&provider, permissions).expect("restore executable provider");
+
+        let retry = crate::agent_task_service::retry(run_id, None, false, false)
+            .expect("reserve a Cook-owned retry successor");
+        assert_eq!(retry.record.metadata["retry_of"], run_id);
+        assert_eq!(retry.record.metadata["cook_id"], cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 2);
+        let recipe = super::super::load_recipe(cook_id).expect("same Cook recipe owns retry");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+
+        let mut resumed_options = super::super::reconstruct_options_with_dispatcher(
+            &recipe,
+            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+        )
+        .expect("reconstruct Cook-owned retry");
+        resumed_options.initial_run_id = retry.record.run_id.clone();
+        resumed_options.initial_plan =
+            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("load durable retry plan");
+        let resumed = run_cook(CookContext::new(resumed_options, Arc::new(UnusedExecutor)))
+            .expect("same Cook retry materializes its recovered provider workspace");
+        assert_eq!(resumed.value.cook_id, cook_id);
+        let resumed_plan =
+            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("materialized retry plan");
+        assert_eq!(
+            resumed_plan.tasks[0].workspace.root.as_deref(),
+            Some(workspace.to_str().expect("utf8 workspace"))
+        );
+        let workspace_identity = resumed_plan.tasks[0].metadata["cook_workspace_identity"].clone();
+        assert_eq!(
+            resumed_plan.metadata["cook_provision"]["workspace_identity"]["token"],
+            "recovered-identity"
+        );
+        assert_eq!(
+            resumed_plan.metadata["cook_provision"]["action"],
+            "existing"
+        );
+        let resumed_record = agent_task_lifecycle::status(&retry.record.run_id)
+            .expect("resumed Cook remains status-addressable");
+        assert_eq!(resumed_record.metadata["provider_executions_consumed"], 0);
+
+        let recipe = super::super::load_recipe(cook_id).expect("same durable Cook recipe");
+        let mut repeated_options = super::super::reconstruct_options_with_dispatcher(
+            &recipe,
+            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+        )
+        .expect("reconstruct materialized Cook retry");
+        repeated_options.initial_run_id = retry.record.run_id.clone();
+        repeated_options.initial_plan = agent_task_lifecycle::load_plan(&retry.record.run_id)
+            .expect("load materialized durable retry plan");
+        run_cook(CookContext::new(repeated_options, Arc::new(UnusedExecutor)))
+            .expect("repeated continuation reuses the materialized workspace");
+        let repeated_plan = agent_task_lifecycle::load_plan(&retry.record.run_id)
+            .expect("load repeated durable retry plan");
+        assert_eq!(
+            repeated_plan.tasks[0].workspace.root.as_deref(),
+            Some(workspace.to_str().expect("utf8 workspace"))
+        );
+        assert_eq!(
+            repeated_plan.tasks[0].metadata["cook_workspace_identity"],
+            workspace_identity
+        );
     });
 }
 

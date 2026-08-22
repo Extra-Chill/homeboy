@@ -3300,6 +3300,7 @@ fn slugify_cook_branch(value: &str) -> String {
 }
 
 pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) {
+    plan.metadata["cook_provision"] = provision.clone();
     if let Some(task) = plan.tasks.first_mut() {
         if !task.metadata.is_object() {
             task.metadata = serde_json::json!({});
