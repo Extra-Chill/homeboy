@@ -6,10 +6,15 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
+
+const CANONICAL_PATCH_CANDIDATE_LIMIT: usize = 16;
+const CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT: u64 = 256 * 1024;
+const CANONICAL_PATCH_BYTES_TOTAL_LIMIT: u64 = 1024 * 1024;
 use crate::agent_task_gate::{
     AgentTaskGateCandidateCheckout, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
     AgentTaskGateVisibility,
@@ -2550,7 +2555,13 @@ fn select_recoverable_patch_artifact(
 #[derive(Debug, Clone)]
 pub struct CanonicalRecoverablePatchArtifacts {
     pub artifacts: Vec<AgentTaskArtifact>,
+    /// Normalized patch bodies keyed by canonical artifact ID. Callers use this
+    /// only for bounded, deterministic projections; full patches remain at their
+    /// durable artifact addresses.
+    pub patch_contents: BTreeMap<String, String>,
     pub unavailable: Vec<Value>,
+    pub omitted_candidate_count: usize,
+    pub omitted_patch_bytes: u64,
 }
 
 /// Resolve and normalize recoverable provider artifacts into deterministic patch
@@ -2589,9 +2600,15 @@ fn canonical_recoverable_patch_artifacts_internal(
         .cloned()
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    let omitted_candidate_count = candidates
+        .len()
+        .saturating_sub(CANONICAL_PATCH_CANDIDATE_LIMIT);
+    candidates.truncate(CANONICAL_PATCH_CANDIDATE_LIMIT);
 
-    let mut canonical = Vec::<(String, AgentTaskArtifact)>::new();
+    let mut canonical = Vec::<(String, AgentTaskArtifact, String)>::new();
     let mut unavailable = Vec::new();
+    let mut read_patch_bytes = 0_u64;
+    let mut omitted_patch_bytes = 0_u64;
     for mut artifact in candidates {
         let Some(kind) = canonical_patch_kind(&artifact.kind) else {
             continue;
@@ -2610,6 +2627,25 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
+        let patch_bytes = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                unavailable
+                    .push(json!({ "id": artifact.id, "path": path, "reason": error.to_string() }));
+                continue;
+            }
+        };
+        if patch_bytes > CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT
+            || read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT
+        {
+            omitted_patch_bytes = omitted_patch_bytes.saturating_add(patch_bytes);
+            unavailable.push(json!({
+                "id": artifact.id,
+                "reason": "canonical_patch_byte_budget_exceeded",
+                "size_bytes": patch_bytes,
+            }));
+            continue;
+        }
         let patch = match std::fs::read_to_string(&path) {
             Ok(patch) => patch,
             Err(error) => {
@@ -2618,6 +2654,7 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
+        read_patch_bytes = read_patch_bytes.saturating_add(patch_bytes);
         if let Err(error) = validate_artifact_content(&artifact, &patch) {
             unavailable.push(json!({ "id": artifact.id, "path": path, "reason": error.message }));
             continue;
@@ -2632,17 +2669,26 @@ fn canonical_recoverable_patch_artifacts_internal(
         };
         let digest = content_hash::sha256_hex(normalized.content.as_bytes());
         let identity = canonical_patch_identity_with_digest(&artifact, &digest);
-        if !canonical.iter().any(|(existing, _)| existing == &identity) {
-            canonical.push((identity, artifact));
+        if !canonical
+            .iter()
+            .any(|(existing, _, _)| existing == &identity)
+        {
+            canonical.push((identity, artifact, normalized.content));
         }
     }
 
     Ok(CanonicalRecoverablePatchArtifacts {
         artifacts: canonical
+            .iter()
+            .map(|(_, artifact, _)| artifact.clone())
+            .collect(),
+        patch_contents: canonical
             .into_iter()
-            .map(|(_, artifact)| artifact)
+            .map(|(_, artifact, patch)| (artifact.id, patch))
             .collect(),
         unavailable,
+        omitted_candidate_count,
+        omitted_patch_bytes,
     })
 }
 
