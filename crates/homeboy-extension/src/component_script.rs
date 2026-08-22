@@ -91,10 +91,12 @@ fn run_component_scripts_with_env_and_timeout(
             .find(|(key, _)| key == "CARGO_TARGET_DIR")
             .map(|(_, value)| value.clone())
             .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
-        let target = homeboy_core::cleanup::acquire_managed_cargo_target(
+        let environment = env.iter().cloned().collect();
+        let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
             &format!("component:{}", component.id),
             source_path,
             explicit_target.as_deref(),
+            &environment,
         )?;
         env.push((
             "CARGO_TARGET_DIR".to_string(),
