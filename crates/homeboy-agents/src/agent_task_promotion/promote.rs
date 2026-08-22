@@ -42,6 +42,48 @@ use gate_run::PromotionGateRun;
 
 thread_local! {
     static GATE_SUPERVISION: RefCell<Option<Arc<crate::agent_task_gate::GateSupervision>>> = const { RefCell::new(None) };
+    static PROMOTION_PROGRESS: RefCell<Option<PromotionProgressCallback>> = const { RefCell::new(None) };
+}
+
+pub type PromotionProgressCallback = Arc<dyn Fn(&PromotionProgress) -> Result<()> + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub struct PromotionProgress {
+    pub phase: &'static str,
+    pub gate: Option<String>,
+    pub last_progress: Option<String>,
+}
+
+pub fn with_promotion_progress<T>(
+    progress: PromotionProgressCallback,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    PROMOTION_PROGRESS.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "promotion progress scopes cannot nest"
+        );
+        *slot.borrow_mut() = Some(progress);
+        let result = operation();
+        *slot.borrow_mut() = None;
+        result
+    })
+}
+
+pub(crate) fn emit_promotion_progress(
+    phase: &'static str,
+    gate: Option<String>,
+    last_progress: Option<String>,
+) {
+    PROMOTION_PROGRESS.with(|slot| {
+        if let Some(progress) = slot.borrow().as_ref() {
+            let _ = progress(&PromotionProgress {
+                phase,
+                gate,
+                last_progress,
+            });
+        }
+    });
 }
 
 pub(crate) fn with_gate_supervision<T>(
@@ -576,6 +618,11 @@ fn promote_with_provider_and_checkpoint_internal(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<AgentTaskPromotionReport> {
+    emit_promotion_progress(
+        "apply",
+        None,
+        Some("validating promotion input".to_string()),
+    );
     validate_workspace_handle(&options.to_worktree)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
@@ -843,6 +890,7 @@ fn promote_with_provider_and_checkpoint_internal(
         // be replaced before the provider opens it.
         let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
         let provider_patch_path = normalized_patch_file.path().display().to_string();
+        emit_promotion_progress("apply", None, Some("applying patch".to_string()));
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
@@ -1684,6 +1732,11 @@ fn run_promotion_gates(
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
 ) -> Result<PromotionGateRun> {
+    emit_promotion_progress(
+        "hydration",
+        None,
+        Some("preparing candidate and dependencies".to_string()),
+    );
     if worktree_path.is_dir() {
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             worktree_path,
@@ -1757,6 +1810,11 @@ fn run_promotion_gates(
                 blocking_gate_id,
             )
         } else {
+            emit_promotion_progress(
+                "gate",
+                Some(format!("gate-{}", index + 1)),
+                Some("starting deterministic gate".to_string()),
+            );
             run_promotion_gate(
                 options,
                 provider,
@@ -1775,6 +1833,11 @@ fn run_promotion_gates(
         }
         deterministic_gates.push(gate);
     }
+    emit_promotion_progress(
+        "cleanup",
+        None,
+        Some("cleaning promotion gate resources".to_string()),
+    );
     let has_gate_failure = deterministic_gates
         .iter()
         .any(|gate| gate.status == AgentTaskGateStatus::Failed);
