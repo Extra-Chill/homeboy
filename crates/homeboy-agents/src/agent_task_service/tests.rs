@@ -1829,7 +1829,7 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
 }
 
 #[test]
-fn upgrade_admission_recovers_an_orphaned_removed_runner_record_locally() {
+fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
     with_isolated_home(|_| {
         let cook_id = "concurrent-first-cook-run";
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
@@ -1846,21 +1846,9 @@ fn upgrade_admission_recovers_an_orphaned_removed_runner_record_locally() {
         assert_eq!(blocker.owner, "durable_agent_tasks");
         assert_eq!(
             blocker.recovery_command,
-            "homeboy --placement local agent-task reconcile concurrent-first-cook-run --apply"
+            "homeboy --placement local agent-task reconcile concurrent-first-cook-run --dry-run"
         );
-
-        let applied = reconcile_run(cook_id, false).expect("orphaned record reconciles locally");
-        assert_eq!(applied.reconciled, 1);
-        assert_eq!(applied.runs[0].action, "reconciled");
-        assert_eq!(
-            lifecycle_status(cook_id).expect("reconciled record").state,
-            AgentTaskRunState::Cancelled
-        );
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
-        assert!(
-            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now())
-                .allows_controller_replacement()
-        );
+        assert!(!blocker.recovery_command.contains("cancel"));
     });
 }
 
@@ -2002,7 +1990,8 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         }));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == attempt_id
-                && blocker.recovery_command == format!("homeboy agent-task cancel {attempt_id}")
+                && blocker.recovery_command
+                    == format!("homeboy --placement local agent-task status {attempt_id}")
         }));
         assert!(agent_task_lifecycle::reconcile_record_health(true).is_ok());
     });
@@ -2489,7 +2478,8 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
         assert_eq!(admission.blockers.len(), 2);
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == "live-owner"
-                && blocker.recovery_command == "homeboy agent-task cancel live-owner"
+                && blocker.recovery_command
+                    == "homeboy --placement local agent-task status live-owner"
         }));
         let runner = admission
             .blockers
@@ -2507,6 +2497,110 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
             admission.record_health["samples"].as_array().unwrap().len()
                 <= crate::agent_task_lifecycle::HEALTH_SAMPLE_LIMIT
         );
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() {
+    with_isolated_home(|_| {
+        let run_id = "lagging-heartbeat-advancing-provider";
+        let plan = discovery_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
+            .expect("provider reserved");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            // Simulate a lagging lifecycle heartbeat after the provider owner
+            // refreshed its durable execution ownership.
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            record.metadata[agent_task_lifecycle::METADATA_KEY_STALE_RUNNING] =
+                serde_json::json!(true);
+        })
+        .expect("lagging heartbeat fixture");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert_eq!(admission.active, 1);
+        assert_eq!(admission.stale, 0);
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].liveness, "active");
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            format!("homeboy --placement local agent-task status {run_id}")
+        );
+        assert!(!admission.blockers[0].recovery_command.contains("cancel"));
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only() {
+    with_isolated_home(|_| {
+        let run_id = "ambiguous-provider-owner";
+        let plan = discovery_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
+            .expect("provider reserved");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            // Zero is not a process identity and must not be treated as a dead
+            // owner merely because the heartbeat is old.
+            record.metadata["provider_executions"][0]["owner_pid"] = serde_json::json!(0);
+            record.metadata[agent_task_lifecycle::METADATA_KEY_STALE_RUNNING] =
+                serde_json::json!(true);
+        })
+        .expect("ambiguous owner fixture");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert_eq!(admission.unreconciled, 1);
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].liveness, "unreconciled");
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            format!("homeboy --placement local agent-task reconcile {run_id} --dry-run")
+        );
+        assert!(!admission.blockers[0].recovery_command.contains("cancel"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_admission_classifies_a_proven_dead_provider_owner_as_stale() {
+    with_isolated_home(|_| {
+        let run_id = "dead-provider-owner";
+        let plan = discovery_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
+            .expect("provider reserved");
+        let mut owner = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("owner process");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            record.metadata["provider_executions"][0]["owner_pid"] = serde_json::json!(owner.id());
+            // The process is reaped below, so no start-time guess is needed to
+            // prove it dead. Live identities remain checked by the lifecycle.
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] =
+                serde_json::Value::Null;
+        })
+        .expect("dead owner fixture");
+        owner.kill().expect("stop owner");
+        owner.wait().expect("reap owner");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert_eq!(admission.stale, 1);
+        assert!(admission.blockers.is_empty());
+        assert!(admission.allows_controller_replacement());
     });
 }
 

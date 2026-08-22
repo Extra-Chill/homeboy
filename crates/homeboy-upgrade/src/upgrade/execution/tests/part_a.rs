@@ -91,6 +91,7 @@ fn source_upgrade_command_returns_after_same_binary_success() {
         "printf 'built same-version binary\\n'",
         workspace.path(),
         Duration::from_secs(1),
+        None,
     )
     .expect("source command completes");
 }
@@ -104,12 +105,73 @@ fn source_build_command_receives_build_only_contract() {
         quote_path(&observed.display().to_string())
     );
 
-    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1), None)
         .expect("source build completes");
 
     assert_eq!(
         std::fs::read_to_string(observed).expect("build-only value"),
         "1"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"homeboy\"\nversion = \"0.352.0\"\n",
+    )
+    .expect("manifest");
+    let installed = workspace.path().join("installed-homeboy");
+    let candidate = workspace.path().join("staged-homeboy");
+    let evidence = workspace.path().join("admission-evidence");
+    std::fs::write(
+        &installed,
+        "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n",
+    )
+    .expect("installed controller");
+    std::fs::write(
+        &candidate,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '%s|%s|%s\\n' \"$1\" \"$4\" \"$6\" > {}\nexit 0\n",
+            quote_path(&evidence.display().to_string())
+        ),
+    )
+    .expect("staged candidate");
+    for path in [&installed, &candidate] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fixture");
+    }
+
+    verify_source_candidate_target_admission(workspace.path(), &candidate, None, Some(&installed))
+        .expect("new candidate, not the old controller, admits replacement");
+    assert_eq!(
+        std::fs::read_to_string(&evidence).expect("admission evidence"),
+        "self|homeboy 0.351.0+old|0.352.0\n"
+    );
+
+    std::fs::write(
+        &candidate,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n",
+    )
+    .expect("failing staged candidate");
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+        .expect("failing candidate executable");
+    let error = verify_source_candidate_target_admission(
+        workspace.path(),
+        &candidate,
+        None,
+        Some(&installed),
+    )
+    .expect_err("candidate admission failure blocks promotion");
+
+    assert!(error.message.contains("verified source candidate refused"));
+    assert_eq!(
+        std::fs::read_to_string(&installed).expect("installed bytes"),
+        "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n"
     );
 }
 
@@ -206,7 +268,7 @@ fn source_upgrade_completion_reaps_background_process_group() {
         quote_path(&pid_file.display().to_string())
     );
 
-    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1), None)
         .expect("source command completes");
 
     let child_pid = std::fs::read_to_string(&pid_file)
@@ -238,8 +300,9 @@ fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
         quote_path(&pid_file.display().to_string())
     );
 
-    let err = run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50))
-        .expect_err("long-running source command times out");
+    let err =
+        run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50), None)
+            .expect_err("long-running source command times out");
     assert!(
         err.details.to_string().to_lowercase().contains("timed out"),
         "unexpected timeout error: {err:?}"
@@ -403,37 +466,57 @@ fn source_install_byte_match_rejects_same_version_stale_binary() {
 }
 
 #[test]
-fn source_built_binary_path_uses_source_local_target_by_default() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_built_binary_path_uses_the_managed_target() {
+    let target = Path::new("/managed/homeboy-cargo-target");
 
     assert_eq!(
-        source_built_binary_path_for_target_dir(workspace, None),
-        workspace.join("target/release/homeboy")
+        source_built_binary_path(target),
+        target.join("release/homeboy")
     );
 }
 
 #[test]
-fn source_built_binary_path_uses_absolute_cargo_target_dir() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_build_command_uses_the_managed_target_outside_the_checkout() {
+    let workspace = tempfile::tempdir().expect("workspace");
     let target_dir = Path::new("/shared/cargo-target");
+    let observed = workspace.path().join("cargo-target");
+    let command = format!(
+        "printf '%s' \"$CARGO_TARGET_DIR\" > {}",
+        quote_path(&observed.display().to_string())
+    );
+
+    run_source_upgrade_command(
+        &command,
+        workspace.path(),
+        Duration::from_secs(1),
+        Some((target_dir, "isolated")),
+    )
+    .expect("source build completes");
 
     assert_eq!(
-        source_built_binary_path_for_target_dir(workspace, Some(target_dir.as_os_str())),
-        target_dir.join("release/homeboy")
+        std::fs::read_to_string(observed).expect("target value"),
+        "/shared/cargo-target"
     );
 }
 
 #[test]
-fn source_built_binary_path_resolves_relative_cargo_target_dir_from_workspace() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_upgrade_reports_external_target_deletion_separately_from_capacity() {
+    let target = tempfile::tempdir().expect("target");
+    let deleted = target.path().join("deleted");
+    let status = Command::new("sh")
+        .args(["-c", "exit 1"])
+        .status()
+        .expect("status");
 
-    assert_eq!(
-        source_built_binary_path_for_target_dir(
-            workspace,
-            Some(std::ffi::OsStr::new("shared/target"))
-        ),
-        workspace.join("shared/target/release/homeboy")
-    );
+    let error = source_upgrade_command_failure(status, Some(&deleted));
+
+    assert!(error
+        .message
+        .contains("deleted while its lifecycle lease was active"));
+    assert!(error
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("external deletion")));
 }
 
 #[test]

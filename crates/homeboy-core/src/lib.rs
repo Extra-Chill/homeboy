@@ -36,9 +36,9 @@ pub use lab_contract as command_contract;
 // Stable domain facades for new command/core integrations.
 pub mod artifacts;
 pub use cleanup::{
-    acquire_managed_cargo_target, acquire_managed_cargo_target_for_environment,
-    acquire_managed_cargo_target_with_compatibility, cargo_target_compatibility,
-    CargoTargetCompatibility, ManagedCargoTarget,
+    acquire_isolated_cargo_target, acquire_managed_cargo_target,
+    acquire_managed_cargo_target_for_environment, acquire_managed_cargo_target_with_compatibility,
+    cargo_target_compatibility, CargoTargetCompatibility, ManagedCargoTarget,
 };
 pub use homeboy_engine_primitives::cargo_target::CargoTargetEvidence;
 

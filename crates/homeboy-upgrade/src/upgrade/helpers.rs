@@ -175,11 +175,13 @@ pub fn run_upgrade_with_method(
             defaults::secondary_install_method_key()
         )));
     }
-    // A release candidate is checksum- and exact-version-verified by the
-    // installer before it performs target-version admission recovery. Legacy
-    // admission cannot classify provenance added by that candidate, so it must
-    // not prevent downloading the only binary that can safely prove recovery.
-    if install_method != InstallMethod::Binary {
+    // Packaged and source candidates are verified before they run their own
+    // target admission. Legacy admission cannot classify provenance added by a
+    // selected candidate, so it must not prevent building or staging it.
+    if !matches!(
+        install_method,
+        InstallMethod::Binary | InstallMethod::Source
+    ) {
         ensure_controller_upgrade_admission()?;
     }
     validate_pinned_version(pinned_version, install_method)?;

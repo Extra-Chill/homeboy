@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
@@ -17,6 +18,7 @@ const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
+static ISOLATED_TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct CargoTargetCleanupOptions {
@@ -186,6 +188,38 @@ pub fn acquire_managed_cargo_target(
     acquire_managed_cargo_target_with_compatibility(owner, source_path, explicit_target, &[])
 }
 
+/// Acquire a fresh, leased target for a single managed run. This prevents a
+/// mutable checkout's local output from becoming part of the build lifecycle.
+/// An explicit target remains authoritative for callers that deliberately
+/// manage their own output location.
+pub fn acquire_isolated_cargo_target(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+) -> Result<ManagedCargoTarget> {
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        return Ok(local_managed_cargo_target(owner, source_path, target));
+    }
+    let root = shared_cargo_target_root()?;
+    admit_shared_cargo_target(&root)?;
+    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let lease = acquire_shared_cargo_target_in(
+        &root,
+        &format!("{owner}:run:{}:{started}:{sequence}", std::process::id()),
+        SystemTime::now(),
+    )?;
+    Ok(ManagedCargoTarget {
+        target_dir: lease.target_dir().to_path_buf(),
+        resolution: "isolated",
+        owner: owner.to_string(),
+        _lease: Some(lease),
+    })
+}
+
 /// Acquire a target store whose identity is bound to the repository and the
 /// declared build compatibility surface.  Cargo still owns fine-grained crate
 /// fingerprints inside this directory; this boundary prevents unrelated build
@@ -235,18 +269,7 @@ fn acquire_managed_cargo_target_for_compatibility(
     compatibility: &CargoTargetCompatibility,
 ) -> Result<ManagedCargoTarget> {
     if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
-        let target_dir = PathBuf::from(target);
-        let target_dir = if target_dir.is_absolute() {
-            target_dir
-        } else {
-            source_path.join(target_dir)
-        };
-        return Ok(ManagedCargoTarget {
-            target_dir,
-            resolution: "local",
-            owner: owner.to_string(),
-            _lease: None,
-        });
+        return Ok(local_managed_cargo_target(owner, source_path, target));
     }
 
     let lease = acquire_shared_cargo_target(&format!("{owner}:{}", compatibility.identity()))?;
@@ -256,6 +279,21 @@ fn acquire_managed_cargo_target_for_compatibility(
         owner: owner.to_string(),
         _lease: Some(lease),
     })
+}
+
+fn local_managed_cargo_target(owner: &str, source_path: &Path, target: &str) -> ManagedCargoTarget {
+    let target_dir = PathBuf::from(target);
+    let target_dir = if target_dir.is_absolute() {
+        target_dir
+    } else {
+        source_path.join(target_dir)
+    };
+    ManagedCargoTarget {
+        target_dir,
+        resolution: "local",
+        owner: owner.to_string(),
+        _lease: None,
+    }
 }
 
 /// Collect the target identity from repository inputs and the declared child
@@ -1457,7 +1495,7 @@ mod tests {
         fs::read_dir(root).unwrap().next().unwrap().unwrap().path()
     }
     #[test]
-    fn active_producer_is_protected_even_with_zero_day_retention() {
+    fn concurrent_cleanup_cannot_reclaim_a_live_build_lease() {
         let root = TempDir::new().unwrap();
         let now = SystemTime::now();
         let lease = acquire_shared_cargo_target_in(root.path(), "active", now).unwrap();
@@ -1465,9 +1503,11 @@ mod tests {
         let mut opts = options(root.path(), true, now);
         opts.older_than = Duration::ZERO;
         opts.max_bytes = 0;
-        let output = cleanup_shared_cargo_targets(opts).unwrap();
+        let cleanup = std::thread::spawn(move || cleanup_shared_cargo_targets(opts));
+        let output = cleanup.join().unwrap().unwrap();
         assert_eq!(output.applied_count, 0);
         assert_eq!(output.retained_by_reason["active lease"], 1);
+        assert!(lease.target_dir().join("artifact").exists());
         drop(lease);
     }
     #[test]
