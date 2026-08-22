@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.5] - 2026-08-22
+
+### Fixed
+- terminate phase heartbeat timers
+
 ## [2.14.4] - 2026-08-21
 
 ### Fixed
