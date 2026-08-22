@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use super::agent_task::candidate::{classify_candidates, CandidateState};
+use super::agent_task::candidate::{
+    changed_files_for_artifact, classify_candidates, CandidateState,
+};
 use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
@@ -57,7 +59,11 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     let tasks_planned = usize_value(payload, &["task_count"])
         .or_else(|| array_len(payload, &["record", "tasks"]))
         .unwrap_or(0);
-    let tasks_attempted = aggregate_outcome_count(payload).unwrap_or(0);
+    let canonical = classify_candidates(payload);
+    let tasks_attempted = canonical
+        .provider_executions
+        .or_else(|| aggregate_outcome_count(payload))
+        .unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"])
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
@@ -106,7 +112,10 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     let run_id = string_value(payload, &["run_id"])?;
     let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
     let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
-    let tasks_attempted = status_attempted_task_count(payload);
+    let canonical = classify_candidates(payload);
+    let tasks_attempted = canonical
+        .provider_executions
+        .unwrap_or_else(|| status_attempted_task_count(payload));
     let metrics = code_production_metrics(payload);
     let state = string_value(payload, &["cook", "state"]).unwrap_or_else(|| {
         effective_run_state(
@@ -432,14 +441,6 @@ fn aggregate_artifact_count(payload: &Value) -> usize {
         .unwrap_or_else(|| array_len(payload, &["artifact_refs"]).unwrap_or(0))
 }
 
-const APPLY_ARTIFACT_KINDS: &[&str] = &[
-    "patch",
-    "diff",
-    "change_artifact",
-    "workspace_patch",
-    "artifact",
-];
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct CodeProductionMetrics {
     non_empty_patches: usize,
@@ -508,58 +509,17 @@ fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
         metrics.candidate_scan_degraded = canonical.is_degraded();
         return metrics;
     }
-    if payload.get("aggregate").is_none()
-        && payload
-            .pointer("/canonical_candidate/schema")
-            .and_then(Value::as_str)
-            == Some("homeboy/agent-task-candidate/v1")
-    {
-        metrics.non_empty_patches = canonical.available;
-        metrics.empty_patches = canonical.empty;
-        metrics.diff_bytes = canonical.diff_bytes;
-        metrics.unknown_size_patches = canonical.unknown
-            + canonical.missing
-            + canonical.unreadable
-            + canonical.conflicting
-            + canonical.retained_only;
-        // Compact projections intentionally omit patch contents and changed-file
-        // metadata, so never present their absent detail as a verified zero.
-        metrics.changed_files_unknown_patches = canonical.available;
-        metrics.candidate_state = canonical.state();
-        metrics.candidate_scan_degraded = canonical.is_degraded();
-        return metrics;
-    }
-    // Metrics intentionally come from the display/review artifacts so rejected,
-    // unreadable, and changed-file evidence retains its established semantics.
-    // The candidate classifier only annotates that evidence with terminal state.
-    if !canonical.is_degraded() {
-        for patch in collect_patch_artifacts(payload) {
-            match patch.size_bytes {
-                Some(size) if size > 0 => {
-                    metrics.non_empty_patches += 1;
-                    metrics.diff_bytes += size;
-                    match patch.changed_files {
-                        Some(count) => metrics.changed_files += count,
-                        None => metrics.changed_files_unknown_patches += 1,
-                    }
-                }
-                Some(_) => metrics.empty_patches += 1,
-                None => metrics.unknown_size_patches += 1,
-            }
-        }
-    }
-    let measured_state = if metrics.non_empty_patches > 0 {
-        CandidateState::PatchAvailable
-    } else if metrics.empty_patches > 0 {
-        CandidateState::Empty
-    } else {
-        CandidateState::Unknown
-    };
-    metrics.candidate_state = if canonical.state() == CandidateState::Unknown {
-        measured_state
-    } else {
-        canonical.state()
-    };
+    metrics.non_empty_patches = canonical.available;
+    metrics.empty_patches = canonical.empty;
+    metrics.diff_bytes = canonical.diff_bytes;
+    metrics.changed_files = canonical.changed_files;
+    metrics.changed_files_unknown_patches = canonical.changed_files_unknown_patches;
+    metrics.unknown_size_patches = canonical.unknown
+        + canonical.missing
+        + canonical.unreadable
+        + canonical.conflicting
+        + canonical.retained_only;
+    metrics.candidate_state = canonical.state();
     metrics.candidate_scan_degraded = canonical.is_degraded();
     metrics
 }
@@ -569,124 +529,6 @@ struct PatchArtifact {
     /// `Some(n)` when the changed-file count is known (from metadata or by
     /// parsing the patch content); `None` when it could not be determined.
     changed_files: Option<usize>,
-}
-
-fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
-    if let Some(inventory) =
-        value_at(payload, &["aggregate_review", "artifact_inventory"]).and_then(Value::as_array)
-    {
-        let candidate_ids = review_candidate_ids(payload);
-        return inventory
-            .iter()
-            .filter_map(|item| {
-                let artifact_id = string_value(item, &["artifact_id"])?;
-                let task_id = string_value(item, &["task_id"])?;
-                if !candidate_ids.contains(&(task_id, artifact_id)) {
-                    return None;
-                }
-                if !is_apply_kind(item) {
-                    return None;
-                }
-                Some(PatchArtifact {
-                    size_bytes: u64_value(item, &["size_bytes"]),
-                    changed_files: resolve_changed_files(item),
-                })
-            })
-            .collect();
-    }
-
-    if let Some(outcomes) = value_at(payload, &["aggregate", "outcomes"]).and_then(Value::as_array)
-    {
-        return outcomes
-            .iter()
-            .flat_map(|outcome| {
-                value_at(outcome, &["artifacts"])
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter(|artifact| is_display_apply_artifact(artifact))
-                    .map(|artifact| PatchArtifact {
-                        size_bytes: u64_value(artifact, &["size_bytes"]),
-                        changed_files: resolve_changed_files(artifact),
-                    })
-            })
-            .collect();
-    }
-
-    if let Some(attempts) = value_at(payload, &["attempts"]).and_then(Value::as_array) {
-        let artifacts: Vec<&Value> = attempts
-            .iter()
-            .flat_map(|attempt| {
-                value_at(attempt, &["aggregate", "outcomes"])
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|outcome| {
-                        value_at(outcome, &["artifacts"])
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                    })
-            })
-            .collect();
-        let canonical: Vec<&Value> = artifacts
-            .iter()
-            .copied()
-            .filter(|artifact| is_canonical_mirror(artifact))
-            .collect();
-        let artifacts = if canonical.is_empty() {
-            artifacts
-        } else {
-            canonical
-        };
-        return artifacts
-            .into_iter()
-            .filter(|artifact| is_display_apply_artifact(artifact))
-            .map(|artifact| PatchArtifact {
-                size_bytes: u64_value(artifact, &["size_bytes"]),
-                changed_files: resolve_changed_files(artifact),
-            })
-            .collect();
-    }
-
-    if let Some(references) = value_at(payload, &["artifact_refs"]).and_then(Value::as_array) {
-        return references
-            .iter()
-            .filter(|reference| is_apply_kind(reference))
-            .map(|reference| PatchArtifact {
-                size_bytes: u64_value(reference, &["size_bytes"]),
-                changed_files: resolve_changed_files(reference),
-            })
-            .collect();
-    }
-
-    Vec::new()
-}
-
-fn review_candidate_ids(payload: &Value) -> Vec<(&str, &str)> {
-    let mut ids = Vec::new();
-    for kind in ["apply_candidates", "review_candidates"] {
-        if let Some(candidates) =
-            value_at(payload, &["aggregate_review", kind]).and_then(Value::as_array)
-        {
-            for candidate in candidates {
-                let Some(task_id) = string_value(candidate, &["task_id"]) else {
-                    continue;
-                };
-                let Some(artifact_ids) =
-                    value_at(candidate, &["artifact_ids"]).and_then(Value::as_array)
-                else {
-                    continue;
-                };
-                for artifact_id in artifact_ids {
-                    if let Some(artifact_id) = artifact_id.as_str() {
-                        ids.push((task_id, artifact_id));
-                    }
-                }
-            }
-        }
-    }
-    ids
 }
 
 fn selected_candidate_patch(payload: &Value) -> Option<PatchArtifact> {
@@ -706,34 +548,6 @@ fn selected_candidate_patch(payload: &Value) -> Option<PatchArtifact> {
     })
 }
 
-fn is_apply_kind(artifact: &Value) -> bool {
-    let Some(kind) = string_value(artifact, &["kind"]) else {
-        return false;
-    };
-    APPLY_ARTIFACT_KINDS.contains(&kind)
-}
-
-fn is_display_apply_artifact(artifact: &Value) -> bool {
-    if !is_apply_kind(artifact) {
-        return false;
-    }
-    !(artifact_flag(artifact, "rejected") || artifact_flag(artifact, "false_positive"))
-}
-
-fn is_canonical_mirror(artifact: &Value) -> bool {
-    value_at(artifact, &["metadata", "executor_artifact_finalized"]).and_then(Value::as_bool)
-        == Some(true)
-        || string_value(artifact, &["url"])
-            .is_some_and(|url| url.starts_with("homeboy://agent-task/run/"))
-}
-
-fn artifact_flag(artifact: &Value, key: &str) -> bool {
-    value_at(artifact, &["metadata"])
-        .and_then(|metadata| metadata.get(key))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 /// Resolve the number of files a patch artifact changes.
 ///
 /// Prefers authoritative metadata (`changed_files` list or
@@ -742,20 +556,7 @@ fn artifact_flag(artifact: &Value, key: &str) -> bool {
 /// cannot be determined so callers can render `unknown` instead of a misleading
 /// zero for a substantive patch (#9742).
 fn resolve_changed_files(artifact: &Value) -> Option<usize> {
-    if let Some(files) =
-        value_at(artifact, &["metadata", "changed_files"]).and_then(Value::as_array)
-    {
-        return Some(files.len());
-    }
-    if let Some(count) =
-        value_at(artifact, &["metadata", "changed_file_count"]).and_then(Value::as_u64)
-    {
-        return Some(count as usize);
-    }
-    // No metadata: parse the patch file the artifact points at.
-    let path = string_value(artifact, &["path"])?;
-    let content = std::fs::read_to_string(path).ok()?;
-    Some(changed_paths_from_patch(&content).len())
+    changed_files_for_artifact(artifact)
 }
 
 /// Extract the set of unique file paths a unified-diff patch touches.
@@ -1132,40 +933,45 @@ mod tests {
     fn cook_summary_parses_changed_files_from_patch_when_metadata_absent() {
         // Regression for #9742: a substantive patch with no changed-file
         // metadata must report the real count parsed from patch content, not 0.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let patch_path = dir.path().join("patch.diff");
-        let patch = "diff --git a/crates/a/src/x.rs b/crates/a/src/x.rs\n\
+        crate::test_support::with_isolated_home(|_| {
+            let root = homeboy::core::artifact_root().expect("artifact root");
+            std::fs::create_dir_all(&root).expect("create artifact root");
+            let patch_path = root.join("patch.diff");
+            let patch = "diff --git a/crates/a/src/x.rs b/crates/a/src/x.rs\n\
              --- a/crates/a/src/x.rs\n+++ b/crates/a/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n\
              diff --git a/crates/a/src/y.rs b/crates/a/src/y.rs\n\
              --- a/crates/a/src/y.rs\n+++ b/crates/a/src/y.rs\n@@ -1 +1 @@\n-c\n+d\n\
              diff --git a/crates/a/src/z.rs b/crates/a/src/z.rs\n\
              --- a/crates/a/src/z.rs\n+++ b/crates/a/src/z.rs\n@@ -1 +1 @@\n-e\n+f\n";
-        std::fs::write(&patch_path, patch).expect("write patch");
+            std::fs::write(&patch_path, patch).expect("write patch");
 
-        let payload = json!({
-            "run_id": "agent-task-9742",
-            "state": "succeeded",
-            "task_count": 1,
-            "aggregate": {
-                "outcomes": [{
-                    "task_id": "agent-task-9742",
-                    "artifacts": [{
-                        "id": "patch",
-                        "kind": "patch",
-                        "path": patch_path.to_str().unwrap(),
-                        "size_bytes": 17338
+            let payload = json!({
+                "run_id": "agent-task-9742",
+                "state": "succeeded",
+                "task_count": 1,
+                "aggregate": {
+                    "outcomes": [{
+                        "task_id": "agent-task-9742",
+                        "artifacts": [{
+                            "id": "patch",
+                            "kind": "patch",
+                            "path": patch_path.to_str().unwrap(),
+                            "size_bytes": patch.len(),
+                            "url": "homeboy://agent-task/run/agent-task-9742/artifacts#task=agent-task-9742&artifact=patch",
+                            "metadata": { "executor_artifact_finalized": true }
+                        }]
                     }]
-                }]
-            }
+                }
+            });
+
+            let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+            assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+            assert!(
+                summary.contains("Changed files: 3\n"),
+                "expected 3 changed files parsed from patch content, got: {summary}"
+            );
         });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
-
-        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-        assert!(
-            summary.contains("Changed files: 3\n"),
-            "expected 3 changed files parsed from patch content, got: {summary}"
-        );
     }
 
     #[test]
@@ -1221,6 +1027,73 @@ mod tests {
 
         assert!(summary.contains("Changed files: 3\n"));
         assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn selection_required_timeout_recovery_has_matching_status_and_review_inventory() {
+        // Three providers timed out from the scheduler's perspective but each
+        // deferred cleanup harvested a distinct durable patch. There are no
+        // normalized task entries, which previously made status say zero tasks
+        // while review discarded all three candidates.
+        let candidates = [
+            ("timeout-recovered-1", 32_318, 2),
+            ("timeout-recovered-2", 32_318, 3),
+            ("timeout-recovered-3", 32_412, 4),
+        ]
+        .into_iter()
+        .map(|(id, size_bytes, changed_file_count)| {
+            json!({
+                "id": id,
+                "kind": "patch",
+                "size_bytes": size_bytes,
+                "url": format!("homeboy://agent-task/run/selection-required/artifacts#{id}"),
+                "metadata": {
+                    "executor_artifact_finalized": true,
+                    "changed_file_count": changed_file_count,
+                    "recovered_from": "scheduler_timeout",
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+        let aggregate = json!({
+            "outcomes": [{ "task_id": "cook", "artifacts": candidates }],
+        });
+        let status = json!({
+            "run_id": "selection-required",
+            "state": "selection_required",
+            "tasks": [],
+            "metadata": { "provider_executions_consumed": 3 },
+            "aggregate": aggregate,
+        });
+        let review = json!({
+            "run_id": "selection-required",
+            "state": "partial_recoverable",
+            "record": { "metadata": { "provider_executions_consumed": 3 } },
+            "aggregate": status["aggregate"].clone(),
+            "aggregate_review": { "summary": { "apply_candidates": 3, "failed": 0 } },
+        });
+
+        let status_summary =
+            render_agent_task_summary(AgentTaskSummaryKind::Status, &status).expect("status");
+        let review_summary =
+            render_agent_task_summary(AgentTaskSummaryKind::Review, &review).expect("review");
+
+        for summary in [&status_summary, &review_summary] {
+            assert!(
+                summary.contains("Patch candidates: 3 non-empty / 0 empty\n"),
+                "{summary}"
+            );
+            assert!(
+                summary.contains("Candidate state: patch_available\n"),
+                "{summary}"
+            );
+            assert!(summary.contains("Changed files: 9\n"), "{summary}");
+            assert!(summary.contains("Diff bytes: 97048\n"), "{summary}");
+        }
+        assert!(
+            status_summary.contains("Tasks attempted: 3\n"),
+            "{status_summary}"
+        );
     }
 
     #[test]
