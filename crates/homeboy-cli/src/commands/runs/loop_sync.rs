@@ -14,7 +14,7 @@ use super::{CmdResult, RunsOutput};
 use types::*;
 pub use types::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 
-pub fn loop_sync(args: RunsLoopSyncArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn loop_sync(args: RunsLoopSyncArgs) -> CmdResult<RunsOutput> {
     if !args.archive_root.is_dir() {
         return Err(Error::validation_invalid_argument(
             "archive_root",

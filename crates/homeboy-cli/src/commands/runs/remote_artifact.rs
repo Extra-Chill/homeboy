@@ -442,7 +442,7 @@ fn directory_contains_html_inner(path: &Path, seen: usize) -> bool {
     false
 }
 
-pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<RunsOutput> {
     // Same resolver as `homeboy cleanup --include runner-downloads`. `--runner`
     // and `--run-id` are the narrowing filters that keep this specialist alive;
     // the inspection budget is not one of them, and the age floor is fixed and
@@ -486,7 +486,7 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
     ))
 }
 
-pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<RunsOutput> {
     // Same resolver as `homeboy cleanup --include persisted-run-artifacts`.
     // The narrowing filters below (`--run-id`, `--kind`, `--type`,
     // `--run-kind`, `--component`) are what keep this specialist alive; the

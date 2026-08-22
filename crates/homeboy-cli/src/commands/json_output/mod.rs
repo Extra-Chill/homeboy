@@ -29,7 +29,7 @@ pub fn run(
     dispatch(command, spec, placement)
 }
 
-pub fn run_command_output(
+pub(crate) fn run_command_output(
     command: Commands,
     spec: &CommandSpec,
     output_file: Option<&str>,

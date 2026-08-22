@@ -715,7 +715,7 @@ pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     ))
 }
 
-pub fn resume_plan(run_id: &str) -> CmdResult<RunsOutput> {
+pub(crate) fn resume_plan(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     let run = runs_service::require_run(&store, run_id)?;
@@ -784,7 +784,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     })
 }
 
-pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     if let Some(runner_id) = args.runner.as_deref() {
         if args.pull {
             return Err(Error::validation_invalid_argument(

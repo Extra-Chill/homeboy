@@ -98,7 +98,7 @@ pub struct RunsDossierCommandHint {
     pub reason: String,
 }
 
-pub fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_readonly()?;
     let (run, artifacts) = runs_service::load_run_with_artifacts(&store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);

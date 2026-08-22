@@ -145,7 +145,7 @@ impl ResolvedScope {
     ///
     /// `command` may be a compound invocation (e.g. `"refactor --from all"`);
     /// only the leading base command is inspected.
-    pub fn command_flags(&self, command: &str) -> Vec<String> {
+    pub(crate) fn command_flags(&self, command: &str) -> Vec<String> {
         let base_cmd = command.split_whitespace().next().unwrap_or("");
         match (&self.mode, &self.base_ref) {
             (ScopeMode::Changed, Some(base_ref))
@@ -177,7 +177,10 @@ pub enum MergeBaseResolver<'a> {
 ///   the [`MergeBaseResolver`].
 /// - Any failure to establish a base ref or merge base falls back
 ///   deterministically to full scope, with a `fallback_reason` recorded.
-pub fn resolve_scope(request: &ScopeRequest, resolver: MergeBaseResolver) -> Result<ResolvedScope> {
+pub(crate) fn resolve_scope(
+    request: &ScopeRequest,
+    resolver: MergeBaseResolver,
+) -> Result<ResolvedScope> {
     if request.context != ScopeContext::PullRequest {
         return Ok(ResolvedScope::full(request.context, request.is_fork, None));
     }
@@ -272,7 +275,7 @@ impl GithubActionsContext {
     }
 
     /// Normalize this GitHub context into a provider-agnostic [`ScopeRequest`].
-    pub fn to_request(&self) -> ScopeRequest {
+    pub(crate) fn to_request(&self) -> ScopeRequest {
         let context = self.context();
         let base_ref = if context == ScopeContext::PullRequest {
             self.base_sha.clone()

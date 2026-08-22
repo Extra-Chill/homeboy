@@ -100,7 +100,7 @@ fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
     ))
 }
 
-pub fn show_version_output(component_id: &str) -> CmdResult<VersionShowOutput> {
+pub(crate) fn show_version_output(component_id: &str) -> CmdResult<VersionShowOutput> {
     let info = read_version(Some(component_id))?;
 
     Ok((

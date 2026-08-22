@@ -18,7 +18,7 @@ pub fn sanitize_artifact_file_name(raw: &str) -> String {
 /// An import walks every artifact of every run; resolving the data root per
 /// file made the destination of one import depend on process-global state that
 /// could change between two files of the same run.
-pub fn persist_artifact_file_in_roots(
+pub(crate) fn persist_artifact_file_in_roots(
     data_root: &Path,
     homeboy_run_id: &str,
     artifact_id: &str,
@@ -48,7 +48,11 @@ pub fn persist_artifact_file_in_roots(
 /// The body and the ETag of one cache entry are two files that must live beside
 /// each other; resolving the root once per file let a 304 be validated against
 /// an ETag from a different installation.
-pub fn list_runs_cache_path_in_roots(config_root: &Path, key: &str, ext: &str) -> Result<PathBuf> {
+pub(crate) fn list_runs_cache_path_in_roots(
+    config_root: &Path,
+    key: &str,
+    ext: &str,
+) -> Result<PathBuf> {
     let base = config_root.join("cache").join("gh-actions-runs");
     fs::create_dir_all(&base).map_err(|e| {
         Error::internal_io(
@@ -63,7 +67,12 @@ pub fn list_runs_cache_path_in_roots(config_root: &Path, key: &str, ext: &str) -
 ///
 /// Best-effort: directory creation and writes are ignored on failure to match
 /// the prior inline behavior (a failed cache write must not fail the command).
-pub fn write_runs_cache(body_path: &Path, etag_path: &Path, body: &[u8], etag: Option<&str>) {
+pub(crate) fn write_runs_cache(
+    body_path: &Path,
+    etag_path: &Path,
+    body: &[u8],
+    etag: Option<&str>,
+) {
     if let Some(parent) = body_path.parent() {
         let _ = fs::create_dir_all(parent);
     }

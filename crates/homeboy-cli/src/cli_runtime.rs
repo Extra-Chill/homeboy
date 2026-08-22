@@ -127,7 +127,7 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
     Some(std::process::ExitCode::SUCCESS)
 }
 
-pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
+pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
     let discovery = collect_extension_cli_info();
     let dynamic_descriptors = discovery
         .info
@@ -143,7 +143,7 @@ pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
 
 /// Installed command/capability metadata for admission checks. Extension
 /// discovery intentionally skips readiness probes at this phase.
-pub fn current_augmented_command_surface() -> crate::cli_surface::CommandSurface {
+fn current_augmented_command_surface() -> crate::cli_surface::CommandSurface {
     let discovery = collect_extension_cli_info_metadata_only();
     command_surface_from(build_augmented_command(&discovery.info, &discovery.health))
 }
@@ -163,7 +163,7 @@ pub(crate) fn current_augmented_command_contract() -> clap::Command {
 /// completeness test the exact startup wiring the binary performs.
 ///
 /// Order is load-bearing and preserved verbatim from the original inline block.
-pub fn register_startup_providers_before_reconcile() {
+pub(crate) fn register_startup_providers_before_reconcile() {
     // Register the config-level artifact_root resolver before any command runs
     // so paths::artifact_root() can honor global config without paths depending
     // on the defaults layer (breaks the paths <-> defaults dependency cycle).
@@ -240,7 +240,7 @@ pub fn register_startup_providers_before_reconcile() {
 /// Takes the agent-task config rather than loading it so the completeness test
 /// can drive the full registration sequence without touching the ambient home
 /// directory.
-pub fn register_startup_providers_after_reconcile(
+fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
 ) -> Result<(), crate::core::error::Error> {
     // Register the runner daemon-exec driver so the daemon's /exec endpoint

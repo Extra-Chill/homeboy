@@ -68,7 +68,7 @@ pub struct ReconciledRunSummary {
     pub remote_job_status: Option<String>,
 }
 
-pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let running = running_runs(&store, args.limit)?;
     let inspected = running.len();

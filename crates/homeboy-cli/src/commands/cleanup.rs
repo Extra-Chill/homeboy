@@ -210,7 +210,7 @@ const CLEANUP_JOB_VERSION: u32 = 1;
 /// Registers cleanup with the daemon's generic durable-job infrastructure. The
 /// command owns cleanup semantics; the daemon only owns process-independent
 /// admission, recovery, and durable progress.
-pub fn register_cleanup_job_driver() {
+pub(crate) fn register_cleanup_job_driver() {
     static REGISTERED: OnceLock<()> = OnceLock::new();
     REGISTERED.get_or_init(|| {
         controller_job_driver::register_controller_job_driver(Arc::new(CleanupJobDriver))

@@ -21,7 +21,7 @@ pub use browser_evidence_compare::{
     BrowserEvidenceCompareReport, VisualCompareOptions,
 };
 pub use failure_digest::{render_failure_digest_from_args, FailureDigestArgs};
-pub use matrix_artifacts::{
+pub(crate) use matrix_artifacts::{
     matrix_artifacts_from_args, render_matrix_artifacts_from_args, MatrixArtifactsArgs,
     MatrixArtifactsReport,
 };
@@ -110,16 +110,16 @@ impl ReportCommand {
     }
 
     /// True when this invocation renders markdown directly.
-    pub fn is_markdown(&self) -> bool {
+    pub(crate) fn is_markdown(&self) -> bool {
         self.format() == MARKDOWN_FORMAT
     }
 }
 
-pub fn is_markdown_mode(args: &ReportArgs) -> bool {
+pub(crate) fn is_markdown_mode(args: &ReportArgs) -> bool {
     args.command.is_markdown()
 }
 
-pub fn run_markdown(args: ReportArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: ReportArgs) -> CmdResult<String> {
     match args.command {
         ReportCommand::FailureDigest(failure_args) => {
             let markdown = render_failure_digest_from_args(&failure_args)?;

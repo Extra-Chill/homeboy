@@ -155,7 +155,7 @@ impl LintArgs {
         None
     }
 
-    pub fn is_full_workspace_run(&self) -> bool {
+    fn is_full_workspace_run(&self) -> bool {
         self.changed.is_full_scope() && self.file.is_none() && self.glob.is_none()
     }
 
@@ -179,14 +179,14 @@ impl LintArgs {
     /// Positional component id targeted by this run, if any (the
     /// `homeboy review lint <component>` form). Returns `None` when the component is
     /// auto-detected from the working directory.
-    pub fn lab_offload_positional_component(&self) -> Option<String> {
+    pub(crate) fn lab_offload_positional_component(&self) -> Option<String> {
         self.comp.component.clone()
     }
 
     /// Whether an explicit `--path` override was supplied. When present, the
     /// offload pipeline already syncs and remaps that path, so component-id
     /// based source resolution must not override it.
-    pub fn lab_offload_has_path_override(&self) -> bool {
+    pub(crate) fn lab_offload_has_path_override(&self) -> bool {
         self.comp.path.is_some()
     }
 }

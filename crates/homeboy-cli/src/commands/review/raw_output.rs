@@ -3,7 +3,7 @@ use homeboy_review::review::render;
 
 use super::{run_umbrella, ReviewArgs};
 
-pub fn run_markdown_with_json(args: ReviewArgs) -> CommandRun {
+pub(crate) fn run_markdown_with_json(args: ReviewArgs) -> CommandRun {
     let banners = args.banner.clone();
     match run_umbrella(args) {
         Ok((output, exit_code)) => {

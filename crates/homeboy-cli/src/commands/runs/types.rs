@@ -603,7 +603,7 @@ pub struct RunsArtifactPathGuide {
 }
 
 impl RunsArtifactPathGuide {
-    pub fn for_listing(run_id: &str, runner_id: Option<&str>) -> Self {
+    pub(crate) fn for_listing(run_id: &str, runner_id: Option<&str>) -> Self {
         let listing_source = runner_id
             .map(|runner_id| format!("connected_runner:{runner_id}"))
             .unwrap_or_else(|| "operator_local_persisted_store".to_string());

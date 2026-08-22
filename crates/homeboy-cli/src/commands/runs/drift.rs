@@ -97,7 +97,7 @@ pub struct DriftValue {
     pub share_delta: Option<f64>,
 }
 
-pub fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
     if args.metric.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "metric",

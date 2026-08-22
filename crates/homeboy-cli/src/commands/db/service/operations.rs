@@ -156,7 +156,7 @@ fn parse_json_tables(json: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
 }
 
-pub fn list_tables(project_id: &str, subtarget: Option<&str>) -> Result<DbResult> {
+pub(crate) fn list_tables(project_id: &str, subtarget: Option<&str>) -> Result<DbResult> {
     let ctx = build_context(project_id, subtarget)?;
 
     let vars = ctx.base_template_vars();
@@ -184,7 +184,7 @@ pub fn list_tables(project_id: &str, subtarget: Option<&str>) -> Result<DbResult
     })
 }
 
-pub fn describe_table(
+pub(crate) fn describe_table(
     project_id: &str,
     table: Option<&str>,
     subtarget: Option<&str>,
@@ -323,7 +323,7 @@ pub fn search(
     })
 }
 
-pub fn delete_row(
+pub(crate) fn delete_row(
     project_id: &str,
     table: Option<&str>,
     row_id: Option<&str>,
@@ -361,7 +361,7 @@ pub fn delete_row(
     })
 }
 
-pub fn drop_table(
+pub(crate) fn drop_table(
     project_id: &str,
     table: Option<&str>,
     subtarget: Option<&str>,

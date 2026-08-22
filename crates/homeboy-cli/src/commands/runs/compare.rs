@@ -65,11 +65,11 @@ pub struct RunsCompareRow {
     pub metrics: BTreeMap<String, Option<f64>>,
 }
 
-pub fn is_table_mode(args: &RunsCompareArgs) -> bool {
+pub(crate) fn is_table_mode(args: &RunsCompareArgs) -> bool {
     args.format == RunsCompareFormat::Table
 }
 
-pub fn run_markdown(args: RunsCompareArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: RunsCompareArgs) -> CmdResult<String> {
     let (output, exit_code) = compare_runs(args)?;
     match output {
         RunsOutput::Compare(output) => Ok((render_compare_table(&output), exit_code)),

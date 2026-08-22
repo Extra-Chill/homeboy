@@ -117,7 +117,7 @@ impl CommandSpec {
         CommandOutputDescriptor::json_envelope(self.json_family, output_file_mode)
     }
 
-    pub fn path_safety(&self, path: &[&str]) -> Option<&'static CommandPathSafetySpec> {
+    pub(crate) fn path_safety(&self, path: &[&str]) -> Option<&'static CommandPathSafetySpec> {
         self.subcommand_safety.iter().find(|entry| {
             entry
                 .paths
@@ -1118,29 +1118,29 @@ pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
     },
 ];
 
-pub fn registered_command(name: &str) -> Option<&'static CommandSpec> {
+pub(crate) fn registered_command(name: &str) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|entry| entry.name == name)
 }
 
-pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
+pub(crate) fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
     registered_command(name).map(|entry| entry.json_family)
 }
 
-pub fn runtime_extension_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+pub(crate) fn runtime_extension_command_doc_slugs() -> impl Iterator<Item = &'static str> {
     COMMAND_DOC_REGISTRY
         .iter()
         .filter(|entry| entry.kind == CommandDocKind::RuntimeExtensionCommand)
         .map(|entry| entry.slug)
 }
 
-pub fn support_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+pub(crate) fn support_command_doc_slugs() -> impl Iterator<Item = &'static str> {
     COMMAND_DOC_REGISTRY
         .iter()
         .filter(|entry| entry.kind == CommandDocKind::Support)
         .map(|entry| entry.slug)
 }
 
-pub fn non_core_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+pub(crate) fn non_core_command_doc_slugs() -> impl Iterator<Item = &'static str> {
     COMMAND_DOC_REGISTRY.iter().map(|entry| entry.slug)
 }
 

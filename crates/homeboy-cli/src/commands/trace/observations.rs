@@ -18,17 +18,20 @@ pub(super) struct TraceArtifactObservationResult {
 }
 
 impl TraceArtifactObservationResult {
-    pub fn has_declared_artifact_failures(&self) -> bool {
+    pub(crate) fn has_declared_artifact_failures(&self) -> bool {
         self.missing_declared_artifacts > 0 || self.invalid_declared_artifacts > 0
     }
 
-    pub fn evidence_promoted(&self) -> bool {
+    pub(crate) fn evidence_promoted(&self) -> bool {
         self.trace_results_path.is_some()
             && !self.has_declared_artifact_failures()
             && self.persistence_failures == 0
     }
 
-    pub fn rewrite_declared_artifact_paths(&self, results: &mut extension_trace::TraceResults) {
+    pub(crate) fn rewrite_declared_artifact_paths(
+        &self,
+        results: &mut extension_trace::TraceResults,
+    ) {
         for artifact in &mut results.artifacts {
             if let Some(path) = self.declared_artifact_paths.get(&artifact.path) {
                 artifact.path = path.clone();

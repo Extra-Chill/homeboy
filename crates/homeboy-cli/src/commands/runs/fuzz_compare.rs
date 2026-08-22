@@ -30,7 +30,7 @@ pub struct RunsFuzzCompareArgs {
     pub hotspot_policy: FuzzCompareHotspotPolicy,
 }
 
-pub fn fuzz_compare_from_args(args: RunsFuzzCompareArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn fuzz_compare_from_args(args: RunsFuzzCompareArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let baseline = resolve_run_fuzz_envelope(&store, &args.from_run)?;
     let candidate = resolve_run_fuzz_envelope(&store, &args.to_run)?;

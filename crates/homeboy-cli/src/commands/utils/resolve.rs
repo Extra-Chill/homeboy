@@ -89,7 +89,7 @@ fn resolve_component_first(
     }
 }
 
-pub fn infer_project_for_components(component_ids: &[String]) -> Option<String> {
+pub(crate) fn infer_project_for_components(component_ids: &[String]) -> Option<String> {
     if component_ids.is_empty() {
         return None;
     }

@@ -305,11 +305,14 @@ pub struct CommandPresentation {
 }
 
 impl CommandRun {
-    pub fn from_stdout_result(stdout_result: homeboy::core::Result<Value>, exit_code: i32) -> Self {
+    pub(crate) fn from_stdout_result(
+        stdout_result: homeboy::core::Result<Value>,
+        exit_code: i32,
+    ) -> Self {
         Self::from_command_stdout_result("unknown", stdout_result, exit_code)
     }
 
-    pub fn from_command_stdout_result(
+    pub(crate) fn from_command_stdout_result(
         command: impl Into<String>,
         stdout_result: homeboy::core::Result<Value>,
         exit_code: i32,
@@ -327,24 +330,24 @@ impl CommandRun {
         }
     }
 
-    pub fn with_presentation(mut self, presentation: CommandPresentation) -> Self {
+    pub(crate) fn with_presentation(mut self, presentation: CommandPresentation) -> Self {
         self.presentation = presentation;
         self
     }
 
     /// Diagnostics emitted only after raw stdout has been durably handed to the
     /// caller. SSH uses this for terminal lifecycle phases.
-    pub fn with_raw_completion_stderr(mut self, stderr: impl Into<String>) -> Self {
+    pub(crate) fn with_raw_completion_stderr(mut self, stderr: impl Into<String>) -> Self {
         self.raw_completion_stderr = Some(stderr.into());
         self
     }
 
-    pub fn with_output_file_result(mut self, result: homeboy::core::Result<Value>) -> Self {
+    pub(crate) fn with_output_file_result(mut self, result: homeboy::core::Result<Value>) -> Self {
         self.output_file_result = Some(result);
         self
     }
 
-    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+    pub(crate) fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = command.into();
         self
     }
@@ -355,12 +358,12 @@ impl CommandRun {
         self
     }
 
-    pub fn with_output_file_already_written(mut self) -> Self {
+    pub(crate) fn with_output_file_already_written(mut self) -> Self {
         self.output_file_already_written = true;
         self
     }
 
-    pub fn from_raw_stdout(
+    pub(crate) fn from_raw_stdout(
         command: impl Into<String>,
         raw_stdout: homeboy::core::Result<String>,
         exit_code: i32,
@@ -389,7 +392,7 @@ impl CommandRun {
 
     /// Keeps raw output out of the command envelope unless an explicit output
     /// artifact was requested.
-    pub fn from_raw_stdout_streaming(
+    pub(crate) fn from_raw_stdout_streaming(
         command: impl Into<String>,
         raw_stdout: homeboy::core::Result<String>,
         exit_code: i32,
@@ -432,7 +435,7 @@ impl<'a> OutputService<'a> {
         Self { output_file }
     }
 
-    pub fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
+    fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
         self.emit_json_result_for_identity(
             result,
             exit_code,
@@ -440,7 +443,7 @@ impl<'a> OutputService<'a> {
         );
     }
 
-    pub fn emit_json_result_for_identity(
+    pub(crate) fn emit_json_result_for_identity(
         &self,
         result: homeboy::core::Result<Value>,
         exit_code: i32,
@@ -553,7 +556,7 @@ pub fn run_command(
     output_service.emit_run(run.with_identity(identity), plan.output_file)
 }
 
-pub fn emit_json_result(
+fn emit_json_result(
     result: homeboy::core::Result<Value>,
     output_file: Option<&str>,
     exit_code: i32,
@@ -561,7 +564,7 @@ pub fn emit_json_result(
     OutputService::new(output_file).emit_json_result(result, exit_code);
 }
 
-pub fn emit_json_result_for_identity(
+pub(crate) fn emit_json_result_for_identity(
     result: homeboy::core::Result<Value>,
     output_file: Option<&str>,
     exit_code: i32,
@@ -570,7 +573,7 @@ pub fn emit_json_result_for_identity(
     OutputService::new(output_file).emit_json_result_for_identity(result, exit_code, identity);
 }
 
-pub fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
+pub(crate) fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
     let value = path.trim();
     let looks_like_format = matches!(
         value.to_ascii_lowercase().as_str(),
@@ -595,7 +598,7 @@ pub fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
     ))
 }
 
-pub fn command_runtime_output_file<'a>(
+fn command_runtime_output_file<'a>(
     command: &Commands,
     requested_output_file: Option<&'a str>,
 ) -> Option<&'a str> {
@@ -606,7 +609,7 @@ pub fn command_runtime_output_file<'a>(
     }
 }
 
-pub fn run_json(
+pub(crate) fn run_json(
     command: Commands,
     spec: &crate::command_contract::CommandSpec,
     mode: CommandOutputFileMode,

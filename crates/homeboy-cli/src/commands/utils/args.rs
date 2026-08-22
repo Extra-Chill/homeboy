@@ -316,7 +316,7 @@ impl PositionalComponentArgs {
 
     /// Resolve the component ID, falling back to CWD auto-discovery.
     /// Returns the effective component ID string for display/logging.
-    pub fn resolve_id(&self) -> homeboy::core::Result<String> {
+    pub(crate) fn resolve_id(&self) -> homeboy::core::Result<String> {
         if let Some(ref id) = self.component {
             return Ok(id.clone());
         }
@@ -851,7 +851,7 @@ impl ScopeArgs {
     }
 
     /// True when no selector was supplied.
-    pub fn is_unscoped(&self) -> bool {
+    pub(crate) fn is_unscoped(&self) -> bool {
         self.selection().is_none()
     }
 
@@ -1150,7 +1150,7 @@ impl ChangedScopeArgs {
     }
 
     /// True when nothing narrowed the run — the full component is in scope.
-    pub fn is_full_scope(&self) -> bool {
+    pub(crate) fn is_full_scope(&self) -> bool {
         !self.is_scoped()
     }
 
@@ -1442,12 +1442,12 @@ impl PresentationArgs {
     }
 
     /// True when the caller explicitly asked for markdown.
-    pub fn is_markdown(&self) -> bool {
+    pub(crate) fn is_markdown(&self) -> bool {
         matches!(self.format, OutputFormat::Markdown)
     }
 
     /// True when the caller asked for the compact summary.
-    pub fn is_summary(&self) -> bool {
+    pub(crate) fn is_summary(&self) -> bool {
         matches!(self.detail, DetailLevel::Summary)
     }
 
@@ -1464,7 +1464,7 @@ impl PresentationArgs {
     /// state to distinguish from its default, so `--json --format text`
     /// cannot mean "text". Passing both spellings with the same intent is
     /// the only combination an operator can express, and it agrees.
-    pub fn json_or_legacy(&self, legacy_json: bool) -> bool {
+    pub(crate) fn json_or_legacy(&self, legacy_json: bool) -> bool {
         legacy_json || self.is_json()
     }
 }
@@ -1625,7 +1625,7 @@ impl MutationArgs {
     /// The plan-only default means this is simply `!apply`; `--dry-run`
     /// makes that default explicit rather than adding a second way to
     /// suppress a mutation.
-    pub fn is_dry_run(&self) -> bool {
+    fn is_dry_run(&self) -> bool {
         !self.apply
     }
 
@@ -1690,7 +1690,7 @@ pub struct DryRunArgs {
 
 impl DryRunArgs {
     /// True when this run must not mutate anything.
-    pub fn is_dry_run(&self) -> bool {
+    fn is_dry_run(&self) -> bool {
         self.dry_run
     }
 
@@ -1869,7 +1869,7 @@ impl SettingArgs {
         Ok(self.setting_json.clone())
     }
 
-    pub fn has_overrides(&self) -> bool {
+    pub(crate) fn has_overrides(&self) -> bool {
         !self.settings_json_file.is_empty()
             || !self.setting.is_empty()
             || !self.setting_json.is_empty()

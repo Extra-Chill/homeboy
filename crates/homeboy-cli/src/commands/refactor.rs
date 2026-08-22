@@ -466,7 +466,7 @@ pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
 }
 
 impl RefactorArgs {
-    pub fn is_hot_resource_command(&self) -> bool {
+    pub(crate) fn is_hot_resource_command(&self) -> bool {
         self.command.is_none()
             && (self.all
                 || self
@@ -475,7 +475,7 @@ impl RefactorArgs {
                     .any(|source| matches_hot_refactor_source(source)))
     }
 
-    pub fn lab_offload_writes_local_state(&self) -> bool {
+    pub(crate) fn lab_offload_writes_local_state(&self) -> bool {
         self.write_mode.write || self.commit
     }
 
@@ -484,7 +484,7 @@ impl RefactorArgs {
     /// `--component`/`--components` value. Returns `None` when the component is
     /// auto-detected from the working directory or when multiple components are
     /// targeted (offload patch capture maps one source path at a time).
-    pub fn lab_offload_positional_component(&self) -> Option<String> {
+    pub(crate) fn lab_offload_positional_component(&self) -> Option<String> {
         if let Some(comp) = &self.comp {
             if let Some(component) = &comp.component {
                 return Some(component.clone());
@@ -501,7 +501,7 @@ impl RefactorArgs {
     /// Whether an explicit `--path` override was supplied. When present, the
     /// offload pipeline already syncs and remaps that path, so component-id
     /// based source resolution must not override it.
-    pub fn lab_offload_has_path_override(&self) -> bool {
+    pub(crate) fn lab_offload_has_path_override(&self) -> bool {
         self.comp
             .as_ref()
             .map(|comp| comp.path.is_some())

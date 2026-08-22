@@ -13,7 +13,7 @@ use super::types::{
 };
 use super::{remote_artifact, CmdResult, RunSummary, RunsListArgs, RunsListOutput, RunsOutput};
 
-pub fn list_runner_runs(
+pub(crate) fn list_runner_runs(
     runner_id: &str,
     args: RunsListArgs,
     command: &'static str,
@@ -248,7 +248,7 @@ fn active_runner_job_run_summary_if_durable(
     })
 }
 
-pub fn runner_artifacts(runner_id: &str, args: &RunsArtifactsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runner_artifacts(runner_id: &str, args: &RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     let run_id = &args.run_id;
     let query = artifact_query(args);
     let data = runner::daemon_api_get(
@@ -336,7 +336,7 @@ fn directory_publication_guidance_for_artifacts(
         .collect()
 }
 
-pub fn runner_artifact_get(
+pub(crate) fn runner_artifact_get(
     runner_id: &str,
     mut args: RunsArtifactGetArgs,
 ) -> CmdResult<RunsOutput> {

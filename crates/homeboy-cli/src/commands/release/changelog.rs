@@ -34,7 +34,7 @@ pub enum ChangelogOutput {
     ShowComponent(ShowOutput),
 }
 
-pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
+pub(crate) fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
     match &args.command {
         None => show_homeboy_markdown(),
         Some(ChangelogCommand::Show { component_id: None }) => show_homeboy_markdown(),
@@ -47,7 +47,7 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
     }
 }
 
-pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
+pub(crate) fn is_show_markdown(args: &ChangelogArgs) -> bool {
     matches!(args.command, Some(ChangelogCommand::Show { .. })) || args.command.is_none()
 }
 

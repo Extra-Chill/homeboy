@@ -16,7 +16,7 @@ pub enum CommandRunPreparation {
     Raw(Box<CommandRun>),
 }
 
-pub fn prepare_command_run(
+pub(crate) fn prepare_command_run(
     command: Commands,
     mode: CommandResponseMode,
     retain_raw_evidence: bool,
@@ -110,7 +110,7 @@ fn runner_compact_exec(args: crate::commands::runner::RunnerArgs) -> CommandRun 
     runner::run_plain_text_raw(args)
 }
 
-pub fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
+fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
     match result {
         Ok((content, exit_code)) => {
             CommandRun::from_raw_stdout("unknown", Ok(content), exit_code, None)

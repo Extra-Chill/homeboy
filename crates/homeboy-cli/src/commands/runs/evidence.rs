@@ -88,7 +88,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
 
 /// Render the full core report or a bounded CLI projection without changing the
 /// reusable report schema used by non-CLI consumers.
-pub fn evidence_projection(run_id: &str, full: bool) -> CmdResult<RunsOutput> {
+pub(crate) fn evidence_projection(run_id: &str, full: bool) -> CmdResult<RunsOutput> {
     if full {
         return evidence(run_id);
     }

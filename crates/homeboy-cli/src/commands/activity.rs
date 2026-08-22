@@ -130,7 +130,7 @@ pub fn run(args: ActivityArgs) -> CmdResult<ActivityOutput> {
     }
 }
 
-pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
+pub(crate) fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
     let report = payload.get("payload").or(Some(payload))?;
     let counts = report.get("counts")?;
     let items = report.get("items")?.as_array()?;
@@ -313,7 +313,7 @@ impl WatchPoller for ActivityPoller {
 /// separate `agent-task watch` loop would mean two poll loops, two terminality
 /// predicates, and two notification paths over the same records; the cheapest
 /// correct implementation is to route the alias straight into this one (#W3-15).
-pub fn watch_alias(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
+pub(crate) fn watch_alias(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
     watch(args)
 }
 

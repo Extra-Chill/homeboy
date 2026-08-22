@@ -126,12 +126,12 @@ pub struct CiPlan {
 
 impl CiPlan {
     /// Comma-separated quality command list, in canonical order.
-    pub fn quality_commands(&self) -> String {
+    fn quality_commands(&self) -> String {
         join_commands(&self.quality)
     }
 
     /// Comma-separated operations command list, in request order.
-    pub fn operations_commands(&self) -> String {
+    fn operations_commands(&self) -> String {
         join_commands(&self.operations)
     }
 }
@@ -149,7 +149,7 @@ fn join_commands(commands: &[PlannedCommand]) -> String {
 /// Collapses any run of non-`[alnum]._-` characters to a single `-`, trims
 /// leading/trailing `-`, and falls back to a stable default when empty. Matches
 /// the action's `command_output_stem` so existing artifact names stay stable.
-pub fn output_stem(command: &str) -> String {
+fn output_stem(command: &str) -> String {
     let mut stem = String::with_capacity(command.len());
     let mut last_was_sep = false;
     for ch in command.chars() {
