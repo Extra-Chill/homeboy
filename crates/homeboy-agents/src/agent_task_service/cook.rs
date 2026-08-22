@@ -6793,6 +6793,10 @@ fn materialize_pending_cook_workspace_with_retry(
                 None,
                 None,
             )?;
+            error.details["worktree_provider_resolve"] = lifecycle_store
+                .read_controller_plan(&options.initial_run_id)?
+                .metadata["worktree_provider_resolve"]
+                .clone();
             return Err(error);
         }
         let configured_timeout_ms = configured_provider_lookup_timeout_ms(options);
