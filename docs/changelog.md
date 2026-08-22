@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.354.0] - 2026-08-22
+
+### Added
+- publish validation and action eligibility
+- wire local differential baseline proof
+
+### Fixed
+- root cook recipe safety checks
+- preserve gate evidence ownership
+- require protected reconcile approval
+- close manual ruleset reconcile bypasses
+- expose durable staging progress
+- classify compact lab result outcomes
+- expose safe notification route resolution
+
 ## [0.353.1] - 2026-08-22
 
 ### Fixed
