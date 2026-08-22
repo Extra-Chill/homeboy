@@ -734,6 +734,7 @@ mod tests {
             // This review fixture did not execute Cargo, so it has no target evidence.
             cargo_target: None,
             ci_context: None,
+            differential: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
         }

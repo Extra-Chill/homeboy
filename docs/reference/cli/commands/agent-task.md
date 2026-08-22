@@ -109,7 +109,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
 | `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in. For Cook, omitting --repo infers its configured component when the Git remote maps unambiguously to one registered component |
 | `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
-| `--repo` | `<REPO>` | Repo/component slug for metadata and task grouping, e.g. sample-plugin. Cook infers this from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
+| `--repo` | `<REPO>` | Repository or configured component slug for metadata and task grouping, e.g. sample-plugin. Cook accepts configured component aliases and normalizes them to the configured component before provisioning. It infers this from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
 | `--task-url` | `<URL>` | Issue, PR, or tracker URL the task is cooking |
 | `--backend` | `<BACKEND>` | Executor backend to request. Defaults to the configured coding backend |
 | `--selector` | `<PROVIDER_ID>` | Optional provider id when more than one provider exists for the backend |

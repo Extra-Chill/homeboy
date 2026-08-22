@@ -76,6 +76,9 @@ pub struct TestCommandOutput {
     pub cargo_target: Option<homeboy_engine_primitives::cargo_target::CargoTargetEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
+    /// Local comparison against a SHA-keyed base-branch test measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub differential: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     #[serde(

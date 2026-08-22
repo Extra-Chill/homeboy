@@ -2,7 +2,7 @@ use clap::Args;
 
 use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::git::short_head_revision_at;
+use homeboy::core::git::{self, short_head_revision_at};
 use homeboy::core::observation::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
@@ -92,6 +92,23 @@ pub struct TestArgs {
     #[arg(long, value_name = "ID", conflicts_with = "drift")]
     pub ci_job: Option<String>,
 
+    /// Compare this test result with a cached measurement of the base revision.
+    #[arg(long)]
+    pub differential: bool,
+
+    /// Base ref for a differential test comparison.
+    #[arg(
+        long,
+        value_name = "REF",
+        default_value = "origin/main",
+        requires = "differential"
+    )]
+    pub differential_base: String,
+
+    /// On a differential cache miss, run the base revision and record its measurement.
+    #[arg(long, requires = "differential")]
+    pub populate_differential_baseline: bool,
+
     #[command(flatten)]
     pub setting_args: SettingArgs,
 
@@ -132,6 +149,9 @@ impl TestArgs {
             since: "HEAD~10".to_string(),
             changed: LabChangedScopeArgs::default(),
             ci_job: None,
+            differential: false,
+            differential_base: "origin/main".to_string(),
+            populate_differential_baseline: false,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
@@ -140,6 +160,12 @@ impl TestArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
+        if self.differential {
+            return LabCommandContract::local_only(
+                TEST_LAB_LABEL,
+                "differential test mode reads the controller-local baseline cache and Git checkout",
+            );
+        }
         if self.baseline_args.baseline || self.baseline_args.ratchet {
             return LabCommandContract::local_only(
                 TEST_LAB_LABEL,
@@ -159,6 +185,7 @@ impl TestArgs {
             && !self.write
             && !self.changed.is_scoped()
             && self.ci_job.is_none()
+            && !self.differential
             && cli_passthrough_args.is_empty()
             && !self.setting_args.has_overrides()
             && !self.baseline_args.baseline
@@ -182,6 +209,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
+    validate_differential_args(&args)?;
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,
@@ -283,6 +311,8 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     }
     let mut passthrough_args = ci_job_passthrough_args(ci_job.as_ref());
     passthrough_args.extend(cli_passthrough_args);
+    let settings = ctx.resolved_settings().string_lossy_overrides();
+    let settings_json = ctx.resolved_settings().json_overrides();
     let workflow = extension_test::run_main_test_workflow(
         &ctx.component,
         &ctx.source_path,
@@ -290,20 +320,22 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: ctx.resolved_settings().string_lossy_overrides(),
-            settings_json: ctx.resolved_settings().json_overrides(),
+            settings: settings.clone(),
+            settings_json: settings_json.clone(),
             skip_lint: args.skip_lint,
             coverage: args.coverage,
             coverage_min: args.coverage_min,
             analyze: args.analyze,
             baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
-                ignore_baseline: args.baseline_args.ignore_baseline,
+                // Differential mode compares raw executions, not source-owned ratchet state.
+                ignore_baseline: args.differential || args.baseline_args.ignore_baseline,
                 ratchet: args.baseline_args.ratchet,
             },
             changed_since: args.changed.changed_since().map(str::to_string),
             precomputed_changed_files: args.changed.resolve()?,
-            json_summary: args.json_summary,
+            // Differential classification needs names even when compact output was not requested.
+            json_summary: args.json_summary || args.differential,
             restore_checkout: args.restore_checkout,
             ci_env: test_runner_ci_env(ci_job.as_ref())
                 .into_iter()
@@ -349,8 +381,348 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
     );
+    let exit_code = apply_differential_verdict(
+        &mut output,
+        exit_code,
+        &args,
+        &ctx.component,
+        &ctx.source_path,
+        &effective_id,
+        &passthrough_args,
+        ci_job.as_ref(),
+        &settings,
+        &settings_json,
+    )?;
     attach_test_actionable(&mut output, run_id);
     Ok((output, exit_code))
+}
+
+fn validate_differential_args(args: &TestArgs) -> homeboy::core::Result<()> {
+    if !args.differential {
+        return Ok(());
+    }
+
+    let mut incompatible = Vec::new();
+    if args.drift {
+        incompatible.push("--drift");
+    }
+    if args.write {
+        incompatible.push("--write");
+    }
+    if args.coverage || args.coverage_min.is_some() {
+        incompatible.push("--coverage/--coverage-min");
+    }
+    if args.analyze {
+        incompatible.push("--analyze");
+    }
+    if args.changed.is_scoped() {
+        incompatible.push("--changed-since");
+    }
+    if args.baseline_args.baseline
+        || args.baseline_args.ignore_baseline
+        || args.baseline_args.ratchet
+    {
+        incompatible.push("--baseline/--ignore-baseline/--ratchet");
+    }
+
+    if incompatible.is_empty() {
+        Ok(())
+    } else {
+        Err(homeboy::core::Error::validation_invalid_argument(
+            "differential",
+            format!(
+                "differential mode requires like-for-like whole-scope test runs and cannot be combined with {}",
+                incompatible.join(", ")
+            ),
+            None,
+            Some(vec![
+                "Run the unsupported mode separately, or remove it from this differential invocation."
+                    .to_string(),
+            ]),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_differential_verdict(
+    output: &mut TestCommandOutput,
+    candidate_exit_code: i32,
+    args: &TestArgs,
+    component: &homeboy::core::component::Component,
+    source_path: &Path,
+    component_id: &str,
+    passthrough_args: &[String],
+    ci_job: Option<&CiResolvedJob>,
+    settings: &[(String, String)],
+    settings_json: &[(String, Value)],
+) -> homeboy::core::Result<i32> {
+    if !args.differential {
+        return Ok(candidate_exit_code);
+    }
+
+    let candidate = extension_test::measurement_from_test_output(output);
+    if candidate_exit_code == 0 {
+        return finalize_differential_output(
+            output,
+            candidate_exit_code,
+            extension_test::classify_differential(extension_test::DifferentialInput {
+                reference: args.differential_base.clone(),
+                revision: None,
+                candidate,
+                baseline: None,
+            }),
+        );
+    }
+
+    let source_root = PathBuf::from(git::get_git_root(&source_path.to_string_lossy())?);
+    let revision = resolve_differential_revision(&source_root, &args.differential_base);
+    let Some(revision) = revision else {
+        if args.populate_differential_baseline {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "differential-base",
+                format!(
+                    "{} does not resolve to a commit in {}",
+                    args.differential_base,
+                    source_root.display()
+                ),
+                Some(args.differential_base.clone()),
+                Some(vec![
+                    "Fetch the base ref or pass a locally available commit.".to_string(),
+                ]),
+            ));
+        }
+        return finalize_differential_output(
+            output,
+            candidate_exit_code,
+            extension_test::classify_differential(extension_test::DifferentialInput {
+                reference: args.differential_base.clone(),
+                revision: None,
+                candidate,
+                baseline: None,
+            }),
+        );
+    };
+    let key = extension_test::BaselineCacheKey::new(
+        component_id,
+        &args.differential_base,
+        revision,
+        differential_scope_key(
+            component,
+            &source_root,
+            source_path,
+            args,
+            passthrough_args,
+            ci_job,
+            settings,
+            settings_json,
+        )?,
+    );
+    let cache = extension_test::BaselineCache::open()?;
+
+    if cache.load(&key).is_none() && args.populate_differential_baseline {
+        let measurement = run_differential_baseline(
+            component,
+            source_path,
+            &key.revision,
+            args,
+            passthrough_args,
+            ci_job,
+            settings,
+            settings_json,
+        )?;
+        cache.store(&key, &measurement, chrono::Utc::now().to_rfc3339())?;
+        cache.prune_superseded(&key)?;
+    }
+
+    finalize_differential_output(
+        output,
+        candidate_exit_code,
+        extension_test::classify_against_cache(&cache, &key, candidate),
+    )
+}
+
+fn resolve_differential_revision(source_root: &Path, reference: &str) -> Option<String> {
+    let commit_ref = format!("{reference}^{{commit}}");
+    git::run_git(
+        source_root,
+        &["rev-parse", "--verify", &commit_ref],
+        "resolve differential test baseline",
+    )
+    .ok()
+    .map(|revision| revision.trim().to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn differential_scope_key(
+    component: &homeboy::core::component::Component,
+    source_root: &Path,
+    source_path: &Path,
+    args: &TestArgs,
+    passthrough_args: &[String],
+    ci_job: Option<&CiResolvedJob>,
+    settings: &[(String, String)],
+    settings_json: &[(String, Value)],
+) -> homeboy::core::Result<String> {
+    use homeboy_engine_primitives::content_hash::sha256_hex;
+
+    let component_prefix = git::get_component_path_prefix(&source_path.to_string_lossy());
+    let component_fingerprint = serde_json::to_vec(component).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "serialize component for differential scope: {error}"
+        ))
+    })?;
+    let settings_fingerprint = serde_json::to_vec(&(settings, settings_json)).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "serialize settings for differential scope: {error}"
+        ))
+    })?;
+    let repository = git::run_git(
+        source_root,
+        &["config", "--get", "remote.origin.url"],
+        "read differential repository identity",
+    )
+    .unwrap_or_else(|_| source_root.to_string_lossy().into_owned());
+    let ci_identity = ci_job.map(|job| {
+        let spec = serde_json::to_vec(&job.spec).unwrap_or_default();
+        serde_json::json!({
+            "extension": job.extension_id,
+            "id": job.id,
+            "spec_sha256": sha256_hex(&spec),
+        })
+    });
+
+    serde_json::to_string(&serde_json::json!({
+        "schema": 1,
+        "repository_sha256": sha256_hex(repository.trim().as_bytes()),
+        "component_prefix": component_prefix,
+        "component_sha256": sha256_hex(&component_fingerprint),
+        "settings_sha256": sha256_hex(&settings_fingerprint),
+        "skip_lint": args.skip_lint,
+        "ci_job": ci_identity,
+        "passthrough_args": passthrough_args,
+    }))
+    .map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "serialize differential test scope: {error}"
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_differential_baseline(
+    component: &homeboy::core::component::Component,
+    source_path: &Path,
+    revision: &str,
+    args: &TestArgs,
+    passthrough_args: &[String],
+    ci_job: Option<&CiResolvedJob>,
+    settings: &[(String, String)],
+    settings_json: &[(String, Value)],
+) -> homeboy::core::Result<extension_test::TestMeasurement> {
+    let source_root = PathBuf::from(git::get_git_root(&source_path.to_string_lossy())?);
+    let component_prefix = git::get_component_path_prefix(&source_path.to_string_lossy());
+    let worktree = DifferentialWorktree::add(&source_root, revision)?;
+    let baseline_path = component_prefix
+        .as_deref()
+        .map(|prefix| worktree.path.join(prefix))
+        .unwrap_or_else(|| worktree.path.clone());
+    let run_dir = RunDir::create()?;
+
+    let mut baseline_component = component.clone();
+    baseline_component.local_path = baseline_path.to_string_lossy().into_owned();
+    let workflow = extension_test::run_main_test_workflow(
+        &baseline_component,
+        &baseline_path,
+        TestRunWorkflowArgs {
+            component_label: component.id.clone(),
+            component_id: component.id.clone(),
+            path_override: Some(baseline_path.to_string_lossy().into_owned()),
+            settings: settings.to_vec(),
+            settings_json: settings_json.to_vec(),
+            skip_lint: args.skip_lint,
+            coverage: false,
+            coverage_min: None,
+            analyze: false,
+            baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
+                ignore_baseline: true,
+                ..Default::default()
+            },
+            changed_since: None,
+            precomputed_changed_files: None,
+            json_summary: true,
+            restore_checkout: false,
+            ci_env: test_runner_ci_env(ci_job)
+                .into_iter()
+                .chain(extension_test::portable_env(&baseline_component)?.public_env)
+                .collect(),
+            passthrough_args: passthrough_args.to_vec(),
+        },
+        &run_dir,
+    );
+    let (output, _) = report::from_main_workflow(workflow?);
+    run_dir.cleanup();
+    Ok(extension_test::measurement_from_test_output(&output))
+}
+
+struct DifferentialWorktree {
+    source_root: PathBuf,
+    path: PathBuf,
+}
+
+impl DifferentialWorktree {
+    fn add(source_root: &Path, revision: &str) -> homeboy::core::Result<Self> {
+        let parent = std::env::temp_dir().join("homeboy-test-differential");
+        std::fs::create_dir_all(&parent).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                format!("Failed to create {}: {error}", parent.display()),
+                Some("test.differential.worktree".to_string()),
+            )
+        })?;
+        let path = parent.join(uuid::Uuid::new_v4().to_string());
+        let path_arg = path.to_string_lossy().into_owned();
+        git::run_git(
+            source_root,
+            &["worktree", "add", "--detach", &path_arg, revision],
+            "create differential test baseline",
+        )?;
+        Ok(Self {
+            source_root: source_root.to_path_buf(),
+            path,
+        })
+    }
+}
+
+impl Drop for DifferentialWorktree {
+    fn drop(&mut self) {
+        let path = self.path.to_string_lossy().into_owned();
+        let _ = git::run_git(
+            &self.source_root,
+            &["worktree", "remove", "--force", &path],
+            "remove differential test baseline",
+        );
+        let _ = std::fs::remove_dir_all(&self.path); // homeboy-audit: allow-thin-command-adapter
+    }
+}
+
+fn finalize_differential_output(
+    output: &mut TestCommandOutput,
+    candidate_exit_code: i32,
+    report: extension_test::DifferentialReport,
+) -> homeboy::core::Result<i32> {
+    eprintln!("{}", report.render());
+    output.differential = Some(serde_json::to_value(&report).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "serialize differential test report: {error}"
+        ))
+    })?);
+    output.passed = !report.blocks();
+    output.status = report.verdict.as_str().to_string();
+    output.exit_code = if report.blocks() {
+        candidate_exit_code
+    } else {
+        0
+    };
+    Ok(output.exit_code)
 }
 
 fn attach_test_actionable(output: &mut TestCommandOutput, run_id: Option<String>) {
@@ -1096,6 +1468,13 @@ fn test_observation_command(component_id: &str, args: &TestArgs) -> String {
     if args.json_summary {
         parts.push("--json-summary".to_string());
     }
+    if args.differential {
+        parts.push("--differential".to_string());
+        parts.push(format!("--differential-base={}", args.differential_base));
+    }
+    if args.populate_differential_baseline {
+        parts.push("--populate-differential-baseline".to_string());
+    }
     let passthrough_args = filter_homeboy_flags(&args.args);
     if !passthrough_args.is_empty() {
         parts.push("--".to_string());
@@ -1125,6 +1504,9 @@ fn test_observation_initial_metadata(
         "changed_since": args.changed.changed_since(),
         "since": args.since,
         "json_summary": args.json_summary,
+        "differential": args.differential,
+        "differential_base": args.differential_base,
+        "populate_differential_baseline": args.populate_differential_baseline,
         "passthrough_args": filter_homeboy_flags(&args.args),
     })
 }
@@ -1196,6 +1578,37 @@ mod tests {
         test: TestArgs,
     }
 
+    fn failed_test_output() -> TestCommandOutput {
+        TestCommandOutput {
+            passed: false,
+            status: "failed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            phase: None,
+            failure: None,
+            test_counts: Some(TestCounts::new(2, 1, 1, 0)),
+            test_inventory: None,
+            test_inventory_rejection: None,
+            test_durations: None,
+            findings: None,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            autofix: None,
+            hints: None,
+            drift: None,
+            auto_fix_drift: None,
+            test_scope: None,
+            summary: None,
+            raw_output: None,
+            cargo_target: None,
+            ci_context: None,
+            differential: None,
+            extension_phase_timings: Vec::new(),
+            actionable: None,
+        }
+    }
+
     fn sample_args() -> TestArgs {
         TestCli::try_parse_from([
             "test",
@@ -1217,6 +1630,120 @@ mod tests {
             .expect("test should parse --ci-job");
 
         assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
+    }
+
+    #[test]
+    fn parses_differential_flags_and_keeps_them_out_of_self_check_dispatch() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "homeboy",
+            "--differential",
+            "--differential-base",
+            "main",
+            "--populate-differential-baseline",
+            "--",
+            "-p",
+            "homeboy-core",
+            "--lib",
+        ])
+        .expect("differential test arguments should parse");
+
+        assert!(cli.test.differential);
+        assert_eq!(cli.test.differential_base, "main");
+        assert!(cli.test.populate_differential_baseline);
+        assert!(!cli
+            .test
+            .should_use_self_check_dispatch(&filter_homeboy_flags(&cli.test.args)));
+        assert!(!cli.test.lab_contract().is_portable());
+    }
+
+    #[test]
+    fn differential_base_requires_differential_mode() {
+        let error =
+            TestCli::try_parse_from(["test", "homeboy", "--differential-base", "origin/stable"])
+                .err()
+                .expect("an orphan differential base should be rejected");
+
+        assert!(error.to_string().contains("--differential"));
+    }
+
+    #[test]
+    fn differential_rejects_non_comparable_test_modes() {
+        let args = TestCli::try_parse_from([
+            "test",
+            "homeboy",
+            "--differential",
+            "--coverage",
+            "--changed-since",
+            "origin/main",
+        ])
+        .expect("arguments should parse before semantic validation")
+        .test;
+
+        let error = validate_differential_args(&args)
+            .expect_err("coverage and changed scope are not comparable yet");
+        let message = error.to_string();
+        assert!(message.contains("--coverage/--coverage-min"));
+        assert!(message.contains("--changed-since"));
+    }
+
+    #[test]
+    fn no_baseline_is_blocking_and_is_serialized_without_claiming_new_failures() {
+        let mut output = failed_test_output();
+        let report = extension_test::classify_differential(extension_test::DifferentialInput {
+            reference: "origin/main".to_string(),
+            revision: Some("abc123".to_string()),
+            candidate: extension_test::TestMeasurement::failed(
+                TestCounts::new(2, 1, 1, 0),
+                vec!["fixture::fails".to_string()],
+            ),
+            baseline: None,
+        });
+
+        let exit_code = finalize_differential_output(&mut output, 1, report)
+            .expect("no-baseline report should serialize");
+
+        assert_eq!(exit_code, 1);
+        assert!(!output.passed);
+        assert_eq!(output.status, "no_baseline");
+        assert_eq!(
+            output.differential.as_ref().unwrap()["verdict"],
+            "no_baseline"
+        );
+        assert!(output.differential.as_ref().unwrap()["new_failures"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn inherited_failure_is_non_blocking_and_preserves_the_baseline_red_verdict() {
+        let mut output = failed_test_output();
+        let measurement = extension_test::TestMeasurement::failed(
+            TestCounts::new(2, 1, 1, 0),
+            vec!["fixture::fails".to_string()],
+        );
+        let report = extension_test::classify_differential(extension_test::DifferentialInput {
+            reference: "origin/main".to_string(),
+            revision: Some("abc123".to_string()),
+            candidate: measurement.clone(),
+            baseline: Some(extension_test::BaselineEvidence {
+                reference: "origin/main".to_string(),
+                revision: "abc123".to_string(),
+                recorded_at: "2026-08-22T00:00:00Z".to_string(),
+                measurement,
+            }),
+        });
+
+        let exit_code = finalize_differential_output(&mut output, 1, report)
+            .expect("baseline-red report should serialize");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        assert_eq!(output.status, "baseline_red");
+        assert_eq!(
+            output.differential.as_ref().unwrap()["verdict"],
+            "baseline_red"
+        );
     }
 
     #[test]
