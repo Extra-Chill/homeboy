@@ -685,9 +685,31 @@ fn mismatch_freeze_boundary(field: &str) -> RecipeFreezeBoundary {
 }
 
 fn reached_freeze_boundary(recipe: &AgentTaskCookRecipe) -> Result<Option<RecipeFreezeBoundary>> {
+    reached_freeze_boundary_in_store(
+        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        recipe,
+    )
+}
+
+/// [`reached_freeze_boundary`] against an explicitly injected lifecycle root.
+///
+/// The freeze boundary is decided entirely by what the attempts' own records
+/// say: provider executions authenticate the candidate, an applied promotion
+/// locks the destination. Reading those ambiently lets another home's record of
+/// the same run id decide whether this recipe is correctable (#7505).
+fn reached_freeze_boundary_in_store(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+) -> Result<Option<RecipeFreezeBoundary>> {
     let mut reached = None;
     for attempt in &recipe.attempts {
-        let Ok(record) = crate::agent_task_lifecycle::status(&attempt.run_id) else {
+        let Ok(record) = crate::agent_task_lifecycle::status_in_store(
+            lifecycle_store,
+            &attempt.run_id,
+            crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
+            false,
+        )
+        .map(|outcome| outcome.record) else {
             continue;
         };
         if record.metadata["provider_executions_consumed"]
@@ -730,7 +752,22 @@ fn ensure_correction_is_safe(
     requested: &AgentTaskCookRecipe,
     mismatches: &[&str],
 ) -> Result<()> {
-    let reached = reached_freeze_boundary(existing)?;
+    ensure_correction_is_safe_in_store(
+        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        existing,
+        requested,
+        mismatches,
+    )
+}
+
+/// [`ensure_correction_is_safe`] against an explicitly injected lifecycle root.
+fn ensure_correction_is_safe_in_store(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    existing: &AgentTaskCookRecipe,
+    requested: &AgentTaskCookRecipe,
+    mismatches: &[&str],
+) -> Result<()> {
+    let reached = reached_freeze_boundary_in_store(lifecycle_store, existing)?;
     let frozen = mismatches
         .iter()
         .copied()
@@ -3921,39 +3958,54 @@ mod tests {
         );
     }
 
-    /// Stays on `with_isolated_home` (#7505). The assertion is an absence — a
-    /// non-applied promotion leaves destination inputs correctable — and it is
-    /// only meaningful if `ensure_correction_is_safe` actually observes the
-    /// promotion this test recorded. That observation is
-    /// `reached_freeze_boundary`'s ambient `agent_task_lifecycle::status` read,
-    /// so a rooted version would satisfy the `expect` by never seeing the
-    /// promotion at all.
+    /// Rooted in explicit stores rather than a mutated process environment
+    /// (#7505). This assertion is an absence — a non-applied promotion leaves
+    /// destination inputs correctable — so it is only meaningful if the freeze
+    /// check actually observes the promotion recorded here. The write and the
+    /// read therefore name the *same* lifecycle store: a rooted spelling that
+    /// split them would satisfy the `expect` by never seeing the promotion at
+    /// all, which is the false pass this test has to avoid.
     #[test]
     fn non_applied_promotion_reports_do_not_freeze_destination_inputs() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let recipe = recipe();
-            default_store()
-                .unwrap()
-                .persist_recipe(&recipe)
-                .expect("persist recipe");
-            crate::agent_task_lifecycle::submit_plan(&recipe.attempts[0].plan, Some("run"))
-                .expect("materialize attempt");
-            let mut corrected = recipe.clone();
-            corrected.finalization["to_worktree"] = serde_json::json!("other-target");
-            for status in ["dry_run", "no_changes", "no_changes_gate_failed"] {
-                crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+        let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(
+            lifecycle_context.path_roots(),
+        );
+
+        let recipe = recipe();
+        recipe_store
+            .persist_recipe(&recipe)
+            .expect("persist recipe");
+        crate::agent_task_lifecycle::submit_plan_in_store(
+            &lifecycle_store,
+            &recipe.attempts[0].plan,
+            Some("run"),
+        )
+        .expect("materialize attempt");
+        let mut corrected = recipe.clone();
+        corrected.finalization["to_worktree"] = serde_json::json!("other-target");
+        for status in ["dry_run", "no_changes", "no_changes_gate_failed"] {
+            crate::agent_task_lifecycle::rewrite_record_for_test_in_store(
+                &lifecycle_store,
+                "run",
+                |record| {
                     record.metadata["latest_promotion"] =
                         promotion_value(status, serde_json::json!([]));
-                })
-                .expect("record non-applied promotion");
-                ensure_correction_is_safe(
-                    &recipe,
-                    &corrected,
-                    &recipe_mismatch_fields(&recipe, &corrected),
-                )
-                .expect("non-applied promotion leaves destination correctable");
-            }
-        });
+                },
+            )
+            .expect("record non-applied promotion");
+            // Same store the promotion was just written to. If this read used a
+            // different home the loop would pass without ever seeing it.
+            ensure_correction_is_safe_in_store(
+                &lifecycle_store,
+                &recipe,
+                &corrected,
+                &recipe_mismatch_fields(&recipe, &corrected),
+            )
+            .expect("non-applied promotion leaves destination correctable");
+        }
     }
 
     #[test]
