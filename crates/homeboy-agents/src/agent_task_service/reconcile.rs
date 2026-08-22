@@ -226,6 +226,23 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                     .unwrap_or(authoritative_state)
             })
         } else {
+            // Discovery is a fleet snapshot. A Lab planner can publish its
+            // run-bound execution after that snapshot but before this cleanup
+            // reaches cancellation. Share the handoff fence with that writer,
+            // then decide from the fenced record so a fresh planned submission
+            // remains alive until normal expiry/acceptance reconciliation.
+            let _lock =
+                agent_task_lifecycle::LabHandoffLock::lock_in_store(&lifecycle_store, &run.run_id)?;
+            let fenced = lifecycle_store.read_record(&run.run_id)?;
+            if fenced.state.is_terminal()
+                || (fenced.has_planned_runner_execution() && fenced.has_fresh_update())
+                || agent_task_lifecycle::has_live_pending_runner_submission_intent(
+                    &fenced,
+                    chrono::Utc::now(),
+                )
+            {
+                continue;
+            }
             agent_task_lifecycle::cancel_run_in_store(&lifecycle_store, &run.run_id, Some(&reason))
                 .map(|record| record.state)
         };
@@ -669,6 +686,90 @@ mod tests {
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(terminal.metadata["cancel_reason"], "missing_runner_pid");
+        });
+    }
+
+    #[test]
+    fn concurrent_planned_submissions_survive_delayed_runner_identity_publication() {
+        use std::sync::{Arc, Barrier};
+
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_ids = [
+                "reconcile-concurrent-planned-1",
+                "reconcile-concurrent-planned-2",
+                "reconcile-concurrent-planned-3",
+                "reconcile-concurrent-planned-4",
+            ];
+            for run_id in run_ids {
+                orphaned_running_run(run_id);
+                agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                    record
+                        .metadata
+                        .as_object_mut()
+                        .expect("metadata object")
+                        .remove("runner_pid");
+                })
+                .expect("remove controller owner identity");
+            }
+
+            let published = Arc::new(Barrier::new(run_ids.len() + 1));
+            let release = Arc::new(Barrier::new(run_ids.len() + 1));
+            let mut planners = Vec::new();
+            for run_id in run_ids {
+                let published = Arc::clone(&published);
+                let release = Arc::clone(&release);
+                planners.push(std::thread::spawn(move || {
+                    let plan = AgentTaskPlan::new("concurrent-planned-runner", Vec::new());
+                    agent_task_lifecycle::record_lab_offload_phase(
+                        run_id,
+                        "homeboy-lab",
+                        "materializing",
+                        None,
+                        None,
+                        None,
+                        Some(&plan),
+                    )
+                    .expect("planned runner submission");
+                    published.wait();
+                    release.wait();
+                }));
+            }
+            published.wait();
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("cleanup during delayed identity publication");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            for run_id in run_ids {
+                let record = agent_task_lifecycle::status(run_id).expect("planned record");
+                assert!(!record.state.is_terminal(), "{run_id} was terminalized");
+                assert_eq!(
+                    record.metadata["runner_execution_record"]["status"],
+                    "planned"
+                );
+                assert!(record.metadata.get("cancel_reason").is_none());
+            }
+
+            release.wait();
+            for planner in planners {
+                planner.join().expect("planner thread");
+            }
+            for run_id in run_ids {
+                let accepted = agent_task_lifecycle::record_detached_lab_run(
+                    agent_task_lifecycle::DetachedLabRunRecord {
+                        run_id,
+                        runner_id: "homeboy-lab",
+                        runner_job_id: &format!("delayed-{run_id}"),
+                        remote_workspace: "/runner/workspace/homeboy",
+                        remote_command: &[],
+                    },
+                )
+                .expect("delayed identity publication");
+                assert_eq!(
+                    accepted.runner_job_id(),
+                    Some(format!("delayed-{run_id}").as_str())
+                );
+            }
         });
     }
 
