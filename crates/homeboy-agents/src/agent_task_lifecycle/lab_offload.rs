@@ -785,6 +785,10 @@ fn record_lab_offload_proxy_in_store(
 ) -> Result<AgentTaskRunRecord> {
     validate_lab_handoff_plan(durable_plan)?;
     let run_id = sanitize_run_id(requested_run_id);
+    // Planning and stale cleanup race for this controller-owned proxy. Use the
+    // same fence as acceptance and expiry so cleanup cannot terminalize a
+    // snapshot taken before this planned execution is durably published.
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let input = DetachedLabRunRecord {
         run_id: &run_id,
         runner_id,
