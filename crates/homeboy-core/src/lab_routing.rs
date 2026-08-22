@@ -490,12 +490,80 @@ pub fn compact_command_result_output(stream: &str) -> Option<String> {
     if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
         lines.push(format!("Summary: {}", compact_line(summary)));
     }
+    append_result_outcome_lines(&value, &mut lines);
     if value.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
         if let Some(cause) = command_result_root_cause(&value) {
             lines.push(format!("Root cause: {}", compact_line(&cause)));
         }
     }
     Some(bound_terminal_output(lines.join("\n")))
+}
+
+fn append_result_outcome_lines(value: &serde_json::Value, lines: &mut Vec<String>) {
+    let Some(data) = value.get("data") else {
+        if value.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+            lines.push("Outcome: orchestration_failed".to_string());
+            lines.push("Retryable: true".to_string());
+        }
+        return;
+    };
+    let payload = data.get("payload").unwrap_or(data);
+    let gate_failures = payload
+        .get("gate_failures")
+        .and_then(serde_json::Value::as_array)
+        .filter(|failures| !failures.is_empty());
+    let outcome = payload
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| data.get("outcome").and_then(serde_json::Value::as_str))
+        .or_else(|| gate_failures.map(|_| "result_gate_failed"));
+    let Some(outcome) = outcome else {
+        return;
+    };
+    lines.push(format!("Outcome: {outcome}"));
+    let retryable = payload
+        .get("retryable")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| data.get("retryable").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    lines.push(format!("Retryable: {retryable}"));
+    if let Some(failures) = gate_failures {
+        let failures = failures
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .take(3)
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            lines.push(format!("Failed gates: {}", failures.join("; ")));
+        }
+    }
+    let run_id = payload
+        .get("persisted_run")
+        .and_then(|run| run.get("run_id"))
+        .and_then(serde_json::Value::as_str);
+    let artifacts = payload
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array);
+    if let (Some(run_id), Some(artifacts)) = (run_id, artifacts) {
+        for artifact in artifacts {
+            let Some(name) = artifact.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if !matches!(name, "result" | "summary" | "findings" | "finding_packets") {
+                continue;
+            }
+            let Some(id) = artifact
+                .get("observation_artifact_id")
+                .or_else(|| artifact.get("artifact_id"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            lines.push(format!(
+                "{name} artifact: homeboy runs artifact get {run_id} {id} -o <path>"
+            ));
+        }
+    }
 }
 
 fn compact_lab_terminal_output(
@@ -1441,6 +1509,37 @@ mod tests {
         assert_eq!(stdout.matches("Cannot find module 'tar'").count(), 1);
         assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn compact_result_outcomes_keep_gate_failures_distinct_and_actionable() {
+        let gate_failure = r#"{"schema":"homeboy/command-result/v3","command":"bench","success":false,"status":"failed","data":{"variant":"single","payload":{"persisted_run":{"run_id":"bench-42"},"gate_failures":["failed_fixture_count lte 0","visual_mismatch"],"artifacts":[{"name":"result","observation_artifact_id":"result-1"},{"name":"summary","artifact_id":"summary-1"},{"name":"finding_packets","observation_artifact_id":"findings-1"}]}}}"#;
+        let workload_failure = r#"{"schema":"homeboy/command-result/v3","command":"bench","success":false,"status":"failed","data":{"outcome":"workload_execution_failed","retryable":false}}"#;
+        let malformed_result = r#"{"schema":"homeboy/command-result/v3","command":"bench","success":false,"status":"failed","data":{"outcome":"result_parse_failed","retryable":false}}"#;
+        let transport_failure = r#"{"schema":"homeboy/command-result/v3","command":"bench","success":false,"status":"failed","error":{"message":"runner connection reset"}}"#;
+
+        let gate = compact_command_result_output(gate_failure).expect("gate summary");
+        assert!(gate.contains("Outcome: result_gate_failed"));
+        assert!(gate.contains("Retryable: false"));
+        assert!(gate.contains("Failed gates: failed_fixture_count lte 0; visual_mismatch"));
+        assert!(
+            gate.contains("result artifact: homeboy runs artifact get bench-42 result-1 -o <path>")
+        );
+        assert!(gate
+            .contains("summary artifact: homeboy runs artifact get bench-42 summary-1 -o <path>"));
+        assert!(gate.contains(
+            "finding_packets artifact: homeboy runs artifact get bench-42 findings-1 -o <path>"
+        ));
+
+        let workload = compact_command_result_output(workload_failure).expect("workload summary");
+        assert!(workload.contains("Outcome: workload_execution_failed"));
+        let malformed = compact_command_result_output(malformed_result).expect("parse summary");
+        assert!(malformed.contains("Outcome: result_parse_failed"));
+        let transport =
+            compact_command_result_output(transport_failure).expect("transport summary");
+        assert!(transport.contains("Outcome: orchestration_failed"));
+        assert!(transport.contains("Retryable: true"));
+        assert!(transport.contains("Root cause: runner connection reset"));
     }
 
     #[test]
