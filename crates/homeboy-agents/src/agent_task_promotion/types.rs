@@ -150,13 +150,15 @@ impl AgentTaskPromotionReport {
     /// A reviewer-visible command needs a durable passing gate for this exact
     /// command and immutable candidate. Status-only evidence never qualifies.
     pub fn has_visible_passed_gate_for_command(&self, command: &str) -> bool {
-        self.gate_outcome().status == AgentTaskPromotionStatus::Applied
-            && self.deterministic_gates.iter().any(|gate| {
-                gate.visibility == HomeboyGateVisibility::Visible
-                    && gate.command.as_slice() == ["sh", "-lc", command]
-                    && durable_gate_passed(gate)
-                    && self.gate_candidate_identity_matches(gate)
-            })
+        matches!(
+            self.gate_outcome().status,
+            AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::VerifiedNoChanges
+        ) && self.deterministic_gates.iter().any(|gate| {
+            gate.visibility == HomeboyGateVisibility::Visible
+                && gate.command.as_slice() == ["sh", "-lc", command]
+                && durable_gate_passed(gate)
+                && self.gate_candidate_identity_matches(gate)
+        })
     }
 
     fn gate_candidate_identity_matches(&self, gate: &AgentTaskGateReport) -> bool {

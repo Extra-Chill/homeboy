@@ -13115,6 +13115,120 @@ fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
 }
 
 #[test]
+fn verified_existing_candidate_no_change_recovery_finalizes_once() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-12836-existing-candidate";
+        let run_id = "cook-12836-existing-candidate-attempt-1";
+        let target = tempfile::tempdir().expect("candidate repository");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(target.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(target.path().join("lib.rs"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        let base = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(target.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        std::fs::write(target.path().join("lib.rs"), "candidate\n").unwrap();
+        assert!(Command::new("git")
+            .args(["commit", "-am", "candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.to_worktree = target.path().display().to_string();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("record Cook attempt");
+        let patch = target.path().join("candidate.patch");
+        seed_substantive_candidate_aggregate(run_id, &options.initial_plan, &patch, "candidate\n");
+        let mut aggregate =
+            agent_task_lifecycle::read_attempt_aggregate(run_id).expect("read aggregate");
+        aggregate.outcomes[0].outputs = serde_json::json!({
+            "review_form": test_review_form(),
+            "provider_run_result": { "intentional_no_change": {
+                "schema": "homeboy/agent-task-intentional-no-change/v1",
+                "verdict": "already_satisfied",
+                "inspected_revision": "candidate",
+                "source_evidence": ["fixture"]
+            }}
+        });
+        agent_task_lifecycle::record_run_aggregate(run_id, &options.initial_plan, &aggregate)
+            .expect("persist intentional no-change aggregate");
+        let mut promotion = promotion_with_existing_path(run_id, target.path());
+        promotion.status = AgentTaskPromotionStatus::VerifiedNoChanges;
+        promotion.changed_files = vec!["lib.rs".to_string()];
+        promotion.verified_base = Some(
+            crate::agent_task_promotion::AgentTaskPromotionVerifiedBase {
+                base: options.base.clone(),
+                sha: base,
+            },
+        );
+        promotion.provenance["candidate"] = serde_json::to_value(
+            crate::agent_task_promotion::candidate_fingerprint(target.path().to_str().unwrap())
+                .expect("candidate fingerprint"),
+        )
+        .unwrap();
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .expect("persist verified existing candidate");
+
+        let mut backend = CaptureBackend {
+            candidate_state: Some(
+                crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+                    changed_files: vec!["lib.rs".to_string()],
+                    push_required: false,
+                },
+            ),
+            synthetic_gate_proof: Some(promotion),
+            ..Default::default()
+        };
+        let recovered = recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut backend)
+            .expect("recover publishes the verified existing candidate");
+        assert_eq!(recovered["status"], "review_ready");
+        assert!(backend.created);
+
+        let mut repeated = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut repeated)
+                .expect("recovery is exactly once"),
+            recovered
+        );
+        assert!(!repeated.created);
+    });
+}
+
+#[test]
 fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980-normal";

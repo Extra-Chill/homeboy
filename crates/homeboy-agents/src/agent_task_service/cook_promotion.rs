@@ -2300,8 +2300,13 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
-    if let Some(receipt) = recover_verified_no_change_finalization(&recipe, &run_id)? {
-        return Ok(receipt);
+    if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
+        promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
+            && promotion.changed_files.is_empty()
+    }) {
+        if let Some(receipt) = recover_verified_no_change_finalization(&recipe, &run_id)? {
+            return Ok(receipt);
+        }
     }
     let promotion = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -2317,12 +2322,15 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     // accept_inherited_failures rather than requiring a green-gate Applied.
     let recovery_outcome = promotion.gate_outcome();
     if recovery_outcome.status != AgentTaskPromotionStatus::Applied
+        && !(recovery_outcome.status == AgentTaskPromotionStatus::VerifiedNoChanges
+            && !promotion.changed_files.is_empty()
+            && promotion.finalization_eligible(options.gates.accept_inherited_failures))
         && !(recovery_outcome.status == AgentTaskPromotionStatus::GateFailed
             && promotion.finalization_eligible(options.gates.accept_inherited_failures))
     {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
-            "recovery requires an applied promotion with green gates or an explicitly accepted inherited baseline failure",
+            "recovery requires an applied promotion, a verified existing-candidate delta, or an explicitly accepted inherited baseline failure",
             Some(run_id),
             None,
         ));
@@ -2369,7 +2377,7 @@ fn recover_verified_no_change_finalization(
         )
     })?;
     let options = super::cook_recipe::reconstruct_adoption_options(recipe)?;
-    let verified_base = promotion
+    let _verified_base = promotion
         .verified_base
         .as_ref()
         .filter(|base| base.base == options.base && !base.sha.trim().is_empty())
@@ -2401,6 +2409,14 @@ fn recover_verified_no_change_finalization(
                 None,
             )
         })?;
+    if selection["selected_task_id"].as_str() != Some(promotion.source.task_id.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.source.task_id",
+            "verified no-change recovery requires the promotion source task to match the Cook-bound candidate",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     let expected: AgentTaskPromotionCandidate = serde_json::from_value(
         promotion
             .provenance
@@ -2437,10 +2453,10 @@ fn recover_verified_no_change_finalization(
             )
         })?;
     let actual = candidate_fingerprint(path)?;
-    if !verified_no_change_candidate_is_valid(&expected, &actual, &verified_base.sha) {
+    if !verified_no_change_candidate_is_valid(&expected, &actual) {
         return Err(Error::validation_invalid_argument(
             "path",
-            "verified no-change recovery requires the exact clean, non-base candidate checked by deterministic gates",
+            "verified no-change recovery requires the exact clean candidate checked by deterministic gates",
             Some(path.to_string()),
             None,
         ));
@@ -2463,14 +2479,11 @@ fn recover_verified_no_change_finalization(
 fn verified_no_change_candidate_is_valid(
     expected: &AgentTaskPromotionCandidate,
     actual: &AgentTaskPromotionCandidate,
-    verified_base_sha: &str,
 ) -> bool {
     let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
         return false;
     };
-    expected == actual
-        && fingerprint.changed_files.is_empty()
-        && fingerprint.head != verified_base_sha
+    expected == actual && fingerprint.changed_files.is_empty()
 }
 
 #[cfg(test)]
@@ -2494,36 +2507,24 @@ mod no_change_recovery_tests {
     }
 
     #[test]
-    fn verified_no_change_candidate_requires_exact_clean_non_base_binding() {
+    fn verified_no_change_candidate_requires_exact_clean_binding() {
         let bound = candidate("candidate-head", &[]);
-        assert!(verified_no_change_candidate_is_valid(
-            &bound,
-            &bound,
-            "verified-base"
-        ));
+        assert!(verified_no_change_candidate_is_valid(&bound, &bound,));
 
         assert!(!verified_no_change_candidate_is_valid(
-            &candidate("verified-base", &[]),
-            &candidate("verified-base", &[]),
-            "verified-base"
-        ));
-        assert!(!verified_no_change_candidate_is_valid(
             &candidate("candidate-head", &["dirty.rs"]),
-            &candidate("candidate-head", &["dirty.rs"]),
-            "verified-base"
+            &candidate("candidate-head", &["dirty.rs"])
         ));
         assert!(!verified_no_change_candidate_is_valid(
             &bound,
-            &candidate("different-head", &[]),
-            "verified-base"
+            &candidate("different-head", &[])
         ));
         assert!(!verified_no_change_candidate_is_valid(
             &candidate("candidate-head", &[]),
             &serde_json::from_value(
                 json!({ "kind": "non_git", "disposition": "not_a_git_worktree" })
             )
-            .expect("unbound candidate fixture"),
-            "verified-base"
+            .expect("unbound candidate fixture")
         ));
     }
 }
