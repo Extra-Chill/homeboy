@@ -136,8 +136,7 @@ impl ObservationStore {
             })?;
         }
 
-        let connection = schema::open_connection(&path)?;
-        schema::apply_migrations(&connection)?;
+        let connection = schema::open_initialized_connection(&path)?;
         let store = Self {
             connection,
             path,

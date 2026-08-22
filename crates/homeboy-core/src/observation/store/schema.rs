@@ -1,7 +1,9 @@
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use fs4::fs_std::FileExt;
 use rusqlite::{Connection, OpenFlags};
 
 use super::{sqlite_error, ObservationDbStatus};
@@ -331,7 +333,7 @@ pub(crate) fn status() -> Result<ObservationDbStatus> {
         });
     }
 
-    let connection = open_connection(&path)?;
+    let connection = open_readonly_connection(&path)?;
     status_for_open_connection(&connection, path, true)
 }
 
@@ -385,6 +387,64 @@ pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Open an initializing connection under a bounded, cross-process lease.
+/// SQLite needs an exclusive lock to convert a rollback journal into WAL, and
+/// the process-local migration mutex cannot coordinate separate CLI processes.
+pub(crate) fn open_initialized_connection(path: &Path) -> Result<Connection> {
+    with_initialization_lock(path, || {
+        let connection = open_connection(path)?;
+        ensure_wal_journal_mode(&connection)?;
+        apply_migrations(&connection)?;
+        Ok(connection)
+    })
+}
+
+fn with_initialization_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    const RETRY: Duration = Duration::from_millis(25);
+
+    let lock_path = path.with_extension("sqlite.init.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            crate::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "open observation initialization lock {}",
+                    lock_path.display()
+                )),
+            )
+        })?;
+    let started = Instant::now();
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => return operation(),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(crate::Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "acquire observation initialization lock {}",
+                        lock_path.display()
+                    )),
+                ));
+            }
+        }
+        if started.elapsed() >= TIMEOUT {
+            return Err(crate::Error::observation_store_busy(
+                path.to_string_lossy(),
+                "initialize observation store",
+                TIMEOUT.as_millis() as u64,
+            ));
+        }
+        std::thread::sleep(RETRY);
+    }
+}
+
 pub(crate) fn status_for_open_connection(
     connection: &Connection,
     path: PathBuf,
@@ -407,32 +467,23 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(sqlite_error("configure observation store busy timeout"))?;
-    // WAL journaling lets readers and a single writer proceed concurrently,
-    // which sharply reduces transient "database is locked" contention when
-    // multiple homeboy processes touch the observation store at once.
-    // pragma_update may itself momentarily contend on the lock, so it stays
-    // best effort: the busy_timeout above plus the write-retry wrapper still
-    // apply.
-    //
-    // Best effort is not the same as silent. A discarded failure leaves the
-    // store running in rollback-journal mode with materially different
-    // concurrency behaviour and nobody told, so the next "database is locked"
-    // report has no way to reach its own cause.
-    // Journal tuning is optional maintenance, so it must not consume the
-    // lifecycle connection's normal busy budget before migrations or callers.
-    connection
-        .busy_timeout(Duration::ZERO)
-        .map_err(sqlite_error(
-            "bound observation journal maintenance timeout",
-        ))?;
-    for warning in apply_journal_pragmas(&connection) {
-        warn_pragma_once(&warning);
-    }
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(sqlite_error("restore observation store busy timeout"))?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)
+}
+
+fn ensure_wal_journal_mode(connection: &Connection) -> Result<()> {
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+        .map_err(sqlite_error("read observation store journal mode"))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(sqlite_error("set observation store journal mode to WAL"))?;
+    }
+    connection
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(sqlite_error("set observation store synchronous mode"))?;
+    Ok(())
 }
 
 /// Turn on the referential integrity this schema has always declared.
@@ -469,38 +520,6 @@ pub(crate) fn foreign_keys_enforced(connection: &Connection) -> Result<bool> {
             "read observation store foreign key enforcement",
         ))?;
     Ok(enforced == 1)
-}
-
-/// Apply the concurrency pragmas, returning a warning per pragma that did not
-/// take. Pure so every branch is reachable without a contended database.
-fn apply_journal_pragmas(connection: &Connection) -> Vec<String> {
-    [("journal_mode", "WAL"), ("synchronous", "NORMAL")]
-        .into_iter()
-        .filter_map(|(pragma, value)| {
-            connection
-                .pragma_update(None, pragma, value)
-                .err()
-                .map(|error| pragma_warning(pragma, value, &error.to_string()))
-        })
-        .collect()
-}
-
-fn pragma_warning(pragma: &str, value: &str, error: &str) -> String {
-    format!(
-        "observation store could not set PRAGMA {pragma}={value}: {error}. The store keeps \
-         working with different concurrency behaviour; expect more transient \
-         `observation_store.busy` errors."
-    )
-}
-
-/// The condition is a property of the database, not of one open, and
-/// `open_connection` runs on nearly every command. Warning once per process
-/// keeps it visible without turning it into noise that gets filtered out.
-fn warn_pragma_once(warning: &str) {
-    static WARNED: OnceLock<()> = OnceLock::new();
-    WARNED.get_or_init(|| {
-        eprintln!("Warning: {warning}");
-    });
 }
 
 /// Open an existing observation store for a bounded metadata read.
@@ -734,51 +753,43 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
 mod tests {
     use super::*;
 
-    /// A real open must take both pragmas. Failure used to be discarded with
-    /// `let _ =`, so the store could silently fall back to rollback-journal
-    /// mode — different concurrency behaviour, nobody told, and the next
-    /// "database is locked" report unable to reach its own cause (#11127).
+    /// An initializing open must persist WAL before it exposes the store.
     #[test]
-    fn a_healthy_connection_applies_both_concurrency_pragmas_without_warning() {
+    fn an_initializing_connection_applies_both_concurrency_pragmas() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let connection =
-            open_connection(&directory.path().join("observations.sqlite")).expect("open");
+        let connection = open_initialized_connection(&directory.path().join("observations.sqlite"))
+            .expect("open");
 
-        assert!(
-            apply_journal_pragmas(&connection).is_empty(),
-            "a healthy store must take both pragmas"
-        );
         let mode: String = connection
             .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
             .expect("read journal mode");
         assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous;", [], |row| row.get(0))
+            .expect("read synchronous mode");
+        assert_eq!(synchronous, 1, "NORMAL is SQLite synchronous level 1");
     }
 
-    /// The point of the change: a failure becomes words, not silence. The
-    /// warning has to name the pragma, the value, and the consequence.
     #[test]
-    fn a_discarded_pragma_failure_becomes_an_actionable_warning() {
-        let warning = pragma_warning("journal_mode", "WAL", "database is locked");
+    fn wal_initialization_returns_real_lock_failures() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("observations.sqlite");
+        let blocker = Connection::open(&path).expect("open blocker");
+        blocker
+            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .expect("hold exclusive lock");
+        let contender = Connection::open(&path).expect("open contender");
+        contender
+            .busy_timeout(Duration::ZERO)
+            .expect("disable contender wait");
 
-        assert!(warning.contains("journal_mode=WAL"), "{warning}");
-        assert!(warning.contains("database is locked"), "{warning}");
+        let error =
+            ensure_wal_journal_mode(&contender).expect_err("WAL setup must fail while locked");
+
         assert!(
-            warning.contains("observation_store.busy"),
-            "the warning must name what the operator will see instead: {warning}"
+            error.to_string().contains("database is locked"),
+            "the concrete SQLite lock failure must be preserved: {error}"
         );
-    }
-
-    /// Every pragma that does not take produces exactly one warning, so a
-    /// second silent fallback cannot be introduced without a test noticing.
-    #[test]
-    fn one_warning_is_produced_per_pragma_that_did_not_take() {
-        let warnings: Vec<_> = [("journal_mode", "WAL"), ("synchronous", "NORMAL")]
-            .into_iter()
-            .map(|(pragma, value)| pragma_warning(pragma, value, "disk I/O error"))
-            .collect();
-
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings.iter().all(|warning| warning.contains("PRAGMA")));
     }
 
     #[test]
