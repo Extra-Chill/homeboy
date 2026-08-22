@@ -4450,34 +4450,34 @@ pub fn run_status_in_store(
             (events, record.artifact_refs.clone())
         }
     };
-    let candidate = load_plan_for_execution_in_store(lifecycle_store, &record.run_id)
-        .ok()
-        .and_then(|plan| {
-            (plan.tasks.len() > 1).then(|| {
-                let selected = aggregate
+    let plan = load_plan_for_execution_in_store(lifecycle_store, &record.run_id).ok();
+    let candidate = plan.as_ref().and_then(|plan| {
+        (plan.tasks.len() > 1).then(|| {
+            let selected = aggregate
+                .as_ref()
+                .and_then(|value| value.selected_outcome());
+            AgentTaskCandidateStatus {
+                policy: plan.options.candidate_completion,
+                selected_task_id: selected.map(|outcome| outcome.task_id.clone()),
+                candidates: aggregate
                     .as_ref()
-                    .and_then(|value| value.selected_outcome());
-                AgentTaskCandidateStatus {
-                    policy: plan.options.candidate_completion,
-                    selected_task_id: selected.map(|outcome| outcome.task_id.clone()),
-                    candidates: aggregate
-                        .as_ref()
-                        .map(|value| tasks_for_aggregate(&plan, value))
-                        .unwrap_or_else(|| record.tasks.clone()),
-                    deadline_timeout_ms: plan.options.timeout_ms,
-                    cancellation_supervision: if selected.is_some() {
-                        "scheduler_deferred_cleanup".to_string()
-                    } else {
-                        "controller_owned".to_string()
-                    },
-                    promotion_action: selected.and_then(|outcome| {
-                        outcome.metadata["candidate_selection"]["promotion_action"]
-                            .as_str()
-                            .map(str::to_string)
-                    }),
-                }
-            })
-        });
+                    .map(|value| tasks_for_aggregate(&plan, value))
+                    .unwrap_or_else(|| record.tasks.clone()),
+                deadline_timeout_ms: plan.options.timeout_ms,
+                cancellation_supervision: if selected.is_some() {
+                    "scheduler_deferred_cleanup".to_string()
+                } else {
+                    "controller_owned".to_string()
+                },
+                promotion_action: selected.and_then(|outcome| {
+                    outcome.metadata["candidate_selection"]["promotion_action"]
+                        .as_str()
+                        .map(str::to_string)
+                }),
+            }
+        })
+    });
+    let action_eligibility = lifecycle_action_eligibility(&record, plan.as_ref());
     let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
     let latest_event_cursor = normalized_events
         .last()
@@ -4502,6 +4502,7 @@ pub fn run_status_in_store(
         latest_event_cursor,
         artifact_refs: record.artifact_refs,
         normalized_events,
+        action_eligibility,
         candidate,
     })
 }

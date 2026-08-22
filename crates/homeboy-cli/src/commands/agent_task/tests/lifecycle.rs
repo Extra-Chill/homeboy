@@ -1,6 +1,25 @@
 //! Agent-task command run submission, status, run-next, cancel, retry, and resume tests.
 
 use super::support::*;
+
+#[test]
+fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
+    with_isolated_home(|_| {
+        let (value, status) = validate_plan(ValidatePlanArgs {
+            plan: "{".to_string(),
+        })
+        .expect("validation report");
+
+        assert_eq!(status, 1);
+        assert_eq!(value["schema"], "homeboy/agent-task-plan-validation/v1");
+        assert_eq!(value["scope"], "local_controller");
+        assert_eq!(value["valid"], false);
+        assert_eq!(value["failures"][0]["kind"], "invalid_input");
+        assert!(agent_task_lifecycle::list_records()
+            .expect("records")
+            .is_empty());
+    });
+}
 use clap::Parser;
 use homeboy::agents::agent_task_service::{
     AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,
@@ -1792,6 +1811,10 @@ fn submit_run_status_reports_terminal_state() {
             timeout: "30m".to_string(),
         })
         .expect("bridge status loaded");
+        assert_eq!(
+            status_json["action_eligibility"]["schema"],
+            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+        );
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
 
         assert_eq!(run_exit_code, 1);
@@ -1802,6 +1825,10 @@ fn submit_run_status_reports_terminal_state() {
             "homeboy/agent-task-run-status/v1"
         );
         assert!(bridge_status_json["normalized_events"].is_array());
+        assert_eq!(
+            bridge_status_json["action_eligibility"]["schema"],
+            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+        );
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
         assert_eq!(record.totals.expect("totals").failed, 1);

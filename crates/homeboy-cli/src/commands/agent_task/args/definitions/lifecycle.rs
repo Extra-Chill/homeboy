@@ -37,6 +37,12 @@ pub struct SubmitArgs {
     pub run_id: Option<String>,
 }
 #[derive(Args, Debug)]
+pub struct ValidatePlanArgs {
+    /// Agent-task plan as inline JSON, `@FILE`, or `-`. Validation creates no lifecycle record.
+    #[arg(long, value_name = "JSON|@FILE|-")]
+    pub plan: String,
+}
+#[derive(Args, Debug)]
 pub struct LifecycleReadArgs {
     pub run_id: String,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its

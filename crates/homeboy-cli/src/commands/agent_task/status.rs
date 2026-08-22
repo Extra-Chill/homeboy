@@ -205,15 +205,23 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         },
     ));
     // A future durable budget is incompatible, not an absent optional preview.
-    if let Err(error) = agent_task_lifecycle::load_plan_in_store(&lifecycle_store, run_id) {
-        if error
-            .message
-            .contains("unsupported agent-task execution budget version")
+    let eligibility_plan = match agent_task_lifecycle::load_plan_in_store(&lifecycle_store, run_id)
+    {
+        Ok(plan) => Some(plan),
+        Err(error)
+            if error
+                .message
+                .contains("unsupported agent-task execution budget version") =>
         {
             return Err(error);
         }
-    }
+        Err(_) => None,
+    };
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    value["action_eligibility"] = serde_json::to_value(
+        agent_task_lifecycle::lifecycle_action_eligibility(&record, eligibility_plan.as_ref()),
+    )
+    .unwrap_or(Value::Null);
     // The default/`--full` status path is a durable-local read: reconciliation
     // has its own explicit command so an unavailable runner cannot hold status
     // hostage. That makes this answer directly comparable to `activity show`,
@@ -1110,6 +1118,7 @@ fn bounded_full_status(value: Value, run_id: &str) -> Value {
     let output = json!({
         "schema": "homeboy/agent-task-status-bounded/v1",
         "presentation": "bounded_outcome_first",
+        "action_eligibility": value.get("action_eligibility").cloned().unwrap_or(Value::Null),
         "outcome": {
             "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
             "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
