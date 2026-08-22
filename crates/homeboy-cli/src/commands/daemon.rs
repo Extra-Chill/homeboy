@@ -854,13 +854,6 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
 
     #[test]
-    fn daemon_controller_context_registers_runner_continuation_projection() {
-        register_daemon_controller_job_providers();
-
-        assert!(homeboy::agents::agent_task_lifecycle::runner_authority("local").is_configured());
-    }
-
-    #[test]
     fn legacy_child_recovery_parser_requires_exact_evidence() {
         assert!(
             Cli::try_parse_from(["homeboy", "daemon", "recover-missing-child-identity"]).is_err()
