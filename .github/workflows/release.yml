@@ -622,19 +622,34 @@ jobs:
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Preflight release workspace build
+      # ── One codegen-free preflight, not two compiles (release critical path) ──
+      #
+      # This replaced a pair of steps: a full workspace codegen build followed
+      # by a `--tests` check, 5m14s combined. The codegen half was the
+      # redundant one — `prepare` consumes none of the object files it emitted,
+      # `gate-build` had already proved those same lib/bin targets link in
+      # release profile, and the check below covers a strict superset of its
+      # error surface. Paying for codegen twice bought nothing.
+      #
+      # `--all-targets` rather than `--tests`: `--tests` alone can miss a plain
+      # `[[bin]]` (e.g. `bench-audit-self`) in its non-test configuration, and
+      # benches are real compile surface too. Same cost class, wider net.
+      #
+      # This step is LOAD-BEARING and must not be deleted as "the test gate
+      # already did it". It did not. `gate-test` runs `review test` with
+      # `--changed-since`, so it compiles only the changed scope — a green Test
+      # gate routinely builds a single binary. The full-scope post-merge job
+      # that used to backstop it was deliberately removed in #10696 (an absence
+      # now pinned by `tests/audit_debt_workflow_test.rs`), and `audit-debt`
+      # only runs weekly. That makes this the ONLY full-workspace target
+      # compile anywhere on the merge path. It is what catches a test file
+      # still referencing a module a crate extraction moved out from under it.
+      #
+      # `--locked` is also the only enforcement that `Cargo.lock` is current
+      # before the version bump rewrites it; `gate-build` does not pass it.
+      - name: Preflight full-workspace compilation
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo build --workspace --locked
-
-      # Compile every crate's TEST target too. `cargo build --workspace` above
-      # only builds lib/bin targets, so a test file that references a module
-      # moved during a crate extraction (e.g. a donor's orphaned `super::foo`
-      # after `foo` was extracted) compiles fine here yet breaks the test gate.
-      # `check --tests` is codegen-free and cheap; it fails the release closed
-      # before shipping a workspace whose tests don't build.
-      - name: Preflight workspace test-target compilation
-        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo check --workspace --tests --locked
+        run: cargo check --workspace --all-targets --locked
 
       - uses: Extra-Chill/homeboy-action@v2
         id: release
