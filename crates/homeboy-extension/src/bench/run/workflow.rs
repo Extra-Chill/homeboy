@@ -150,6 +150,7 @@ pub fn run_main_bench_workflow(
                 }),
                 rig_package: args.rig_package.clone(),
                 lifecycle: None,
+                stages: Vec::new(),
                 diagnostics: Vec::new(),
             });
             attach_memory_timeline_artifacts(
