@@ -559,61 +559,6 @@ fn resolve_changed_files(artifact: &Value) -> Option<usize> {
     changed_files_for_artifact(artifact)
 }
 
-/// Extract the set of unique file paths a unified-diff patch touches.
-///
-/// Prefers `diff --git a/<old> b/<new>` headers, which are present for standard
-/// edits, renames, deletes, and binary diffs alike; falls back to `+++`/`---`
-/// hunk headers when a git header is absent. Paths are de-duplicated and the
-/// `a/`/`b/` prefixes and `/dev/null` sentinels are stripped. A malformed or
-/// non-diff string simply yields no paths.
-fn changed_paths_from_patch(patch: &str) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-    let mut push_unique = |candidate: Option<String>| {
-        if let Some(path) = candidate {
-            if !path.is_empty() && !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-    };
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            // `diff --git a/old b/new` — take the destination (b/) path, falling
-            // back to the source when the destination is /dev/null (delete).
-            let mut parts = rest.split_whitespace();
-            let old = parts.next().map(strip_diff_path_prefix);
-            let new = parts.next().map(strip_diff_path_prefix);
-            match (new, old) {
-                (Some(new), _) if new != "/dev/null" => push_unique(Some(new)),
-                (_, Some(old)) => push_unique(Some(old)),
-                _ => {}
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
-            if path != "/dev/null" {
-                push_unique(Some(path));
-            }
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            // Only used as a fallback for deletes where `+++` is /dev/null.
-            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
-            if path != "/dev/null" {
-                push_unique(Some(path));
-            }
-        }
-    }
-    paths
-}
-
-/// Strip a leading `a/` or `b/` diff prefix (and surrounding quotes) from a
-/// unified-diff path token.
-fn strip_diff_path_prefix(token: &str) -> String {
-    let token = token.trim().trim_matches('"');
-    token
-        .strip_prefix("a/")
-        .or_else(|| token.strip_prefix("b/"))
-        .unwrap_or(token)
-        .to_string()
-}
-
 /// A run whose lifecycle state is `succeeded` but that produced zero promotion
 /// candidates did not actually patch anything. Surface that honestly as
 /// `no_patch_produced` instead of advertising success (#4610).
@@ -886,47 +831,6 @@ mod tests {
         assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
         assert!(summary.contains("Changed files: 2\n"));
         assert!(summary.contains("Diff bytes: 256\n"));
-    }
-
-    #[test]
-    fn changed_paths_from_patch_parses_standard_rename_delete_and_binary() {
-        let standard = "diff --git a/src/lib.rs b/src/lib.rs\n\
-             index 111..222 100644\n\
-             --- a/src/lib.rs\n\
-             +++ b/src/lib.rs\n\
-             @@ -1 +1 @@\n-a\n+b\n";
-        assert_eq!(changed_paths_from_patch(standard), vec!["src/lib.rs"]);
-
-        let rename = "diff --git a/old/name.rs b/new/name.rs\n\
-             similarity index 100%\n\
-             rename from old/name.rs\n\
-             rename to new/name.rs\n";
-        assert_eq!(changed_paths_from_patch(rename), vec!["new/name.rs"]);
-
-        let delete = "diff --git a/gone.rs b/gone.rs\n\
-             deleted file mode 100644\n\
-             index 333..000\n\
-             --- a/gone.rs\n\
-             +++ /dev/null\n\
-             @@ -1 +0,0 @@\n-x\n";
-        assert_eq!(changed_paths_from_patch(delete), vec!["gone.rs"]);
-
-        let binary = "diff --git a/logo.png b/logo.png\n\
-             index 444..555 100644\n\
-             Binary files a/logo.png and b/logo.png differ\n";
-        assert_eq!(changed_paths_from_patch(binary), vec!["logo.png"]);
-    }
-
-    #[test]
-    fn changed_paths_from_patch_dedupes_and_ignores_malformed() {
-        let multi =
-            "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n\
-             diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n";
-        assert_eq!(changed_paths_from_patch(multi), vec!["one.rs", "two.rs"]);
-
-        // Not a diff at all — yields no paths rather than panicking or guessing.
-        assert!(changed_paths_from_patch("just some prose\nwith no diff headers").is_empty());
-        assert!(changed_paths_from_patch("").is_empty());
     }
 
     #[test]
