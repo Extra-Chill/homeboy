@@ -992,9 +992,10 @@ pub struct AgentTaskCookArgs {
     #[arg(long)]
     pub no_progress: bool,
     /// Base branch the finalized pull request targets and the branch changes are
-    /// diffed against (default `main`).
-    #[arg(long, default_value = "main", value_name = "BRANCH")]
-    pub base: String,
+    /// diffed against. When omitted, Cook resolves repository evidence before
+    /// falling back to `main`.
+    #[arg(long, value_name = "BRANCH")]
+    pub base: Option<String>,
     /// Head branch to push and open the PR from. Defaults to the branch the
     /// destination worktree is already on.
     #[arg(long, value_name = "BRANCH")]
@@ -1035,6 +1036,9 @@ pub struct AgentTaskCookArgs {
     /// not caller input: Cook persists it with the compiled plan.
     #[arg(skip)]
     pub repository_identity: Option<serde_json::Value>,
+    /// Controller-resolved base provenance persisted with the Cook plan.
+    #[arg(skip)]
+    pub base_resolution: Option<serde_json::Value>,
 }
 
 pub(crate) fn parse_provider_evidence_input(

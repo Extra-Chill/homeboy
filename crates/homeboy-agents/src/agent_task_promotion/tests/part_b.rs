@@ -419,7 +419,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
             source_run_id: Some("v2-run".to_string()),
             source_path: None,
             source_worktree_path: None,
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: "fixture@target".to_string(),
@@ -489,7 +489,7 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
             source_worktree_path: None,
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: "repo@recoverable".to_string(),
@@ -808,6 +808,168 @@ fn adoption_scopes_a_rebased_two_file_candidate_to_its_parent() {
         Some(1)
     );
     assert_eq!(report.provenance["historical_task_base"], historical_base);
+}
+
+#[test]
+fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init", "-b", "main"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "historical base"]);
+    let historical_base = git_head(&repo, "HEAD");
+    let remote = temp.path().join("origin.git");
+    std::fs::create_dir(&remote).expect("create remote");
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-u", "origin", "main"]);
+
+    git(&repo, &["checkout", "-b", "candidate"]);
+    std::fs::write(repo.join("candidate.txt"), "candidate\n").expect("write candidate");
+    git(&repo, &["add", "candidate.txt"]);
+    git(&repo, &["commit", "-m", "candidate change"]);
+    let candidate_parent = git_head(&repo, "HEAD");
+
+    git(&repo, &["checkout", "main"]);
+    std::fs::write(repo.join("base-advance.txt"), "advanced\n").expect("advance base");
+    git(&repo, &["add", "base-advance.txt"]);
+    git(&repo, &["commit", "-m", "base advance"]);
+    let resolved_base_parent = git_head(&repo, "HEAD");
+    git(&repo, &["push", "origin", "main"]);
+    git(&repo, &["checkout", "candidate"]);
+    git(
+        &repo,
+        &["merge", "--no-ff", "main", "-m", "merge verified base"],
+    );
+    let merged_candidate = git_head(&repo, "HEAD");
+    let (source_path, source) = write_empty_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("adopted-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("main".to_string()),
+            task_base_sha: Some(historical_base),
+            candidate_ref: Some(merged_candidate.clone()),
+            to_worktree: "repo@adopted".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("merged candidate adopts");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.changed_files, vec!["candidate.txt"]);
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["head"],
+        merged_candidate
+    );
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["tree"],
+        report.provenance["adoption_merge"]["candidate_tree"]
+    );
+    assert_eq!(report.provenance["base_ref"], resolved_base_parent);
+    assert_eq!(
+        report.provenance["adoption_merge"]["candidate_parent"],
+        candidate_parent
+    );
+    assert_eq!(
+        report.provenance["adoption_merge"]["resolved_base_parent"],
+        resolved_base_parent
+    );
+    assert_eq!(
+        report.provenance["adoption_merge"]["candidate"],
+        merged_candidate
+    );
+    assert_eq!(
+        report.provenance["adoption_merge"]["changed_files"],
+        serde_json::json!(["candidate.txt"])
+    );
+    assert_eq!(provider.verify_calls.len(), 1);
+}
+
+#[test]
+fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init", "-b", "main"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "historical base"]);
+    let historical_base = git_head(&repo, "HEAD");
+    git(&repo, &["checkout", "-b", "candidate"]);
+    std::fs::write(repo.join("candidate.txt"), "candidate\n").expect("write candidate");
+    git(&repo, &["add", "candidate.txt"]);
+    git(&repo, &["commit", "-m", "candidate change"]);
+    git(&repo, &["checkout", "--orphan", "unrelated"]);
+    git(&repo, &["rm", "-rf", "."]);
+    std::fs::write(repo.join("unrelated.txt"), "unrelated\n").expect("write unrelated");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "unrelated base"]);
+    git(&repo, &["checkout", "candidate"]);
+    git(
+        &repo,
+        &[
+            "merge",
+            "--allow-unrelated-histories",
+            "unrelated",
+            "-m",
+            "merge unrelated",
+        ],
+    );
+    let (source_path, source) = write_empty_patch_source(&temp);
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("adopted-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("unrelated".to_string()),
+            task_base_sha: Some(historical_base),
+            candidate_ref: Some(git_head(&repo, "HEAD")),
+            to_worktree: "repo@adopted".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo),
+            ..Default::default()
+        },
+    )
+    .expect_err("unrelated merge must fail closed");
+
+    assert!(error
+        .message
+        .contains("resolved base parent regresses or is unrelated"));
 }
 
 #[test]

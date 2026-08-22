@@ -12,10 +12,22 @@ pub(crate) struct CommittedChangesPatch {
     pub(crate) base_ref: String,
     pub(crate) candidate: String,
     pub(crate) historical_task_base: Option<String>,
+    pub(crate) adoption_merge: Option<AdoptionMergeProof>,
     pub(crate) patch_path: PathBuf,
     pub(crate) sha256: String,
     pub(crate) commit_range: String,
     pub(crate) commits: Vec<Value>,
+}
+
+/// The graph roles authenticated when adoption selects a merge commit. Keeping
+/// these immutable IDs in promotion evidence makes the candidate-only delta
+/// independently reviewable without relying on branch names or mutable refs.
+#[derive(Clone)]
+pub(crate) struct AdoptionMergeProof {
+    pub(crate) candidate_parent: String,
+    pub(crate) resolved_base_parent: String,
+    pub(crate) candidate_tree: String,
+    pub(crate) resolved_base_tree: String,
 }
 
 pub(crate) fn committed_changes_patch(
@@ -43,11 +55,12 @@ pub(crate) fn committed_changes_patch(
         }
     }
 
-    let (base_ref, historical_task_base) = if options.candidate_ref.is_some() {
+    let (base_ref, historical_task_base, adoption_merge) = if options.candidate_ref.is_some() {
         resolve_adoption_candidate_base(
             worktree_path,
             &candidate,
             options.task_base_sha.as_deref(),
+            options.base_ref.as_deref(),
         )?
     } else {
         let Some(base_ref) = resolve_committed_changes_base(
@@ -58,7 +71,7 @@ pub(crate) fn committed_changes_patch(
         else {
             return Ok(None);
         };
-        (base_ref, None)
+        (base_ref, None, None)
     };
     let is_ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
@@ -115,6 +128,7 @@ pub(crate) fn committed_changes_patch(
         base_ref,
         candidate,
         historical_task_base,
+        adoption_merge,
         patch_path,
         sha256,
         commit_range,
@@ -122,41 +136,19 @@ pub(crate) fn committed_changes_patch(
     }))
 }
 
-/// Explicit adoption is scoped to the immutable candidate's sole parent, not
-/// the task's historical workspace base. A rebased candidate may have many
-/// unrelated upstream commits between those two points.
+/// Explicit adoption is scoped to the immutable candidate delta, not the task's
+/// historical workspace base. A candidate may be a normal one-parent commit or
+/// a two-parent merge that incorporates the verified base after it advanced.
 fn resolve_adoption_candidate_base(
     cwd: &Path,
     candidate: &str,
     task_base_sha: Option<&str>,
-) -> Result<(String, Option<String>)> {
+    resolved_base_ref: Option<&str>,
+) -> Result<(String, Option<String>, Option<AdoptionMergeProof>)> {
     let parents = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", candidate])?;
     let mut identities = parents.split_whitespace();
     let _commit = identities.next();
-    let parent = identities.next();
-    if parent.is_none() || identities.next().is_some() {
-        return Err(Error::validation_invalid_argument(
-            "candidate_ref",
-            "adopted candidate must have exactly one parent so its immutable base is unambiguous",
-            Some(candidate.to_string()),
-            None,
-        ));
-    }
-    let parent = parent.expect("validated candidate parent").to_string();
-    let is_ancestor = Command::new("git")
-        .args(["merge-base", "--is-ancestor", &parent, candidate])
-        .current_dir(cwd)
-        .status()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?
-        .success();
-    if !is_ancestor {
-        return Err(Error::validation_invalid_argument(
-            "candidate_ref",
-            "adopted candidate is not descended from its immutable parent base",
-            Some(candidate.to_string()),
-            None,
-        ));
-    }
+    let parents = identities.map(str::to_string).collect::<Vec<_>>();
     let historical_task_base = task_base_sha
         .filter(|base| !base.trim().is_empty())
         .map(|base| {
@@ -167,25 +159,136 @@ fn resolve_adoption_candidate_base(
             .map(|base| base.trim().to_string())
         })
         .transpose()?;
-    if let Some(historical) = historical_task_base.as_deref() {
-        if historical != candidate {
-            let related = Command::new("git")
-                .args(["merge-base", "--is-ancestor", historical, &parent])
-                .current_dir(cwd)
-                .status()
-                .map_err(|error| Error::git_command_failed(error.to_string()))?
-                .success();
-            if !related {
-                return Err(Error::validation_invalid_argument(
-                    "task_base_sha",
-                    "recorded task base is unrelated to the adopted candidate parent; refusing ambiguous adoption provenance",
-                    Some(historical.to_string()),
-                    None,
+    match parents.as_slice() {
+        [parent] => {
+            validate_adoption_parent_lineage(
+                cwd,
+                candidate,
+                parent,
+                historical_task_base.as_deref(),
+            )?;
+            Ok((parent.clone(), historical_task_base, None))
+        }
+        [candidate_parent, resolved_base_parent] => {
+            let resolved_base = resolved_base_ref
+                .filter(|base| !base.trim().is_empty())
+                .map(|base| {
+                    git_stdout(
+                        cwd,
+                        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                    )
+                })
+                .transpose()?
+                .map(|base| base.trim().to_string())
+                .ok_or_else(|| {
+                    adoption_graph_error(
+                        candidate,
+                        "merge candidate requires the resolved immutable base ref",
+                    )
+                })?;
+            if resolved_base != *resolved_base_parent {
+                return Err(adoption_graph_error(
+                    candidate,
+                    "merge candidate's second parent does not equal the resolved immutable base",
                 ));
             }
+            let historical = historical_task_base.as_deref().ok_or_else(|| {
+                adoption_graph_error(
+                    candidate,
+                    "merge candidate requires the recorded immutable task base",
+                )
+            })?;
+            for (role, revision) in [
+                ("candidate-side parent", candidate_parent.as_str()),
+                ("resolved base parent", resolved_base_parent.as_str()),
+            ] {
+                if !is_ancestor(cwd, historical, revision)? {
+                    return Err(adoption_graph_error(candidate, &format!(
+                        "merge candidate's {role} regresses or is unrelated to the recorded task base"
+                    )));
+                }
+            }
+            if is_ancestor(cwd, resolved_base_parent, candidate_parent)?
+                || is_ancestor(cwd, candidate_parent, resolved_base_parent)?
+            {
+                return Err(adoption_graph_error(
+                    candidate,
+                    "merge parents do not represent distinct candidate and advanced-base lineages",
+                ));
+            }
+            Ok((
+                resolved_base_parent.clone(),
+                historical_task_base,
+                Some(AdoptionMergeProof {
+                    candidate_parent: candidate_parent.clone(),
+                    resolved_base_parent: resolved_base_parent.clone(),
+                    candidate_tree: git_stdout(
+                        cwd,
+                        &["rev-parse", &format!("{candidate}^{{tree}}")],
+                    )?
+                    .trim()
+                    .to_string(),
+                    resolved_base_tree: git_stdout(
+                        cwd,
+                        &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
+                    )?
+                    .trim()
+                    .to_string(),
+                }),
+            ))
+        }
+        _ => Err(adoption_graph_error(
+            candidate,
+            "adopted candidate must have one parent or exactly two authenticated merge parents",
+        )),
+    }
+}
+
+fn validate_adoption_parent_lineage(
+    cwd: &Path,
+    candidate: &str,
+    parent: &str,
+    historical_task_base: Option<&str>,
+) -> Result<()> {
+    if !is_ancestor(cwd, parent, candidate)? {
+        return Err(adoption_graph_error(
+            candidate,
+            "adopted candidate is not descended from its immutable parent base",
+        ));
+    }
+    if let Some(historical) = historical_task_base.filter(|historical| *historical != candidate) {
+        if !is_ancestor(cwd, historical, parent)? {
+            return Err(Error::validation_invalid_argument(
+                "task_base_sha",
+                "recorded task base is unrelated to the adopted candidate parent; refusing ambiguous adoption provenance",
+                Some(historical.to_string()),
+                None,
+            ));
         }
     }
-    Ok((parent, historical_task_base))
+    Ok(())
+}
+
+fn git_commit_parents(cwd: &Path, revision: &str) -> Result<Vec<String>> {
+    let output = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", revision])?;
+    Ok(output
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_string)
+        .collect())
+}
+
+fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(cwd)
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| Error::git_command_failed(error.to_string()))
+}
+
+fn adoption_graph_error(candidate: &str, message: &str) -> Error {
+    Error::validation_invalid_argument("candidate_ref", message, Some(candidate.to_string()), None)
 }
 
 fn ensure_clean_source(cwd: &Path) -> Result<()> {

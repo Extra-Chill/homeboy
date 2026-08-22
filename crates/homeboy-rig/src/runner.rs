@@ -202,7 +202,10 @@ pub enum SymlinkStatusState {
 pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     preflight_effective_component_checkouts(rig)?;
     let _lease = acquire_active_run_lease(rig, "up")?;
-    let observer = RigRunObserver::start(rig, "up");
+    // One rig run is one unit of work, so the entry point resolves the roots
+    // once and the observer carries them for the rest of it (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let observer = RigRunObserver::start(rig, "up", &roots);
 
     let execute = || {
         let outcome = run_pipeline(rig, "up", true)?;
@@ -260,7 +263,8 @@ pub fn run_check_with_settings(
     settings: &[(String, String)],
 ) -> Result<CheckReport> {
     preflight_effective_component_checkouts(rig)?;
-    let observer = RigRunObserver::start(rig, "check");
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let observer = RigRunObserver::start(rig, "check", &roots);
 
     let execute = || {
         let requirements = evaluate_requirements(rig);
@@ -422,7 +426,8 @@ pub fn run_fuzz_prepare(
 
     // Dependency-cache evidence must belong to a real, completed run rather
     // than depending on a caller to have installed a rig observer.
-    let observer = RigRunObserver::start(rig, "fuzz_prepare");
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let observer = RigRunObserver::start(rig, "fuzz_prepare", &roots);
     let execute = || {
         let dependency_outcome =
             run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
@@ -1365,8 +1370,13 @@ struct RigRunObserver {
 }
 
 impl RigRunObserver {
-    fn start(rig: &RigSpec, command: &str) -> Option<Self> {
-        let store = ObservationStore::open_initialized().ok()?;
+    /// The observer carries the store for the whole run, and
+    /// [`Self::record_resource_lifecycle_index`] derives the dependency-cache
+    /// root from it. Opening ambiently here left that store unrooted, so the
+    /// cache lookup fell through to its own environment read every time — two
+    /// resolutions that only agreed by coincidence (#7505).
+    fn start(rig: &RigSpec, command: &str, roots: &homeboy_core::paths::PathRoots) -> Option<Self> {
+        let store = ObservationStore::open_initialized_in_roots(roots).ok()?;
         let artifact_manifest = tempfile::NamedTempFile::new().ok()?;
         let cwd = std::env::current_dir().ok();
         let run = store
