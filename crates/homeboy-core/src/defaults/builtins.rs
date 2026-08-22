@@ -111,8 +111,15 @@ const BINARY_UPGRADE_BOOTSTRAP: &str = r#"# Keep the installed controller immuta
 # its own read-only ownership admission. This lets a fixed candidate classify
 # durable records that a legacy controller cannot, without bypassing live work.
 chmod 0755 homeboy
+TARGET_VERSION="${HOMEBOY_UPGRADE_RELEASE_VERSION:?target-version bootstrap recovery requires a selected release version}"
+CANDIDATE_VERSION="$("$TMP_DIR/homeboy" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//; s/+.*$//')"
+if [ "$CANDIDATE_VERSION" != "$TARGET_VERSION" ]; then
+  echo "Target-version bootstrap recovery refused: verified archive candidate reports ${CANDIDATE_VERSION:-unverifiable}, expected $TARGET_VERSION." >&2
+  echo "Same-version repair: homeboy agent-task reconcile-records --dry-run" >&2
+  exit 1
+fi
 LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
-"$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+"$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY" --target-version "$TARGET_VERSION"
 TMP_BIN="$(dirname "$BIN_PATH")/.homeboy-upgrade.$$"
 
 if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then"#;
@@ -253,6 +260,8 @@ fi"#;
 
         assert!(admission < swap);
         assert!(command.contains("LEGACY_IDENTITY=\"$(\"$BIN_PATH\" self identity"));
+        assert!(command.contains("HOMEBOY_UPGRADE_RELEASE_VERSION"));
+        assert!(command.contains("--target-version \"$TARGET_VERSION\""));
         assert!(!command.contains("install -m 0755 homeboy \"$BIN_PATH\""));
         assert!(command.contains("sudo mv \"$TMP_BIN\" \"$BIN_PATH\""));
     }

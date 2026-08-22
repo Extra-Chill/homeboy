@@ -12,8 +12,8 @@ mod validation;
 
 pub use admission::{
     controller_upgrade_admission, ensure_controller_upgrade_admission,
-    register_controller_upgrade_admission_provider, ControllerUpgradeAdmission,
-    ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
+    ensure_verified_target_upgrade_admission, register_controller_upgrade_admission_provider,
+    ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
 };
 pub use execution::parse_build_identity_display;
 pub use helpers::{
