@@ -262,13 +262,22 @@ fn prepare_lab_offload_workspace_stage_inner(
     // Compatible snapshots are mutable runner workspaces, not shared immutable
     // source objects. A job-owned execution view must therefore materialize its
     // own checkout instead of borrowing a snapshot another job may reap.
-    let synced = if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
-        reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
-            .map(|snapshot| (snapshot, 0))
-            .unwrap_or(sync_workspace(runner_id, sync_options)?)
-    } else {
-        sync_workspace(runner_id, sync_options)?
-    }
+    let requires_chunk_transfer = !declared_agent_task_evidence_inputs(&offload_args).is_empty();
+    let synced = preflight_before_workspace_sync(
+        requires_chunk_transfer,
+        || lab_runner_file_transfer(runner_id).map(|_| ()),
+        || {
+            Ok(
+                if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
+                    reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
+                        .map(|snapshot| (snapshot, 0))
+                        .unwrap_or(sync_workspace(runner_id, sync_options)?)
+                } else {
+                    sync_workspace(runner_id, sync_options)?
+                },
+            )
+        },
+    )?
     .0;
     sync_mode = synced.sync_mode;
     if sync_mode == RunnerWorkspaceSyncMode::Snapshot
@@ -688,6 +697,20 @@ fn prepare_lab_offload_workspace_stage_inner(
     })
 }
 
+/// Chunk evidence needs the daemon file API, so refuse an old daemon before a
+/// workspace sync creates any remote state. SSH transfer has no daemon chunk
+/// dependency and its preflight is intentionally a no-op.
+fn preflight_before_workspace_sync<T>(
+    requires_chunk_transfer: bool,
+    preflight: impl FnOnce() -> Result<()>,
+    sync: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if requires_chunk_transfer {
+        preflight()?;
+    }
+    sync()
+}
+
 /// Explicitly transfer controller-projected provider evidence into the primary
 /// runner workspace. Git-based Lab materialization deliberately excludes
 /// untracked files, so evidence must travel outside the snapshot contract.
@@ -706,7 +729,15 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         .unwrap_or_else(|_| source_path.to_path_buf());
     let transfer = lab_runner_file_transfer(runner_id)?;
     let mut entries = Vec::new();
-    for (path, expected_sha256) in paths {
+    for (path, declared) in paths {
+        if declared.artifact_digest != declared.sha256 {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab evidence artifact digest does not match its declared SHA-256",
+                Some(path),
+                None,
+            ));
+        }
         let local = PathBuf::from(&path);
         let canonical = local.canonicalize().map_err(|error| {
             Error::validation_invalid_argument(
@@ -731,12 +762,14 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         );
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
         transfer.ensure_directory(parent)?;
-        transfer.upload_private_file_atomic(
+        transfer.upload_private_evidence_atomic(
             &canonical.display().to_string(),
             &remote,
-            expected_sha256
+            declared
+                .sha256
                 .strip_prefix("sha256:")
-                .unwrap_or(&expected_sha256),
+                .unwrap_or(&declared.sha256),
+            declared.size_bytes,
         )?;
         entries.push(workspace_mapping_entry_for_materialized_file(
             "provider_evidence",
@@ -747,9 +780,16 @@ fn materialize_agent_task_evidence_inputs_on_runner(
     Ok(entries)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredProviderEvidence {
+    sha256: String,
+    size_bytes: u64,
+    artifact_digest: String,
+}
+
 fn declared_agent_task_evidence_inputs(
     args: &[String],
-) -> std::collections::BTreeMap<String, String> {
+) -> std::collections::BTreeMap<String, DeclaredProviderEvidence> {
     let mut paths = std::collections::BTreeMap::new();
     for (index, arg) in args.iter().enumerate() {
         let spec = if matches!(arg.as_str(), "--plan" | "--attempt-plan") {
@@ -786,11 +826,23 @@ fn declared_agent_task_evidence_inputs(
                 continue;
             };
             for input in inputs {
-                if let (Some(path), Some(sha256)) = (
+                if let (Some(path), Some(sha256), Some(size_bytes), Some(artifact_digest)) = (
                     input.get("path").and_then(serde_json::Value::as_str),
                     input.get("sha256").and_then(serde_json::Value::as_str),
+                    input.get("size_bytes").and_then(serde_json::Value::as_u64),
+                    input
+                        .get("artifact")
+                        .and_then(|artifact| artifact.get("digest"))
+                        .and_then(serde_json::Value::as_str),
                 ) {
-                    paths.insert(path.to_string(), sha256.to_string());
+                    paths.insert(
+                        path.to_string(),
+                        DeclaredProviderEvidence {
+                            sha256: sha256.to_string(),
+                            size_bytes,
+                            artifact_digest: artifact_digest.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -1182,8 +1234,45 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    #[test]
+    fn old_daemon_evidence_refusal_precedes_workspace_sync() {
+        let synced = Cell::new(false);
+        let error = preflight_before_workspace_sync(
+            true,
+            || {
+                Err(Error::internal_unexpected(
+                    "old daemon refuses chunk upload",
+                ))
+            },
+            || {
+                synced.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("old daemon must refuse before sync");
+
+        assert!(error.message.contains("old daemon"));
+        assert!(!synced.get(), "workspace sync must not run after refusal");
+    }
+
+    #[test]
+    fn no_evidence_skips_chunk_preflight_before_workspace_sync() {
+        let synced = Cell::new(false);
+        preflight_before_workspace_sync(
+            false,
+            || Err(Error::internal_unexpected("must not probe")),
+            || {
+                synced.set(true);
+                Ok(())
+            },
+        )
+        .expect("ordinary sync");
+        assert!(synced.get());
+    }
 
     #[test]
     fn discovers_only_declared_provider_evidence_from_cook_attempt_plan() {
@@ -1198,7 +1287,7 @@ mod tests {
                     "tasks": [{
                         "task_id": "task",
                         "executor": {"backend": "fixture", "config": {
-                            "evidence_inputs": [{"path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc"}]
+                            "evidence_inputs": [{"id":"fixture","path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc", "size_bytes": 4194304, "transport":"content-addressed-blob/v1", "artifact":{"digest":"sha256:abc","size_bytes":4194304}, "visibility":"private", "redaction":"withhold-content"}]
                         }}
                     }]
                 })
@@ -1209,22 +1298,34 @@ mod tests {
             declared_agent_task_evidence_inputs(&args),
             std::collections::BTreeMap::from([(
                 "/workspace/.homeboy/evidence/one/input.json".to_string(),
-                "sha256:abc".to_string()
+                DeclaredProviderEvidence {
+                    sha256: "sha256:abc".to_string(),
+                    size_bytes: 4_194_304,
+                    artifact_digest: "sha256:abc".to_string(),
+                }
             )])
+        );
+        assert!(
+            !args[3].contains("fixture bytes"),
+            "Lab plan carries the artifact reference, not binary content"
         );
 
         let plan_equals = vec![
             "homeboy".to_string(),
             format!(
                 "--plan={}",
-                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def"}]}}}]})
+                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def","size_bytes":3,"artifact":{"digest":"sha256:def"}}]}}}]})
             ),
         ];
         assert_eq!(
             declared_agent_task_evidence_inputs(&plan_equals),
             std::collections::BTreeMap::from([(
                 "/workspace/.homeboy/evidence/two/input.json".to_string(),
-                "sha256:def".to_string()
+                DeclaredProviderEvidence {
+                    sha256: "sha256:def".to_string(),
+                    size_bytes: 3,
+                    artifact_digest: "sha256:def".to_string(),
+                }
             )])
         );
     }

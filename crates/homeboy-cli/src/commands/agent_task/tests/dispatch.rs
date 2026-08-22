@@ -408,7 +408,7 @@ fn cook_normalizes_repository_alias_to_component_identity_for_every_destination_
             issue.to_worktree.as_deref(),
             Some("php-transformer@fix-issue-12844-blocks-engine")
         );
-        assert_eq!(issue.base, "trunk");
+        assert_eq!(issue.base.as_deref(), Some("trunk"));
 
         let plan =
             super::super::run::compile_cook_plan(&worktree, json!({ "action": "lookup_pending" }))
