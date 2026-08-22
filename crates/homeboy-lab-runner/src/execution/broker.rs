@@ -349,6 +349,7 @@ pub(super) fn exec_via_reverse_broker(
     }
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
+    let mut reported_progress_sequence = 0;
     while !matches!(
         job.status,
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
@@ -386,11 +387,27 @@ pub(super) fn exec_via_reverse_broker(
                 err,
             )
         })?;
+        if let Ok(events) = fetch_daemon_events(&client, broker_url, &job_id) {
+            let events =
+                redact_runner_job_events(&events, &redaction_env, &redaction_secret_env_names);
+            super::daemon::record_and_report_promotion_progress_frames(
+                run_id.as_deref(),
+                &job_id,
+                &events,
+                &mut reported_progress_sequence,
+            );
+        }
     }
     let events = redact_runner_job_events(
         &fetch_daemon_events(&client, broker_url, &job.id.to_string())?,
         &redaction_env,
         &redaction_secret_env_names,
+    );
+    super::daemon::record_and_report_promotion_progress_frames(
+        run_id.as_deref(),
+        &job.id.to_string(),
+        &events,
+        &mut reported_progress_sequence,
     );
 
     let RunnerJobResultFields {
