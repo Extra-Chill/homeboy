@@ -3598,19 +3598,76 @@ pub(crate) fn validate_provider_evidence_inputs(
         }
     }
     if let Some(prompt) = prompt {
-        for token in prompt.split_whitespace() {
-            let path = token.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
-                )
-            });
-            if path.starts_with('/') && !sources.contains(path) {
-                return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
-            }
+        let undeclared = prompt_absolute_evidence_paths(prompt)
+            .into_iter()
+            .filter(|path| !sources.contains(path))
+            .collect::<Vec<_>>();
+        if !undeclared.is_empty() {
+            let paths = undeclared
+                .iter()
+                .map(|path| format!("`{path}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "prompt",
+                format!("prompt names undeclared absolute evidence paths: {paths}"),
+                Some(undeclared.join(", ")),
+                Some(vec!["Declare each path with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()]),
+            ));
         }
     }
     Ok(())
+}
+
+/// Find explicit Unix path references in prompt content. Code is still provider
+/// input, so it has the same evidence boundary as prose.
+fn prompt_absolute_evidence_paths(prompt: &str) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for token in prompt.split_whitespace() {
+        // A non-file URL is prose, including its authority and URL path.
+        if token.contains("://") && !token.contains("file://") {
+            continue;
+        }
+        let mut candidate = token;
+        if let Some(file) = token.find("file://") {
+            let rest = &token[file + "file://".len()..];
+            candidate = if rest.starts_with('/') {
+                rest
+            } else {
+                rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
+            };
+        }
+        let bytes = candidate.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let Some(relative) = candidate[offset..].find('/') else {
+                break;
+            };
+            let start = offset + relative;
+            let path = &candidate[start..];
+            let end = path.find(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
+                    )
+            });
+            let path = &path[..end.unwrap_or(path.len())];
+            let path = path.trim_end_matches('.');
+            // A filesystem path needs a segment after its leading slash. This
+            // excludes bare separators/URL authorities while retaining real
+            // double-slash absolute paths.
+            if path.starts_with('/')
+                && path
+                    .trim_start_matches('/')
+                    .contains(|character: char| character != '/')
+            {
+                paths.insert(path.to_string());
+            }
+            offset = start.saturating_add(path.len()).max(start + 1);
+        }
+    }
+    paths.into_iter().collect()
 }
 
 pub(crate) fn projected_provider_evidence(
@@ -3935,6 +3992,52 @@ mod provider_evidence_tests {
             .expect_err("undeclared prompt path is rejected");
         assert_eq!(error.details["field"], "prompt");
         assert!(error.message.contains("undeclared absolute evidence path"));
+    }
+
+    #[test]
+    fn prompt_path_validation_distinguishes_separators_urls_and_real_paths() {
+        let prompt = r#"
+These functions route through `write_batch` / `mutate_batch` / `read_batch`.
+Issue: https://github.com/Extra-Chill/homeboy/issues/7505
+    struct AgentTaskBatchStore { root: PathBuf }   // NOTE: private
+```
+let comment = "// not evidence";
+let path = "/also/not-evidence";
+```
+Read /private/one.json and //private/two.json.
+Evidence=file:///private/three.json path=/private/four.json.
+"#;
+        let error = validate_provider_evidence_inputs(&[], Some(prompt))
+            .expect_err("only real prose paths are rejected");
+
+        assert_eq!(error.details["field"], "prompt");
+        assert!(error.message.contains("/private/one.json"));
+        assert!(error.message.contains("//private/two.json"));
+        assert!(error.message.contains("/private/three.json"));
+        assert!(error.message.contains("/private/four.json"));
+        assert!(error.message.contains("/also/not-evidence"));
+        assert!(!error.message.contains("`/`"));
+        assert!(!error.message.contains("// not evidence"));
+    }
+
+    #[test]
+    fn prompt_path_scanner_handles_embedded_json_quotes_angles_and_local_file_urls() {
+        let paths = prompt_absolute_evidence_paths(
+            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///file/url.json //double/path.md / // https://example.com/ignore/me"#,
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                "//double/path.md",
+                "/angle/path.rs",
+                "/assigned/path.toml",
+                "/file/url.json",
+                "/json/path.md",
+                "/local/file.json",
+                "/quoted/path.txt",
+            ]
+        );
     }
 
     #[cfg(unix)]
