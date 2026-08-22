@@ -908,7 +908,6 @@ fn promote_with_provider_and_checkpoint_internal(
     let gate_feedback_baseline = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
-
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
@@ -1533,6 +1532,16 @@ fn promote_committed_changes(
     let gate_feedback_baseline = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
+    let adoption_merge = committed_patch.adoption_merge.as_ref().map(|proof| {
+        json!({
+            "candidate_parent": &proof.candidate_parent,
+            "resolved_base_parent": &proof.resolved_base_parent,
+            "candidate_delta_base": &proof.candidate_delta_base,
+            "candidate": &committed_patch.candidate,
+            "changed_files": &normalized_patch.changed_files,
+            "patch_sha256": &committed_patch.sha256,
+        })
+    });
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -1546,7 +1555,14 @@ fn promote_committed_changes(
             path: retained_patch_path.display().to_string(),
             sha256: Some(committed_patch.sha256),
         },
-        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
+        // A merge candidate's workspace fingerprint may include base-side files
+        // after the provider applies its candidate-only patch. Its durable review
+        // scope is the graph-proven candidate delta, never those base changes.
+        changed_files: if adoption_merge.is_some() {
+            normalized_patch.changed_files.clone()
+        } else {
+            persisted_changed_files(normalized_patch.changed_files, candidate.as_ref())
+        },
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
@@ -1564,6 +1580,7 @@ fn promote_committed_changes(
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
             "historical_task_base": committed_patch.historical_task_base,
+            "adoption_merge": adoption_merge,
             "candidate": candidate,
             "destination_baseline": candidate,
             "gate_feedback_baseline": gate_feedback_baseline,
