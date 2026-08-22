@@ -3934,21 +3934,38 @@ fn record_completed_run_exposes_logs_and_artifacts() {
     });
 }
 
-/// Stays on `with_isolated_home` (#7505) — `mark_running`; see
-/// `running_observation_projects_each_terminal_aggregate_state`.
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The whole submit -> run -> complete -> read cycle names one home,
+/// including the controller admission `submit_plan_in_store` takes: that queue
+/// and its lock follow the store's root now (#12859) instead of the machine.
 #[test]
 fn submitted_run_can_be_loaded_marked_running_and_completed() {
-    with_isolated_home(|_| {
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(test_context.path_roots());
+    {
         let plan = test_plan();
-        submit_plan(&plan, Some("run-execute")).expect("submitted");
+        submit_plan_in_store(&lifecycle_store, &plan, Some("run-execute")).expect("submitted");
 
-        let loaded_plan = load_plan("run-execute").expect("plan loaded");
-        let running = mark_running("run-execute").expect("marked running");
+        let loaded_plan = load_plan_in_store(&lifecycle_store, "run-execute").expect("plan loaded");
+        let running =
+            mark_running_in_store(&lifecycle_store, "run-execute").expect("marked running");
         let aggregate = succeeded_aggregate(&loaded_plan);
 
-        let completed =
-            record_run_aggregate("run-execute", &loaded_plan, &aggregate).expect("completed");
-        let durable_status = status("run-execute").expect("status");
+        let completed = record_run_aggregate_in_store(
+            &lifecycle_store,
+            "run-execute",
+            &loaded_plan,
+            &aggregate,
+        )
+        .expect("completed");
+        let durable_status = status_in_store(
+            &lifecycle_store,
+            "run-execute",
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status")
+        .record;
 
         assert_eq!(loaded_plan.plan_id, "plan-a");
         assert_eq!(running.state, AgentTaskRunState::Running);
@@ -3969,7 +3986,7 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
         assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
         assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
         assert!(completed.aggregate_path.is_some());
-    });
+    }
 }
 
 /// Stays on `with_isolated_home` (#7505) — `record_completed_run`; see
