@@ -2298,6 +2298,39 @@ impl LabStagingCheckpoint {
     }
 }
 
+/// Project only checkpointed staging work into the public parent run. The
+/// controller job can resume after a crash, so reporting an uncheckpointed
+/// transition would make status claim work that recovery may repeat.
+fn lifecycle_phase_for_checkpoint(phase: &LabStagingPhase) -> Option<&'static str> {
+    match phase {
+        LabStagingPhase::AcceptedMaterializeWorkspace => Some("source_materialization"),
+        LabStagingPhase::MaterializeRuntime => Some("runtime_staging"),
+        LabStagingPhase::HydrateDependencies => Some("dependency_hydration"),
+        LabStagingPhase::DispatchRunner => Some("runner_dispatch"),
+        LabStagingPhase::ObserveRunner => Some("runner_execution"),
+        LabStagingPhase::Completed => None,
+    }
+}
+
+fn record_checkpointed_lifecycle_phase(
+    request: &LabStagingExecutionRequest,
+    checkpoint: &LabStagingCheckpoint,
+) -> Result<()> {
+    let Some(phase) = lifecycle_phase_for_checkpoint(&checkpoint.phase) else {
+        return Ok(());
+    };
+    homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
+        &checkpoint.run_id,
+        &checkpoint.runner_id,
+        phase,
+        checkpoint.workspace_id.as_deref(),
+        None,
+        None,
+        Some(&request.durable_agent_task_plan),
+    )?;
+    Ok(())
+}
+
 #[derive(Clone, Default)]
 pub struct LabStagingCancellationToken(Arc<std::sync::atomic::AtomicBool>);
 
@@ -4054,7 +4087,8 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
                     error.to_string(),
                     Some("serialize Lab staging checkpoint".to_string()),
                 )
-            })?)
+            })?)?;
+            record_checkpointed_lifecycle_phase(request, checkpoint)
         })
     }
 
@@ -6026,6 +6060,59 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn checkpoint_phases_have_stable_public_lifecycle_progress() {
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::AcceptedMaterializeWorkspace),
+            Some("source_materialization")
+        );
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::MaterializeRuntime),
+            Some("runtime_staging")
+        );
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::HydrateDependencies),
+            Some("dependency_hydration")
+        );
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::DispatchRunner),
+            Some("runner_dispatch")
+        );
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::ObserveRunner),
+            Some("runner_execution")
+        );
+        assert_eq!(
+            lifecycle_phase_for_checkpoint(&LabStagingPhase::Completed),
+            None
+        );
+    }
+
+    #[test]
+    fn checkpointed_runtime_stage_updates_the_persisted_parent_progress() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            checkpoint.phase = LabStagingPhase::MaterializeRuntime;
+            checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+            checkpoint.workspace_id = Some("/runner/workspaces/attempt-1".to_string());
+
+            record_checkpointed_lifecycle_phase(&request, &checkpoint)
+                .expect("project checkpointed runtime stage");
+
+            let record = homeboy_agents::agent_task_lifecycle::status(&request.recipe.run_id)
+                .expect("persisted parent run");
+            assert_eq!(record.metadata["phase"], "runtime_staging");
+            assert_eq!(record.metadata["phase_activity"], "Homeboy runtime_staging");
+            assert_eq!(
+                record.metadata["remote_workspace"],
+                "/runner/workspaces/attempt-1"
+            );
+        });
     }
 
     #[test]

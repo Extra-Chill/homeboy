@@ -386,7 +386,9 @@ pub fn persist_initial_recipe_in_store(
     if store.recipe_exists(&recipe.cook_id) {
         let existing = store.load_recipe(&recipe.cook_id)?;
         let mismatches = recipe_mismatch_fields(&existing, &recipe);
-        ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+        ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
         let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
         let next_attempt = existing
             .attempts
@@ -546,7 +548,9 @@ pub fn validate_initial_recipe_compatibility_in_store(
             .remove("policy");
     }
     let mismatches = recipe_mismatch_fields(&existing, &recipe);
-    ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
     Ok(())
 }
 
@@ -3000,15 +3004,6 @@ mod tests {
         );
     }
 
-    /// Stays on `with_isolated_home` (#7505). The assertion is that a resolved
-    /// execution-budget mutation is *fenced* after a provider execution, which
-    /// only holds if `ensure_correction_is_safe` observes the lifecycle record
-    /// this test wrote. That observation goes through `reached_freeze_boundary`,
-    /// which reads `agent_task_lifecycle::status` ambiently; rooting it would
-    /// require `validate_initial_recipe_compatibility_in_store` to accept a
-    /// lifecycle store, changing `CookRecipeStore`'s public method and every
-    /// caller of it. Converted without that, the freeze boundary would never be
-    /// reached and the negative assertion would pass for the wrong reason.
     #[test]
     fn persisted_old_retry_policy_remains_compatible_after_provider_execution() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -3048,12 +3043,6 @@ mod tests {
         });
     }
 
-    /// Stays on `with_isolated_home` for the same reason as the test above: the
-    /// point of the assertion is that a recipe already frozen by a recorded
-    /// provider execution is still accepted, and that freeze is only visible
-    /// through `reached_freeze_boundary`'s ambient `agent_task_lifecycle::status`
-    /// read. Rooted without that, the recipe would not be frozen at all and the
-    /// `expect` would succeed vacuously (#7505).
     #[test]
     fn legacy_recipe_without_retry_policy_remains_compatible_after_provider_execution() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -3774,16 +3763,6 @@ mod tests {
         );
     }
 
-    /// Stays on `with_isolated_home` (#7505). Every assertion below is that a
-    /// correction *is* refused at a named freeze boundary, and each boundary is
-    /// decided by `reached_freeze_boundary`, which reads
-    /// `agent_task_lifecycle::status` ambiently. Rooting it means threading a
-    /// lifecycle store through `ensure_correction_is_safe` and therefore through
-    /// `persist_initial_recipe_in_store` and
-    /// `validate_initial_recipe_compatibility_in_store` — both reached from
-    /// public `CookRecipeStore` methods with callers across this crate. Until
-    /// that lands, converting this test would silently turn every `expect_err`
-    /// into an unreachable branch.
     #[test]
     fn recipe_correction_transitions_from_pre_provider_supersede_to_frozen_boundaries() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -3910,6 +3889,40 @@ mod tests {
             .expect_err("finalization freezes finalization policy");
             assert!(error.message.contains("finalization execution"));
             assert!(error.message.contains("finalization"));
+        });
+    }
+
+    #[test]
+    fn rooted_recipe_validation_uses_its_own_lifecycle_store() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let (store, lifecycle_store) = rooted_stores(&context);
+            let original = recipe();
+            store.persist_recipe(&original).expect("persist recipe");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &lifecycle_store,
+                &original.attempts[0].plan,
+                Some("run"),
+            )
+            .expect("materialize provider attempt");
+            crate::agent_task_lifecycle::rewrite_record_for_test_in_store(
+                &lifecycle_store,
+                "run",
+                |record| {
+                    record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                },
+            )
+            .expect("record provider execution");
+
+            let mut corrected = reconstruct_options(&original).expect("reconstruct options");
+            corrected.source_refs.push("corrected-source".to_string());
+
+            assert!(
+                store
+                    .validate_initial_recipe_compatibility(&corrected)
+                    .is_err(),
+                "the recipe-rooted check must see the provider execution outside the ambient home"
+            );
         });
     }
 

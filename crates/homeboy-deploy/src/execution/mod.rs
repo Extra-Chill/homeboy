@@ -798,6 +798,84 @@ mod tests {
     }
 
     #[test]
+    fn predeploy_artifact_version_inspection_ignores_repository_only_targets_when_archive_paths_are_declared(
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("wp-codebox.zip");
+        write_zip(
+            &artifact,
+            &[
+                (
+                    "wp-codebox/wp-codebox.php",
+                    "<?php\n/* Version: 0.22.0 */\n",
+                ),
+                (
+                    "wp-codebox/packages/cli/package.json",
+                    r#"{"version":"0.22.0"}"#,
+                ),
+            ],
+        );
+        let component = Component {
+            id: "wp-codebox".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            version_targets: Some(vec![
+                VersionTarget {
+                    file: "npm-shrinkwrap.json".to_string(),
+                    pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: None,
+                },
+                VersionTarget {
+                    file: "wp-codebox.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: Some("wp-codebox/wp-codebox.php".to_string()),
+                },
+                VersionTarget {
+                    file: "packages/cli/package.json".to_string(),
+                    pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: Some("wp-codebox/packages/cli/package.json".to_string()),
+                },
+            ]),
+            ..Component::default()
+        };
+
+        validate_predeploy_artifact_version(&component, &artifact, "0.22.0")
+            .expect("archive targets, not the repository lockfile, verify the release asset");
+    }
+
+    #[test]
+    fn predeploy_artifact_version_inspection_rejects_contradictory_archive_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(
+            &artifact,
+            &[
+                ("plugin/plugin.php", "Version: 1.2.3\n"),
+                ("plugin/package.json", r#"{"version":"1.2.4"}"#),
+            ],
+        );
+        let component = Component {
+            id: "fixture".to_string(),
+            version_targets: Some(vec![
+                VersionTarget {
+                    file: "plugin.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: Some("plugin/plugin.php".to_string()),
+                },
+                VersionTarget {
+                    file: "package.json".to_string(),
+                    pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: Some("plugin/package.json".to_string()),
+                },
+            ]),
+            ..Component::default()
+        };
+
+        let error = validate_predeploy_artifact_version(&component, &artifact, "1.2.3")
+            .expect_err("contradictory archive target must fail closed");
+        assert!(error.contains("1.2.4") && error.contains("expected '1.2.3'"));
+    }
+
+    #[test]
     fn predeploy_artifact_version_inspection_reports_artifact_path_when_missing() {
         // When artifact_path is set but absent from the ZIP, the error should name the
         // artifact path (what ships), not the source bump path.

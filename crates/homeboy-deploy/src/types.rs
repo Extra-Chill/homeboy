@@ -474,9 +474,9 @@ pub struct VersionSource {
 ///
 /// This and `artifact_version_source` used to live in the release crate's
 /// `version` module even though they return deploy types and only deploy calls
-/// them — one of the edges that made release and deploy circular (#11144). They
-/// resolve through `homeboy_version::version::canonical_version_target`, so the
-/// canonical-target policy still has exactly one definition.
+/// them — one of the edges that made release and deploy circular (#11144).
+/// Local source keeps the shared canonical-target policy; artifacts select their
+/// explicitly mapped shipped targets below.
 pub fn local_version_source(component: &Component) -> Option<VersionSource> {
     let target = homeboy_version::version::canonical_version_target(component)?;
     Some(VersionSource {
@@ -490,7 +490,7 @@ pub fn local_version_source(component: &Component) -> Option<VersionSource> {
 
 /// The path a component's version is read from inside a built artifact.
 pub fn artifact_version_source(component: &Component) -> Option<VersionSource> {
-    let target = homeboy_version::version::canonical_version_target(component)?;
+    let target = artifact_version_targets(component).next()?;
     let file = target
         .artifact_path
         .clone()
@@ -499,6 +499,24 @@ pub fn artifact_version_source(component: &Component) -> Option<VersionSource> {
         path: file.clone(),
         file,
     })
+}
+
+/// Version targets that describe files carried by a deploy artifact.
+///
+/// An explicit `artifact_path` maps a source version target to its shipped
+/// location. Once a component declares such mappings, repository-only targets
+/// are not archive requirements. Components without mappings retain the legacy
+/// behavior of validating every declared target, including single-package npm
+/// artifacts.
+pub(crate) fn artifact_version_targets(
+    component: &Component,
+) -> impl Iterator<Item = &homeboy_core::component::VersionTarget> {
+    let targets = component.version_targets.as_deref().unwrap_or_default();
+    let has_artifact_paths = targets.iter().any(|target| target.artifact_path.is_some());
+
+    targets
+        .iter()
+        .filter(move |target| !has_artifact_paths || target.artifact_path.is_some())
 }
 
 /// Version-target provenance for deploy output. Every populated source follows
@@ -816,9 +834,9 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult,
-        ComponentStatus, DeployConfig, DeployResult, DeploymentProvenanceEvidence,
-        PreparedDeployArtifact, ReleaseState, ReleaseStateStatus,
+        artifact_version_source, compare_deployed_versions, parse_bulk_component_ids,
+        ComponentDeployResult, ComponentStatus, DeployConfig, DeployResult,
+        DeploymentProvenanceEvidence, PreparedDeployArtifact, ReleaseState, ReleaseStateStatus,
     };
     use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::project::Project;
@@ -1247,6 +1265,29 @@ mod tests {
 
         std::fs::write(&artifact_path, "changed bytes").expect("changed artifact");
         assert!(artifact.validate("fixture", Some("1.2.3")).is_err());
+    }
+
+    #[test]
+    fn artifact_version_source_prefers_an_explicit_archive_path_over_a_repository_lockfile() {
+        let component = Component {
+            version_targets: Some(vec![
+                homeboy_core::component::VersionTarget {
+                    file: "npm-shrinkwrap.json".to_string(),
+                    pattern: None,
+                    artifact_path: None,
+                },
+                homeboy_core::component::VersionTarget {
+                    file: "wp-codebox.php".to_string(),
+                    pattern: None,
+                    artifact_path: Some("wp-codebox/wp-codebox.php".to_string()),
+                },
+            ]),
+            ..Component::default()
+        };
+
+        let source = artifact_version_source(&component).expect("archive version source");
+        assert_eq!(source.file, "wp-codebox/wp-codebox.php");
+        assert_eq!(source.path, "wp-codebox/wp-codebox.php");
     }
 
     #[test]

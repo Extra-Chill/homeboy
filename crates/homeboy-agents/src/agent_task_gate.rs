@@ -1972,7 +1972,7 @@ impl SelectedGateEnvironment {
             .cloned()
             .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
         let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
-            "agent-task-cargo",
+            "agent-task-gate",
             cwd,
             explicit_target.as_deref(),
             &self.values,

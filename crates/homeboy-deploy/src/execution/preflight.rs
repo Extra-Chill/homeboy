@@ -165,7 +165,13 @@ pub(super) fn resolve_preflight_artifact_path(
         artifact_path
     };
 
-    if let Some(expected_version) = local_version.as_deref() {
+    // An explicit --version identifies the requested release asset and must be
+    // the archive assertion too. Otherwise retain the inferred local version.
+    if let Some(expected_version) = config
+        .expected_version
+        .as_deref()
+        .or(local_version.as_deref())
+    {
         if let Err(error) =
             validate_predeploy_artifact_version(component, &artifact_path, expected_version)
         {
@@ -307,9 +313,10 @@ pub(super) fn validate_predeploy_artifact_version(
         return Ok(());
     }
 
-    let Some(targets) = component.version_targets.as_ref() else {
+    let Some(_) = component.version_targets.as_ref() else {
         return Ok(());
     };
+    let targets = crate::types::artifact_version_targets(component).collect::<Vec<_>>();
     if targets.is_empty() {
         return Ok(());
     }

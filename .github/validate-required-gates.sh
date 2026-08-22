@@ -353,7 +353,7 @@ fi
 # line before its verdict.
 echo "::notice::required-gates enforcement basis=live-branch-rules repo=${repo} branch=${branch} ruleset=${ruleset_id} head=${head_sha} declared=${declared_count} live=${live_count} rules=${live_rule_count} strict=${live_strict} bypass_actors=${bypass_count} current_user_can_bypass=${bypass_current_user} outcome=${outcome}"
 
-apply_hint="Apply .github/required-gates-ruleset.json to ruleset ${ruleset_id} (gh api --method PUT repos/${repo}/rulesets/${ruleset_id} --input .github/required-gates-ruleset.json), then verify with 'bash .github/validate-required-gates.sh --github'. See docs/operations/required-ci-gates.md."
+apply_hint="Use the approved Required Gates Ruleset workflow from current main after its exact SHA has a successful homeboy / Test check, then verify with 'bash .github/validate-required-gates.sh --github'. See docs/operations/required-ci-gates.md."
 
 case "${outcome}" in
   enforced)

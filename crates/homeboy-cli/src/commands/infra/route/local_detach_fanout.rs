@@ -524,7 +524,10 @@ fn detached_child_start_identity(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetachedFanoutHandoff {
     state: DetachedHandoffState,
-    children: Option<usize>,
+    expected: Option<usize>,
+    admitted: Option<usize>,
+    rejected: Option<usize>,
+    absent: Option<usize>,
     waited_ms: u64,
 }
 
@@ -533,10 +536,11 @@ enum DetachedHandoffState {
     /// The coordinator published its durable batch record; `fanout status` and
     /// `fanout resume` resolve now.
     Accepted,
-    /// The coordinator is alive but has not written its batch record yet. The
-    /// fanout id is still the correct handle — it is pinned on the child's argv
-    /// and is the controller job's idempotency key.
-    Pending,
+    /// The controller job owns a coordinator, but child admission is not yet
+    /// durable for every expected child.
+    CoordinatorStarted,
+    /// The coordinator wrote a terminal failure before completing admission.
+    CoordinatorFailed,
     /// The coordinator exited before publishing durable batch state. The log is
     /// the only evidence, and this is reported rather than dressed up as a
     /// successful handoff.
@@ -547,7 +551,8 @@ impl DetachedHandoffState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
-            Self::Pending => "pending",
+            Self::CoordinatorStarted => "coordinator_started",
+            Self::CoordinatorFailed => "coordinator_failed",
             Self::ExitedBeforeHandoff => "exited_before_handoff",
         }
     }
@@ -575,29 +580,68 @@ fn await_durable_handoff(
 ) -> DetachedFanoutHandoff {
     let started = Instant::now();
     loop {
-        if let Ok(record) = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id) {
-            return DetachedFanoutHandoff {
-                state: DetachedHandoffState::Accepted,
-                children: Some(record.child_runs.len()),
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
+        if let Some(mut handoff) = durable_handoff(fanout_id) {
+            handoff.waited_ms = started.elapsed().as_millis() as u64;
+            return handoff;
         }
         if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
             return DetachedFanoutHandoff {
                 state: DetachedHandoffState::ExitedBeforeHandoff,
-                children: None,
+                expected: None,
+                admitted: None,
+                rejected: None,
+                absent: None,
                 waited_ms: started.elapsed().as_millis() as u64,
             };
         }
         if started.elapsed() >= timeout {
             return DetachedFanoutHandoff {
-                state: DetachedHandoffState::Pending,
-                children: None,
+                state: DetachedHandoffState::CoordinatorStarted,
+                expected: None,
+                admitted: None,
+                rejected: None,
+                absent: None,
                 waited_ms: started.elapsed().as_millis() as u64,
             };
         }
         std::thread::sleep(HANDOFF_POLL);
     }
+}
+
+/// Read admission only from durable records. A batch roster alone is merely a
+/// coordinator start: it must not be reported as accepted before every child is
+/// either admitted or durably rejected.
+fn durable_handoff(fanout_id: &str) -> Option<DetachedFanoutHandoff> {
+    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
+    let expected = record.child_runs.len();
+    let terminal_failure = record.metadata["terminal_failure"].is_object();
+    let admitted = record
+        .child_runs
+        .iter()
+        .filter(|child| {
+            homeboy::agents::agent_tasks::lifecycle::run_record_exists_readonly(&child.run_id)
+                .unwrap_or(false)
+        })
+        .count();
+    let rejected = terminal_failure
+        .then_some(expected.saturating_sub(admitted))
+        .unwrap_or(0);
+    let absent = expected.saturating_sub(admitted + rejected);
+    let state = if terminal_failure {
+        DetachedHandoffState::CoordinatorFailed
+    } else if absent == 0 {
+        DetachedHandoffState::Accepted
+    } else {
+        DetachedHandoffState::CoordinatorStarted
+    };
+    Some(DetachedFanoutHandoff {
+        state,
+        expected: Some(expected),
+        admitted: Some(admitted),
+        rejected: Some(rejected),
+        absent: Some(absent),
+        waited_ms: 0,
+    })
 }
 
 /// The launcher's only output: a bounded, machine-readable handoff naming the
@@ -618,7 +662,12 @@ fn handoff_envelope(
         "launcher_log": log_path.display().to_string(),
         "handoff": {
             "state": handoff.state.as_str(),
-            "children": handoff.children,
+            "admission": {
+                "expected": handoff.expected,
+                "admitted": handoff.admitted,
+                "rejected": handoff.rejected,
+                "absent": handoff.absent,
+            },
             "waited_ms": handoff.waited_ms,
         },
         // The daemon-owned durable job that now supervises this wave, making it
@@ -1048,7 +1097,10 @@ mod tests {
             Path::new("/tmp/fanout.log"),
             &DetachedFanoutHandoff {
                 state: DetachedHandoffState::Accepted,
-                children: Some(3),
+                expected: Some(3),
+                admitted: Some(3),
+                rejected: Some(0),
+                absent: Some(0),
                 waited_ms: 12,
             },
             &ControllerJobHandoff::Owned {
@@ -1060,7 +1112,8 @@ mod tests {
         assert_eq!(envelope["fanout_id"], "wave-7");
         assert_eq!(envelope["detached"], true);
         assert_eq!(envelope["handoff"]["state"], "accepted");
-        assert_eq!(envelope["handoff"]["children"], 3);
+        assert_eq!(envelope["handoff"]["admission"]["expected"], 3);
+        assert_eq!(envelope["handoff"]["admission"]["admitted"], 3);
         assert_eq!(envelope["controller_job"]["state"], "owned");
         assert_eq!(
             envelope["commands"]["status"],
@@ -1070,6 +1123,30 @@ mod tests {
             envelope["commands"]["resume"],
             "homeboy agent-task fanout resume wave-7"
         );
+    }
+
+    #[test]
+    fn a_persisted_roster_without_child_records_is_only_coordinator_started() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            homeboy::agents::agent_tasks::batch::persist_fanout_run_batch(
+                "wave-pre-admission",
+                "wave-pre-admission",
+                &[homeboy::agents::agent_tasks::batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "child-run".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist coordinator roster");
+
+            let handoff = durable_handoff("wave-pre-admission").expect("read handoff");
+
+            assert_eq!(handoff.state, DetachedHandoffState::CoordinatorStarted);
+            assert_eq!(handoff.expected, Some(1));
+            assert_eq!(handoff.admitted, Some(0));
+            assert_eq!(handoff.rejected, Some(0));
+            assert_eq!(handoff.absent, Some(1));
+        });
     }
 
     #[test]

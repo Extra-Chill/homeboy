@@ -37,7 +37,7 @@ jobs:
           if-no-files-found: error
 
   reconcile:
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'reconcile' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.operation == 'reconcile' }}
     needs: audit
     runs-on: ubuntu-latest
     environment: main-ruleset-administration
@@ -50,10 +50,17 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
         run: |
           test -n "${GH_TOKEN}"
+          gh api "repos/${GITHUB_REPOSITORY}/environments/main-ruleset-administration" \
+            --jq '.can_admins_bypass == false and any(.protection_rules[]; .type == "required_reviewers")' \
+            | grep -qx true
           head="$(git rev-parse HEAD)"
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs" \
+          current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+          test "${head}" = "${current_main}"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs?per_page=100" \
             --jq 'any(.check_runs[]; .name == "homeboy / Test" and .conclusion == "success")' \
             | grep -qx true
+          current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+          test "${head}" = "${current_main}"
           bash .github/manage-required-gates-ruleset.sh --operation reconcile --evidence required-gates-ruleset-reconcile.json
           bash .github/validate-required-gates.sh --github
       - uses: actions/upload-artifact@v4
