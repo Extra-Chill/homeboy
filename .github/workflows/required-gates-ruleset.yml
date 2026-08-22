@@ -1,8 +1,6 @@
 name: Required Gates Ruleset
 
 on:
-  schedule:
-    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       operation:
@@ -52,6 +50,10 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
         run: |
           test -n "${GH_TOKEN}"
+          head="$(git rev-parse HEAD)"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs" \
+            --jq 'any(.check_runs[]; .name == "homeboy / Test" and .conclusion == "success")' \
+            | grep -qx true
           bash .github/manage-required-gates-ruleset.sh --operation reconcile --evidence required-gates-ruleset-reconcile.json
           bash .github/validate-required-gates.sh --github
       - uses: actions/upload-artifact@v4

@@ -130,9 +130,10 @@ without wiring it into the terminal job turns `Required Gates Declaration` red.
 ## Apply And Verify
 
 The GitHub ruleset is repository state, so it cannot be changed by a pull
-request. `Required Gates Ruleset` audits the existing ruleset every hour from
-`main`, fails on drift, and uploads its before/desired/after evidence. It does
-not create another ruleset. Configure the `main-ruleset-administration`
+request. `Required Gates Ruleset` is an approved manual operation from `main`.
+It does not create another ruleset. Reconciliation first requires a successful
+`homeboy / Test` check on the current `main` SHA, so it cannot re-enable strict
+required checks while the main suite is red. Configure the `main-ruleset-administration`
 environment with required reviewers and a repository-administration token named
 `HOMEBOY_RULESET_ADMIN_TOKEN`; only the approved manual reconciliation job can
 use that credential.
