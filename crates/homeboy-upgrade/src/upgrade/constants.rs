@@ -18,6 +18,8 @@ pub(crate) const RELEASE_ASSET_DOWNLOAD_BASE: &str =
 /// Environment variable read by the binary installer to pin the release tag it
 /// downloads from. Absent, the installer keeps using `latest/download`.
 pub(crate) const RELEASE_TAG_ENV: &str = "HOMEBOY_UPGRADE_RELEASE_TAG";
+/// Exact semantic version expected from the staged release candidate.
+pub(crate) const RELEASE_VERSION_ENV: &str = "HOMEBOY_UPGRADE_RELEASE_VERSION";
 
 /// Timeout for the release list request. Matches the single-release fetch: the
 /// update path must never hang a command.

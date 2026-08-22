@@ -357,22 +357,28 @@ pub fn submit_plan(
 /// run's own terminal state. Reading that ambiently would let another home's
 /// record of the same identity abandon this store's admission, or leave a
 /// cancellation recorded here unseen while the controller waits on the
-/// admission lock. The controller-runtime store itself stays process-global by
-/// design; only the lifecycle read is rooted here.
+/// admission lock. The controller-runtime store follows the same root now
+/// (#12859), so the admission queue and its lock belong to this installation
+/// rather than the machine.
 pub fn submit_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
         None,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&|run_id| {
+            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+        }),
         |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                &runtime_root,
                 run_id,
                 || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
             )
@@ -1038,6 +1044,88 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
+/// Replace a failed pre-provider attempt's placement with an explicitly
+/// authorized local continuation. The immutable Cook recipe remains the source
+/// of work; this records only the next execution's routing authority.
+pub fn transition_execution_placement_for_continuation(
+    run_id: &str,
+    replacement: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    transition_execution_placement_for_continuation_in_store(&lifecycle_store, run_id, replacement)
+}
+
+/// [`transition_execution_placement_for_continuation`] against an explicitly
+/// rooted lifecycle store.
+pub fn transition_execution_placement_for_continuation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    replacement: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> Result<()> {
+    use homeboy_lab_runner_contract::ExecutionPlacementRequirement;
+
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    let prior: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+        record.metadata["execution_placement_decision"].clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "execution_placement_decision",
+            format!("durable run has no valid canonical placement decision: {error}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let pre_provider_failure = record.metadata["pre_execution_failure"].is_object()
+        && record.metadata["provider_executions"]
+            .as_array()
+            .is_none_or(Vec::is_empty);
+    if prior.required == ExecutionPlacementRequirement::Lab
+        || !replacement.permits_local_execution()
+        || !pre_provider_failure
+        || prior.identity != replacement.identity
+        || prior.policy_id != replacement.policy_id
+        || prior.policy_revision != replacement.policy_revision
+        || record.metadata["execution_placement_transition"].is_object()
+        || record.metadata["transport_admission_reset"].is_object()
+    {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "explicit local continuation is permitted once after a pre-provider failure from a non-Lab-required placement with the same execution identity",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+
+    let mut plan = load_controller_plan_in_store(lifecycle_store, &record.run_id)?;
+    plan.metadata["execution_placement_decision"] =
+        serde_json::to_value(&replacement).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize continuation placement".to_string()),
+            )
+        })?;
+    persist_controller_plan_in_store(lifecycle_store, &record.run_id, &plan)?;
+    record.metadata["execution_placement_decision"] =
+        plan.metadata["execution_placement_decision"].clone();
+    record.metadata["execution_placement_outcome"] = Value::Null;
+    record.metadata["execution_placement_transition"] = json!({
+        "kind": "explicit_local_continuation",
+        "prior_decision_id": prior.decision_id,
+        "replacement_decision_id": replacement.decision_id,
+        "reason": "pre_provider_failure",
+    });
+    // This is a one-shot admission reset, not a retry-budget reset. The
+    // replacement run consumes it by receiving a new transport identity.
+    record.metadata["transport_admission_reset"] = json!({
+        "kind": "placement_transition",
+        "prior_decision_id": prior.decision_id,
+        "replacement_decision_id": replacement.decision_id,
+        "reason": "explicit_local_continuation_after_pre_provider_failure",
+    });
+    lifecycle_store.write_record(&record)
+}
+
 // The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
 // its two normalization tests now normalize inside a store they resolve (#7505).
 
@@ -1115,6 +1203,145 @@ mod execution_placement_tests {
                 authority: None,
             },
         )
+    }
+
+    fn local_continuation(
+        prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            prior.policy_id.clone(),
+            prior.policy_revision.clone(),
+            prior.identity.clone(),
+            Placement::Local,
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Local,
+            None,
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: true,
+                authority: Some("operator --placement local".to_string()),
+            },
+        )
+    }
+
+    #[test]
+    fn explicit_local_continuation_replaces_only_pre_provider_auto_lab_placement() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut plan = super::super::tests::test_plan();
+            let lab = decision();
+            let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+                lab.policy_id,
+                lab.policy_revision,
+                lab.identity,
+                Placement::Auto,
+                ExecutionPlacementRequirement::Either,
+                EffectiveExecutionPlacement::Lab,
+                lab.runner,
+                ExecutionPlacementFallback {
+                    local_allowed: true,
+                    reason: None,
+                },
+                lab.override_authorization,
+            );
+            plan.metadata = json!({ "execution_placement_decision": prior });
+            submit_plan_with_runtime_admission(&plan, Some("local-continuation"), |_| {
+                Ok(json!({}))
+            })
+            .expect("submit routed Lab attempt");
+            record_pre_execution_failure(
+                "local-continuation",
+                &plan,
+                "lab_handoff_preacceptance",
+                &Error::internal_unexpected("Lab disconnected before provider start"),
+            )
+            .expect("record pre-provider failure");
+
+            let replacement = local_continuation(&prior);
+            let mut stale_identity = prior.identity.clone();
+            stale_identity.candidate = Some("candidate-b".to_string());
+            let stale = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+                prior.policy_id.clone(),
+                prior.policy_revision.clone(),
+                stale_identity,
+                Placement::Local,
+                ExecutionPlacementRequirement::Either,
+                EffectiveExecutionPlacement::Local,
+                None,
+                ExecutionPlacementFallback {
+                    local_allowed: false,
+                    reason: None,
+                },
+                ExecutionPlacementOverrideAuthorization {
+                    authorized: true,
+                    authority: Some("operator --placement local".to_string()),
+                },
+            );
+            transition_execution_placement_for_continuation("local-continuation", stale)
+                .expect_err("a stale placement decision is rejected");
+            transition_execution_placement_for_continuation(
+                "local-continuation",
+                replacement.clone(),
+            )
+            .expect("explicit local continuation is authorized");
+
+            let record = status("local-continuation").expect("read transitioned attempt");
+            assert_eq!(
+                record.metadata["execution_placement_decision"]["decision_id"],
+                replacement.decision_id
+            );
+            assert_eq!(
+                record.metadata["execution_placement_transition"]["prior_decision_id"],
+                prior.decision_id
+            );
+            assert_eq!(
+                load_controller_plan("local-continuation")
+                    .expect("read transitioned controller plan")
+                    .metadata["execution_placement_decision"]["decision_id"],
+                replacement.decision_id
+            );
+            assert_eq!(
+                record.metadata["transport_admission_reset"]["replacement_decision_id"],
+                replacement.decision_id
+            );
+            transition_execution_placement_for_continuation("local-continuation", replacement)
+                .expect_err("the placement transition cannot mint another admission reset");
+        });
+    }
+
+    #[test]
+    fn explicit_local_continuation_rejects_lab_required_policy() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut plan = super::super::tests::test_plan();
+            let prior = decision();
+            plan.metadata = json!({ "execution_placement_decision": prior });
+            submit_plan_with_runtime_admission(&plan, Some("lab-only-continuation"), |_| {
+                Ok(json!({}))
+            })
+            .expect("submit Lab-required attempt");
+            record_pre_execution_failure(
+                "lab-only-continuation",
+                &plan,
+                "lab_handoff_preacceptance",
+                &Error::internal_unexpected("Lab disconnected before provider start"),
+            )
+            .expect("record pre-provider failure");
+
+            let error = transition_execution_placement_for_continuation(
+                "lab-only-continuation",
+                local_continuation(&prior),
+            )
+            .expect_err("Lab-required policy fails closed");
+            assert!(error.message.contains("non-Lab-required"));
+            assert_eq!(
+                status("lab-only-continuation")
+                    .expect("read unchanged attempt")
+                    .metadata["execution_placement_decision"]["decision_id"],
+                prior.decision_id
+            );
+        });
     }
 
     #[test]
@@ -1918,10 +2145,11 @@ pub fn record_completed_run(
 /// aggregate write in another leaves a queued record that never completes and a
 /// terminal projection with no run behind it, and neither write ever fails.
 ///
-/// The controller-runtime admission that `submit_plan_in_store` performs stays
-/// process-global by design — it is a content-addressed executable pin shared
-/// across homes, not durable lifecycle state, so it is not one of this store's
-/// roots.
+/// The controller-runtime admission that `submit_plan_in_store` performs
+/// follows this store's root as well (#12859, #12862). The pin itself is
+/// content-addressed and shared, but the admission queue and its cross-process
+/// lock are per-installation: resolving them from the ambient home made every
+/// rooted caller serialize on one machine-global lock.
 pub fn record_completed_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
@@ -4649,15 +4877,20 @@ fn retry_with_force_inner_in_store(
     force: bool,
     enforce_lineage_reservation: bool,
 ) -> Result<AgentTaskRunRecord> {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     retry_with_runtime_admission_in_store(
         lifecycle_store,
         run_id,
         requested_run_id,
         force,
         enforce_lineage_reservation,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&|run_id| {
+            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+        }),
         |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                &runtime_root,
                 run_id,
                 || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
             )

@@ -16,7 +16,11 @@ pub enum CommandRunPreparation {
     Raw(Box<CommandRun>),
 }
 
-pub fn prepare_command_run(command: Commands, mode: CommandResponseMode) -> CommandRunPreparation {
+pub fn prepare_command_run(
+    command: Commands,
+    mode: CommandResponseMode,
+    retain_raw_evidence: bool,
+) -> CommandRunPreparation {
     match mode {
         CommandResponseMode::Json => CommandRunPreparation::Json(Box::new(command)),
         CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
@@ -26,18 +30,22 @@ pub fn prepare_command_run(command: Commands, mode: CommandResponseMode) -> Comm
             }
         }
         CommandResponseMode::Raw(raw_mode) => {
-            let raw_run = run(command, raw_mode)
+            let raw_run = run(command, raw_mode, retain_raw_evidence)
                 .expect("markdown and plain-text modes should return raw output");
             CommandRunPreparation::Raw(Box::new(raw_run))
         }
     }
 }
 
-pub fn run(command: Commands, mode: CommandRawOutputMode) -> Option<CommandRun> {
+pub fn run(
+    command: Commands,
+    mode: CommandRawOutputMode,
+    retain_raw_evidence: bool,
+) -> Option<CommandRun> {
     match mode {
         CommandRawOutputMode::InteractivePassthrough => None,
         CommandRawOutputMode::Markdown => Some(run_markdown(command)),
-        CommandRawOutputMode::PlainText => Some(run_plain_text(command)),
+        CommandRawOutputMode::PlainText => Some(run_plain_text(command, retain_raw_evidence)),
     }
 }
 
@@ -57,7 +65,7 @@ fn run_markdown(command: Commands) -> CommandRun {
     }
 }
 
-fn run_plain_text(command: Commands) -> CommandRun {
+fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
     match command {
         Commands::File(args) => raw_stdout_only(match file::run(args) {
             Ok((file::FileCommandOutput::Raw(content), exit_code)) => Ok((content, exit_code)),
@@ -69,7 +77,7 @@ fn run_plain_text(command: Commands) -> CommandRun {
         Commands::Runner(args) if runner::is_compact_exec_stdout(&args) => {
             runner_compact_exec(args)
         }
-        Commands::Ssh(args) => ssh_raw(args),
+        Commands::Ssh(args) => ssh_raw(args, retain_raw_evidence),
         Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
         _ => raw_stdout_only(unsupported_output("plain text")),
     }
@@ -77,15 +85,22 @@ fn run_plain_text(command: Commands) -> CommandRun {
 
 /// Emit only the remote command's stdout to local stdout and its stderr to local
 /// stderr, exiting with the remote exit code (#9894).
-fn ssh_raw(args: ssh::SshArgs) -> CommandRun {
+fn ssh_raw(args: ssh::SshArgs, retain_raw_evidence: bool) -> CommandRun {
     match ssh::execute_raw_command(&args) {
-        Ok((stdout, stderr, exit_code)) => {
-            CommandRun::from_raw_stdout("ssh", Ok(stdout), exit_code, None).with_presentation(
-                CommandPresentation {
-                    stdout: None,
-                    stderr: Some(stderr),
-                },
+        Ok(execution) => {
+            let evidence = retain_raw_evidence.then(|| Ok(execution.output_file_evidence()));
+            let completion = execution.completion_phase_stderr();
+            CommandRun::from_raw_stdout_streaming(
+                "ssh",
+                Ok(execution.stdout),
+                execution.exit_code,
+                evidence,
             )
+            .with_presentation(CommandPresentation {
+                stdout: None,
+                stderr: Some(execution.stderr),
+            })
+            .with_raw_completion_stderr(completion)
         }
         Err(err) => CommandRun::from_raw_stdout("ssh", Err(err), 1, None),
     }
@@ -141,6 +156,7 @@ mod tests {
                 ),
             }),
             CommandRawOutputMode::InteractivePassthrough,
+            false,
         );
 
         assert!(result.is_none());

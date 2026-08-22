@@ -1061,10 +1061,11 @@ pub fn refresh_homeboy_binary(
             if let Err(readiness_error) =
                 probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
             {
-                daemon_refreshed = false;
                 // The readiness probe can discover that the newly connected
                 // transport vanished. Never certify a transient connect as a
                 // successful reconnect when its postcondition is disconnected.
+                // This arm returns `daemon_refreshed: false` directly, so it
+                // does not reassign the local first.
                 let transport_exit_code = reconnect_transport_exit_code(
                     super::status(&plan.runner_id)
                         .map(|status| status.is_connected())
@@ -2695,15 +2696,6 @@ where
     ))
 }
 
-fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> Result<()> {
-    homeboy_core::config::with_config_lock(|| {
-        let patch = serde_json::json!({ "homeboy_path": homeboy_path });
-        match merge(Some(runner_id), &patch.to_string(), &[])? {
-            MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(()),
-        }
-    })
-}
-
 /// Restore only if this promotion still owns the selected value. A later
 /// serialized transaction may have selected another binary after this one
 /// failed; compensation must never overwrite that newer owner.
@@ -2751,66 +2743,6 @@ fn defer_reconnect_after_promotion_race(
     })
 }
 
-fn rollback_refreshed_daemon(
-    runner_id: &str,
-    previous_homeboy_path: Option<&str>,
-    force: bool,
-) -> Result<()> {
-    // Stop the newly selected daemon before restoring configuration so all
-    // persisted state converges on the previous binary before it reconnects.
-    rollback_refreshed_daemon_with(
-        previous_homeboy_path,
-        || disconnect_with_session(runner_id, None, force).map(|_| ()),
-        |homeboy_path| restore_runner_homeboy_path(runner_id, homeboy_path),
-        |_| {
-            let (report, exit_code) =
-                connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)?;
-            if exit_code != 0 || !report.connected {
-                return Err(Error::validation_invalid_argument(
-                    "reconnect",
-                    report.failure_message.unwrap_or_else(|| {
-                        "rollback reconnect did not persist an active daemon session".to_string()
-                    }),
-                    Some(runner_id.to_string()),
-                    None,
-                ));
-            }
-            Ok(())
-        },
-    )
-}
-
-fn rollback_refreshed_daemon_with<Stop, Restore, Reconnect>(
-    previous_homeboy_path: Option<&str>,
-    stop: Stop,
-    restore: Restore,
-    reconnect: Reconnect,
-) -> Result<()>
-where
-    Stop: FnOnce() -> Result<()>,
-    Restore: FnOnce(Option<&str>) -> Result<()>,
-    Reconnect: FnOnce(Option<&str>) -> Result<()>,
-{
-    stop()?;
-    restore(previous_homeboy_path)?;
-    reconnect(previous_homeboy_path)
-}
-
-fn rollback_refresh_connect_error_with<T, Restore, Reconnect>(
-    primary_error: Error,
-    restore: Restore,
-    reconnect: Reconnect,
-) -> Result<T>
-where
-    Restore: FnOnce() -> Result<()>,
-    Reconnect: FnOnce() -> Result<()>,
-{
-    rollback_refresh_error_with(primary_error, || {
-        restore()?;
-        reconnect()
-    })
-}
-
 fn rollback_refresh_error_with<T, Restore>(mut primary_error: Error, restore: Restore) -> Result<T>
 where
     Restore: FnOnce() -> Result<()>,
@@ -2828,35 +2760,6 @@ where
         });
     }
     Err(primary_error)
-}
-
-fn reconnect_rollback_error(
-    report: &super::RunnerConnectReport,
-    rollback_error: Error,
-    previous_homeboy_path: Option<&str>,
-    force: bool,
-) -> Error {
-    let primary_error = Error::validation_invalid_argument(
-        "reconnect",
-        report
-            .failure_message
-            .as_deref()
-            .unwrap_or("runner connect returned a non-zero exit code"),
-        Some(report.runner_id.clone()),
-        None,
-    );
-    let mut error = primary_error;
-    error.message = format!(
-        "{}; additionally failed to restore the pre-refresh runner binary: {}",
-        error.message,
-        error_context(&rollback_error)
-    );
-    error.details["rollback_error"] = serde_json::json!({
-        "code": rollback_error.code.as_str(),
-        "message": rollback_error.message,
-        "details": rollback_error.details,
-    });
-    durable_refresh_partial_error(error, &report.runner_id, previous_homeboy_path, force)
 }
 
 fn durable_refresh_partial_error(

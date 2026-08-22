@@ -2,10 +2,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::daemon_repair;
-use crate::resolve_lab_runner_hint;
 use homeboy_core::daemon::DaemonRepairStep;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
-use homeboy_core::lab_contract::LabCommandPortability;
 use homeboy_core::runtime_promotion::RuntimePromotionWaitEvent;
 use homeboy_core::{Error, ErrorCode, Result};
 
@@ -451,16 +449,6 @@ fn placement_readiness_with_transport(
     ))
 }
 
-fn placement_readiness_from_status(
-    request: &PlacementReadinessRequest,
-    status: &RunnerStatusReport,
-    capacity: Option<usize>,
-    mode: RunnerTunnelMode,
-    capability: super::LabRunnerGateDecision,
-) -> PlacementReadiness {
-    placement_readiness_from_status_with_catalog(request, status, capacity, mode, capability, None)
-}
-
 fn placement_readiness_from_status_with_catalog(
     request: &PlacementReadinessRequest,
     status: &RunnerStatusReport,
@@ -788,21 +776,6 @@ fn loopback_direct_ssh_transport_for_preflight(
     }
 }
 
-pub(super) fn preflight_lab_runner_availability_from_status(
-    selection: &LabRunnerSelection,
-    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
-    capacity: Option<usize>,
-    connect_authority: Option<&RunnerConnectReport>,
-) -> Result<(RunnerAvailability, RunnerStatusReport)> {
-    preflight_lab_runner_availability_from_status_with_transport(
-        selection,
-        status_fn,
-        capacity,
-        connect_authority,
-        false,
-    )
-}
-
 pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
@@ -824,13 +797,6 @@ pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
         capacity,
     );
     Ok((availability, status))
-}
-
-pub(super) fn authoritative_status_for_preflight(
-    status: RunnerStatusReport,
-    connect_authority: Option<&RunnerConnectReport>,
-) -> Result<RunnerStatusReport> {
-    authoritative_status_for_preflight_with_transport(status, connect_authority, false)
 }
 
 pub(super) fn authoritative_status_for_preflight_with_transport(
@@ -1529,201 +1495,6 @@ fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<
     )
 }
 
-pub(super) fn resolve_lab_runner_selection(
-    command: &LabOffloadCommand,
-    explicit_runner: Option<&str>,
-    placement: homeboy_lab_runner_contract::Placement,
-) -> Result<Option<LabRunnerSelection>> {
-    let config = homeboy_core::defaults::load_config();
-    let deny_local_bench = config.bench.local_execution.is_denied();
-    let release_gate_local_hot_allowed =
-        homeboy_core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
-    let default_runner = if explicit_runner.is_none()
-        && command.is_portable()
-        && (command.routing_policy.default_lab_offload || placement.requests_lab())
-    {
-        super::resolve_default_lab_runner()?
-    } else {
-        None
-    };
-
-    resolve_lab_runner_selection_from_placement(
-        command,
-        explicit_runner,
-        placement,
-        deny_local_bench,
-        release_gate_local_hot_allowed,
-        default_runner,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn resolve_lab_runner_selection_from_placement(
-    command: &LabOffloadCommand,
-    explicit_runner: Option<&str>,
-    placement: homeboy_lab_runner_contract::Placement,
-    deny_local_bench: bool,
-    release_gate_local_hot_allowed: bool,
-    default_runner: Option<String>,
-) -> Result<Option<LabRunnerSelection>> {
-    if let Some(runner_id) = explicit_runner {
-        if let LabCommandPortability::LocalOnly(reason) = command.portability {
-            let message = format!("--runner is unavailable for this hot command. {reason}");
-            return Err(local_only_flag_rejection(
-                "runner",
-                message,
-                Some(runner_id.to_string()),
-                command.hot_label,
-            ));
-        }
-
-        return Ok(Some(LabRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: runner_status_tunnel_mode(runner_id),
-        }));
-    }
-
-    if placement == homeboy_lab_runner_contract::Placement::Lab && !command.is_portable() {
-        // Surface the command's own local-only reason rather than a generic
-        // "portable commands are ..." hint. For a controller-owned coordinator
-        // like cook, `--placement lab` is a contradiction the operator should
-        // not have to reverse-engineer: the coordinator stays local by design
-        // while its provider attempt already routes to Lab automatically (#9373).
-        let reason = match command.portability {
-            LabCommandPortability::LocalOnly(reason) => reason,
-            LabCommandPortability::Portable => "this command runs on the controller",
-        };
-        let message =
-            format!("--placement lab is unavailable for this local-only command. {reason}");
-        return Err(local_only_flag_rejection(
-            "placement",
-            message,
-            None,
-            command.hot_label,
-        ));
-    }
-
-    if !command.routing_policy.default_lab_offload && !placement.requests_lab() {
-        fail_if_local_bench_denied(command, deny_local_bench)?;
-        return Ok(None);
-    }
-
-    // Release-gate routing safety (#4603 / #4605): local placement for a release gate silently routes the
-    // gate to the controller machine instead of the configured Lab runner,
-    // producing a gate result that is not faithful to the routing policy. Fail
-    // closed with a clear diagnostic unless the operator explicitly opts back
-    // into local execution via config/env, in which case the override is recorded
-    // by the offload metadata.
-    if command.routing_policy.release_gate
-        && placement == homeboy_lab_runner_contract::Placement::Local
-    {
-        if let Some(runner_id) = default_runner.as_ref() {
-            if !release_gate_local_hot_allowed {
-                return Err(release_gate_local_hot_denied_error(
-                    format!(
-                "Release gate `{}` cannot bypass Lab routing with --placement local while default Lab runner `{}` is configured and `/release_gate/local_hot` is `fail_closed`",
-                        command.hot_label, runner_id
-                    ),
-                    "placement",
-                ));
-            }
-        }
-    }
-
-    if placement == homeboy_lab_runner_contract::Placement::Local || !command.is_portable() {
-        fail_if_local_bench_denied(command, deny_local_bench)?;
-        return Ok(None);
-    }
-
-    if placement == homeboy_lab_runner_contract::Placement::Lab && default_runner.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "placement",
-            format!(
-                "--placement lab requires an eligible Lab runner for `{}`",
-                command.hot_label
-            ),
-            None,
-            Some(vec![
-                "Connect a Lab runner or use --placement local to run on the controller."
-                    .to_string(),
-            ]),
-        ));
-    }
-
-    if default_runner.is_none() {
-        fail_if_local_bench_denied(command, deny_local_bench)?;
-    }
-
-    default_runner
-        .map(|runner_id| {
-            Ok(LabRunnerSelection {
-                mode: runner_status_tunnel_mode(&runner_id),
-                runner_id,
-                source: LabRunnerSelectionSource::Default,
-            })
-        })
-        .transpose()
-}
-
-/// Build an actionable rejection when `--placement lab` or `--runner` is passed
-/// to a controller-owned, local-only command.
-///
-/// The generic "portable commands are ..." hint left operators guessing which
-/// spelling was correct (#9373). This surfaces command-specific remediation so
-/// runtime behavior and guidance agree: for a cook/agent-task coordinator it
-/// explains that the coordinator stays controller-owned while its provider
-/// attempt is dispatched to the selected Lab runner, and names the levers that
-/// select it (`--placement lab`, `--runner <runner-id>`, `fanout` for waves).
-///
-/// A split-placement coordinator that can serve `--placement lab` never reaches
-/// here: `route_after_parse` dispatches it (or reports that no Lab runner is
-/// ready) before placement resolution. What remains are the cases where the
-/// coordinator genuinely cannot place a provider attempt at all — for example a
-/// cook with no deterministic gate, or controller-local batch planning — so the
-/// remediation must not claim Lab placement is meaningless for cook waves.
-fn local_only_flag_rejection(
-    field: &'static str,
-    message: String,
-    value: Option<String>,
-    hot_label: &str,
-) -> Error {
-    let mut hints = Vec::new();
-    if hot_label.starts_with("agent-task cook") || hot_label.starts_with("agent-task fanout") {
-        hints.push(
-            "The cook coordinator is controller-owned by design: only its provider attempt is placed. `--placement lab` and `--runner <runner-id>` select the Lab runner for that attempt; neither offloads the coordinator.".to_string(),
-        );
-        hints.push(
-            "This invocation has no placeable provider attempt, so resolve the reason above first (for example, add a deterministic `--verify` gate to a cook).".to_string(),
-        );
-        hints.push(
-            "To fan out many independent cooks in one operation, use `homeboy agent-task fanout cook-batch --run-plan --placement lab` so the batch coordinator dispatches each child cook's provider attempt to Lab.".to_string(),
-        );
-    } else {
-        hints.push(resolve_lab_runner_hint().hint);
-    }
-    Error::validation_invalid_argument(field, message, value, Some(hints))
-}
-
-fn fail_if_local_bench_denied(command: &LabOffloadCommand, denied: bool) -> Result<()> {
-    if !denied || command.hot_label != "bench" {
-        return Ok(());
-    }
-
-    let config_path = homeboy_core::defaults::config_path()
-        .unwrap_or_else(|_| "the global Homeboy config".to_string());
-    Err(Error::validation_invalid_argument(
-        "bench.local_execution",
-        "Refusing to run `homeboy bench` locally because global config `/bench/local_execution` is `denied`",
-        Some("denied".to_string()),
-        Some(vec![
-            "Configure `lab.preferred_runner`, or keep exactly one SSH Lab runner configured, then run `homeboy bench <component>` so Homeboy auto-routes the benchmark to Lab.".to_string(),
-            "Use `--runner <runner-id>` only to override an ambiguous or non-default Lab selection.".to_string(),
-            format!("Change `/bench/local_execution` in {config_path} to `allowed` before intentionally re-enabling local benchmark execution."),
-        ]),
-    ))
-}
-
 /// Build the fail-closed error for a release-gate routing-policy violation.
 ///
 /// `message` is the already-formatted diagnostic. The remediation always
@@ -1966,138 +1737,7 @@ mod daemon_repair_step_tests {
 }
 
 #[cfg(test)]
-mod placement_rejection_tests {
-    use super::*;
-    use homeboy_core::lab_contract::LabCommandContract;
-
-    fn local_only_command(hot_label: &'static str, reason: &'static str) -> LabOffloadCommand {
-        LabOffloadCommand {
-            command: LabCommandContract::local_only(hot_label, reason),
-            required_extensions: Vec::new(),
-            required_capabilities: Vec::new(),
-            workload: None,
-        }
-    }
-
-    fn hints(error: &Error) -> Vec<String> {
-        error
-            .details
-            .get("tried")
-            .and_then(|value| value.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| entry.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn placement_lab_on_cook_yields_cook_aware_remediation() {
-        // #9373: `--placement lab` on a cook coordinator that has no placeable
-        // provider attempt must not report a generic "portable commands are ..."
-        // hint, and must not claim Lab placement is meaningless for cook waves
-        // (the documented spelling for a wave). It explains that placement
-        // selects the runner for the attempt and names the levers.
-        let command = local_only_command(
-            "agent-task cook/run-plan/retry --run",
-            "agent-task cook is a controller-owned coordinator.",
-        );
-
-        let error = resolve_lab_runner_selection_from_placement(
-            &command,
-            None,
-            homeboy_lab_runner_contract::Placement::Lab,
-            false,
-            false,
-            None,
-        )
-        .expect_err("--placement lab must be rejected for a local-only cook");
-
-        assert_eq!(error.details["field"].as_str(), Some("placement"));
-        assert!(
-            error.details["problem"]
-                .as_str()
-                .is_some_and(|problem| problem.contains("controller-owned coordinator")),
-            "problem must carry the command's own reason: {}",
-            error.details["problem"]
-        );
-        let hints = hints(&error);
-        assert!(
-            hints
-                .iter()
-                .any(|hint| hint.contains("--runner <runner-id>")),
-            "cook remediation must name --runner, got {hints:?}"
-        );
-        assert!(
-            hints
-                .iter()
-                .any(|hint| hint.contains("select the Lab runner for that attempt")),
-            "cook remediation must explain what placement selects, got {hints:?}"
-        );
-        assert!(
-            !hints
-                .iter()
-                .any(|hint| hint.contains("no --placement lab needed")),
-            "cook remediation must not contradict documented wave guidance, got {hints:?}"
-        );
-        assert!(
-            hints.iter().any(|hint| hint.contains("fanout")),
-            "cook remediation must point at fanout for waves, got {hints:?}"
-        );
-    }
-
-    #[test]
-    fn explicit_runner_on_cook_yields_cook_aware_remediation() {
-        let command = local_only_command(
-            "agent-task cook/run-plan/retry --run",
-            "agent-task cook is a controller-owned coordinator.",
-        );
-
-        let error = resolve_lab_runner_selection_from_placement(
-            &command,
-            Some("homeboy-lab"),
-            homeboy_lab_runner_contract::Placement::Auto,
-            false,
-            false,
-            None,
-        )
-        .expect_err("--runner must be rejected for a local-only cook coordinator");
-
-        assert_eq!(error.details["field"].as_str(), Some("runner"));
-        let hints = hints(&error);
-        assert!(
-            hints
-                .iter()
-                .any(|hint| hint.contains("--runner <runner-id>")),
-            "cook remediation must name --runner, got {hints:?}"
-        );
-    }
-
-    #[test]
-    fn placement_lab_on_non_cook_local_only_keeps_generic_hint() {
-        // A non-agent-task local-only command must retain the generic
-        // portable-commands hint rather than cook-specific remediation.
-        let command = local_only_command("some-other-command", "this command runs locally.");
-
-        let error = resolve_lab_runner_selection_from_placement(
-            &command,
-            None,
-            homeboy_lab_runner_contract::Placement::Lab,
-            false,
-            false,
-            None,
-        )
-        .expect_err("--placement lab must be rejected for a local-only command");
-
-        let hints = hints(&error);
-        assert!(
-            !hints.iter().any(|hint| hint.contains("fanout")),
-            "non-cook remediation must not mention fanout, got {hints:?}"
-        );
-    }
-}
+mod placement_rejection_tests {}
 
 #[cfg(test)]
 mod placement_readiness_tests {
@@ -2202,7 +1842,9 @@ mod placement_readiness_tests {
         mode: RunnerTunnelMode,
         capability: super::super::LabRunnerGateDecision,
     ) -> PlacementReadiness {
-        placement_readiness_from_status(request, status, capacity, mode, capability)
+        placement_readiness_from_status_with_catalog(
+            request, status, capacity, mode, capability, None,
+        )
     }
 
     #[test]
@@ -2496,11 +2138,12 @@ mod placement_readiness_tests {
             "reverse runner identity cannot be verified".to_string(),
         ));
 
-        let (availability, _) = preflight_lab_runner_availability_from_status(
+        let (availability, _) = preflight_lab_runner_availability_from_status_with_transport(
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
             None,
+            false,
         )
         .expect("preflight");
 
@@ -2556,11 +2199,12 @@ mod placement_readiness_tests {
             Some("homeboy 0.0.1+new".to_string()),
         ));
 
-        let (availability, _) = preflight_lab_runner_availability_from_status(
+        let (availability, _) = preflight_lab_runner_availability_from_status_with_transport(
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
             None,
+            false,
         )
         .expect("preflight");
 

@@ -87,7 +87,7 @@ pub struct CargoTargetStorageStatus {
 /// liveness evidence for inventory after the producer exits.
 pub struct SharedCargoTargetLease {
     target_dir: PathBuf,
-    _lock: File,
+    lock: File,
 }
 
 /// The Cargo target selected for a managed child process. Holding this value
@@ -97,6 +97,20 @@ pub struct ManagedCargoTarget {
     resolution: &'static str,
     owner: String,
     _lease: Option<SharedCargoTargetLease>,
+}
+
+/// The complete, non-secret compatibility surface used to select a shared
+/// Cargo target. Callers must collect this from the environment they pass to
+/// the child, rather than from Homeboy's ambient process environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoTargetCompatibility {
+    identity: String,
+}
+
+impl CargoTargetCompatibility {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
 }
 
 impl ManagedCargoTarget {
@@ -133,8 +147,23 @@ impl SharedCargoTargetLease {
 
 impl Drop for SharedCargoTargetLease {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.target_dir.join(LEASE_FILE));
-        let _ = write_last_used(&self.target_dir, SystemTime::now());
+        // A provider attempt, its retry, and controller gates can all hold a
+        // shared lease. Only the final holder may clear liveness; otherwise a
+        // cleaner can reclaim an actively compiling target between phases.
+        let _ = FileExt::unlock(&self.lock);
+        let final_holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.target_dir.join(LOCK_FILE))
+            .ok()
+            .and_then(|lock| match lock.try_lock_exclusive() {
+                Ok(true) => Some(lock),
+                Ok(false) | Err(_) => None,
+            });
+        if final_holder.is_some() {
+            let _ = fs::remove_file(self.target_dir.join(LEASE_FILE));
+            let _ = write_last_used(&self.target_dir, SystemTime::now());
+        }
     }
 }
 
@@ -167,6 +196,44 @@ pub fn acquire_managed_cargo_target_with_compatibility(
     explicit_target: Option<&str>,
     declared_environment: &[(&str, &str)],
 ) -> Result<ManagedCargoTarget> {
+    let compatibility = cargo_target_compatibility(source_path, declared_environment);
+    acquire_managed_cargo_target_for_compatibility(
+        owner,
+        source_path,
+        explicit_target,
+        &compatibility,
+    )
+}
+
+/// Acquire a target using compatibility collected from the exact child
+/// environment. This keeps provider attempts, retries, and controller gates in
+/// the same store when their execution declarations are the same.
+pub fn acquire_managed_cargo_target_for_environment(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+    environment: &BTreeMap<String, String>,
+) -> Result<ManagedCargoTarget> {
+    let declared = environment
+        .iter()
+        .filter(|(name, _)| cargo_compatibility_environment_name(name))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let compatibility = cargo_target_compatibility(source_path, &declared);
+    acquire_managed_cargo_target_for_compatibility(
+        owner,
+        source_path,
+        explicit_target,
+        &compatibility,
+    )
+}
+
+fn acquire_managed_cargo_target_for_compatibility(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+    compatibility: &CargoTargetCompatibility,
+) -> Result<ManagedCargoTarget> {
     if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
         let target_dir = PathBuf::from(target);
         let target_dir = if target_dir.is_absolute() {
@@ -182,8 +249,7 @@ pub fn acquire_managed_cargo_target_with_compatibility(
         });
     }
 
-    let compatibility = cargo_target_compatibility_identity(source_path, declared_environment);
-    let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
+    let lease = acquire_shared_cargo_target(&format!("{owner}:{}", compatibility.identity()))?;
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "shared",
@@ -192,10 +258,13 @@ pub fn acquire_managed_cargo_target_with_compatibility(
     })
 }
 
-fn cargo_target_compatibility_identity(
+/// Collect the target identity from repository inputs and the declared child
+/// environment. Cargo fingerprints individual crates within the selected
+/// target, while this boundary prevents incompatible build universes sharing it.
+pub fn cargo_target_compatibility(
     source_path: &Path,
     declared_environment: &[(&str, &str)],
-) -> String {
+) -> CargoTargetCompatibility {
     let mut inputs = BTreeMap::new();
     inputs.insert(
         "repository".to_string(),
@@ -219,11 +288,33 @@ fn cargo_target_compatibility_identity(
         inputs.insert(format!("input:{name}"), digest);
     }
     for (name, value) in declared_environment {
-        inputs.insert(format!("env:{name}"), (*value).to_string());
+        if cargo_compatibility_environment_name(name) {
+            inputs.insert(format!("env:{name}"), (*value).to_string());
+        }
     }
-    content_hash::sha256_hex(
-        &serde_json::to_vec(&inputs).expect("Cargo compatibility inputs serialize"),
-    )
+    CargoTargetCompatibility {
+        identity: content_hash::sha256_hex(
+            &serde_json::to_vec(&inputs).expect("Cargo compatibility inputs serialize"),
+        ),
+    }
+}
+
+fn cargo_compatibility_environment_name(name: &str) -> bool {
+    matches!(
+        name,
+        "CARGO_BUILD_TARGET"
+            | "CARGO_BUILD_RUSTFLAGS"
+            | "CARGO_ENCODED_RUSTFLAGS"
+            | "CARGO_INCREMENTAL"
+            | "CARGO_PROFILE"
+            | "CARGO_TARGET_DIR"
+            | "RUSTC"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "RUSTDOCFLAGS"
+            | "RUSTFLAGS"
+    ) || name.starts_with("CARGO_FEATURE_")
+        || name == "HOMEBOY_CARGO_FEATURES"
 }
 
 /// Cargo itself separates compatible crate fingerprints inside one target
@@ -314,10 +405,7 @@ pub(crate) fn acquire_shared_cargo_target_in(
     lock.lock_shared()
         .map_err(|error| io_error(error, "lock shared Cargo target"))?;
     write_lifecycle(&target_dir, Some(owner), now)?;
-    Ok(SharedCargoTargetLease {
-        target_dir,
-        _lock: lock,
-    })
+    Ok(SharedCargoTargetLease { target_dir, lock })
 }
 
 pub fn cleanup_shared_cargo_targets(
@@ -1110,14 +1198,14 @@ mod tests {
             "channel = 'stable'",
         )
         .unwrap();
-        let first = cargo_target_compatibility_identity(
+        let first = cargo_target_compatibility(
             workspace.path(),
             &[
                 ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
                 ("RUSTFLAGS", ""),
             ],
         );
-        let warm = cargo_target_compatibility_identity(
+        let warm = cargo_target_compatibility(
             workspace.path(),
             &[
                 ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
@@ -1128,7 +1216,7 @@ mod tests {
         fs::write(workspace.path().join("Cargo.lock"), "lock-b").unwrap();
         assert_ne!(
             first,
-            cargo_target_compatibility_identity(
+            cargo_target_compatibility(
                 workspace.path(),
                 &[
                     ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
@@ -1143,7 +1231,7 @@ mod tests {
         .unwrap();
         assert_ne!(
             warm,
-            cargo_target_compatibility_identity(
+            cargo_target_compatibility(
                 workspace.path(),
                 &[
                     ("CARGO_BUILD_TARGET", "aarch64-apple-darwin"),
@@ -1151,6 +1239,110 @@ mod tests {
                 ],
             )
         );
+    }
+
+    #[test]
+    fn compatibility_collector_uses_effective_environment_and_feature_declarations() {
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "lock-a").unwrap();
+        let provider_environment = BTreeMap::from([
+            (
+                "CARGO_BUILD_TARGET".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ),
+            ("CARGO_PROFILE".to_string(), "release".to_string()),
+            ("RUSTFLAGS".to_string(), "-Dwarnings".to_string()),
+            (
+                "HOMEBOY_CARGO_FEATURES".to_string(),
+                "server,metrics".to_string(),
+            ),
+            ("UNRELATED".to_string(), "ignored".to_string()),
+        ]);
+        let gate_environment = provider_environment.clone();
+
+        let provider =
+            cargo_target_compatibility_for_environment(workspace.path(), &provider_environment);
+        let gate = cargo_target_compatibility_for_environment(workspace.path(), &gate_environment);
+        assert_eq!(
+            provider, gate,
+            "the same effective child environment reuses the store"
+        );
+
+        let mut incompatible = gate_environment;
+        incompatible.insert("HOMEBOY_CARGO_FEATURES".to_string(), "server".to_string());
+        assert_ne!(
+            provider,
+            cargo_target_compatibility_for_environment(workspace.path(), &incompatible),
+            "feature declarations are a cache compatibility boundary"
+        );
+    }
+
+    #[test]
+    fn provider_retry_controller_matrix_reuses_one_durable_lease() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "lock-a").unwrap();
+        let environment = BTreeMap::from([(
+            "CARGO_BUILD_TARGET".to_string(),
+            "x86_64-unknown-linux-gnu".to_string(),
+        )]);
+        let compatibility =
+            cargo_target_compatibility_for_environment(workspace.path(), &environment);
+        let provider = acquire_shared_cargo_target_in(
+            root.path(),
+            &format!("agent-task-cargo:{}", compatibility.identity()),
+            SystemTime::now(),
+        )
+        .unwrap();
+        let target = provider.target_dir().to_path_buf();
+        fs::write(target.join("provider-artifact"), "warm output").unwrap();
+        assert!(
+            target.join(LEASE_FILE).is_file(),
+            "provider holds the live lease"
+        );
+
+        let retry = acquire_shared_cargo_target_in(
+            root.path(),
+            &format!("agent-task-cargo:{}", compatibility.identity()),
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert_eq!(retry.target_dir(), target, "retry observes provider output");
+        assert!(retry.target_dir().join("provider-artifact").is_file());
+
+        let controller = acquire_shared_cargo_target_in(
+            root.path(),
+            &format!("agent-task-cargo:{}", compatibility.identity()),
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            controller.target_dir(),
+            target,
+            "controller gate reuses retry target"
+        );
+        drop(provider);
+        drop(retry);
+        assert!(
+            target.join(LEASE_FILE).is_file(),
+            "controller keeps the lease durable"
+        );
+        drop(controller);
+        assert!(
+            !target.join(LEASE_FILE).exists(),
+            "terminal controller release clears liveness"
+        );
+    }
+
+    fn cargo_target_compatibility_for_environment(
+        source_path: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> CargoTargetCompatibility {
+        let declared = environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        cargo_target_compatibility(source_path, &declared)
     }
 
     #[test]

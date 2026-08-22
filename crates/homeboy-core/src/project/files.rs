@@ -787,6 +787,7 @@ mod tests {
             success: false,
             exit_code: 126,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 
@@ -810,6 +811,7 @@ mod tests {
             success: false,
             exit_code: 2,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
 

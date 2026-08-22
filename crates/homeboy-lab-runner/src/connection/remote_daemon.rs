@@ -48,31 +48,6 @@ pub(super) fn remote_homeboy_version(
     ))
 }
 
-/// Read the remote Homeboy version under a hard wall-clock bound (#10418).
-///
-/// Reachable from read-only inspection (`runner status`, `runs list`,
-/// `agent-task status`), which used to run this probe with no bound at all — so
-/// a wedged Lab made the whole diagnostic surface hang. On timeout the SSH
-/// child process group is killed and the degradation is recorded.
-pub(super) fn bounded_remote_homeboy_version(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: Option<&str>,
-) -> std::result::Result<String, String> {
-    let command = remote_homeboy_version_command(homeboy);
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
-    let started = std::time::Instant::now();
-    let output = client.execute_with_timeout(&command, timeout);
-    crate::readonly_probe::record_probe_outcome(
-        "runner_homeboy_version",
-        runner_id,
-        started,
-        timeout,
-        &output,
-    );
-    parse_remote_homeboy_version(&output)
-}
-
 fn remote_homeboy_version_command(homeboy: &str) -> String {
     format!("{} --version", shell::quote_arg(homeboy))
 }
@@ -771,27 +746,6 @@ pub(super) fn authoritative_stale_generations_are_dead(
     }
 }
 
-/// A stop is complete only when the remote state is absent or explicitly proves
-/// the exact stopped lease is dead. A new lease is a recovery race, not success.
-pub(super) fn authoritative_lease_stop_confirmed(
-    status: &RemoteDaemonStatus,
-    expected_lease_id: &str,
-) -> std::result::Result<(), String> {
-    match status.daemon.as_ref() {
-        None => Ok(()),
-        Some(daemon)
-            if daemon.lease_id.as_deref() == Some(expected_lease_id)
-                && status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) =>
-        {
-            Ok(())
-        }
-        Some(daemon) => Err(format!(
-            "authoritative daemon ownership changed during reconciliation (expected lease `{expected_lease_id}`, observed lease `{}`); stale generations were retained",
-            daemon.lease_id.as_deref().unwrap_or("unavailable")
-        )),
-    }
-}
-
 impl RemoteDaemonWorkEvidence {
     fn from_unresolved_count(count: usize) -> Self {
         if count == 0 {
@@ -1208,22 +1162,10 @@ pub(super) fn remote_daemon_connect_action(
     previous_session: Option<&RunnerSession>,
     status: &RemoteDaemonStatus,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
-    remote_daemon_connect_action_with_controller_identity(
-        previous_session,
-        status,
-        &homeboy_product_identity::build_identity().display,
-    )
-}
-
-pub(super) fn remote_daemon_connect_action_with_controller_identity(
-    previous_session: Option<&RunnerSession>,
-    status: &RemoteDaemonStatus,
-    expected_identity: &str,
-) -> std::result::Result<RemoteDaemonConnectAction, String> {
     remote_daemon_connect_action_for_runner(
         previous_session,
         status,
-        expected_identity,
+        &homeboy_product_identity::build_identity().display,
         "<runner-id>",
         None,
     )
@@ -1523,17 +1465,6 @@ pub(super) fn remote_daemon_status(
     homeboy: &str,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
     remote_daemon_status_with_timeout(client, homeboy, REMOTE_DAEMON_STATUS_TIMEOUT, None)
-}
-
-/// Read daemon state for a status path without allowing an unreachable SSH
-/// endpoint to hide the persisted disconnected session indefinitely.
-pub(super) fn bounded_remote_daemon_status(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: &str,
-) -> std::result::Result<RemoteDaemonStatus, String> {
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
-    remote_daemon_status_with_timeout(client, homeboy, timeout, Some(runner_id))
 }
 
 pub(super) fn bounded_remote_daemon_status_with_timeout(
@@ -2218,61 +2149,6 @@ pub(super) fn remote_daemon_ensure_running_command(
     )
 }
 
-/// Start an independent daemon store for a runner generation. Keep HOME intact:
-/// runner configuration, auth, and extensions are HOME-scoped. Only daemon
-/// runtime data is generation-scoped.
-pub(super) fn remote_daemon_ensure_running_in_home(
-    client: &SshClient,
-    homeboy: &str,
-    home: &str,
-) -> std::result::Result<RemoteDaemon, String> {
-    let command = generation_daemon_ensure_command(homeboy, home);
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote generation daemon startup failed",
-            &output,
-        ));
-    }
-    let envelope = parse_envelope(&output.stdout)
-        .map_err(|err| format!("remote generation daemon startup returned invalid JSON: {err}"))?;
-    if !envelope.success {
-        return Err(format!(
-            "remote generation daemon startup failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        ));
-    }
-    let data = envelope
-        .data
-        .ok_or_else(|| "remote generation daemon startup returned no data".to_string())?;
-    Ok(RemoteDaemon {
-        address: data
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pid: data
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
-        lease_id: data
-            .get("lease_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        version: None,
-        build_identity: None,
-        inspected_freshness: None,
-    })
-}
-
-pub(in crate::connection) fn generation_daemon_ensure_command(homeboy: &str, home: &str) -> String {
-    format!(
-        "mkdir -p {home}/data && XDG_DATA_HOME={home}/data {} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy),
-        home = shell::quote_arg(home),
-    )
-}
-
 pub(super) fn remote_daemon_force_stop(
     client: &SshClient,
     homeboy: &str,
@@ -2309,45 +2185,6 @@ pub(super) fn remote_daemon_force_stop(
             "remote bounded stale-daemon replacement stop returned an unexpected response"
                 .to_string(),
         );
-    }
-    Ok(())
-}
-
-pub(super) fn remote_daemon_force_stop_in_home(
-    client: &SshClient,
-    homeboy: &str,
-    home: &str,
-    lease_id: &str,
-) -> std::result::Result<(), String> {
-    let command = format!(
-        "XDG_DATA_HOME={home}/data {} daemon stop --force --lease-id {}",
-        shell::quote_arg(homeboy),
-        shell::quote_arg(lease_id),
-        home = shell::quote_arg(home),
-    );
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote generation daemon stop failed",
-            &output,
-        ));
-    }
-    Ok(())
-}
-
-/// Last-resort cleanup for a generation whose lifecycle endpoint is no longer
-/// reachable. The PID came from that generation's lease-bearing startup result.
-pub(super) fn remote_daemon_kill_pid(
-    client: &SshClient,
-    pid: u32,
-) -> std::result::Result<(), String> {
-    let command = format!("kill -TERM {}", shell::quote_arg(&pid.to_string()));
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote generation daemon PID cleanup failed",
-            &output,
-        ));
     }
     Ok(())
 }

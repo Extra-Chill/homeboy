@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::constants::{RELEASE_TAG_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
+use super::constants::{
+    RELEASE_TAG_ENV, RELEASE_VERSION_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY,
+};
 use super::helpers::{current_version, source_promotion_decision, version_is_newer};
 use super::planning::resolve_binary_on_path;
 use super::release_catalog::{self, SelectedRelease};
@@ -194,6 +196,7 @@ pub(crate) fn execute_upgrade(
             command.args(["-c", cmd]);
             if let Some(release) = selected_release {
                 command.env(RELEASE_TAG_ENV, &release.tag);
+                command.env(RELEASE_VERSION_ENV, &release.version);
             }
             command.output().map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run binary upgrade".to_string()))

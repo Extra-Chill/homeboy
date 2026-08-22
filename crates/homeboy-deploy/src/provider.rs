@@ -54,9 +54,15 @@ pub(super) fn run_if_configured(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let provider_count = components
+    let provider_count = component_ids
         .iter()
-        .filter(|component| component.deployment_provider.is_some())
+        .filter(|id| {
+            project
+                .components
+                .iter()
+                .find(|attachment| attachment.id == **id)
+                .is_some_and(|attachment| attachment.selects_deployment_provider())
+        })
         .count();
     if config.check && provider_count > 0 && provider_count < components.len() {
         return Err(Error::validation_invalid_argument(
@@ -180,13 +186,14 @@ fn run_component(
         ));
     }
 
-    // With target input, the resolved provider attachment is necessarily the
-    // repository-owned policy because a project override was rejected above.
-    // Without input, retain the legacy resolved project override behavior.
-    let attachment = component
-        .deployment_provider
-        .as_ref()
-        .expect("checked by caller");
+    let attachment = component.deployment_provider.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "components.deployment_provider_input",
+            "Selected deployment provider has no component provider policy",
+            Some(component.id.clone()),
+            None,
+        )
+    })?;
     let layered = homeboy_extension::deployment_provider_layered_input(
         &attachment.extension,
         &attachment.provider,
@@ -301,6 +308,9 @@ fn run_component(
         "failed"
     };
     let mut result = ComponentDeployResult::new(component, "").with_status(status);
+    result.warnings.push(
+        "deployment route: provider (selected by project deployment provider target)".to_string(),
+    );
     if is_layered {
         result.local_path = None;
     }
@@ -702,12 +712,23 @@ mod tests {
     }
 
     fn write_provider_extension(home: &std::path::Path, dry_run_command: Option<&str>) {
+        write_provider_extension_with_target_requirement(home, dry_run_command, false);
+    }
+
+    fn write_provider_extension_with_target_requirement(
+        home: &std::path::Path,
+        dry_run_command: Option<&str>,
+        target_required: bool,
+    ) {
         let extension = home.join(".config/homeboy/extensions/fixture-provider");
         std::fs::create_dir_all(&extension).expect("extension directory");
         let mut provider = serde_json::json!({
             "id": "fixture.deploy",
             "command": "sh {{extension_path}}/run.sh apply {{payload.contract}}",
-            "layered_input": { "schema": "homeboy/deployment-provider-payload/v1" }
+            "layered_input": {
+                "schema": "homeboy/deployment-provider-payload/v1",
+                "target_required": target_required
+            }
         });
         if let Some(command) = dry_run_command {
             provider["dry_run_command"] = serde_json::Value::String(command.to_string());
@@ -746,9 +767,10 @@ mod tests {
     fn project_wide_check_dispatches_to_provider_without_ssh_configuration() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let repository = provider_repository("fixture");
-            write_provider_extension(
+            write_provider_extension_with_target_requirement(
                 home.path(),
                 Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+                true,
             );
             let project = provider_project(repository.path());
 
@@ -768,6 +790,76 @@ mod tests {
                 "opaque"
             );
             assert!(!repository.path().join("applied").exists());
+        });
+    }
+
+    #[test]
+    fn local_attachment_defers_a_repository_provider_without_a_target() {
+        let repository = provider_repository("fixture");
+        let project = Project {
+            id: "local-site".to_string(),
+            components: vec![ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: repository.path().to_string_lossy().to_string(),
+                remote_path: Some("wp-content/plugins/fixture".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.check = false;
+        config.all = false;
+        config.component_ids = vec!["fixture".to_string()];
+        config.dry_run = true;
+
+        assert!(
+            run_if_configured("local-site", &project, &config, None)
+                .expect("local attachment must not invoke the provider")
+                .is_none(),
+            "the standard deployment route must remain available when no provider target is selected"
+        );
+    }
+
+    #[test]
+    fn explicit_provider_target_without_required_input_fails_closed() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension_with_target_requirement(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+                true,
+            );
+            let project = Project {
+                id: "provider-site".to_string(),
+                components: vec![ProjectComponentAttachment {
+                    id: "fixture".to_string(),
+                    local_path: repository.path().to_string_lossy().to_string(),
+                    deployment_provider: Some(DeploymentProviderAttachment {
+                        extension: "fixture-provider".to_string(),
+                        provider: "fixture.deploy".to_string(),
+                        contract: None,
+                        policy: Some(serde_json::json!({ "repository": "shared" })),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let error = run_if_configured(
+                "provider-site",
+                &project,
+                &DeployConfig::check_all_no_pull_head(),
+                None,
+            )
+            .expect_err("the selected provider must require its target input");
+
+            assert_eq!(
+                error.details["field"],
+                "components.deployment_provider_input"
+            );
+            assert!(error
+                .message
+                .contains("Deployment provider requires project provider input"));
         });
     }
 
@@ -810,6 +902,7 @@ mod tests {
                 ProjectComponentAttachment {
                     id: "provider".to_string(),
                     local_path: provider.path().to_string_lossy().to_string(),
+                    deployment_provider_input: Some(serde_json::json!({ "target": "site" })),
                     ..Default::default()
                 },
                 ProjectComponentAttachment {

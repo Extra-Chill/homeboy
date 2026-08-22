@@ -85,6 +85,19 @@ impl Drop for ReverseSessionHeartbeat {
     }
 }
 
+/// The prepared-source cache is intentionally immutable while a worker uses it.
+/// Restore owner write access before the hermetic fixture removes its checkout.
+struct WritableTreeOnDrop(PathBuf);
+
+impl Drop for WritableTreeOnDrop {
+    fn drop(&mut self) {
+        let _ = Command::new("chmod")
+            .args(["-R", "u+w"])
+            .arg(&self.0)
+            .output();
+    }
+}
+
 /// Wall-clock ledger for the acceptance run.
 ///
 /// This test is the slowest binary in the suite and its deadlines are wall
@@ -202,6 +215,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let broker = ReverseBrokerFixture::start("lab");
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("cook-source");
+    let _checkout_permissions = WritableTreeOnDrop(checkout.clone());
     std::fs::write(checkout.join(".gitignore"), "_lab_workspaces/\n")
         .expect("ignore runner workspace materialization");
     homeboy_core::test_support::run_git_fixture_command(&checkout, &["add", ".gitignore"]);
@@ -578,45 +592,29 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     // proven against a genuinely expired session instead of racing one.
     session_heartbeat.expire();
     // The controller must project the broker result after the worker exits.
-    // `daemon serve` is intentionally un-tokenized, so terminate the test-owned
-    // foreground child only after that durable parent lifecycle is terminal.
+    // Read the record directly: `agent-task status` deliberately uses the
+    // caller_opted_out probe policy, so invoking it here could not prove the
+    // daemon's own controller-job provider registration.
     let run_id = accepted["run_id"].as_str().expect("accepted run id");
-    // Bound this on observations as well as wall clock. Each poll is a whole
-    // `homeboy` subprocess, so on a loaded machine a single observation can
-    // outlast a bare wall-clock deadline and the controller is declared stalled
-    // having been asked exactly once. The deadline then measures how long the
-    // probe took, not whether the controller made progress. Requiring a minimum
-    // number of observations keeps the assertion about the controller while
-    // leaving the failure bounded.
+    // Bound this on observations as well as wall clock. Requiring a minimum
+    // number of durable reads keeps the assertion about controller progress,
+    // rather than a single slow observation, while leaving failure bounded.
     const MINIMUM_TERMINAL_OBSERVATIONS: u32 = 8;
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut observations = 0u32;
     let terminal = loop {
-        let status = context
-            .command(TestBinary::HomeboyFixture)
-            // A recorded-only reverse session makes `runner status` reach for
-            // its SSH recovery probe. Keep that on the fixture shim rather than
-            // letting a real `ssh` escape the hermetic context.
-            .env("PATH", &path)
-            .args(["agent-task", "status", run_id])
-            .output()
-            .expect("read terminal parent status");
         observations += 1;
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&status.stdout).expect("parse terminal parent status");
-        if matches!(
-            parsed
-                .pointer("/data/state")
-                .and_then(serde_json::Value::as_str),
-            Some("succeeded" | "failed" | "cancelled")
-        ) {
-            break parsed;
+        let record = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("open controller lifecycle store")
+            .read_record(run_id)
+            .expect("read controller parent record");
+        if record.state.is_terminal() {
+            break record;
         }
         if observations >= MINIMUM_TERMINAL_OBSERVATIONS && Instant::now() >= deadline {
             panic!(
-                "controller did not project terminal broker result after {observations} observations\n{}\nstatus={}\ndaemon stderr={}",
+                "controller did not project terminal broker result after {observations} observations\n{}\nrecord={record:#?}\ndaemon stderr={}",
                 ledger.render(),
-                parsed,
                 std::fs::read_to_string(&daemon_stderr_path)
                     .unwrap_or_else(|error| format!("<unavailable: {error}>")),
             );
@@ -625,11 +623,9 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     };
     ledger.mark("controller_terminal_projection");
     assert_eq!(
-        terminal
-            .pointer("/data/state")
-            .and_then(serde_json::Value::as_str),
-        Some("succeeded"),
-        "controller terminal projection: {terminal}\n{}",
+        terminal.state,
+        homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded,
+        "controller terminal projection: {terminal:#?}\n{}",
         ledger.render(),
     );
     let durable_record = homeboy::agents::agent_task_lifecycle::status(run_id)
