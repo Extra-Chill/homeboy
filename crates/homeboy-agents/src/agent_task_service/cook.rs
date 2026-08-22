@@ -198,6 +198,24 @@ fn transport_retry_available(store: &CookRecipeStore, cook_id: &str, attempt: u3
         <= MAX_TRANSPORT_RETRIES_PER_ATTEMPT)
 }
 
+/// An authorized placement transition gets one new transport admission after a
+/// failed route exhausted its own connection budget. Provider execution and the
+/// semantic Cook attempt remain untouched; the replacement run consumes this
+/// authority because it does not inherit this record metadata.
+fn transport_admission_reset_available(
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+) -> bool {
+    record.is_some_and(|record| {
+        record.metadata["transport_admission_reset"]["kind"] == "placement_transition"
+            && record.metadata["transport_admission_reset"]["replacement_decision_id"]
+                == record.metadata["execution_placement_decision"]["decision_id"]
+            && record.metadata["execution_placement_transition"]["kind"]
+                == "explicit_local_continuation"
+            && record.metadata["execution_placement_transition"]["replacement_decision_id"]
+                == record.metadata["execution_placement_decision"]["decision_id"]
+    })
+}
+
 /// Durable operation key for the dispatch of one retry attempt. A retry is
 /// one-per-generated-`run_id`, so the next run id is the stable identity (#8357).
 fn retry_dispatch_operation_key(next_run_id: &str) -> String {
@@ -4383,12 +4401,19 @@ fn run_cook_spine(
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
     let requested_run_id = options.initial_run_id.clone();
+    let local_placement_override = options.attempt_dispatcher.is_none()
+        && lifecycle_store
+            .read_record(&requested_run_id)
+            .ok()
+            .is_some_and(|record| transport_admission_reset_available(Some(&record)));
     let mut options = if existing_recipe {
         let mut reconstructed = if adopted_model.is_some() || allow_historical_terminal {
             super::reconstruct_adoption_options_with_dispatcher(
                 &recipe,
                 options.attempt_dispatcher,
             )?
+        } else if local_placement_override {
+            super::cook_recipe::reconstruct_options_with_local_placement_override(&recipe)?
         } else {
             super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?
         };
@@ -4681,12 +4706,20 @@ fn run_cook_spine(
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
+        // Recipe attempts retain logical input provenance. The controller plan
+        // is the canonical dispatch contract once pending workspace resolution
+        // has authenticated and projected a concrete root into it.
+        let plan = if lifecycle_store.record_exists(&latest_attempt.run_id)? {
+            lifecycle_store.read_controller_plan(&latest_attempt.run_id)?
+        } else {
+            latest_attempt.plan.clone()
+        };
         materialize_cook_attempt_with_stores(
             store,
             lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
-            &latest_attempt.plan,
+            &plan,
         )?;
     }
     // The recipe alone is resumable input, not a status-addressable run. Publish
@@ -5251,7 +5284,9 @@ fn run_cook_spine(
                         Some(&run_id),
                     ));
                 }
-                if !transport_retry_available(store, &cook_id, attempt)? {
+                if !transport_retry_available(store, &cook_id, attempt)?
+                    && !transport_admission_reset_available(record.as_ref())
+                {
                     return Ok(pre_execution_failure_report(
                         cook_id,
                         attempts,
@@ -5391,7 +5426,9 @@ fn run_cook_spine(
                         1,
                     ));
                 }
-                if replace_semantic_attempt && !transport_retry_available(store, &cook_id, attempt)?
+                if replace_semantic_attempt
+                    && !transport_retry_available(store, &cook_id, attempt)?
+                    && !transport_admission_reset_available(Some(&record))
                 {
                     return Ok(pre_artifact_interruption_report(
                         cook_id,
@@ -7217,13 +7254,31 @@ fn cook_owned_unpushed_destination(
     if head == fingerprint.head {
         return Ok(None);
     }
-    let parent = homeboy_core::git::run_git(
+    let parents = homeboy_core::git::run_git(
         path,
-        &["rev-parse", "--verify", "HEAD^"],
-        "resolve Cook-owned committed candidate parent",
+        &["rev-list", "--parents", "-n", "1", "HEAD"],
+        "resolve Cook-owned committed candidate parents",
     )?
-    .trim()
-    .to_string();
+    .split_whitespace()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    if parents.len() != 2 {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            "clean unpushed checkout is not a single-parent Cook-owned promoted candidate",
+            Some(path.display().to_string()),
+            None,
+        );
+        error.details["workspace"] = serde_json::json!({
+            "classification": "workspace.cook_owned_unpushed_commit_mismatch",
+            "reason": "merge_commit",
+            "owning_layer": "cook",
+            "path": path,
+            "parents": parents,
+        });
+        return Err(error);
+    }
+    let parent = &parents[1];
     let tree = homeboy_core::git::run_git(
         path,
         &["rev-parse", "--verify", "HEAD^{tree}"],
@@ -7231,7 +7286,7 @@ fn cook_owned_unpushed_destination(
     )?
     .trim()
     .to_string();
-    if parent != fingerprint.head || tree != fingerprint.tree {
+    if parent != &fingerprint.head || tree != fingerprint.tree {
         let mut error = Error::validation_invalid_argument(
             "to_worktree",
             "clean unpushed checkout is not the exact one-commit Cook-owned promoted candidate",
@@ -7240,7 +7295,7 @@ fn cook_owned_unpushed_destination(
         );
         error.details["workspace"] = serde_json::json!({
             "classification": "workspace.cook_owned_unpushed_commit_mismatch",
-            "reason": if parent != fingerprint.head { "divergent_ancestry" } else { "unrelated_unpushed_commit" },
+            "reason": if parent != &fingerprint.head { "divergent_ancestry" } else { "unrelated_unpushed_commit" },
             "owning_layer": "cook",
             "path": path,
             "expected_parent": fingerprint.head,

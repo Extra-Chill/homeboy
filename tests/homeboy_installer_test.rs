@@ -29,7 +29,7 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
     let candidate = target.join("homeboy");
     write_executable(
         &candidate,
-        "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = upgrade-admission ]; then\n  printf '%s|%s\\n' \"$0\" \"$4\" > \"$HOMEBOY_TEST_EVIDENCE\"\n  printf 'admission\\n' >> \"$HOMEBOY_TEST_EVENTS\"\n  exit ${HOMEBOY_TEST_CANDIDATE_EXIT:-0}\nfi\nexit 64\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy %s\\n' \"${HOMEBOY_TEST_TARGET_VERSION:-0.351.3+fixture}\"; exit 0; fi\nif [ \"$1\" = self ] && [ \"$2\" = upgrade-admission ]; then\n  printf '%s|%s|%s\\n' \"$0\" \"$4\" \"$6\" > \"$HOMEBOY_TEST_EVIDENCE\"\n  printf 'admission\\n' >> \"$HOMEBOY_TEST_EVENTS\"\n  exit ${HOMEBOY_TEST_CANDIDATE_EXIT:-0}\nfi\nexit 64\n",
     );
 
     let mut entries = vec![TARGET.to_string()];
@@ -136,6 +136,7 @@ fn run_installer(
         .env("HOMEBOY_TEST_EVIDENCE", &evidence)
         .env("HOMEBOY_TEST_EVENTS", &events)
         .env("HOMEBOY_TEST_BIN_DIR", &install_dir)
+        .env("HOMEBOY_UPGRADE_RELEASE_VERSION", "0.351.3")
         // Archive inspection must be independent of caller tar defaults.
         .env("TAR_OPTIONS", "--invalid-homeboy-installer-option")
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()));
@@ -155,6 +156,7 @@ fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure(
     assert!(allowed.status.success(), "{allowed:?}");
     assert!(installed.contains("upgrade-admission"));
     assert!(evidence.contains("legacy-controller-identity"));
+    assert!(evidence.contains("0.351.3"));
     assert!(evidence
         .split('|')
         .next()
@@ -167,6 +169,47 @@ fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure(
         assert!(installed.contains("legacy-controller-identity"));
         assert!(evidence.contains("legacy-controller-identity"));
     }
+}
+
+#[test]
+fn installer_rejects_a_digest_verified_candidate_with_the_wrong_target_version() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tools = temp.path().join("tools");
+    let install_dir = temp.path().join("bin");
+    let installed = install_dir.join("homeboy");
+    let archive_path = temp.path().join("homeboy.tar.xz");
+    let archive_root = temp.path().join("archive-root");
+    fs::create_dir_all(&tools).expect("tools directory");
+    fs::create_dir_all(&install_dir).expect("install directory");
+    archive(&archive_root, &archive_path, ArchiveFixture::Valid);
+    write_executable(&installed, "#!/bin/sh\nprintf 'legacy'\n");
+    write_executable(&tools.join("curl"), "#!/bin/sh\nout=\nfor arg in \"$@\"; do [ \"$previous\" = -o ] && out=\"$arg\"; previous=\"$arg\"; done\ncase \"$out\" in *.sha256) printf 'unused  homeboy.tar.xz\\n' > \"$out\" ;; *) cp \"$HOMEBOY_TEST_ARCHIVE\" \"$out\" ;; esac\n");
+    write_executable(
+        &tools.join("sha256sum"),
+        "#!/bin/sh\nprintf 'homeboy.tar.xz: OK\\n'\n",
+    );
+    write_executable(
+        &tools.join("uname"),
+        "#!/bin/sh\ncase \"$1\" in -s) printf 'Linux\\n' ;; -m) printf 'x86_64\\n' ;; esac\n",
+    );
+    let output = Command::new("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/homeboy-installer.sh"
+        ))
+        .env("HOMEBOY_INSTALL_PATH", &installed)
+        .env("HOMEBOY_TEST_ARCHIVE", &archive_path)
+        .env("HOMEBOY_UPGRADE_RELEASE_VERSION", "9.9.9")
+        .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+        .output()
+        .expect("run installer");
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(&installed).expect("installed bytes"),
+        "#!/bin/sh\nprintf 'legacy'\n"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("Target-version bootstrap recovery refused"));
 }
 
 #[test]

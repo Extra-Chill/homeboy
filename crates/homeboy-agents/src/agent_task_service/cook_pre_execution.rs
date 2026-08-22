@@ -371,9 +371,13 @@ pub(crate) fn production_runtime_admission(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> impl FnOnce(&str) -> Result<Value> + '_ {
     move |run_id| {
-        homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(run_id, || {
-            Ok(lifecycle_store.read_record(run_id)?.state.is_terminal())
-        })
+        let runtime_root =
+            homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
+        homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+            &runtime_root,
+            run_id,
+            || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+        )
         .map(|admission| admission.runtime)
     }
 }

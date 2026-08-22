@@ -294,6 +294,7 @@ pub struct CommandRun {
     pub output_file_result: Option<homeboy::core::Result<Value>>,
     pub presentation: CommandPresentation,
     pub raw_stdout: Option<homeboy::core::Result<String>>,
+    pub raw_completion_stderr: Option<String>,
     output_file_already_written: bool,
 }
 
@@ -321,12 +322,20 @@ impl CommandRun {
             output_file_result: None,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
 
     pub fn with_presentation(mut self, presentation: CommandPresentation) -> Self {
         self.presentation = presentation;
+        self
+    }
+
+    /// Diagnostics emitted only after raw stdout has been durably handed to the
+    /// caller. SSH uses this for terminal lifecycle phases.
+    pub fn with_raw_completion_stderr(mut self, stderr: impl Into<String>) -> Self {
+        self.raw_completion_stderr = Some(stderr.into());
         self
     }
 
@@ -373,6 +382,28 @@ impl CommandRun {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: Some(raw_stdout),
+            raw_completion_stderr: None,
+            output_file_already_written: false,
+        }
+    }
+
+    /// Keeps raw output out of the command envelope unless an explicit output
+    /// artifact was requested.
+    pub fn from_raw_stdout_streaming(
+        command: impl Into<String>,
+        raw_stdout: homeboy::core::Result<String>,
+        exit_code: i32,
+        output_file_result: Option<homeboy::core::Result<Value>>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            operation: None,
+            stdout_result: output_file_result.clone().unwrap_or(Ok(Value::Null)),
+            exit_code,
+            output_file_result,
+            presentation: CommandPresentation::default(),
+            raw_stdout: Some(raw_stdout),
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
@@ -424,8 +455,22 @@ impl<'a> OutputService<'a> {
     pub(crate) fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
         if let Some(raw_stdout) = run.raw_stdout {
+            if let Some(stderr) = &run.presentation.stderr {
+                eprint!("{}", stderr);
+            }
             match raw_stdout {
-                Ok(content) => print!("{}", content),
+                Ok(content) => {
+                    use std::io::Write;
+
+                    let mut stdout = std::io::stdout().lock();
+                    if let Err(error) = stdout
+                        .write_all(content.as_bytes())
+                        .and_then(|_| stdout.flush())
+                    {
+                        eprintln!("Homeboy could not deliver raw stdout: {error}");
+                        return 1;
+                    }
+                }
                 Err(err) => {
                     output::print_json_result_for_identity(
                         Err(err),
@@ -438,6 +483,10 @@ impl<'a> OutputService<'a> {
                     )
                     .ok();
                 }
+            }
+
+            if let Some(stderr) = &run.raw_completion_stderr {
+                eprint!("{}", stderr);
             }
 
             return run.exit_code;
@@ -479,7 +528,11 @@ pub fn run_command(
     let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
-    let run = match crate::commands::raw_output::prepare_command_run(command, plan.stdout) {
+    let run = match crate::commands::raw_output::prepare_command_run(
+        command,
+        plan.stdout,
+        !matches!(plan.output_file, CommandOutputFileMode::None),
+    ) {
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
@@ -574,6 +627,7 @@ pub fn run_json(
                 output_file_result,
                 presentation: CommandPresentation::default(),
                 raw_stdout: None,
+                raw_completion_stderr: None,
                 output_file_already_written: false,
             }
         }
@@ -601,6 +655,14 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
         }
         CommandOutputFileMode::TraceJsonSummaryArtifact
         | CommandOutputFileMode::GenericEnvelope => {
+            // Raw stdout/stderr are terminal streams. Their bounded evidence is
+            // supplied explicitly by the raw command, not duplicated in the
+            // structured envelope's presentation fields.
+            let presentation = run
+                .raw_stdout
+                .is_none()
+                .then(|| presentation_envelope(run.presentation.clone()))
+                .flatten();
             output::write_json_to_file_for_identity(
                 run.output_file_result(mode),
                 path,
@@ -609,7 +671,7 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
                     command: run.command.clone(),
                     operation: run.operation.clone(),
                 },
-                presentation_envelope(run.presentation.clone()),
+                presentation,
             );
         }
     }
@@ -644,6 +706,7 @@ mod tests {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            raw_completion_stderr: None,
             output_file_already_written: false,
         }
     }
@@ -667,6 +730,88 @@ mod tests {
 
         assert_eq!(run.raw_stdout.unwrap().unwrap(), "markdown output");
         assert_eq!(run.stdout_result.unwrap(), json!({ "artifact": true }));
+    }
+
+    #[test]
+    fn streaming_raw_output_is_not_retained_without_an_output_artifact() {
+        let large = "x".repeat(2 * 1024 * 1024);
+        let run = CommandRun::from_raw_stdout_streaming("ssh", Ok(large), 0, None);
+
+        assert!(run.output_file_result.is_none());
+        assert_eq!(run.stdout_result.unwrap(), Value::Null);
+        assert_eq!(
+            run.raw_stdout.as_ref().unwrap().as_ref().unwrap().len(),
+            2 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn streaming_raw_output_uses_only_explicit_bounded_artifact_evidence() {
+        let evidence = json!({ "stdout_tail": "tail", "stdout_truncated": true });
+        let run = CommandRun::from_raw_stdout_streaming(
+            "ssh",
+            Ok("full stream".to_string()),
+            0,
+            Some(Ok(evidence.clone())),
+        );
+
+        assert_eq!(run.stdout_result.unwrap(), evidence);
+        assert_eq!(
+            run.output_file_result.unwrap().unwrap()["stdout_tail"],
+            "tail"
+        );
+    }
+
+    #[test]
+    fn raw_output_file_omits_unbounded_presentation_streams() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ssh-output.json");
+        let large_stderr = "e".repeat(2 * 1024 * 1024);
+        let run = CommandRun::from_raw_stdout_streaming(
+            "ssh",
+            Ok("full raw stdout".to_string()),
+            0,
+            Some(Ok(json!({
+                "stdout_tail": "bounded stdout",
+                "stderr_tail": "bounded stderr",
+                "stderr_truncated": true,
+            }))),
+        )
+        .with_presentation(CommandPresentation {
+            stdout: None,
+            stderr: Some(large_stderr),
+        });
+
+        write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+
+        let bytes = std::fs::read(&path).expect("artifact written");
+        let json: Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert!(
+            bytes.len() < 16 * 1024,
+            "raw presentation leaked into artifact"
+        );
+        assert_eq!(json["data"]["stderr_tail"], "bounded stderr");
+        assert!(json.get("presentation").is_none());
+    }
+
+    #[test]
+    fn raw_completion_diagnostics_are_separate_from_remote_stderr() {
+        let run = CommandRun::from_raw_stdout("ssh", Ok("payload".to_string()), 0, None)
+            .with_presentation(CommandPresentation {
+                stdout: None,
+                stderr: Some("remote stderr\n".to_string()),
+            })
+            .with_raw_completion_stderr("[ssh] phase=command-finished\n");
+
+        assert_eq!(run.presentation.stderr.as_deref(), Some("remote stderr\n"));
+        assert_eq!(
+            run.raw_completion_stderr.as_deref(),
+            Some("[ssh] phase=command-finished\n")
+        );
     }
 
     #[test]
