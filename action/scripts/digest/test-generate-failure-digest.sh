@@ -146,4 +146,19 @@ if grep -Fq 'top-secret-token\|do-not-display\|ghp_abcdefghijklmnopqrstuvwxyz012
   exit 1
 fi
 
+cat > "${BIN_DIR}/homeboy" <<'STUB'
+#!/usr/bin/env bash
+printf 'renderer failed before producing markdown\n' >&2
+exit 1
+STUB
+chmod +x "${BIN_DIR}/homeboy"
+export RESULTS='{"review lint":"fail"}'
+
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+
+grep -F "## Failure digest unavailable" "${DIGEST_FILE}" >/dev/null
+grep -F '`homeboy review lint`: **fail** (result: `review-lint.json`)' "${DIGEST_FILE}" >/dev/null
+grep -F "renderer failed before producing markdown" "${DIGEST_FILE}" >/dev/null
+grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
+
 echo "generate failure digest wrapper checks passed"

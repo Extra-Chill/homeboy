@@ -678,6 +678,16 @@ runs:
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
+    - name: Upload Homeboy failure digest
+      if: always() && steps.select-results.outputs.results != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.artifact-names.outputs.homeboy-ci-results }}-failure-digest
+        path: |
+          homeboy-ci-results/failure-digest.md
+          homeboy-ci-results/failure-digest-renderer.stderr
+        if-no-files-found: ignore
+
     - name: Run release
       id: release
       if: steps.resolve-commands.outputs.release-commands != '' && github.event_name != 'pull_request'
