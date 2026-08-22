@@ -277,6 +277,80 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     );
 }
 
+/// A detached Cook cannot resume a handoff parent without a materialized recipe.
+/// A mismatched daemon is therefore rejected, with its lease-bound repair, before
+/// the launcher announces or persists that parent (#12982).
+#[test]
+fn cook_rejects_daemon_build_mismatch_before_durable_handoff_announcement() {
+    let context = HermeticTestContext::new();
+    let state_path = context.daemon_dir().join("state.json");
+    // The test process is a live local PID from the Cook subprocess's point of
+    // view. A stale lease reaches the build-mismatch preflight without a daemon
+    // process or network timing in the fixture.
+    let state = serde_json::json!({
+        "schema": "homeboy.daemon.session_lease.v1",
+        "lease_id": "stale-fixture-lease",
+        "startup_token": "stale-fixture-token",
+        "address": "127.0.0.1:49152",
+        "pid": std::process::id(),
+        "state_path": state_path.display().to_string(),
+        "started_at": "2026-01-01T00:00:00Z",
+        "last_seen_at": "2026-01-01T00:00:00Z",
+        "build_identity": {
+            "version": "0.0.0-stale",
+            "display": "homeboy 0.0.0-stale+fixture"
+        },
+        "binary_sha256": null,
+        "runtime_paths": { "loaded_at": "2026-01-01T00:00:00Z", "paths": [] }
+    });
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&state).expect("serialize mismatched daemon state"),
+    )
+    .expect("write mismatched daemon state");
+
+    let cook_id = "local-detach-daemon-build-mismatch";
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command.args([
+        "--placement",
+        "local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--run-id",
+        cook_id,
+        "--backend",
+        "fixture",
+        "--prompt",
+        "reject stale daemon before handoff",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
+    let output = bounded_output(command);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("Next: homeboy daemon recover --yes"),
+        "{stdout}"
+    );
+    assert!(
+        !stderr.contains(&format!("durable run id `{cook_id}`")),
+        "a failed preflight must not announce a durable handoff: {stderr}"
+    );
+
+    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id, "--full"]);
+    let status = bounded_output(status);
+    assert!(
+        !status.status.success(),
+        "mismatch preflight must not persist a handoff: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 /// A successful local detach exposes accepted only after the child has written
 /// an attempt that status can resolve, rather than merely its zero-task parent.
 #[test]

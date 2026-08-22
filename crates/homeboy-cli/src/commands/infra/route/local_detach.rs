@@ -335,6 +335,14 @@ pub(super) fn intercept_local_detached_cook(
     // materialize an attempt after cancellation.
     if handoff_parent.state.is_terminal() {
         terminate_and_reap_detached_child(&mut child);
+        if handoff_parent.metadata["detached_cook_handoff"]["state"] == "exited_before_handoff" {
+            return Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "detached Cook exited before materializing its first attempt",
+                Some(cook_id),
+                None,
+            ));
+        }
         return Err(Error::validation_invalid_argument(
             "detach-after-handoff",
             "detached Cook became terminal before durable controller ownership could be established",
