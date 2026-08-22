@@ -375,6 +375,12 @@ grep -F 'resolve-run-artifact.sh homeboy-test-archive' "${WORKFLOW}" >/dev/null 
 # shellcheck disable=SC2016
 grep -F 'name: ${{ steps.test-plan-artifact.outputs.artifact-name }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: shard jobs do not consume the resolved plan artifact\n'; exit 1; }
 grep -F "needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate shard work can start without a successful inventory plan\n'; exit 1; }
+aggregate_condition="$(grep -A3 '^  candidate-test-result:' "${WORKFLOW}" | grep '^    if:')"
+printf '%s\n' "${aggregate_condition}" | grep -q 'always()' || { printf 'FAIL: candidate shard aggregation does not run after a failed producing shard\n'; exit 1; }
+if printf '%s\n' "${aggregate_condition}" | grep -q 'needs.candidate-test-shards.result'; then
+  printf 'FAIL: candidate shard aggregation is gated on the producing shard result\n'
+  exit 1
+fi
 grep -F 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not report candidate inventory generation failures\n'; exit 1; }
 grep -F "if: needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }
 grep -F "Candidate Test inventory generation failed; shard execution was not started" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory producer is not terminal\n'; exit 1; }
