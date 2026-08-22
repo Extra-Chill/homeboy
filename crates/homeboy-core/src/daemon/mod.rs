@@ -413,7 +413,6 @@ static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new(
 /// cancellation terminal while its owned execute thread is still live.
 struct ControllerJobRuntime {
     cancel: mpsc::Sender<()>,
-    supervisor: std::thread::JoinHandle<()>,
 }
 
 type ControllerJobRuntimeKey = (String, Uuid);
@@ -427,17 +426,6 @@ fn controller_job_runtimes(
     static RUNTIMES: OnceLock<Mutex<HashMap<ControllerJobRuntimeKey, ControllerJobRuntime>>> =
         OnceLock::new();
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn controller_job_runtime_count(job_store: &JobStore) -> usize {
-    let scope = job_store.runtime_registry_scope();
-    controller_job_runtimes()
-        .lock()
-        .expect("controller runtimes lock")
-        .keys()
-        .filter(|(runtime_scope, _)| runtime_scope == &scope)
-        .count()
 }
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
@@ -3539,7 +3527,8 @@ fn dispatch_claimed_controller_job(
     // Register ownership before allowing a fast driver to terminalize itself.
     let (start_tx, start_rx) = mpsc::channel();
     let supervisor_runtime_key = runtime_key.clone();
-    let supervisor = std::thread::spawn(move || {
+    // Detached: nothing joins this handle, so it is not retained.
+    std::thread::spawn(move || {
         let _ = start_rx.recv();
         let job = job_store.handle(job_id);
         if job.is_cancelled() {
@@ -3721,13 +3710,7 @@ fn dispatch_claimed_controller_job(
     controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
-        .insert(
-            runtime_key,
-            ControllerJobRuntime {
-                cancel: cancel_tx,
-                supervisor,
-            },
-        );
+        .insert(runtime_key, ControllerJobRuntime { cancel: cancel_tx });
     let _ = start_tx.send(());
 }
 

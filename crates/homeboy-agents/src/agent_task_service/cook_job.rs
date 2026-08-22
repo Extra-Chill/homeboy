@@ -347,6 +347,29 @@ impl CookJobDriver {
                 }
             }
 
+            // Runner ownership starts when the durable attempt records its job,
+            // not when the launcher child exits. A detached Cook can retain a
+            // provably-live launcher while its reverse worker has already
+            // published a terminal broker result. Keep process identity as the
+            // child-exit safety guard below, but let the daemon project the
+            // runner authority throughout supervision.
+            if let Some(run_id) = job.run_id.as_deref() {
+                let lifecycle_store =
+                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                let mut record = lifecycle_store.read_record(run_id)?;
+                if record.runner_id().is_some() && record.runner_job_id().is_some() {
+                    agent_task_lifecycle::reconcile_runner_job_state_in_store(
+                        &lifecycle_store,
+                        &mut record,
+                    )?;
+                    handle.checkpoint(job.to_checkpoint()?)?;
+                    handle.progress(job.progress_projection())?;
+                    if record.state.is_terminal() {
+                        return job.observe_terminal(Some(record.run_id));
+                    }
+                }
+            }
+
             if !child_is_live(&job.request) {
                 return job.observe_terminal(job.run_id.clone());
             }

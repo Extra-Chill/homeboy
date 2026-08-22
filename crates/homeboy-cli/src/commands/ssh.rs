@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server};
-use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
+use homeboy::core::server::{resolve_context, CommandObservation, SshClient, SshResolveArgs};
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -97,6 +97,55 @@ pub struct SshConnectOutput {
     pub failure_reason: Option<String>,
 }
 
+/// Captured raw SSH result. Raw stdout is presented before its terminal phase
+/// diagnostics so those diagnostics are never evidence of output the caller
+/// has not yet received.
+pub(super) struct RawSshExecution {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub result_classification: String,
+    pub observation_lost: bool,
+    pub observation: CommandObservation,
+    pub timed_out: bool,
+}
+
+impl RawSshExecution {
+    pub fn completion_phase_stderr(&self) -> String {
+        let command_phase = ssh_terminal_phase_name(self.observation, self.observation_lost);
+        format!("[ssh] phase={command_phase}\n[ssh] phase=cleanup-finished\n")
+    }
+
+    pub fn output_file_evidence(&self) -> serde_json::Value {
+        serde_json::json!({
+            "stdout_tail": bounded_tail(&self.stdout),
+            "stderr_tail": bounded_tail(&self.stderr),
+            "stdout_seen_bytes": self.stdout.len(),
+            "stderr_seen_bytes": self.stderr.len(),
+            "stdout_truncated": self.stdout.len() > RAW_EVIDENCE_LIMIT_BYTES,
+            "stderr_truncated": self.stderr.len() > RAW_EVIDENCE_LIMIT_BYTES,
+            "exit_code": self.exit_code,
+            "result_classification": self.result_classification,
+            "observation_lost": self.observation_lost,
+            "observation": self.observation.code(),
+            "timed_out": self.timed_out,
+        })
+    }
+}
+
+const RAW_EVIDENCE_LIMIT_BYTES: usize = 64 * 1024;
+
+fn bounded_tail(value: &str) -> String {
+    if value.len() <= RAW_EVIDENCE_LIMIT_BYTES {
+        return value.to_string();
+    }
+    let start = value
+        .char_indices()
+        .find_map(|(index, _)| (value.len() - index <= RAW_EVIDENCE_LIMIT_BYTES).then_some(index))
+        .unwrap_or(value.len());
+    value[start..].to_string()
+}
+
 #[derive(Debug, Serialize)]
 
 pub struct SshListOutput {
@@ -160,7 +209,7 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                 ssh_phase("command-start");
                 let output =
                     execute_non_interactive(&client, cmd, timeout, std::io::stdin().is_terminal());
-                ssh_phase("command-finished");
+                ssh_terminal_phase(&output);
                 ssh_phase("cleanup-finished");
 
                 Ok((
@@ -173,7 +222,6 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                             .map(str::to_string),
                         command_string.clone(),
                         &output,
-                        timeout,
                     )),
                     output.exit_code,
                 ))
@@ -219,7 +267,6 @@ fn connect_output_from_execution(
     // invocations remain unambiguous (e.g. args containing spaces).
     command: Option<String>,
     output: &homeboy::core::server::CommandOutput,
-    timeout: Option<Duration>,
 ) -> SshConnectOutput {
     SshConnectOutput {
         resolved_type: resolved_type.to_string(),
@@ -232,21 +279,17 @@ fn connect_output_from_execution(
         stderr: Some(output.stderr.clone()),
         success: output.success,
         exit_code: output.exit_code,
-        result_classification: ssh_result_classification(output.success, output.exit_code),
-        failure_reason: if output.timed_out {
-            Some(format!(
-                "SSH command deadline expired after {}ms; transport child process group was terminated",
-                timeout.map_or(0, |timeout| timeout.as_millis())
-            ))
+        result_classification: ssh_result_classification_with_observation(
+            output.success,
+            output.exit_code,
+            ssh_observation_lost(output),
+        ),
+        failure_reason: if ssh_observation_lost(output) {
+            ssh_failure_reason_with_observation(output)
         } else {
             ssh_failure_reason(output.success, output.exit_code)
         },
-        phases: vec![
-            "target-resolved".to_string(),
-            "command-started".to_string(),
-            "command-finished".to_string(),
-            "cleanup-finished".to_string(),
-        ],
+        phases: ssh_execution_phases(output),
         timed_out: output.timed_out,
     }
 }
@@ -254,7 +297,7 @@ fn connect_output_from_execution(
 /// Execute a non-interactive remote command and return its raw stdout/stderr and
 /// exit code, for `--raw` mode. Resolution mirrors [`run`], but the caller emits
 /// the remote streams directly instead of a JSON envelope.
-pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(String, String, i32)> {
+pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<RawSshExecution> {
     ssh_phase("target-resolution-start");
     let resolve_args = if args.as_server {
         SshResolveArgs {
@@ -294,9 +337,64 @@ pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(Stri
     let timeout = command_timeout(args.timeout)?;
     ssh_phase("command-start");
     let output = execute_non_interactive(&client, cmd, timeout, std::io::stdin().is_terminal());
-    ssh_phase("command-finished");
-    ssh_phase("cleanup-finished");
-    Ok((output.stdout, output.stderr, output.exit_code))
+    Ok(raw_execution_from_output(output))
+}
+
+fn raw_execution_from_output(output: homeboy::core::server::CommandOutput) -> RawSshExecution {
+    let observation_lost = ssh_observation_lost(&output);
+    RawSshExecution {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+        result_classification: ssh_result_classification_with_observation(
+            output.success,
+            output.exit_code,
+            observation_lost,
+        ),
+        observation_lost,
+        observation: output.observation,
+        timed_out: output.timed_out,
+    }
+}
+
+fn ssh_execution_phases(output: &homeboy::core::server::CommandOutput) -> Vec<String> {
+    let command_phase = ssh_terminal_phase_name(output.observation, ssh_observation_lost(output));
+    vec![
+        "target-resolved".to_string(),
+        "command-started".to_string(),
+        command_phase.to_string(),
+        "cleanup-finished".to_string(),
+    ]
+}
+
+fn ssh_terminal_phase(output: &homeboy::core::server::CommandOutput) {
+    ssh_phase(ssh_terminal_phase_name(
+        output.observation,
+        ssh_observation_lost(output),
+    ));
+}
+
+fn ssh_terminal_phase_name(
+    observation: CommandObservation,
+    observation_lost: bool,
+) -> &'static str {
+    if observation == CommandObservation::SpawnFailed {
+        "command-not-started"
+    } else if observation_lost {
+        "command-observation-lost"
+    } else {
+        "command-finished"
+    }
+}
+
+fn ssh_observation_lost(output: &homeboy::core::server::CommandOutput) -> bool {
+    matches!(
+        output.observation,
+        CommandObservation::StdinDeliveryFailed
+            | CommandObservation::Cancelled
+            | CommandObservation::StreamDrainTimedOut
+            | CommandObservation::TransportObservationFailed
+    )
 }
 
 fn execute_non_interactive(
@@ -339,6 +437,17 @@ fn ssh_phase(phase: &str) {
 }
 
 fn ssh_result_classification(success: bool, exit_code: i32) -> String {
+    ssh_result_classification_with_observation(success, exit_code, false)
+}
+
+fn ssh_result_classification_with_observation(
+    success: bool,
+    exit_code: i32,
+    observation_lost: bool,
+) -> String {
+    if observation_lost {
+        return "remote_state_indeterminate".to_string();
+    }
     if success {
         return "remote_command_success".to_string();
     }
@@ -366,6 +475,18 @@ fn ssh_failure_reason(success: bool, exit_code: i32) -> Option<String> {
     Some(format!(
         "Remote command exited with status {exit_code}; stdout/stderr may be empty for no-output commands"
     ))
+}
+
+fn ssh_failure_reason_with_observation(
+    output: &homeboy::core::server::CommandOutput,
+) -> Option<String> {
+    if ssh_observation_lost(output) {
+        return Some(
+            "SSH observation was interrupted; remote execution may have continued after the client lost its terminal result."
+                .to_string(),
+        );
+    }
+    ssh_failure_reason(output.success, output.exit_code)
 }
 
 /// Use an explicitly requested cwd when present; otherwise preserve the
@@ -525,6 +646,7 @@ mod tests {
             success: true,
             exit_code: 0,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         };
         let connect = connect_output_from_execution(
@@ -535,7 +657,6 @@ mod tests {
             Some("/srv/override".to_string()),
             Some("pwd".to_string()),
             &output,
-            None,
         );
 
         assert_eq!(connect.requested_cwd.as_deref(), Some("/srv/override"));
@@ -570,6 +691,257 @@ mod tests {
             ssh_failure_reason(false, 255).as_deref(),
             Some("SSH transport failed with exit code 255")
         );
+    }
+
+    fn command_output(
+        stdout: &str,
+        stderr: &str,
+        success: bool,
+        exit_code: i32,
+        timed_out: bool,
+        observation: CommandObservation,
+    ) -> homeboy::core::server::CommandOutput {
+        homeboy::core::server::CommandOutput {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            success,
+            exit_code,
+            timed_out,
+            observation,
+            child_resource: None,
+        }
+    }
+
+    #[test]
+    fn raw_execution_preserves_delayed_and_last_moment_output_before_completion() {
+        let client = localhost_client();
+
+        let delayed = execute_non_interactive(
+            &client,
+            "sleep 0.02; printf delayed-output",
+            Some(Duration::from_secs(1)),
+            true,
+        );
+        let final_output = execute_non_interactive(
+            &client,
+            "printf output-immediately-before-exit",
+            Some(Duration::from_secs(1)),
+            true,
+        );
+        let delayed = raw_execution_from_output(delayed);
+        let final_output = raw_execution_from_output(final_output);
+
+        assert_eq!(delayed.stdout, "delayed-output");
+        assert_eq!(final_output.stdout, "output-immediately-before-exit");
+        for execution in [delayed, final_output] {
+            assert!(!execution.observation_lost);
+            assert_eq!(execution.exit_code, 0);
+            assert!(execution
+                .completion_phase_stderr()
+                .contains("command-finished"));
+            assert!(execution
+                .completion_phase_stderr()
+                .contains("cleanup-finished"));
+        }
+    }
+
+    #[test]
+    fn raw_execution_reports_indeterminate_observation_without_command_finished() {
+        let timeout = raw_execution_from_output(command_output(
+            "partial",
+            "drain timed out",
+            false,
+            124,
+            true,
+            CommandObservation::StreamDrainTimedOut,
+        ));
+        let interrupted = raw_execution_from_output(command_output(
+            "partial",
+            "remote stderr remains opaque to terminal state classification",
+            false,
+            130,
+            false,
+            CommandObservation::Cancelled,
+        ));
+        let transport = raw_execution_from_output(command_output(
+            "",
+            "connection lost",
+            false,
+            255,
+            false,
+            CommandObservation::TransportObservationFailed,
+        ));
+        assert_eq!(transport.stderr, "connection lost");
+
+        for execution in [timeout, interrupted, transport] {
+            assert!(execution.observation_lost);
+            assert_eq!(
+                execution.result_classification,
+                "remote_state_indeterminate"
+            );
+            assert!(execution
+                .completion_phase_stderr()
+                .contains("command-observation-lost"));
+            assert!(!execution
+                .completion_phase_stderr()
+                .contains("command-finished"));
+        }
+    }
+
+    #[test]
+    fn structured_phases_do_not_report_command_finished_after_lost_observation() {
+        let output = command_output(
+            "",
+            "transport observation failed",
+            false,
+            -1,
+            false,
+            CommandObservation::TransportObservationFailed,
+        );
+        let phases = ssh_execution_phases(&output);
+
+        assert!(phases.contains(&"command-observation-lost".to_string()));
+        assert!(!phases.contains(&"command-finished".to_string()));
+        assert_eq!(phases.last().map(String::as_str), Some("cleanup-finished"));
+    }
+
+    #[test]
+    fn spawn_failure_never_reports_a_terminal_command_phase() {
+        let output = command_output(
+            "",
+            "ssh unavailable",
+            false,
+            -1,
+            false,
+            CommandObservation::SpawnFailed,
+        );
+        let phases = ssh_execution_phases(&output);
+        let raw = raw_execution_from_output(output);
+
+        assert!(!raw.observation_lost);
+        assert!(phases.contains(&"command-not-started".to_string()));
+        assert!(!phases.contains(&"command-finished".to_string()));
+        assert!(raw
+            .completion_phase_stderr()
+            .contains("command-not-started"));
+        assert!(!raw.completion_phase_stderr().contains("command-finished"));
+    }
+
+    #[test]
+    fn structured_result_classification_matches_lost_observation_phase() {
+        let output = command_output(
+            "partial",
+            "stream drain timed out",
+            false,
+            124,
+            true,
+            CommandObservation::StreamDrainTimedOut,
+        );
+        let connect = connect_output_from_execution(
+            "server",
+            None,
+            "local",
+            None,
+            None,
+            Some("printf partial".to_string()),
+            &output,
+        );
+
+        assert_eq!(connect.result_classification, "remote_state_indeterminate");
+        assert!(connect
+            .failure_reason
+            .as_deref()
+            .expect("typed failure reason")
+            .contains("may have continued"));
+        assert!(connect
+            .phases
+            .contains(&"command-observation-lost".to_string()));
+        assert!(!connect.phases.contains(&"command-finished".to_string()));
+    }
+
+    #[test]
+    fn piped_stdin_delivery_failure_is_typed_indeterminate_state() {
+        let execution = raw_execution_from_output(command_output(
+            "partial stdout",
+            "unrelated remote stderr",
+            false,
+            1,
+            false,
+            CommandObservation::StdinDeliveryFailed,
+        ));
+
+        assert!(execution.observation_lost);
+        assert_eq!(
+            execution.result_classification,
+            "remote_state_indeterminate"
+        );
+        assert!(execution
+            .completion_phase_stderr()
+            .contains("command-observation-lost"));
+    }
+
+    #[test]
+    fn raw_output_file_evidence_is_bounded_without_losing_transport_state() {
+        let execution = RawSshExecution {
+            stdout: "x".repeat(RAW_EVIDENCE_LIMIT_BYTES + 1),
+            stderr: "y".repeat(RAW_EVIDENCE_LIMIT_BYTES + 1),
+            exit_code: 0,
+            result_classification: "remote_command_success".to_string(),
+            observation_lost: false,
+            observation: CommandObservation::Complete,
+            timed_out: false,
+        };
+
+        let evidence = execution.output_file_evidence();
+        assert_eq!(evidence["stdout_seen_bytes"], RAW_EVIDENCE_LIMIT_BYTES + 1);
+        assert_eq!(evidence["stderr_seen_bytes"], RAW_EVIDENCE_LIMIT_BYTES + 1);
+        assert_eq!(
+            evidence["stdout_tail"].as_str().unwrap().len(),
+            RAW_EVIDENCE_LIMIT_BYTES
+        );
+        assert_eq!(
+            evidence["stderr_tail"].as_str().unwrap().len(),
+            RAW_EVIDENCE_LIMIT_BYTES
+        );
+        assert_eq!(evidence["stdout_truncated"], true);
+        assert_eq!(evidence["exit_code"], 0);
+        assert_eq!(evidence["observation"], "complete");
+        assert_eq!(evidence["timed_out"], false);
+    }
+
+    #[test]
+    fn raw_output_file_evidence_preserves_typed_terminal_observation() {
+        for (observation, timed_out, expected) in [
+            (
+                CommandObservation::StreamDrainTimedOut,
+                true,
+                "stream_drain_timed_out",
+            ),
+            (CommandObservation::Cancelled, false, "cancelled"),
+            (
+                CommandObservation::StdinDeliveryFailed,
+                false,
+                "stdin_delivery_failed",
+            ),
+            (
+                CommandObservation::TransportObservationFailed,
+                false,
+                "transport_observation_failed",
+            ),
+        ] {
+            let evidence = raw_execution_from_output(command_output(
+                "",
+                "",
+                false,
+                -1,
+                timed_out,
+                observation,
+            ))
+            .output_file_evidence();
+
+            assert_eq!(evidence["observation"], expected);
+            assert_eq!(evidence["timed_out"], timed_out);
+        }
     }
 
     fn raw_args(command: Vec<&str>, raw: bool) -> SshArgs {

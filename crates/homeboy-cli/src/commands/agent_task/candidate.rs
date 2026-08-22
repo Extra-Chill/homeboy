@@ -1,4 +1,9 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Read,
+    path::Path,
+};
 
 use serde_json::{json, Value};
 
@@ -48,6 +53,8 @@ impl CandidateState {
 const MAX_ATTEMPTS_SCANNED: usize = 64;
 const MAX_OUTCOMES_SCANNED: usize = 256;
 const MAX_ARTIFACTS_SCANNED: usize = 256;
+const MAX_CHANGED_FILES_ARTIFACT_BYTES: u64 = 1024 * 1024;
+const MAX_CHANGED_FILES_PATHS: usize = 4096;
 
 /// The canonical terminal result for a Cook's candidate evidence. Evidence is
 /// monotonic: a finalized PR, promoted/adopted candidate, or durable patch
@@ -62,6 +69,9 @@ pub(crate) struct CandidateResult {
     pub(crate) retained_only: usize,
     pub(crate) unknown: usize,
     pub(crate) diff_bytes: u64,
+    pub(crate) changed_files: usize,
+    pub(crate) changed_files_unknown_patches: usize,
+    pub(crate) provider_executions: Option<usize>,
     pub(crate) finalized: bool,
     pub(crate) promoted: bool,
     pub(crate) attempts_omitted: usize,
@@ -102,7 +112,7 @@ impl CandidateResult {
         self.attempts_omitted > 0 || self.outcomes_omitted > 0 || self.artifacts_omitted > 0
     }
 
-    fn record(&mut self, state: CandidateState, size: Option<u64>) {
+    fn record(&mut self, state: CandidateState, size: Option<u64>, changed_files: Option<usize>) {
         match state {
             CandidateState::Finalized | CandidateState::Promoted => {
                 unreachable!("terminal facts are recorded directly")
@@ -110,6 +120,10 @@ impl CandidateResult {
             CandidateState::PatchAvailable => {
                 self.available += 1;
                 self.diff_bytes += size.unwrap_or_default();
+                match changed_files {
+                    Some(count) => self.changed_files += count,
+                    None => self.changed_files_unknown_patches += 1,
+                }
             }
             CandidateState::NoChangesProduced => self.no_changes_produced = true,
             CandidateState::Empty => self.empty += 1,
@@ -162,6 +176,13 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
             .and_then(Value::as_str)
             .unwrap_or("unnamed")
             .to_string();
+        // Only content-addressed artifacts can be aliases of one another. Older
+        // aggregate entries can reuse an id across independent task outcomes.
+        let identity = if artifact.get("sha256").and_then(Value::as_str).is_some() {
+            identity
+        } else {
+            format!("{identity}@{:p}", artifact)
+        };
         by_identity.entry(identity).or_default().push(artifact);
     }
 
@@ -169,6 +190,7 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
         attempts_omitted,
         outcomes_omitted,
         artifacts_omitted,
+        provider_executions: provider_execution_count(payload),
         ..Default::default()
     };
     for artifacts in by_identity.into_values() {
@@ -203,7 +225,7 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
                 None => CandidateState::Unknown,
             }
         };
-        counts.record(state, size);
+        counts.record(state, size, changed_files_for_artifact(artifact));
     }
     counts.no_changes_produced = counts.available == 0
         && counts.empty == 0
@@ -226,6 +248,9 @@ pub(crate) fn canonical_candidate_projection(result: CandidateResult) -> Value {
         "schema": "homeboy/agent-task-candidate/v1",
         "state": result.state().as_str(),
         "diff_bytes": result.diff_bytes,
+        "changed_files": result.changed_files,
+        "changed_files_unknown_patches": result.changed_files_unknown_patches,
+        "provider_executions": result.provider_executions,
         "counts": {
             "patch_available": result.available,
             "empty": result.empty,
@@ -287,6 +312,20 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
             .get("diff_bytes")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
+        changed_files: value
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or_default(),
+        changed_files_unknown_patches: value
+            .get("changed_files_unknown_patches")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or_default(),
+        provider_executions: value
+            .get("provider_executions")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok()),
         finalized: state == CandidateState::Finalized,
         promoted: state == CandidateState::Promoted,
         attempts_omitted: omitted("attempts_omitted"),
@@ -294,6 +333,151 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
         artifacts_omitted: omitted("artifacts_omitted"),
         no_changes_produced: state == CandidateState::NoChangesProduced,
     })
+}
+
+/// Return durable provider executions rather than normalized aggregate outcomes.
+/// Timeout recovery can leave a patch without a successful normalized task.
+fn provider_execution_count(payload: &Value) -> Option<usize> {
+    let metadata = payload
+        .get("metadata")
+        .or_else(|| payload.pointer("/record/metadata"));
+    metadata
+        .and_then(|metadata| metadata.get("provider_executions_consumed"))
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .or_else(|| {
+            metadata
+                .and_then(|metadata| metadata.get("provider_executions"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .or_else(|| {
+            payload
+                .get("attempts")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+}
+
+pub(crate) fn changed_files_for_artifact(artifact: &Value) -> Option<usize> {
+    if let Some(files) = artifact
+        .pointer("/metadata/changed_files")
+        .and_then(Value::as_array)
+    {
+        return Some(files.len());
+    }
+    if let Some(count) = artifact
+        .pointer("/metadata/changed_file_count")
+        .and_then(Value::as_u64)
+    {
+        return usize::try_from(count).ok();
+    }
+    if !is_homeboy_durable_artifact(artifact) {
+        return None;
+    }
+    let path = Path::new(artifact.get("path").and_then(Value::as_str)?);
+    let artifact_root = homeboy::core::artifact_root().ok()?.canonicalize().ok()?;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > MAX_CHANGED_FILES_ARTIFACT_BYTES
+        || artifact
+            .get("size_bytes")
+            .and_then(Value::as_u64)
+            .is_some_and(|size| size > MAX_CHANGED_FILES_ARTIFACT_BYTES)
+    {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(&artifact_root) {
+        return None;
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let opened = file.metadata().ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
+            return None;
+        }
+    }
+    if !opened.is_file() || opened.len() > MAX_CHANGED_FILES_ARTIFACT_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    file.take(MAX_CHANGED_FILES_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_CHANGED_FILES_ARTIFACT_BYTES {
+        return None;
+    }
+    let patch = std::str::from_utf8(&bytes).ok()?;
+    changed_paths_from_patch(patch)
+}
+
+fn is_homeboy_durable_artifact(artifact: &Value) -> bool {
+    artifact
+        .pointer("/metadata/executor_artifact_finalized")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && artifact
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| {
+                url.starts_with("homeboy://agent-task/run/") && url.contains("/artifacts")
+            })
+}
+
+fn changed_paths_from_patch(patch: &str) -> Option<usize> {
+    let mut paths = BTreeSet::new();
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let mut parts = rest.split_whitespace();
+            let old = parts.next().map(strip_diff_path_prefix);
+            let new = parts.next().map(strip_diff_path_prefix);
+            match (new, old) {
+                (Some(new), _) if new != "/dev/null" => insert_changed_path(&mut paths, Some(new)),
+                (_, Some(old)) => insert_changed_path(&mut paths, Some(old)),
+                _ => {}
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
+            if path != "/dev/null" {
+                insert_changed_path(&mut paths, Some(path));
+            }
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
+            if path != "/dev/null" {
+                insert_changed_path(&mut paths, Some(path));
+            }
+        }
+        if paths.len() > MAX_CHANGED_FILES_PATHS {
+            return None;
+        }
+    }
+    Some(paths.len())
+}
+
+fn insert_changed_path(paths: &mut BTreeSet<String>, candidate: Option<String>) {
+    if let Some(path) = candidate.filter(|path| !path.is_empty()) {
+        paths.insert(path);
+    }
+}
+
+fn strip_diff_path_prefix(token: &str) -> String {
+    let token = token.trim().trim_matches('"');
+    token
+        .strip_prefix("a/")
+        .or_else(|| token.strip_prefix("b/"))
+        .unwrap_or(token)
+        .to_string()
 }
 
 fn aggregate_artifacts(payload: &Value) -> (Vec<&Value>, usize, usize, usize) {
@@ -339,12 +523,56 @@ fn aggregate_artifacts(payload: &Value) -> (Vec<&Value>, usize, usize, usize) {
             );
         }
     }
+    // Older review/status projections carry no aggregate. Their candidate
+    // inventory and artifact references remain authoritative fallback evidence.
+    if artifacts.is_empty() {
+        if let Some(inventory) = payload
+            .pointer("/aggregate_review/artifact_inventory")
+            .and_then(Value::as_array)
+        {
+            let candidate_ids = review_candidate_ids(payload);
+            artifacts.extend(inventory.iter().filter(|artifact| {
+                let task_id = artifact.get("task_id").and_then(Value::as_str);
+                let artifact_id = artifact.get("artifact_id").and_then(Value::as_str);
+                task_id
+                    .zip(artifact_id)
+                    .is_some_and(|identity| candidate_ids.contains(&identity))
+            }));
+        }
+    }
+    if artifacts.is_empty() {
+        if let Some(references) = payload.get("artifact_refs").and_then(Value::as_array) {
+            artifacts.extend(references.iter());
+        }
+    }
     (
         artifacts,
         attempts_omitted,
         outcomes_omitted,
         artifacts_omitted,
     )
+}
+
+fn review_candidate_ids(payload: &Value) -> Vec<(&str, &str)> {
+    ["apply_candidates", "review_candidates"]
+        .into_iter()
+        .flat_map(|kind| {
+            payload
+                .pointer(&format!("/aggregate_review/{kind}"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|candidate| {
+                    let task_id = candidate.get("task_id").and_then(Value::as_str);
+                    candidate
+                        .get("artifact_ids")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(move |artifact_id| task_id.zip(artifact_id.as_str()))
+                })
+        })
+        .collect()
 }
 
 /// Count omitted entries from array lengths while only visiting individual
@@ -508,6 +736,10 @@ fn declared_location(artifact: &Value) -> bool {
             .get("url")
             .and_then(Value::as_str)
             .is_some_and(|url| !url.trim().is_empty())
+        || artifact
+            .get("uri")
+            .and_then(Value::as_str)
+            .is_some_and(|uri| !uri.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -531,6 +763,84 @@ mod tests {
             "url": format!("homeboy://agent-task/run/lab-restarted/artifacts#task=cook-intelligence&artifact={id}"),
             "metadata": { "executor_artifact_finalized": true, "source_provenance": { "runner_id": "homeboy-lab" } }
         })
+    }
+
+    fn durable_patch(path: &Path, size_bytes: u64) -> Value {
+        json!({
+            "id": "patch",
+            "kind": "patch",
+            "path": path,
+            "size_bytes": size_bytes,
+            "url": "homeboy://agent-task/run/test/artifacts#task=cook&artifact=patch",
+            "metadata": { "executor_artifact_finalized": true },
+        })
+    }
+
+    #[test]
+    fn changed_file_parsing_refuses_unmanaged_persisted_paths() {
+        crate::test_support::with_isolated_home(|_| {
+            let unmanaged = tempfile::tempdir().expect("unmanaged directory");
+            let patch = unmanaged.path().join("outside.patch");
+            std::fs::write(&patch, "diff --git a/a.rs b/a.rs\n").expect("write unmanaged patch");
+
+            assert_eq!(changed_files_for_artifact(&durable_patch(&patch, 26)), None);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_file_parsing_refuses_special_files_without_opening_them() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        crate::test_support::with_isolated_home(|_| {
+            let root = homeboy::core::artifact_root().expect("artifact root");
+            std::fs::create_dir_all(&root).expect("create artifact root");
+            let fifo = root.join("patch.fifo");
+            let fifo_path = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+            assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+            assert_eq!(changed_files_for_artifact(&durable_patch(&fifo, 0)), None);
+        });
+    }
+
+    #[test]
+    fn changed_file_parsing_refuses_oversized_durable_patch() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = homeboy::core::artifact_root().expect("artifact root");
+            std::fs::create_dir_all(&root).expect("create artifact root");
+            let patch = root.join("oversized.patch");
+            std::fs::write(
+                &patch,
+                vec![b'x'; MAX_CHANGED_FILES_ARTIFACT_BYTES as usize + 1],
+            )
+            .expect("write oversized patch");
+
+            assert_eq!(
+                changed_files_for_artifact(&durable_patch(
+                    &patch,
+                    MAX_CHANGED_FILES_ARTIFACT_BYTES + 1,
+                )),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn changed_file_parsing_refuses_patches_with_too_many_paths() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = homeboy::core::artifact_root().expect("artifact root");
+            std::fs::create_dir_all(&root).expect("create artifact root");
+            let patch = root.join("many-paths.patch");
+            let content = (0..=MAX_CHANGED_FILES_PATHS)
+                .map(|index| format!("diff --git a/{index}.rs b/{index}.rs\n"))
+                .collect::<String>();
+            std::fs::write(&patch, &content).expect("write patch");
+
+            assert_eq!(
+                changed_files_for_artifact(&durable_patch(&patch, content.len() as u64)),
+                None
+            );
+        });
     }
 
     #[test]

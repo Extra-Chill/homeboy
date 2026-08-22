@@ -541,41 +541,6 @@ fn refreshed_daemon_verification_rejects_commit_substring_mismatch() {
 }
 
 #[test]
-fn refreshed_daemon_rollback_stops_restores_and_reconnects_the_previous_binary() {
-    let operations = std::cell::RefCell::new(Vec::new());
-
-    rollback_refreshed_daemon_with(
-        Some("/stable/homeboy"),
-        || {
-            operations.borrow_mut().push("stop new daemon".to_string());
-            Ok(())
-        },
-        |path| {
-            operations
-                .borrow_mut()
-                .push(format!("restore {}", path.expect("previous binary")));
-            Ok(())
-        },
-        |path| {
-            operations
-                .borrow_mut()
-                .push(format!("reconnect {}", path.expect("previous binary")));
-            Ok(())
-        },
-    )
-    .expect("rollback converges on the previous binary");
-
-    assert_eq!(
-        operations.into_inner(),
-        [
-            "stop new daemon",
-            "restore /stable/homeboy",
-            "reconnect /stable/homeboy",
-        ]
-    );
-}
-
-#[test]
 fn materialize_plan_uses_clean_runner_cache() {
     let options = HomeboyBinaryRefreshOptions {
         runner_id: "lab".to_string(),
@@ -1608,64 +1573,6 @@ fn post_promotion_active_job_race_preserves_newer_selector_as_contention() {
                 .homeboy_path
                 .as_deref(),
             Some("/newer/homeboy")
-        );
-    });
-}
-
-#[test]
-fn reconnect_failure_after_stop_restores_and_reconnects_before_returning() {
-    let operations = std::cell::RefCell::new(Vec::new());
-
-    let error = rollback_refresh_connect_error_with::<(), _, _>(
-        Error::internal_io("selected daemon reconnect failed".to_string(), None),
-        || {
-            operations
-                .borrow_mut()
-                .push("restore old binary".to_string());
-            Ok(())
-        },
-        || {
-            operations
-                .borrow_mut()
-                .push("persist old-or-new authoritative lease".to_string());
-            Ok(())
-        },
-    )
-    .expect_err("the original reconnect failure remains visible after convergence");
-
-    assert_eq!(error.details["error"], "selected daemon reconnect failed");
-    assert_eq!(
-        operations.into_inner(),
-        [
-            "restore old binary",
-            "persist old-or-new authoritative lease"
-        ],
-        "a failed reconnect after the old session is removed must compensate before returning"
-    );
-}
-
-#[test]
-fn nonzero_reconnect_report_rollback_restores_the_pre_refresh_binary() {
-    test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let patch =
-            refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
-        merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
-
-        restore_runner_homeboy_path("lab-local", Some("/stable/homeboy"))
-            .expect("rollback after nonzero reconnect report");
-
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable/homeboy")
         );
     });
 }

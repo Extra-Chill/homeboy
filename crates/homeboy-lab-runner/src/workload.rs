@@ -34,12 +34,20 @@ pub(crate) struct LabRunnerWorkloadBuildInput<'a> {
     pub proof_id: Option<&'a str>,
 }
 
+/// Fixture builder for tests that need a workload but do not care which command
+/// dispatched it.
+///
+/// It routes through the production builder with an empty dispatched command,
+/// which is exactly the fallback path `build_lab_runner_workload_for_dispatched_command`
+/// takes when it cannot derive an identity: `from_label(hot_label)`. The former
+/// implementation reached the same identity through a separate
+/// `_with_command_label` entry point that production never called, so these
+/// tests were asserting against a builder no dispatch used.
 #[cfg(test)]
 pub(crate) fn build_lab_runner_workload(
     input: LabRunnerWorkloadBuildInput<'_>,
 ) -> LabRunnerWorkload {
-    let command_label = input.command.hot_label.to_string();
-    build_lab_runner_workload_with_command_label(input, command_label)
+    build_lab_runner_workload_for_dispatched_command(input, &[])
 }
 
 pub(crate) fn build_lab_runner_workload_for_dispatched_command(
@@ -49,16 +57,6 @@ pub(crate) fn build_lab_runner_workload_for_dispatched_command(
     let identity = dispatched_command_identity(dispatched_command)
         .unwrap_or_else(|| LabRunnerWorkloadCommandIdentity::from_label(input.command.hot_label));
     build_lab_runner_workload_with_command_identity(input, identity)
-}
-
-fn build_lab_runner_workload_with_command_label(
-    input: LabRunnerWorkloadBuildInput<'_>,
-    command_label: String,
-) -> LabRunnerWorkload {
-    build_lab_runner_workload_with_command_identity(
-        input,
-        LabRunnerWorkloadCommandIdentity::from_label(&command_label),
-    )
 }
 
 fn build_lab_runner_workload_with_command_identity(

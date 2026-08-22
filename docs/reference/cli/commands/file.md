@@ -32,7 +32,7 @@ Remote file operations
 | `homeboy file grep` | Search file contents |
 | `homeboy file download` | Download a file or directory from remote server |
 | `homeboy file copy` | Copy a file or path between local and remote targets |
-| `homeboy file sync` | Sync a directory between local and remote targets without deleting extras |
+| `homeboy file sync` | Sync directory contents into a local or remote destination without deleting extras |
 | `homeboy file edit` | Edit file with line-based or pattern-based operations |
 
 ## `homeboy file list`
@@ -223,7 +223,7 @@ Copy a file or path between local and remote targets
 homeboy file sync [OPTIONS] <SOURCE> <DESTINATION>
 ```
 
-Sync a directory between local and remote targets without deleting extras
+Sync directory contents into a local or remote destination without deleting extras
 
 | Argument | Required | Description |
 | --- | --- | --- |

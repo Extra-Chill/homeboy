@@ -2314,6 +2314,7 @@ mod metadata_write_tests {
             success: false,
             exit_code: -1,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         });
 
@@ -3367,6 +3368,15 @@ pub(crate) enum RunAuthority {
 
 pub(crate) enum ActiveResourceLifecycleLiveness {
     NotActive,
+    /// The payload carries the run id whose terminal state released the lease.
+    /// Production matches `Terminal(_)`, so nothing reads it at runtime — but
+    /// `workspace/tests/prune.rs` asserts `owner == "run-terminal"` to pin that
+    /// the right run was credited. Suppressed per-item rather than at module
+    /// scope so the next unused field in this file still fails the build.
+    #[allow(
+        dead_code,
+        reason = "Owning run id is asserted by workspace/tests/prune.rs; production branches on the variant only."
+    )]
     Terminal(String),
     Live,
     Unknown(&'static str),
@@ -4045,19 +4055,7 @@ fn parse_ssh_prune_delete_output(
     }
 }
 
-pub(crate) fn ssh_prune_delete_command(root: &str, remote_path: &str) -> String {
-    ssh_prune_delete_command_with_terminal_owner(root, remote_path, None)
-}
-
-pub(crate) fn ssh_prune_delete_command_with_terminal_owner(
-    root: &str,
-    remote_path: &str,
-    terminal_owner_run_id: Option<&str>,
-) -> String {
-    ssh_prune_delete_command_with_terminal_authority(root, remote_path, terminal_owner_run_id, None)
-}
-
-fn ssh_prune_delete_command_with_terminal_authority(
+pub(crate) fn ssh_prune_delete_command_with_terminal_authority(
     root: &str,
     remote_path: &str,
     terminal_owner_run_id: Option<&str>,
@@ -4325,6 +4323,7 @@ mod tests {
             success,
             exit_code,
             timed_out: false,
+            observation: Default::default(),
             child_resource: None,
         }
     }

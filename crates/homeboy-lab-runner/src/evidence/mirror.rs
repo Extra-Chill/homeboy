@@ -241,11 +241,15 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
     Ok(())
 }
 
+/// Takes the caller's roots because the evidence this mirrors describes the run
+/// whose lease the caller is already holding. Resolving a second set here let
+/// the lease live in one installation and its evidence land in another (#7505).
 pub(crate) fn mirror_daemon_evidence(
     request: MirrorEvidenceRequest<'_>,
+    roots: &homeboy_core::paths::PathRoots,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     classify_terminal_result(request.job, request.result, "direct-daemon")?;
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_initialized_in_roots(roots)?;
     let local_job_run = mirror_job_run_request(&store, request)?;
     let result = (|| {
         let remote_runs = mirror_remote_observation_runs(

@@ -2514,18 +2514,6 @@ fn optional_string(
     }
 }
 
-fn required_bool(
-    provider_id: &str,
-    index: usize,
-    field: &str,
-    path: &str,
-    item: &Value,
-) -> Result<bool> {
-    required_jsonpath_value(provider_id, &format!("items[{index}].{field}"), path, item)?
-        .as_bool()
-        .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a boolean"))
-}
-
 /// Resolve an advisory boolean safety flag. An absent value defaults to `false`
 /// (the provider makes no claim of unsafety), so a provider that omits the field
 /// does not block the cook (#7886). A value that resolves but is not a boolean
