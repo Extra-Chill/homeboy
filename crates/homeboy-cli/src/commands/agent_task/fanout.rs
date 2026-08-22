@@ -6182,7 +6182,7 @@ fi
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  path='{}/'$2\n  if [ -d \"$path\" ]; then\n    branch=$(git -C \"$path\" branch --show-current)\n    printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"%s\",\"branch\":\"%s\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\" \"$path\" \"$branch\"\n  else\n    exit 1\n  fi\n  ;;\nensure)\n  path='{}/'$2\n  git init --quiet -b \"$5\" \"$path\"\n  printf '%s|%s|%s|%s\\n' \"$2\" \"$8\" \"$9\" \"${{10}}\" >> '{}'\n  ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  path='{}/'$2\n  if [ -d \"$path\" ]; then\n    branch=$(git -C \"$path\" branch --show-current)\n    printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"%s\",\"branch\":\"%s\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\" \"$path\" \"$branch\"\n  else\n    printf '{{\"status\":\"error\",\"error\":{{\"code\":\"worktree_not_found\"}}}}\\n'\n  fi\n  ;;\nensure)\n  path='{}/'$2\n  git init --quiet -b \"$5\" \"$path\"\n  printf '%s|%s|%s|%s\\n' \"$2\" \"$8\" \"$9\" \"${{10}}\" >> '{}'\n  ;;\nesac\n",
                     workspace_root.display(),
                     workspace_root.display(),
                     ensured.display(),
@@ -6244,6 +6244,9 @@ fi
             homeboy::core::defaults::save_config(&config).expect("save provider config");
 
             let mut args = cook_batch_args();
+            args.issues = (6453..=6458)
+                .map(|number| format!("https://github.com/Extra-Chill/homeboy/issues/{number}"))
+                .collect();
             args.dry_run = false;
             let mut plan = build_cook_batch_plan(&args).expect("fanout plan");
             let worktrees =
@@ -6255,9 +6258,13 @@ fi
                         path.starts_with(workspace_root.to_string_lossy().as_ref())
                     })
             }));
-            assert!(std::fs::read_to_string(&ensured)
-                .expect("provider ensure records")
-                .contains("agent_task_cook"));
+            let ensured = std::fs::read_to_string(&ensured).expect("provider ensure records");
+            assert_eq!(ensured.lines().count(), 6, "{ensured}");
+            assert!(ensured.contains("agent_task_cook"));
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| ensured.contains(&cook.to_worktree)));
             assert!(worktrees.rows.iter().all(|row| {
                 row.command.first() == Some(&provider.display().to_string())
                     && !row
@@ -6267,6 +6274,7 @@ fi
             }));
 
             bind_materialized_worktree_paths(&mut plan, &worktrees);
+            assert_eq!(plan.cooks.len(), 6);
             assert!(plan.cooks.iter().all(|cook| cook.workspace.is_some()));
 
             let mut blocked = worktrees.clone();
