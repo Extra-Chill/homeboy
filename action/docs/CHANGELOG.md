@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.6] - 2026-08-22
+
+### Fixed
+- resolve sharded Test results across reruns
+
 ## [2.14.5] - 2026-08-22
 
 ### Fixed
