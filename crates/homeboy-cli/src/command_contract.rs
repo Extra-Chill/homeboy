@@ -46,16 +46,14 @@ pub(crate) use constants::{
     CONTRACT_CONSTANTS_SCHEMA,
 };
 pub(crate) use lab::{
-    lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
-    lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, run_location_index_path, scope_lab_cli_arguments,
-    AgentTaskDispatchIdentity, CommandPortabilityContract, JobArtifactMetadata, LabCommandContract,
-    LabCommandPortability, LabCommandRouteContract, LabRigWorkloadArguments, LabRigWorkloadKind,
-    LabRoutingPolicy, LabRunnerHandoffArtifactManifestRef, LabRunnerHandoffEnvelope,
-    LabRunnerHandoffFollowCommands, LabRunnerSupportSummary, LabRunnerWorkload,
-    LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
-    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy, LabRunnerWorkloadAssignment,
-    LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
+    lab_runner_support_summary, lab_runner_supported_labels, run_location_index_path,
+    scope_lab_cli_arguments, AgentTaskDispatchIdentity, CommandPortabilityContract,
+    JobArtifactMetadata, LabCommandContract, LabCommandPortability, LabCommandRouteContract,
+    LabRigWorkloadArguments, LabRigWorkloadKind, LabRoutingPolicy,
+    LabRunnerHandoffArtifactManifestRef, LabRunnerHandoffEnvelope, LabRunnerHandoffFollowCommands,
+    LabRunnerSupportSummary, LabRunnerWorkload, LabRunnerWorkloadAgentTask,
+    LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    LabRunnerWorkloadAssignment, LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
     LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
     LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
     LabRunnerWorkloadWorkspaceMappings, LabSecretEnvSource, LabSourcePathMode,
@@ -81,8 +79,7 @@ pub(crate) use registry::{
     registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
 };
 pub(crate) use spec::{
-    non_core_command_doc_slugs, registered_command, registered_command_json_family,
-    runtime_extension_command_doc_slugs, support_command_doc_slugs, CommandDocKind, CommandDocSpec,
+    registered_command, runtime_extension_command_doc_slugs, CommandDocKind, CommandDocSpec,
     CommandLabSupportSummary, CommandPathSafetySpec, CommandSafetySpec, CommandSpec,
     COMMAND_DOC_REGISTRY, COMMAND_SPECS,
 };

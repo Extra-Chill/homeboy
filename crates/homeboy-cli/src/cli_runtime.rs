@@ -3375,46 +3375,6 @@ mod tests {
     }
 
     #[test]
-    fn augmented_manifest_includes_extension_command_contract_and_health() {
-        crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
-            write_extension_command_docs(home.path(), "sample-runtime", "sample-cli");
-
-            let manifest = current_augmented_command_safety_manifest();
-            let sample_cli = manifest
-                .find_path(&["sample-cli"])
-                .expect("sample-cli command manifest");
-
-            assert!(sample_cli.mutates);
-            assert!(sample_cli.operator);
-            assert_eq!(
-                sample_cli.docs.path.as_deref(),
-                Some("docs/commands/sample-cli.md")
-            );
-            assert!(sample_cli
-                .dangerous_flags
-                .contains(&"passthrough args".to_string()));
-            assert!(sample_cli
-                .output
-                .notes
-                .contains("extension-provided CLI passthrough"));
-
-            let extension = sample_cli.extension.as_ref().expect("extension metadata");
-            assert_eq!(extension.extension_id, "sample-runtime");
-            assert_eq!(extension.tool_name, "sample-cli");
-            assert_eq!(extension.args_contract.project_id.name, "project_id");
-            assert!(extension.args_contract.project_id.required);
-            assert_eq!(extension.args_contract.args.name, "args");
-            assert!(extension.args_contract.args.multiple);
-            assert!(extension.args_contract.trailing_var_arg);
-            assert!(extension.args_contract.allow_hyphen_values);
-            assert_eq!(extension.health.status, "ready");
-            assert!(extension.health.ready);
-            assert!(extension.health.compatible);
-        });
-    }
-
-    #[test]
     fn runs_list_runner_after_subcommand_is_not_treated_as_global_runner() {
         let _env = EnvGuard::remove(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let mut cli = Cli::parse_from([

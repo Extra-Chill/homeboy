@@ -54,10 +54,6 @@ impl FuzzArgs {
         }
     }
 
-    pub(crate) fn is_run_invocation(&self) -> bool {
-        matches!(self.command, None | Some(FuzzCommand::Run(_)))
-    }
-
     /// Fuzz subcommands that offload to the configured Lab runner. Listing is
     /// local metadata discovery unless runner availability is requested.
     pub(crate) fn is_lab_offload_command(&self) -> bool {

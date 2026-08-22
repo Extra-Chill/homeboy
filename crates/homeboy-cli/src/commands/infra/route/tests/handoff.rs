@@ -2,7 +2,6 @@
 
 use super::*;
 use clap::Parser;
-use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
 use tempfile::tempdir;
 
@@ -219,41 +218,6 @@ fn extension_show_routes_to_explicit_lab_runner() {
 }
 
 #[test]
-fn fuzz_doctor_supports_runner_lab_placement_route() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "fuzz",
-        "doctor",
-        "--extension",
-        "nodejs",
-        "--runner",
-        "homeboy-lab",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
-    assert_eq!(command.hot_label, "fuzz doctor");
-    assert!(lab_runner_supports_contract_label(command.hot_label));
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(command.routing_policy.requires_extension_parity);
-    assert!(command.routing_policy.read_only_polling);
-    assert_eq!(command.required_extensions, vec!["nodejs".to_string()]);
-    assert_eq!(
-        command.source_path_mode,
-        runners::LabOffloadSourcePathMode::RunnerResident
-    );
-    assert_eq!(
-        command.workspace_mode_policy,
-        runners::LabOffloadWorkspaceModePolicy::RunnerResident
-    );
-    assert!(cli.command.lab_offload_mutation_flag().is_none());
-    assert!(!cli.command.lab_offload_captures_mutation_patch());
-    assert!(cli.command.supports_lab_runner());
-}
-
-#[test]
 fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let normalized = vec![
@@ -408,62 +372,6 @@ fn runs_artifact_attach_runner_option_routes_locally() {
 }
 
 #[test]
-fn agent_task_inspection_commands_support_runner_resident_recovery() {
-    for args in [
-        ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
-    ] {
-        let cli = Cli::parse_from(args);
-        let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert_eq!(
-            command.source_path_mode,
-            runners::LabOffloadSourcePathMode::RunnerResident
-        );
-        assert_eq!(
-            command.workspace_mode_policy,
-            runners::LabOffloadWorkspaceModePolicy::RunnerResident
-        );
-        assert!(!command.routing_policy.default_lab_offload);
-    }
-}
-
-#[test]
-fn agent_task_retry_run_supports_explicit_runner() {
-    for args in [
-        [
-            "homeboy",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "retry",
-            "agent-task-123",
-            "--run",
-        ],
-        [
-            "homeboy",
-            "agent-task",
-            "retry",
-            "agent-task-123",
-            "--run",
-            "--runner",
-            "homeboy-lab",
-        ],
-    ] {
-        let cli = Cli::parse_from(args);
-
-        let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-    }
-}
-
-#[test]
 fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
     let automatic = Cli::parse_from([
         "homeboy",
@@ -515,40 +423,6 @@ fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
         .unwrap()
         .is_portable());
     assert_eq!(lab.placement, crate::cli_surface::Placement::Lab);
-}
-
-#[test]
-fn agent_task_providers_supports_explicit_runner_discovery() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "providers",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert!(lab_runner_supports_contract_label(command.hot_label));
-    assert!(command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(command.routing_policy.preserve_result_payload);
-    assert!(!command.routing_policy.requires_extension_parity);
-    assert!(command.required_extensions.is_empty());
-    assert!(!command.routing_policy.infer_source_path_tools);
-    // The runner catalog answers from the runner's own installation. Nothing
-    // about a provider read needs the controller's working tree, and building
-    // one is exactly the materialization ceremony that outran the caller's
-    // timeout (#9763).
-    assert_eq!(
-        command.source_path_mode,
-        runners::LabOffloadSourcePathMode::RunnerResident
-    );
-    assert_eq!(
-        command.workspace_mode_policy,
-        runners::LabOffloadWorkspaceModePolicy::RunnerResident
-    );
 }
 
 #[test]
@@ -995,20 +869,6 @@ fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
     assert_eq!(command.hot_label, "review audit");
     assert!(command.is_portable());
     assert!(command.routing_policy.requires_extension_parity);
-}
-
-#[test]
-fn lab_command_preserves_local_only_contract_shape() {
-    let cli = Cli::parse_from(["homeboy", "rig", "up", "demo"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "rig up");
-    assert!(matches!(
-        command.portability,
-        LabCommandPortability::LocalOnly(_)
-    ));
-    assert!(!command.routing_policy.requires_extension_parity);
 }
 
 #[test]

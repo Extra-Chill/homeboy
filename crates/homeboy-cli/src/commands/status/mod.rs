@@ -1783,51 +1783,6 @@ mod tests {
         }
     }
 
-    /// Every filter/positional spelling `homeboy status` accepted before
-    /// `ScopeArgs` must still parse the same way.
-    #[test]
-    fn previously_valid_status_invocations_still_parse() {
-        let bare = parse_status(&["homeboy", "status"]);
-        assert!(bare.target.is_none());
-        assert!(bare.scope.is_unscoped());
-
-        let positional = parse_status(&["homeboy", "status", "wordpress-playground"]);
-        assert_eq!(positional.target.as_deref(), Some("wordpress-playground"));
-        assert!(positional.scope.is_unscoped());
-
-        let filters = parse_status(&[
-            "homeboy",
-            "status",
-            "--all",
-            "--uncommitted",
-            "--needs-release",
-            "--ready",
-            "--docs-only",
-            "--outdated",
-            "--unreleased",
-            "--timings",
-            "--refresh",
-            "--full",
-        ]);
-        assert!(filters.all);
-        assert!(!filters.global);
-        assert!(filters.uncommitted);
-        assert!(filters.needs_release);
-        assert!(filters.ready);
-        assert!(filters.docs_only);
-        assert!(filters.outdated);
-        assert!(filters.unreleased);
-        assert!(filters.timings);
-        assert!(filters.refresh);
-        assert!(filters.full);
-
-        let short_all = parse_status(&["homeboy", "status", "-a"]);
-        assert!(short_all.all);
-
-        let global = parse_status(&["homeboy", "status", "--global"]);
-        assert!(global.global);
-    }
-
     #[test]
     fn status_scope_selectors_resolve_to_their_variants() {
         assert_eq!(

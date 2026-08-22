@@ -833,21 +833,6 @@ fn preflight_review_scope(
     })
 }
 
-/// Markdown output mode — runs the JSON path internally and renders the
-/// envelope into a PR-comment section. The body is just the section content;
-/// the consumer (`homeboy git pr comment --header`) owns the wrapping
-/// section header.
-pub(crate) fn run_markdown(args: ReviewArgs) -> CmdResult<String> {
-    let banners = args.banner.clone();
-    let (output, exit_code) = run_umbrella(args)?;
-    let md = if banners.is_empty() {
-        review::render::render_pr_comment(&output)
-    } else {
-        review::render::render_pr_comment_with_banners(&output, &banners)
-    };
-    Ok((md, exit_code))
-}
-
 /// Write the stable review artifact to `--output` for automated consumers.
 /// Falls back to the generic JSON envelope if the review command failed before
 /// producing an artifact.

@@ -324,11 +324,6 @@ pub(crate) fn is_markdown_mode(args: &TraceArgs) -> bool {
     args.report.as_deref() == Some("markdown")
 }
 
-pub(crate) fn run_markdown(args: TraceArgs) -> CmdResult<String> {
-    let (output, exit_code) = run(args)?;
-    Ok((render_markdown_output(&output), exit_code))
-}
-
 pub(crate) fn run_markdown_with_json_artifact(
     args: TraceArgs,
 ) -> super::output_runtime::CommandRun {

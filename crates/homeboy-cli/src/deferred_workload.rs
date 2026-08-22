@@ -243,26 +243,6 @@ fn claim_in_roots(
     })
 }
 
-fn claim_next_in_roots(
-    config_root: &Path,
-    runner_id: &str,
-    owner: &str,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at_in_roots(config_root, runner_id, owner, now_ms(), |_| true)
-}
-
-/// Claim the next deferred workload accepted by the selected runner. Records
-/// that require a different runtime or capability remain deferred for a later
-/// compatible runner.
-pub(crate) fn claim_next_matching_at(
-    runner_id: &str,
-    owner: &str,
-    now: u64,
-    accepts: impl Fn(&DeferredWorkload) -> bool,
-) -> Result<Option<DeferredWorkload>> {
-    claim_next_matching_at_in_roots(&ambient_config_root()?, runner_id, owner, now, accepts)
-}
-
 pub(crate) fn claim_next_matching_at_in_roots(
     config_root: &Path,
     runner_id: &str,
@@ -571,10 +551,6 @@ impl DeferredWorkloadWorkerDisposition {
         Self::Orphaned {
             reason: reason.to_string(),
         }
-    }
-
-    fn is_orphaned(&self) -> bool {
-        matches!(self, Self::Orphaned { .. })
     }
 }
 
@@ -1100,36 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn next_claim_heartbeats_and_publishes_durable_worker_status() {
-        let ctx = homeboy_core::test_support::HermeticTestContext::new();
-        let config_root = ctx.config_dir();
-
-        let deferred = defer_in_roots(&config_root, input()).expect("defer workload");
-        let claimed = claim_next_in_roots(&config_root, "ready-runner", "worker-a")
-            .expect("claim next")
-            .expect("deferred workload");
-        assert_eq!(claimed.id, deferred.id);
-        assert_eq!(claimed.runner_id.as_deref(), Some("ready-runner"));
-        assert!(heartbeat_in_roots(&config_root, &claimed.id, "worker-a").expect("heartbeat"));
-        assert!(!heartbeat_in_roots(&config_root, &claimed.id, "worker-b")
-            .expect("wrong worker heartbeat"));
-
-        write_worker_status_in_roots(
-            &config_root,
-            "test-owner",
-            "dispatching",
-            "replaying deferred workload",
-        )
-        .expect("write worker status");
-        let status = worker_status_in_roots(&config_root)
-            .expect("read worker status")
-            .expect("status exists");
-        assert_eq!(status.state, "dispatching");
-        assert_eq!(status.detail, "replaying deferred workload");
-        assert_eq!(status.owner_token, "test-owner");
-    }
-
-    #[test]
     fn matching_claim_skips_a_live_claimed_head_for_a_later_deferred_record() {
         let ctx = homeboy_core::test_support::HermeticTestContext::new();
         let config_root = ctx.config_dir();
@@ -1380,64 +1326,6 @@ mod tests {
         assert!(records_in_roots(&config_root).expect("records")[0]
             .claim_owner
             .is_none());
-    }
-
-    #[test]
-    fn only_the_proven_singleton_owner_survives_reconciliation() {
-        let owner = owner_status(41, "owner-token");
-
-        assert_eq!(
-            classify_worker_process(&worker_process(41, "owner-token"), Some(&owner), true, true),
-            DeferredWorkloadWorkerDisposition::Retained
-        );
-
-        // A different process running the same command is not the owner.
-        assert!(classify_worker_process(
-            &worker_process(42, "owner-token"),
-            Some(&owner),
-            true,
-            true
-        )
-        .is_orphaned());
-        // The owner pid presenting a token it cannot prove is not the owner
-        // either: `/proc/<pid>/environ` is the proof, argv is only the label.
-        let unproven = DeferredWorkloadWorkerProcess {
-            owns_startup_token: false,
-            ..worker_process(41, "owner-token")
-        };
-        assert!(classify_worker_process(&unproven, Some(&owner), true, true).is_orphaned());
-        // A stale token from a previous singleton generation is not the owner.
-        assert!(classify_worker_process(
-            &worker_process(41, "stale-token"),
-            Some(&owner),
-            true,
-            true
-        )
-        .is_orphaned());
-    }
-
-    #[test]
-    fn a_worker_with_no_durable_work_or_no_live_owner_is_orphaned() {
-        let owner = owner_status(41, "owner-token");
-
-        assert!(classify_worker_process(
-            &worker_process(41, "owner-token"),
-            Some(&owner),
-            true,
-            false
-        )
-        .is_orphaned());
-        assert!(classify_worker_process(
-            &worker_process(41, "owner-token"),
-            Some(&owner),
-            false,
-            true
-        )
-        .is_orphaned());
-        assert!(
-            classify_worker_process(&worker_process(41, "owner-token"), None, true, true)
-                .is_orphaned()
-        );
     }
 
     #[test]

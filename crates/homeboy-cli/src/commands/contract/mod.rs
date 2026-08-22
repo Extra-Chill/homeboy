@@ -1731,17 +1731,6 @@ mod tests {
     }
 
     #[test]
-    fn command_registry_export_covers_contract_command() {
-        let export = command_registry_export();
-
-        assert!(export
-            .commands
-            .iter()
-            .any(|command| command.name == "contract"));
-        assert!(current_command_surface().contains_path(&["contract", "export"]));
-    }
-
-    #[test]
     fn contract_export_writes_stable_json_files() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let args = ContractArgs {

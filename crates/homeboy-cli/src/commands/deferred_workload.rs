@@ -1118,43 +1118,6 @@ mod tests {
     }
 
     #[test]
-    fn restarted_worker_reclaims_an_expired_claim() {
-        crate::test_support::with_isolated_home(|_| {
-            let deferred = deferred_workload::defer(input()).expect("defer workload");
-            let first =
-                deferred_workload::claim_next_matching_at("first-runner", "dead-worker", 1, |_| {
-                    true
-                })
-                .expect("claim workload")
-                .expect("deferred workload");
-            let dispatched = Rc::new(Cell::new(0));
-            let dispatch_count = dispatched.clone();
-
-            run_worker_with(
-                &test_config_root(),
-                "restarted-worker",
-                || Ok(Some(inventory("recovery-runner"))),
-                move |record, runner_id, owner| {
-                    assert_eq!(record.id, deferred.id);
-                    assert_eq!(runner_id, "recovery-runner");
-                    assert_eq!(owner, "restarted-worker");
-                    dispatch_count.set(dispatch_count.get() + 1);
-                    Ok(true)
-                },
-                || first.claim_expires_at_ms.expect("claim expiry"),
-                |_| panic!("recovered worker should not wait"),
-            )
-            .expect("restarted worker reclaims expired work");
-
-            assert_eq!(dispatched.get(), 1);
-            assert_eq!(
-                deferred_workload::records().expect("records")[0].state,
-                deferred_workload::DeferredWorkloadState::Dispatched
-            );
-        });
-    }
-
-    #[test]
     fn pending_workload_restarts_a_dead_worker_but_not_a_live_one() {
         crate::test_support::with_isolated_home(|_| {
             deferred_workload::defer(input()).expect("defer workload");

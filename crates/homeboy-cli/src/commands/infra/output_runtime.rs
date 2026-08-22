@@ -435,14 +435,6 @@ impl<'a> OutputService<'a> {
         Self { output_file }
     }
 
-    fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
-        self.emit_json_result_for_identity(
-            result,
-            exit_code,
-            &CommandIdentity::top_level("unknown"),
-        );
-    }
-
     pub(crate) fn emit_json_result_for_identity(
         &self,
         result: homeboy::core::Result<Value>,
@@ -554,14 +546,6 @@ pub fn run_command(
         crate::commands::raw_output::CommandRunPreparation::Raw(run) => run,
     };
     output_service.emit_run(run.with_identity(identity), plan.output_file)
-}
-
-fn emit_json_result(
-    result: homeboy::core::Result<Value>,
-    output_file: Option<&str>,
-    exit_code: i32,
-) {
-    OutputService::new(output_file).emit_json_result(result, exit_code);
 }
 
 pub(crate) fn emit_json_result_for_identity(
