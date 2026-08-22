@@ -5314,7 +5314,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
             .expect("persist recipe in the injected recipe store");
         materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
             .expect("materialize run in the injected lifecycle store");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("materialize the ensured workspace in the injected lifecycle store");
 
         assert!(created.exists(), "ensure ran after durable Cook admission");
@@ -5985,7 +5985,7 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
 
         let lifecycle_store =
             AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("materialize original provider workspace");
 
         assert_eq!(
