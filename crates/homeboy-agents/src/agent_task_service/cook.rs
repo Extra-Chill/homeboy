@@ -4681,12 +4681,20 @@ fn run_cook_spine(
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
+        // Recipe attempts retain logical input provenance. The controller plan
+        // is the canonical dispatch contract once pending workspace resolution
+        // has authenticated and projected a concrete root into it.
+        let plan = if lifecycle_store.record_exists(&latest_attempt.run_id)? {
+            lifecycle_store.read_controller_plan(&latest_attempt.run_id)?
+        } else {
+            latest_attempt.plan.clone()
+        };
         materialize_cook_attempt_with_stores(
             store,
             lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
-            &latest_attempt.plan,
+            &plan,
         )?;
     }
     // The recipe alone is resumable input, not a status-addressable run. Publish

@@ -3145,6 +3145,37 @@ impl AgentTaskCookAttemptDispatcher for RecordingDetachedAttemptDispatcher {
     }
 }
 
+#[derive(Debug)]
+struct WorkspaceCapturingDetachedAttemptDispatcher {
+    plan: Arc<Mutex<Option<AgentTaskPlan>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for WorkspaceCapturingDetachedAttemptDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-workspace-capturing-detached" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        *self.plan.lock().expect("captured dispatch plan") = Some(plan.clone());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "workspace-capturing-daemon-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct UnusedExecutor;
 
@@ -6000,6 +6031,46 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
         assert_eq!(
             options.initial_plan.tasks[0].workspace.root.as_deref(),
             canonical_original.to_str()
+        );
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut dispatch_options = batch_cook_options(
+            "provider-bound-dispatch",
+            Arc::new(WorkspaceCapturingDetachedAttemptDispatcher {
+                plan: Arc::clone(&captured),
+            }),
+        );
+        dispatch_options.to_worktree = "fixture@provider-bound".to_string();
+        dispatch_options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending", "kind": "provider",
+            "handle": dispatch_options.to_worktree,
+            "worktree_provider_id": "z-original",
+        });
+
+        let report = run_cook(CookContext::new(dispatch_options, Arc::new(UnusedExecutor)))
+            .expect("Cook dispatches the materialized provider workspace");
+        assert_eq!(report.value.status, "in_flight");
+        let dispatched = captured
+            .lock()
+            .expect("captured dispatch plan")
+            .clone()
+            .expect("provider dispatch received a plan");
+        assert_eq!(
+            dispatched.tasks[0].workspace.root.as_deref(),
+            canonical_original.to_str(),
+            "provider resolution projects its concrete path into the canonical dispatch plan"
+        );
+        assert_eq!(
+            dispatched.metadata["cook_provision"]["workspace_identity"]["handle"],
+            "fixture@provider-bound",
+            "the logical handle remains the authenticated provider identity"
+        );
+        let recipe = super::super::load_recipe("provider-bound-dispatch")
+            .expect("logical Cook recipe remains durable");
+        assert!(recipe.attempts[0].plan.tasks[0].workspace.root.is_none());
+        assert_eq!(
+            recipe.attempts[0].plan.metadata["cook_provision"]["action"],
+            "lookup_pending"
         );
     });
 }
