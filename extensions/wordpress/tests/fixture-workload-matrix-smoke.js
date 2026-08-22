@@ -88,6 +88,49 @@ async function main() {
 		assert.equal(result.summary.groups.opaque_problem, 1);
 		assert.equal(result.fixtures[1].comparison.comparable, 'beta-case');
 
+		const actionable = normalizeFixtureWorkloadMatrixResult({
+			matrix,
+			summaryLimit: 1,
+			results: [
+				{ fixture_id: 'alpha-case', status: 'passed', diagnostics: [] },
+				{
+					fixture_id: 'beta-case',
+					status: 'failed',
+					artifact_refs: [{ artifact_id: 'visual-diff', url: 'https://artifacts.example.test/beta/visual-diff.json' }],
+					diagnostics: [{
+						kind: 'visual_mismatch',
+						category: 'visual_comparison',
+						severity: 'error',
+						reason: 'Pixel difference exceeded the permitted threshold by 6 pixels.',
+						selector: 'main .hero',
+						block_name: 'core/html',
+						element: 'img',
+						retryable: true,
+						artifact_refs: [{ artifact_id: 'comparison', href: 'https://artifacts.example.test/beta/comparison.html' }],
+					}],
+				},
+			],
+		});
+		assert.deepEqual(actionable.summary.failure_summaries, [{
+			fixture_id: 'beta-case',
+			status: 'failed',
+			kind: 'visual_mismatch',
+			category: 'visual_comparison',
+			severity: 'error',
+			reason: 'Pixel difference exceeded the permitted threshold by 6 pixels.',
+			artifact_refs: [
+				{ artifact_id: 'comparison', href: 'https://artifacts.example.test/beta/comparison.html' },
+				{ artifact_id: 'visual-diff', url: 'https://artifacts.example.test/beta/visual-diff.json' },
+			],
+			retryable: true,
+		}]);
+		assert.deepEqual(actionable.summary.top_diagnostic_kinds, [{ value: 'visual_mismatch', count: 1 }]);
+		assert.deepEqual(actionable.summary.top_fixtures_by_finding_count, [{ fixture_id: 'beta-case', finding_count: 1 }]);
+		assert.deepEqual(actionable.summary.top_severities, [{ value: 'error', count: 1 }]);
+		assert.deepEqual(actionable.summary.top_categories, [{ value: 'visual_comparison', count: 1 }]);
+		assert.deepEqual(actionable.summary.top_runtime_target_selectors, [{ value: 'main .hero', count: 1 }]);
+		assert.deepEqual(actionable.summary.top_core_html_sources, [{ value: 'img', count: 1 }]);
+
 		const deduped = normalizeFixtureWorkloadMatrixResult({
 			matrix,
 			results: [
