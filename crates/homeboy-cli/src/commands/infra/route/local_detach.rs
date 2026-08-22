@@ -235,6 +235,14 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
+    // A daemon build mismatch cannot be resumed from the handoff parent: it has
+    // no materialized Cook recipe yet. Reject it before the first durable write
+    // so the supplied repair command can be followed by the same invocation.
+    let preflight_controller_client = cli
+        .detach_after_handoff
+        .then(homeboy::core::daemon::LocalControllerJobClient::connect_current_build)
+        .transpose()?;
+
     // One store for the whole handoff. The parent record, the child record, the
     // supervisor projection, and every compensating failure below are one
     // transaction: a parent opened in one installation and failed in another
@@ -258,15 +266,13 @@ pub(super) fn intercept_local_detached_cook(
     // A daemon-owned job is the authority that outlives this launcher. Prove it
     // is reachable before a provider-capable child exists, so unsupported
     // detachment is rejected before dispatch.
-    let controller_client =
-        match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
+    let controller_client = match preflight_controller_client {
+        Some(client) => client,
+        None => match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
             Ok(client) => client,
-            Err(error)
-                if controller_job_daemon_build_mismatch(&error) && !cli.detach_after_handoff =>
-            {
-                // An attached caller can retain foreground ownership. This keeps a
-                // newer client useful without letting an older resident daemon
-                // interpret and terminate lifecycle records it does not understand.
+            Err(error) if controller_job_daemon_build_mismatch(&error) => {
+                // Attached callers retain foreground ownership when the resident
+                // daemon is an older build; #12581 owns that wait-policy path.
                 return Ok(None);
             }
             Err(error) => {
@@ -277,7 +283,8 @@ pub(super) fn intercept_local_detached_cook(
                 );
                 return Err(error);
             }
-        };
+        },
+    };
     let route = detached_route(cli);
     let launch_token = create_local_cook_launch_token(&session_root)?;
     let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)

@@ -224,13 +224,13 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
         if stderr.contains("durable run id `local-detach-exits-before-attempt`") {
             assert!(
                 child.try_wait().expect("poll detached Cook launcher").is_none(),
-                "the launcher must still be crossing daemon/child admission after it emits the durable parent identity"
+                "the launcher must still be crossing child admission after it emits the durable parent identity"
             );
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the parent identity was not emitted before detached admission completed: {stderr}"
+            "the parent identity was not emitted after daemon compatibility admission completed: {stderr}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
