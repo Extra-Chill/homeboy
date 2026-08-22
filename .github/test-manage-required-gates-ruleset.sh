@@ -7,11 +7,20 @@ trap 'rm -rf "${tmp}"' EXIT
 
 workflow="${root}/.github/workflows/required-gates-ruleset.yml"
 grep -Fq 'workflow_dispatch:' "${workflow}"
+! grep -Fq 'schedule:' "${workflow}"
 grep -Fq 'environment: main-ruleset-administration' "${workflow}"
 grep -Fq -- '--operation audit' "${workflow}"
 grep -Fq -- '--operation reconcile' "${workflow}"
+grep -Fq "github.ref == 'refs/heads/main'" "${workflow}"
+grep -Fq 'environments/main-ruleset-administration' "${workflow}"
+grep -Fq 'required_reviewers' "${workflow}"
+grep -Fq 'can_admins_bypass == false' "${workflow}"
 grep -Fq 'commits/${head}/check-runs' "${workflow}"
+grep -Fq 'commits/main' "${workflow}"
+grep -Fq 'test "${head}" = "${current_main}"' "${workflow}"
 grep -Fq 'bash .github/validate-required-gates.sh --github' "${workflow}"
+! grep -Fq 'gh api --method PUT' "${root}/docs/operations/required-ci-gates.md"
+! grep -Fq 'gh api --method PUT' "${root}/.github/validate-required-gates.sh"
 
 jq 'del(.rules[] | select(.type == "required_status_checks"))' \
   "${root}/.github/required-gates-ruleset.json" > "${tmp}/state.json"
