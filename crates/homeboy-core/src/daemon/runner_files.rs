@@ -3,7 +3,7 @@
 //! paths safely within the runner root. Extracted from the `daemon` god file.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -32,6 +32,8 @@ struct UploadKey {
 
 struct PendingUpload {
     temp: PathBuf,
+    destination: PathBuf,
+    file: fs::File,
     size_bytes: u64,
     reserved_bytes: u64,
     updated_at: Instant,
@@ -251,7 +253,7 @@ pub(super) fn upload_runner_file_chunk(
             None,
         ));
     }
-    let temp = path.with_file_name(format!(
+    let requested_temp = path.with_file_name(format!(
         ".{}.{}.upload",
         path.file_name()
             .and_then(|name| name.to_str())
@@ -265,15 +267,21 @@ pub(super) fn upload_runner_file_chunk(
     };
     let mut registry = upload_registry().lock().expect("upload registry lock");
     reap_expired_uploads_locked(&mut registry);
+    if let Some(upload) = registry.uploads.get(&key) {
+        if upload.destination != path {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "runner file upload id is already bound to a different destination",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+    }
     let current = registry
         .uploads
         .get(&key)
         .map(|upload| upload.size_bytes)
-        .unwrap_or_else(|| {
-            fs::metadata(&temp)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-        });
+        .unwrap_or(0);
     if current != request.offset || current + content.len() as u64 > request.size_bytes {
         return Err(Error::validation_invalid_argument(
             "provider_evidence",
@@ -324,31 +332,22 @@ pub(super) fn upload_runner_file_chunk(
         registry.uploads.insert(
             key.clone(),
             PendingUpload {
-                temp: temp.clone(),
+                temp: requested_temp,
+                destination: path.clone(),
+                file: create_upload_file(&path, upload_id, request.private)?,
                 size_bytes: current,
                 reserved_bytes: request.size_bytes,
                 updated_at: Instant::now(),
             },
         );
     }
-    let mut options = fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
+    let upload = registry.uploads.get_mut(&key).expect("upload was inserted");
+    if let Err(error) = upload
+        .file
+        .write_all(&content)
+        .and_then(|_| upload.file.sync_all())
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(if request.private { 0o600 } else { 0o644 });
-    }
-    let mut file = match options.open(&temp) {
-        Ok(file) => file,
-        Err(error) => {
-            registry.uploads.remove(&key);
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(temp.display().to_string()),
-            ));
-        }
-    };
-    if let Err(error) = file.write_all(&content).and_then(|_| file.sync_all()) {
+        let temp = upload.temp.clone();
         let _ = fs::remove_file(&temp);
         registry.uploads.remove(&key);
         return Err(Error::internal_io(
@@ -357,13 +356,14 @@ pub(super) fn upload_runner_file_chunk(
         ));
     }
     let size = current + content.len() as u64;
-    if let Some(upload) = registry.uploads.get_mut(&key) {
-        upload.size_bytes = size;
-        upload.updated_at = Instant::now();
-    }
+    let upload = registry.uploads.get_mut(&key).expect("upload was inserted");
+    upload.size_bytes = size;
+    upload.updated_at = Instant::now();
     if request.final_chunk {
         let expected = request.sha256.as_deref().expect("validated before write");
-        let digest_matches = crate::artifact_metadata::sha256_file(&temp)
+        let upload = registry.uploads.get_mut(&key).expect("upload was inserted");
+        let temp = upload.temp.clone();
+        let digest_matches = sha256_open_file(&mut upload.file)
             .map(|actual| actual == expected)
             .unwrap_or(false);
         if size != request.size_bytes || !digest_matches {
@@ -376,7 +376,7 @@ pub(super) fn upload_runner_file_chunk(
                 None,
             ));
         }
-        if let Err(error) = fs::rename(&temp, &path) {
+        if let Err(error) = publish_upload_file(upload) {
             let _ = fs::remove_file(&temp);
             registry.uploads.remove(&key);
             return Err(Error::internal_io(
@@ -389,6 +389,95 @@ pub(super) fn upload_runner_file_chunk(
     Ok(
         json!({"runner_id": request.runner_id, "path": path.display().to_string(), "size_bytes": size, "final": request.final_chunk}),
     )
+}
+
+fn create_upload_file(
+    destination: &Path,
+    upload_id: uuid::Uuid,
+    private: bool,
+) -> Result<fs::File> {
+    let temp = destination.with_file_name(format!(
+        ".{}.{}.upload",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("upload"),
+        upload_id
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(if private { 0o600 } else { 0o644 });
+    }
+    let file = options.open(&temp).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", temp.display())),
+        )
+    })?;
+    if !file
+        .metadata()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(temp.display().to_string())))?
+        .is_file()
+    {
+        let _ = fs::remove_file(&temp);
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner upload temporary path is not a regular file",
+            Some(temp.display().to_string()),
+            None,
+        ));
+    }
+    Ok(file)
+}
+
+fn sha256_open_file(file: &mut fs::File) -> std::io::Result<String> {
+    use sha2::Digest;
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    file.seek(SeekFrom::End(0))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn publish_upload_file(upload: &PendingUpload) -> std::io::Result<()> {
+    let metadata = upload.file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "upload descriptor is not a regular file",
+        ));
+    }
+    // The path still names the descriptor we wrote and hashed; refuse a swap before publish.
+    let path_metadata = fs::symlink_metadata(&upload.temp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if path_metadata.dev() != metadata.dev() || path_metadata.ino() != metadata.ino() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "upload temporary path changed identity",
+            ));
+        }
+    }
+    if !path_metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "upload temporary path is not a regular file",
+        ));
+    }
+    fs::rename(&upload.temp, &upload.destination)
 }
 
 pub(super) fn abort_runner_file_chunk_upload(
@@ -680,5 +769,53 @@ mod tests {
         )
         .expect("reap expired upload");
         assert!(!temp.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chunk_upload_refuses_a_predictable_temp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runner = format!("chunk-symlink-{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v4();
+        let victim = workspace.path().join("victim");
+        fs::write(&victim, b"protected").expect("victim");
+        symlink(
+            &victim,
+            workspace.path().join(format!(".evidence.bin.{id}.upload")),
+        )
+        .expect("plant symlink");
+
+        assert!(
+            upload_runner_file_chunk(Some(request(workspace.path(), &runner, id)), &trusted())
+                .is_err()
+        );
+        assert_eq!(fs::read(&victim).expect("victim remains"), b"protected");
+    }
+
+    #[test]
+    fn chunk_upload_binds_its_destination_and_cleans_only_its_recorded_file() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runner = format!("chunk-binding-{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v4();
+        upload_runner_file_chunk(Some(request(workspace.path(), &runner, id)), &trusted())
+            .expect("start upload");
+        let temp = workspace.path().join(format!(".evidence.bin.{id}.upload"));
+        let other = workspace.path().join("other.bin");
+        fs::write(&other, b"unrelated").expect("unrelated file");
+
+        let mut switched = request(workspace.path(), &runner, id);
+        switched["path"] = json!("other.bin");
+        let error = upload_runner_file_chunk(Some(switched), &trusted())
+            .expect_err("upload id cannot switch destinations");
+        assert_eq!(error.details["field"], "path");
+        abort_runner_file_chunk_upload(
+            Some(json!({"runner_id": runner, "workspace_root": workspace.path().display().to_string(), "upload_id": id})),
+            &trusted(),
+        )
+        .expect("abort recorded upload");
+        assert!(!temp.exists());
+        assert_eq!(fs::read(other).expect("unrelated remains"), b"unrelated");
     }
 }

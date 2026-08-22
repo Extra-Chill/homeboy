@@ -6250,6 +6250,7 @@ pub fn handle_reverse_broker_test_connection(
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
     const MAX_UPLOAD_CHUNK_BODY_BYTES: usize = 96 * 1024;
     let mut request = Vec::new();
     let mut buffer = [0; 8 * 1024];
@@ -6259,6 +6260,12 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
             return Ok(request);
         }
         request.extend_from_slice(&buffer[..bytes]);
+        if request.len() > MAX_HEADER_BYTES && find_header_end(&request).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP request headers exceed the 16 KiB limit",
+            ));
+        }
         if let Some(index) = find_header_end(&request) {
             break index;
         }
@@ -6269,7 +6276,14 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let upload_chunk_request = headers
         .lines()
         .next()
-        .is_some_and(|line| line.starts_with("POST /files/upload-chunk "));
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|target| {
+            target
+                .split_once('?')
+                .map(|(path, _)| path)
+                .or(Some(target))
+        })
+        .is_some_and(|path| path == "/files/upload-chunk");
     if upload_chunk_request && content_length > MAX_UPLOAD_CHUNK_BODY_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
