@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.353.1] - 2026-08-22
+
+### Fixed
+- bound authoritative workspace lookup
+- serialize observation WAL initialization
+- scope bare doctor repairs
+- remove unused command import
+- gate ruleset convergence on green main
+- fence planned runner publication
+- restore warning-clean lab runner build
+
 ## [0.353.0] - 2026-08-22
 
 ### Changed
