@@ -93,6 +93,7 @@ pub(super) fn agent_task_resource_behavior(
         }
         agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
         agent_task::AgentTaskCommand::Status(_)
+        | agent_task::AgentTaskCommand::ValidatePlan(_)
         // `watch` is an alias for `activity watch`: a bounded, non-reconciling
         // poll over the activity read model, not an admitted workload.
         | agent_task::AgentTaskCommand::Watch(_)

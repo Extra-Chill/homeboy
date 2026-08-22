@@ -23,7 +23,7 @@ use super::lifecycle::{
     LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs,
     RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
-    VerifyReplacementArgs,
+    ValidatePlanArgs, VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -99,6 +99,8 @@ pub enum AgentTaskCommand {
     RunNext(RunNextArgs),
     /// Persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
+    /// Validate a plan and provider readiness without creating a lifecycle record.
+    ValidatePlan(ValidatePlanArgs),
     /// Read durable run status.
     Status(StatusArgs),
     /// Poll a run until it reaches a terminal state.

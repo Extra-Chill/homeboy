@@ -24,6 +24,40 @@ use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::{config, worktree, Error, Result};
 
+pub const AGENT_TASK_PLAN_VALIDATION_SCHEMA: &str = "homeboy/agent-task-plan-validation/v1";
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskPlanValidationKind {
+    InvalidInput,
+    UnavailableCapability,
+    TemporaryCapacity,
+    MissingReadiness,
+    PolicyDenied,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskPlanValidationReport {
+    pub schema: String,
+    pub valid: bool,
+    pub scope: String,
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<AgentTaskPlanValidationFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskPlanValidationFailure {
+    pub kind: AgentTaskPlanValidationKind,
+    pub code: String,
+    pub reason: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub details: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
 use super::cook_baseline::DerivedCookBaselineCapability;
 use super::discovery::source_uri;
 
@@ -67,6 +101,352 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
     })?;
     normalize_plan_workspaces(&mut plan)?;
     Ok(plan)
+}
+
+/// Validate controller-visible plan syntax and provider readiness without
+/// reserving a run, creating workspaces, or dispatching work.
+pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
+    let plan = match read_plan(spec) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return invalid_plan_report(None, AgentTaskPlanValidationKind::InvalidInput, error)
+        }
+    };
+    let plan_id = Some(plan.plan_id.clone());
+    if let Err(error) = validate_plan_structure(&plan) {
+        return invalid_plan_report(plan_id, AgentTaskPlanValidationKind::InvalidInput, error);
+    }
+    let mut plan = plan;
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    if let Err(error) = validate_plan_provider_capabilities(&plan, &catalog) {
+        return invalid_plan_report(
+            plan_id,
+            AgentTaskPlanValidationKind::UnavailableCapability,
+            error,
+        );
+    }
+    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    for (kind, result) in [
+        (
+            AgentTaskPlanValidationKind::UnavailableCapability,
+            catalog.validate_explicit_models(&plan),
+        ),
+        (
+            AgentTaskPlanValidationKind::MissingReadiness,
+            catalog.enforce_runtime_preflight_checks_for_plan(&plan),
+        ),
+        (
+            AgentTaskPlanValidationKind::MissingReadiness,
+            preflight_plan_secret_env(&plan),
+        ),
+        (
+            AgentTaskPlanValidationKind::MissingReadiness,
+            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+                &plan,
+                catalog.providers(),
+            ),
+        ),
+    ] {
+        if let Err(error) = result {
+            return invalid_plan_report(plan_id, kind, error);
+        }
+    }
+    if let Err(error) =
+        crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+            &plan,
+            catalog.providers(),
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+    {
+        let kind = if error.retryable == Some(true) {
+            AgentTaskPlanValidationKind::TemporaryCapacity
+        } else {
+            AgentTaskPlanValidationKind::MissingReadiness
+        };
+        return invalid_plan_report(plan_id, kind, error);
+    }
+
+    AgentTaskPlanValidationReport {
+        schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
+        valid: true,
+        scope: plan_validation_scope(),
+        plan_id,
+        failures: Vec::new(),
+    }
+}
+
+fn invalid_plan_report(
+    plan_id: Option<String>,
+    kind: AgentTaskPlanValidationKind,
+    error: Error,
+) -> AgentTaskPlanValidationReport {
+    AgentTaskPlanValidationReport {
+        schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
+        valid: false,
+        scope: plan_validation_scope(),
+        plan_id,
+        failures: vec![AgentTaskPlanValidationFailure {
+            kind,
+            code: error.code.as_str().to_string(),
+            reason: error.message,
+            retryable: error.retryable.unwrap_or(false),
+            details: error.details,
+            hints: error.hints.into_iter().map(|hint| hint.message).collect(),
+        }],
+    }
+}
+
+fn plan_validation_scope() -> String {
+    homeboy_core::resource_policy_context::lab_execution_runner_id()
+        .map(|runner_id| format!("runner:{runner_id}"))
+        .unwrap_or_else(|| "local_controller".to_string())
+}
+
+fn validate_plan_structure(plan: &AgentTaskPlan) -> Result<()> {
+    use crate::agent_task::{AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA};
+    use crate::agent_task_schedule::AGENT_TASK_PLAN_SCHEMA;
+    use std::collections::HashSet;
+
+    if plan.schema != AGENT_TASK_PLAN_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            format!(
+                "unsupported agent-task plan schema '{}'; supported schema is '{AGENT_TASK_PLAN_SCHEMA}'",
+                plan.schema
+            ),
+            Some(plan.schema.clone()),
+            None,
+        ));
+    }
+    if plan.plan_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "plan_id",
+            "agent-task plan_id must not be empty",
+            Some(plan.plan_id.clone()),
+            None,
+        ));
+    }
+    if plan.tasks.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "tasks",
+            "agent-task plan must contain at least one task",
+            None,
+            None,
+        ));
+    }
+
+    let mut task_ids = HashSet::new();
+    for task in &plan.tasks {
+        if task.schema != AGENT_TASK_REQUEST_SCHEMA {
+            return Err(Error::validation_invalid_argument(
+                "tasks.schema",
+                format!(
+                    "task '{}' uses unsupported request schema '{}'; supported schema is '{AGENT_TASK_REQUEST_SCHEMA}'",
+                    task.task_id, task.schema
+                ),
+                Some(task.schema.clone()),
+                None,
+            ));
+        }
+        if task.task_id.trim().is_empty() || !task_ids.insert(task.task_id.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "tasks.task_id",
+                format!(
+                    "task ids must be non-empty and unique; invalid id '{}';",
+                    task.task_id
+                ),
+                Some(task.task_id.clone()),
+                None,
+            ));
+        }
+        if task.instructions.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "tasks.instructions",
+                format!("task '{}' has empty instructions", task.task_id),
+                Some(task.task_id.clone()),
+                None,
+            ));
+        }
+        if task
+            .source_refs
+            .iter()
+            .any(|source| source.kind.trim().is_empty() || source.uri.trim().is_empty())
+        {
+            return Err(Error::validation_invalid_argument(
+                "tasks.source_refs",
+                format!(
+                    "task '{}' has a source reference with an empty kind or URI",
+                    task.task_id
+                ),
+                Some(task.task_id.clone()),
+                None,
+            ));
+        }
+        if matches!(task.workspace.mode, AgentTaskWorkspaceMode::Existing)
+            && task.workspace.root.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(Error::validation_invalid_argument(
+                "tasks.workspace.root",
+                format!(
+                    "task '{}' uses an existing workspace without a root",
+                    task.task_id
+                ),
+                Some(task.task_id.clone()),
+                None,
+            ));
+        }
+        if task.workspace.kind.as_deref() == Some("component-worktree") {
+            if task
+                .workspace
+                .component_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "tasks.workspace.component_id",
+                    format!(
+                        "task '{}' component-worktree workspace requires component_id",
+                        task.task_id
+                    ),
+                    Some(task.task_id.clone()),
+                    None,
+                ));
+            }
+            let has_root = task
+                .workspace
+                .root
+                .as_deref()
+                .is_some_and(|root| !root.is_empty())
+                || materialization_string(&task.workspace.materialization, "root").is_some()
+                || materialization_string(&task.workspace.materialization, "resolved_root")
+                    .is_some();
+            if !has_root && task.workspace.branch.as_deref().is_none_or(str::is_empty) {
+                return Err(Error::validation_invalid_argument(
+                    "tasks.workspace.branch",
+                    format!(
+                        "task '{}' component-worktree workspace requires branch before materialization",
+                        task.task_id
+                    ),
+                    Some(task.task_id.clone()),
+                    None,
+                ));
+            }
+        }
+        if task.limits.timeout_ms == Some(0)
+            || task.limits.max_runtime_ms == Some(0)
+            || task.limits.liveness_timeout_ms == Some(0)
+            || task.limits.max_output_bytes == Some(0)
+        {
+            return Err(Error::validation_invalid_argument(
+                "tasks.limits",
+                format!("task '{}' has a zero-valued execution limit", task.task_id),
+                Some(task.task_id.clone()),
+                None,
+            ));
+        }
+        task.capability_requirements().map_err(|problem| {
+            Error::validation_invalid_argument(
+                "tasks.required_capabilities",
+                format!(
+                    "task '{}' has invalid capability requirements: {problem}",
+                    task.task_id
+                ),
+                Some(task.task_id.clone()),
+                None,
+            )
+        })?;
+    }
+    for (task_id, dependencies) in &plan.output_dependencies {
+        if !task_ids.contains(task_id.as_str())
+            || dependencies
+                .depends_on
+                .iter()
+                .any(|dependency| !task_ids.contains(dependency.as_str()) || dependency == task_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "output_dependencies",
+                format!("task '{task_id}' has an unknown or self-referential dependency"),
+                Some(task_id.clone()),
+                None,
+            ));
+        }
+    }
+    plan.validate_managed_services()
+        .map_err(|problem| Error::validation_invalid_argument("services", problem, None, None))
+}
+
+fn validate_plan_provider_capabilities(
+    plan: &AgentTaskPlan,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<()> {
+    use crate::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
+
+    for task in &plan.tasks {
+        let provider = match resolve_provider_for_backend(
+            catalog.providers(),
+            &task.executor.backend,
+            task.executor.selector.as_deref(),
+        ) {
+            ProviderResolution::Resolved(provider) => provider,
+            ProviderResolution::NotFound => {
+                return Err(Error::runner_capability_missing(
+                    "local_controller",
+                    &task.task_id,
+                    Vec::new(),
+                    vec![task.executor.backend.clone()],
+                ));
+            }
+            ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
+                return Err(Error::validation_invalid_argument(
+                    "tasks.executor.selector",
+                    format!(
+                        "task '{}' backend '{}' is ambiguous; select one of: {}",
+                        task.task_id,
+                        task.executor.backend,
+                        candidate_ids.join(", ")
+                    ),
+                    task.executor.selector.clone(),
+                    None,
+                ));
+            }
+            ProviderResolution::SelectorMismatch { available_ids, .. } => {
+                return Err(Error::validation_invalid_argument(
+                    "tasks.executor.selector",
+                    format!(
+                        "task '{}' selector does not match backend '{}'; available providers: {}",
+                        task.task_id,
+                        task.executor.backend,
+                        available_ids.join(", ")
+                    ),
+                    task.executor.selector.clone(),
+                    None,
+                ));
+            }
+        };
+        let requirements = task.capability_requirements().map_err(|problem| {
+            Error::validation_invalid_argument(
+                "tasks.required_capabilities",
+                problem,
+                Some(task.task_id.clone()),
+                None,
+            )
+        })?;
+        let missing = requirements
+            .provider
+            .iter()
+            .filter(|capability| !provider.capabilities.contains(capability))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(Error::runner_capability_missing(
+                &provider.id,
+                &task.task_id,
+                missing,
+                Vec::new(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn run_loaded_plan(
@@ -1624,6 +2004,89 @@ mod tests {
                 metadata: Value::Null,
             }],
         )
+    }
+
+    #[test]
+    fn validate_plan_rejects_unsupported_plan_schema_with_structured_failure() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut plan = one_task_plan("schema-plan", workspace.path());
+        plan.schema = "homeboy/agent-task-plan/v999".to_string();
+
+        let report = validate_plan_spec(&serde_json::to_string(&plan).expect("plan JSON"));
+
+        assert!(!report.valid);
+        assert_eq!(report.plan_id.as_deref(), Some("schema-plan"));
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].kind,
+            AgentTaskPlanValidationKind::InvalidInput
+        );
+        assert_eq!(report.failures[0].code, "validation.invalid_argument");
+    }
+
+    #[test]
+    fn validate_plan_structure_rejects_duplicate_tasks_and_unknown_dependencies() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut duplicate = one_task_plan("duplicate-plan", workspace.path());
+        duplicate.tasks.push(duplicate.tasks[0].clone());
+        assert!(validate_plan_structure(&duplicate)
+            .expect_err("duplicate task")
+            .message
+            .contains("unique"));
+
+        let mut dependency = one_task_plan("dependency-plan", workspace.path());
+        dependency.output_dependencies.insert(
+            "same-task".to_string(),
+            crate::agent_task_scheduler::AgentTaskOutputDependencies {
+                depends_on: vec!["missing-task".to_string()],
+                bindings: HashMap::new(),
+            },
+        );
+        assert!(validate_plan_structure(&dependency)
+            .expect_err("unknown dependency")
+            .message
+            .contains("unknown"));
+    }
+
+    #[test]
+    fn validate_plan_rejects_missing_provider_and_capability_before_readiness() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let plan = one_task_plan("provider-plan", workspace.path());
+        let empty_catalog = crate::agent_task_provider::AgentTaskProviderCatalog::default();
+        let missing_provider = validate_plan_provider_capabilities(&plan, &empty_catalog)
+            .expect_err("missing provider");
+        assert_eq!(
+            missing_provider.code,
+            homeboy_core::ErrorCode::RunnerCapabilityMissing
+        );
+
+        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "test-provider",
+                "backend": "test",
+                "capabilities": []
+            }))
+            .expect("provider");
+        provider.capabilities.clear();
+        let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let mut plan = plan;
+        plan.tasks[0]
+            .executor
+            .required_capabilities
+            .push("workspace_write".to_string());
+        let missing_capability =
+            validate_plan_provider_capabilities(&plan, &catalog).expect_err("missing capability");
+        assert_eq!(
+            missing_capability.code,
+            homeboy_core::ErrorCode::RunnerCapabilityMissing
+        );
+        assert_eq!(
+            missing_capability.details["missing_capabilities"][0],
+            "workspace_write"
+        );
     }
 
     fn initialize_workspace(path: &Path) {

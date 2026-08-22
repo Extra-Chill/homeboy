@@ -87,6 +87,8 @@ pub struct AgentTaskCoreContractSchemas {
     pub diagnostic_ranking: String,
     pub workflow: String,
     pub plan: String,
+    pub plan_validation: String,
+    pub lifecycle_action_eligibility: String,
     pub aggregate: String,
     pub matrix_plan: String,
     pub matrix_aggregate: String,
@@ -198,6 +200,11 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             diagnostic_ranking: AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA.to_string(),
             workflow: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
             plan: AGENT_TASK_PLAN_SCHEMA.to_string(),
+            plan_validation: crate::agent_task_service::AGENT_TASK_PLAN_VALIDATION_SCHEMA
+                .to_string(),
+            lifecycle_action_eligibility:
+                crate::agent_task_lifecycle::AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA
+                    .to_string(),
             aggregate: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             matrix_plan: AGENT_TASK_MATRIX_PLAN_SCHEMA.to_string(),
             matrix_aggregate: AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
@@ -510,6 +517,14 @@ mod tests {
 
         assert_eq!(contract.schema, AGENT_TASK_CORE_CONTRACT_SCHEMA);
         assert_eq!(contract.schemas.request, AGENT_TASK_REQUEST_SCHEMA);
+        assert_eq!(
+            contract.schemas.plan_validation,
+            crate::agent_task_service::AGENT_TASK_PLAN_VALIDATION_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.lifecycle_action_eligibility,
+            crate::agent_task_lifecycle::AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA
+        );
         assert_eq!(
             contract.schemas.provider,
             AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA

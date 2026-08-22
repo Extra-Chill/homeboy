@@ -34,6 +34,7 @@ use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, LifecycleReadArgs,
     PromotionProviderArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
+    ValidatePlanArgs,
 };
 use super::gate_contract::validate_gate_contracts;
 
@@ -5766,6 +5767,15 @@ pub(super) fn run_next_with_executor_and_fanout(
 pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
     let record = agent_task_service::submit_plan_spec(&args.plan, args.run_id.as_deref())?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+}
+
+pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
+    let report = agent_task_service_direct::validate_plan_spec(&args.plan);
+    let valid = report.valid;
+    Ok((
+        serde_json::to_value(report).unwrap_or(Value::Null),
+        i32::from(!valid),
+    ))
 }
 
 pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {

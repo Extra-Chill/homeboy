@@ -105,6 +105,14 @@ fn contract_output_exports_core_agent_task_metadata() {
     assert_eq!(value["schema"], "homeboy/agent-task-core-contract/v1");
     assert_eq!(value["schemas"]["request"], AGENT_TASK_REQUEST_SCHEMA);
     assert_eq!(
+        value["schemas"]["plan_validation"],
+        "homeboy/agent-task-plan-validation/v1"
+    );
+    assert_eq!(
+        value["schemas"]["lifecycle_action_eligibility"],
+        "homeboy/agent-task-lifecycle-action-eligibility/v1"
+    );
+    assert_eq!(
         value["schemas"]["artifact_declaration"],
         "homeboy/agent-task-artifact-declaration/v1"
     );

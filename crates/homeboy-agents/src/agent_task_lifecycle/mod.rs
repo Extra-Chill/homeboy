@@ -30,6 +30,7 @@ mod lifecycle_store;
 use lifecycle_store as store;
 
 mod acceptance_verifier;
+mod action_eligibility;
 pub mod activity_provider;
 pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
@@ -64,6 +65,7 @@ pub use acceptance_verifier::{
     AgentTaskAcceptanceAttestation, AgentTaskAcceptanceVerificationRequest,
     AgentTaskAcceptanceVerifier, AgentTaskAcceptanceVerifierProvenance,
 };
+pub use action_eligibility::*;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;

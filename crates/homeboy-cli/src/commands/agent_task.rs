@@ -44,7 +44,8 @@ pub use args::{
     PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs, VerifyReplacementArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyGateArgs,
+    VerifyReplacementArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -259,6 +260,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::RunNext(args) => run::run_next(args),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
+        AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
         // Alias, not a second watch loop: route straight into `activity watch`,
         // which already resolves cook ids, durable run ids, observation run ids
