@@ -50,6 +50,9 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
         run: |
           test -n "${GH_TOKEN}"
+          gh api "repos/${GITHUB_REPOSITORY}/environments/main-ruleset-administration" \
+            --jq '.can_admins_bypass == false and any(.protection_rules[]; .type == "required_reviewers")' \
+            | grep -qx true
           head="$(git rev-parse HEAD)"
           current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "${head}" = "${current_main}"
