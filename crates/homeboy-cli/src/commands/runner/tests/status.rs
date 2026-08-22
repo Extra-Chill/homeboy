@@ -7,9 +7,12 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
-use homeboy::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use homeboy::core::daemon::{
+    DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
+};
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerKind, RunnerSession, RunnerStatusReport, RunnerTunnelMode,
+    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerKind, RunnerSession,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 
@@ -20,7 +23,7 @@ use super::super::status::{
     execution_capabilities_with_local_placement, lab_runner_homeboy_output, non_local_sessions,
     operator_summary, reconcile_output, reconciliation_outcome,
     runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
-    runner_status_operator_commands, selected_admission_summary,
+    runner_status_operator_commands, runner_status_operator_hints, selected_admission_summary,
 };
 use super::super::types::{RunnerConnectionOutput, RunnerReconciliationStatus};
 use crate::cli_surface::Cli;
@@ -107,7 +110,7 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
         restartable: true,
         lease_id: None,
         pid: None,
-        recovery_evidence: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::Recoverable),
         ownership_evidence: None,
         adoption_command: None,
         binary_hash: None,
@@ -248,7 +251,7 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         restartable: false,
         lease_id: None,
         pid: None,
-        recovery_evidence: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
         ownership_evidence: None,
         adoption_command: None,
         binary_hash: None,
@@ -257,7 +260,10 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         runtime_paths: None,
         active_jobs: 0,
         termination_evidence: None,
-        repair_plan: Vec::new(),
+        repair_plan: vec![DaemonRepairStep::text(
+            "runner_reconcile_leaseless_orphans",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+        )],
     });
     let mut admission = admission_fixture();
     admission.daemon_fresh = false;
@@ -268,6 +274,133 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         outcome.remaining_blocker.as_deref(),
         Some("daemon_lease_missing")
     );
+}
+
+#[test]
+fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
+    let mut report = disconnected_report();
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseCorrupt),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some(
+            "remote daemon lease ownership could not be established".to_string(),
+        ),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: Some("0.349.0".to_string()),
+        daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: vec![DaemonRepairStep::text(
+            "runner_reconcile_leaseless_orphans",
+            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+        )],
+    });
+
+    let admission = report.admission_summary(0);
+    let outcome = reconciliation_outcome("homeboy lab", Vec::new(), &report, &admission);
+
+    assert!(!admission.accepting_jobs);
+    assert_eq!(admission.next_action, None);
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("daemon_ownership_evidence_unavailable")
+    );
+    assert_eq!(outcome.next_action, None);
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("ownership evidence required before daemon recovery: remote daemon lease ownership could not be established")
+    );
+    let status = operator_summary(&report);
+    assert_eq!(
+        status.next_action,
+        "No automatic daemon recovery: typed ownership evidence is insufficient: remote daemon lease ownership could not be established"
+    );
+    assert!(!status.next_action.contains("runner doctor"));
+
+    report
+        .daemon_freshness
+        .as_mut()
+        .expect("freshness")
+        .recovery_evidence = None;
+    let admission = report.admission_summary(0);
+    let outcome = reconciliation_outcome("homeboy lab", Vec::new(), &report, &admission);
+    assert_eq!(outcome.next_action, None);
+    assert_eq!(
+        operator_summary(&report).next_action,
+        "No automatic daemon recovery: typed ownership evidence is insufficient: remote daemon lease ownership could not be established"
+    );
+}
+
+#[test]
+fn terminal_ownership_dominates_unresolved_retained_generation_projections() {
+    let mut report = disconnected_report();
+    let mut session = runner_session_fixture();
+    session.runner_id = "homeboy lab".to_string();
+    report.session = Some(session);
+    report.active_job_state = RunnerActiveJobState::Unavailable;
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let generations = vec![RunnerDaemonGenerationStatus {
+        generation: "lease-old".to_string(),
+        admission_owner: false,
+        drain_state: homeboy_lab_runner::RollingDrainState::Draining,
+        active_job_count: 2,
+        observed_active_job_count: None,
+        active_job_count_authoritative: false,
+        job_owner_count: 2,
+        run_owner_count: 0,
+        artifact_owner_count: 0,
+        homeboy_build_identity: None,
+        remote_daemon_lease_id: Some("lease-old".to_string()),
+        remote_daemon_address: None,
+        local_url: None,
+    }];
+
+    let admission = report.admission_summary_with_generations(&generations, &[], 1);
+    let summary = operator_summary(&report);
+    let followups =
+        runner_followups_with_admission(Some("homeboy lab"), Some(&report), Some(&admission));
+
+    assert_eq!(admission.unresolved_retained_projection_count, 2);
+    assert_eq!(
+        admission.next_action, None,
+        "compact status must not reconcile"
+    );
+    assert!(summary
+        .next_action
+        .contains("typed ownership evidence is insufficient"));
+    assert!(!summary.next_action.contains("runner reconcile"));
+    assert!(followups.iter().all(|followup| {
+        !followup.command.contains("runner reconcile")
+            && !matches!(
+                followup.label.as_str(),
+                "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+            )
+    }));
+    assert!(runner_status_operator_commands(&report)
+        .iter()
+        .all(|command| !command.command.contains("runner reconcile")));
 }
 
 #[test]
@@ -555,7 +688,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             restartable: false,
             lease_id: Some("lease-23456".to_string()),
             pid: Some(23456),
-            recovery_evidence: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
             adoption_command: Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()),
             binary_hash: None,
@@ -693,13 +826,184 @@ fn admission_followups_replace_generic_restart_for_ambiguous_missing_lease() {
     assert!(followups.iter().all(|followup| {
         !matches!(
             followup.label.as_str(),
-            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+            "exec" | "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
         )
     }));
-    assert!(followups.iter().any(|followup| {
-        followup.label == "admission_recovery"
-            && Some(&followup.command) == admission.next_action.as_ref()
+    assert!(admission.next_action.is_none());
+    assert!(followups
+        .iter()
+        .all(|followup| followup.label != "admission_recovery"));
+}
+
+#[test]
+fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projections() {
+    let mut report = disconnected_report();
+    report.connected = true;
+    report.state = runner::RunnerSessionState::Connected;
+    let mut session = runner_session_fixture();
+    session.runner_id = report.runner_id.clone();
+    session.mode = RunnerTunnelMode::Reverse;
+    session.broker_url = Some("https://broker.example.test/".to_string());
+    session.homeboy_build_identity = Some("homeboy 0.320.0+runner".to_string());
+    report.session = Some(session);
+    report.active_job_count = 1;
+    report.stale_daemon = Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "homeboy 0.320.0".to_string(),
+        "homeboy 0.321.0".to_string(),
+        Some("homeboy 0.320.0+runner".to_string()),
+        Some("homeboy 0.321.0+configured".to_string()),
+    ));
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: Some("0.320.0".to_string()),
+        daemon_build_identity: Some("homeboy 0.320.0+runner".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: vec![DaemonRepairStep::text(
+            "runner_reconcile_leaseless_orphans",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+        )],
+    });
+    let generations = vec![RunnerDaemonGenerationStatus {
+        generation: "lease-retained".to_string(),
+        admission_owner: false,
+        drain_state: homeboy_lab_runner::RollingDrainState::Draining,
+        active_job_count: 2,
+        observed_active_job_count: None,
+        active_job_count_authoritative: false,
+        job_owner_count: 2,
+        run_owner_count: 0,
+        artifact_owner_count: 0,
+        homeboy_build_identity: None,
+        remote_daemon_lease_id: Some("lease-retained".to_string()),
+        remote_daemon_address: None,
+        local_url: None,
+    }];
+
+    let admission = report.admission_summary_with_generations(&generations, &[], 1);
+    let outcome = reconciliation_outcome("homeboy-lab", Vec::new(), &report, &admission);
+    let followups =
+        runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
+    let commands = runner_status_operator_commands(&report);
+    let hints = runner_status_operator_hints(&report);
+    let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy", &report);
+
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("daemon_ownership_evidence_unavailable")
+    );
+    assert_eq!(outcome.next_action, None);
+    assert!(followups.iter().all(|followup| {
+        !matches!(
+            followup.label.as_str(),
+            "exec"
+                | "refresh_homeboy"
+                | "homeboy_binary_refresh"
+                | "homeboy_binary_upgrade"
+                | "workspace_prune_drain"
+                | "workspace_sync"
+        )
     }));
+    assert!(commands.iter().all(|command| {
+        !matches!(
+            command.scope,
+            "unknown_owner_reconcile"
+                | "agent_task_retry"
+                | "job_cancel"
+                | "broker_reconcile"
+                | "generation_reconcile"
+                | "daemon_refresh"
+                | "daemon_reconcile_split_view"
+                | "daemon_reconnect_fresh_idle"
+        )
+    }));
+    assert!(output.refresh_commands.is_empty());
+    assert_eq!(output.upgrade_command, None);
+    assert_eq!(output.stale_daemon_refresh_command, None);
+    assert!(hints.iter().all(|hint| !hint.contains("refresh-homeboy")));
+    assert!(hints.iter().all(|hint| {
+        !hint.contains("runner job cancel") && !hint.contains("runner job reconcile")
+    }));
+    let mut missing_broker_report = report.clone();
+    missing_broker_report
+        .session
+        .as_mut()
+        .expect("reverse session")
+        .broker_url = None;
+    assert!(runner_status_operator_hints(&missing_broker_report)
+        .iter()
+        .all(|hint| !hint.contains("reconnecting with")));
+    assert!(output
+        .artifact_features
+        .hints
+        .iter()
+        .all(|hint| !hint.contains("runner disconnect")));
+}
+
+#[test]
+fn reverse_runner_and_workspace_sync_guidance_remain_available_without_terminal_ownership() {
+    let mut reverse_report = connected_report();
+    reverse_report.active_job_count = 1;
+    let mut reverse_session = runner_session_fixture();
+    reverse_session.runner_id = reverse_report.runner_id.clone();
+    reverse_session.mode = RunnerTunnelMode::Reverse;
+    reverse_session.broker_url = Some("https://broker.example.test/".to_string());
+    reverse_report.session = Some(reverse_session);
+
+    let reverse_hints = runner_status_operator_hints(&reverse_report);
+    assert!(reverse_hints
+        .iter()
+        .any(|hint| hint.contains("runner job cancel")));
+    assert!(reverse_hints
+        .iter()
+        .any(|hint| hint.contains("runner job reconcile")));
+
+    let mut missing_broker_report = reverse_report.clone();
+    missing_broker_report
+        .session
+        .as_mut()
+        .expect("reverse session")
+        .broker_url = None;
+    assert!(runner_status_operator_hints(&missing_broker_report)
+        .iter()
+        .any(|hint| hint.contains("reconnecting with")));
+
+    let mut workspace_report = connected_report();
+    workspace_report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let admission = workspace_report.admission_summary(0);
+    assert!(runner_followups_with_admission(
+        Some("homeboy lab"),
+        Some(&workspace_report),
+        Some(&admission),
+    )
+    .iter()
+    .any(|followup| followup.label == "workspace_sync"));
 }
 
 #[test]
@@ -733,10 +1037,10 @@ fn unqualified_status_followups_use_selected_admission_action() {
             "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
         )
     }));
-    assert!(followups.iter().any(|followup| {
-        followup.label == "admission_recovery"
-            && Some(&followup.command) == admission.next_action.as_ref()
-    }));
+    assert!(admission.next_action.is_none());
+    assert!(followups
+        .iter()
+        .all(|followup| followup.label != "admission_recovery"));
 }
 
 #[test]

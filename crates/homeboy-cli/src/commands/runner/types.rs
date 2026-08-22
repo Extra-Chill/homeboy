@@ -263,7 +263,8 @@ pub struct LabRunnerHomeboyOutput {
     pub command_availability_checks: Vec<String>,
     pub artifact_features: RunnerArtifactFeatureDiagnostics,
     pub refresh_commands: Vec<String>,
-    pub upgrade_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dev_sync: Option<Value>,
 }

@@ -272,7 +272,10 @@ pub(super) fn execution_capabilities_with_local_placement(
         sessions
             .iter()
             .find(|report| !is_controller_local_runner(runners, &report.runner_id))
-            .map(|report| report.status_action().render_command())
+            .map(|report| {
+                terminal_daemon_ownership_diagnostic(report)
+                    .unwrap_or_else(|| report.status_action().render_command())
+            })
     } else {
         None
     };
@@ -371,58 +374,88 @@ pub(super) fn reconciliation_outcome(
     }
 
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
-    let (remaining_blocker, next_action, retry_predicate) = if unresolved_projection {
-        (
-            "unresolved_generation_projection".to_string(),
-            format!("homeboy runner status {} --full", shell_arg(runner_id)),
-            "a fresh authoritative generation projection resolves every retained count".to_string(),
-        )
-    } else if !admission.connected {
-        (
-            "runner_disconnected".to_string(),
-            reconciliation_remediation(&reconcile_command, admission, report)
-                .unwrap_or_else(|| format!("homeboy runner connect {}", shell_arg(runner_id))),
-            "the runner reconnects and publishes a current daemon session".to_string(),
-        )
-    } else if !admission.daemon_fresh {
-        (
-            daemon_freshness_blocker(report),
-            reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
-                || {
-                    format!(
-                        "homeboy runner doctor {} --scope lab-offload",
-                        shell_arg(runner_id)
-                    )
-                },
-            ),
-            "daemon_fresh=true after the selected daemon repair completes".to_string(),
-        )
-    } else if !admission.daemon_compatible {
-        (
-            "daemon_compatibility".to_string(),
-            reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
-                || {
-                    format!(
-                        "homeboy runner doctor {} --scope lab-offload",
-                        shell_arg(runner_id)
-                    )
-                },
-            ),
-            "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
-        )
-    } else if admission.blocking_generation.is_some() {
-        (
-            "retained_generation_ownership".to_string(),
-            format!("homeboy runner job list {} --active", shell_arg(runner_id)),
-            "the retained generation has no authoritative active job owners".to_string(),
-        )
-    } else {
-        (
-            "admission_unavailable".to_string(),
-            format!("homeboy runner status {} --full", shell_arg(runner_id)),
-            "an authoritative active-job view is available".to_string(),
-        )
-    };
+    let (remaining_blocker, next_action, retry_predicate) =
+        if terminal_daemon_ownership_blocker(report) {
+            (
+                "daemon_ownership_evidence_unavailable".to_string(),
+                None,
+                format!(
+                    "ownership evidence required before daemon recovery: {}",
+                    report
+                        .daemon_freshness
+                        .as_ref()
+                        .and_then(|freshness| freshness.ownership_evidence.as_deref())
+                        .unwrap_or("no ownership evidence was recorded")
+                ),
+            )
+        } else if unresolved_projection {
+            (
+                "unresolved_generation_projection".to_string(),
+                Some(format!(
+                    "homeboy runner status {} --full",
+                    shell_arg(runner_id)
+                )),
+                "a fresh authoritative generation projection resolves every retained count"
+                    .to_string(),
+            )
+        } else if !admission.connected {
+            (
+                "runner_disconnected".to_string(),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!("homeboy runner connect {}", shell_arg(runner_id))
+                        }),
+                ),
+                "the runner reconnects and publishes a current daemon session".to_string(),
+            )
+        } else if !admission.daemon_fresh {
+            (
+                daemon_freshness_blocker(report),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "homeboy runner doctor {} --scope lab-offload",
+                                shell_arg(runner_id)
+                            )
+                        }),
+                ),
+                "daemon_fresh=true after the selected daemon repair completes".to_string(),
+            )
+        } else if !admission.daemon_compatible {
+            (
+                "daemon_compatibility".to_string(),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "homeboy runner doctor {} --scope lab-offload",
+                                shell_arg(runner_id)
+                            )
+                        }),
+                ),
+                "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
+            )
+        } else if admission.blocking_generation.is_some() {
+            (
+                "retained_generation_ownership".to_string(),
+                Some(format!(
+                    "homeboy runner job list {} --active",
+                    shell_arg(runner_id)
+                )),
+                "the retained generation has no authoritative active job owners".to_string(),
+            )
+        } else {
+            (
+                "admission_unavailable".to_string(),
+                Some(format!(
+                    "homeboy runner status {} --full",
+                    shell_arg(runner_id)
+                )),
+                "an authoritative active-job view is available".to_string(),
+            )
+        };
 
     RunnerReconciliationOutcome {
         changed_state: reconciliation_changed_state(retired_generation_count),
@@ -435,11 +468,35 @@ pub(super) fn reconciliation_outcome(
             RunnerReconciliationStatus::Blocked
         },
         remaining_blocker: Some(remaining_blocker),
-        next_action: Some(next_action),
+        next_action,
         retry_predicate: Some(retry_predicate),
         retired_generation_count,
         retired_generation_ids,
     }
+}
+
+fn terminal_daemon_ownership_blocker(report: &RunnerStatusReport) -> bool {
+    report
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|freshness| freshness.has_terminal_recovery_ownership_blocker())
+}
+
+fn terminal_daemon_ownership_diagnostic(report: &RunnerStatusReport) -> Option<String> {
+    terminal_daemon_ownership_blocker(report).then(|| {
+        format!(
+            "No automatic daemon recovery: typed ownership evidence is insufficient: {}",
+            report
+                .daemon_freshness
+                .as_ref()
+                .and_then(|freshness| freshness.ownership_evidence.as_deref())
+                .unwrap_or("no ownership evidence was recorded")
+        )
+    })
+}
+
+fn terminal_daemon_ownership_blocks_mutation(report: &RunnerStatusReport) -> bool {
+    terminal_daemon_ownership_blocker(report)
 }
 
 fn reconciliation_changed_state(retired_generation_count: usize) -> String {
@@ -622,7 +679,8 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
         identity: bounded_status_text(&report.runner_id),
         state: format!("{:?}", report.state).to_ascii_lowercase(),
         risk,
-        next_action: report.status_action().render_command(),
+        next_action: terminal_daemon_ownership_diagnostic(report)
+            .unwrap_or_else(|| report.status_action().render_command()),
     }
 }
 
@@ -744,7 +802,10 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
 ) -> LabRunnerHomeboyOutput {
     let mut materialization =
         RuntimeMaterializationStatus::for_homeboy_runner(runner_id, configured_executable, status);
-    let refresh_command = recovery_refresh_command(&shell_arg(runner_id), guidance);
+    let recovery_blocked = terminal_daemon_ownership_blocks_mutation(status);
+    let refresh_command = (!recovery_blocked)
+        .then(|| recovery_refresh_command(&shell_arg(runner_id), guidance))
+        .flatten();
     materialization.stale_daemon_refresh_command = refresh_command.clone();
     let stale_daemon = status
         .stale_daemon
@@ -783,11 +844,15 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
             status,
             has_drift,
         ),
-        refresh_commands: lab_runner_homeboy_refresh_commands(runner_id, status),
-        upgrade_command: format!(
-            "homeboy upgrade --force --upgrade-runner {}",
-            shell_arg(runner_id)
-        ),
+        refresh_commands: (!recovery_blocked)
+            .then(|| lab_runner_homeboy_refresh_commands(runner_id, status))
+            .unwrap_or_default(),
+        upgrade_command: (!recovery_blocked).then(|| {
+            format!(
+                "homeboy upgrade --force --upgrade-runner {}",
+                shell_arg(runner_id)
+            )
+        }),
         dev_sync: runner::load(runner_id)
             .ok()
             .and_then(|runner| runner.resources.get("dev_sync").cloned()),
@@ -1265,7 +1330,9 @@ pub(super) fn runner_artifact_feature_diagnostics(
     let binary = shell_arg(homeboy_path);
     let runner_arg = shell_arg(runner_id);
     let mut hints = Vec::new();
-    if version_drift || status.stale_daemon.is_some() {
+    if !terminal_daemon_ownership_blocks_mutation(status)
+        && (version_drift || status.stale_daemon.is_some())
+    {
         hints.push(format!(
             "Runner `{runner_id}` reports Homeboy version/build drift. If artifact commands are missing on runner jobs, restart the active daemon with `homeboy runner disconnect {runner_arg}` then `homeboy runner connect {runner_arg}`."
         ));
@@ -1400,7 +1467,17 @@ pub(crate) fn runner_followups_with_admission(
     admission: Option<&runner::RunnerAdmissionSummary>,
 ) -> Vec<LabFollowup> {
     let mut followups = runner_followups(runner_id, status);
-    let Some(action) = admission.and_then(|admission| admission.next_action.as_ref()) else {
+    let Some(admission) = admission else {
+        return followups;
+    };
+    let terminal_ownership_blocker = status.is_some_and(terminal_daemon_ownership_blocker);
+    let Some(action) = admission.next_action.as_ref() else {
+        if !terminal_ownership_blocker {
+            return followups;
+        }
+        // No repair is safe, but generic mutation guidance is unsafe too.
+        // Retain only diagnostic follow-ups and the terminal freshness evidence.
+        followups.retain(|followup| !is_terminal_ownership_mutating_followup(followup));
         return followups;
     };
 
@@ -1408,18 +1485,27 @@ pub(crate) fn runner_followups_with_admission(
     // restart guidance. In particular, a missing lease with ambiguous daemon
     // candidates cannot be made safe by refreshing, upgrading, disconnecting,
     // or reconnecting the controller session.
-    followups.retain(|followup| {
-        !matches!(
-            followup.label.as_str(),
-            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
-        )
-    });
+    followups.retain(|followup| !is_terminal_ownership_mutating_followup(followup));
     followups.push(LabFollowup {
         label: "admission_recovery".to_string(),
         command: action.clone(),
         purpose: "Apply the authoritative runner admission recovery selected from the current daemon evidence.".to_string(),
     });
     followups
+}
+
+fn is_terminal_ownership_mutating_followup(followup: &LabFollowup) -> bool {
+    // Generic runner exec accepts arbitrary argv, so it is mutating for
+    // terminal ownership recovery even when its displayed purpose is diagnostic.
+    matches!(
+        followup.label.as_str(),
+        "exec"
+            | "refresh_homeboy"
+            | "homeboy_binary_refresh"
+            | "homeboy_binary_upgrade"
+            | "workspace_prune_drain"
+            | "workspace_sync"
+    )
 }
 
 pub(crate) fn selected_admission_summary(
@@ -1687,20 +1773,27 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
     if report.stale_daemon.is_some() {
         let mut materialization =
             RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report);
-        materialization.stale_daemon_refresh_command = recovery_refresh_command(
-            &shell_arg(&report.runner_id),
-            recovery_refresh_guidance(report),
-        );
+        materialization.stale_daemon_refresh_command =
+            (!terminal_daemon_ownership_blocks_mutation(report))
+                .then(|| {
+                    recovery_refresh_command(
+                        &shell_arg(&report.runner_id),
+                        recovery_refresh_guidance(report),
+                    )
+                })
+                .flatten();
         hints.extend(materialization.stale_daemon_hint());
     }
-    if let RecoveryRefreshGuidance::IdentityDrift { controller, runner } =
-        recovery_refresh_guidance(report)
-    {
-        hints.push(format!(
-            "Runner `{}` reports exact Homeboy build drift: controller={} runner={runner}. Recovery will not recommend refresh-homeboy until ancestry is verified; use `--allow-downgrade` only for an intentional rollback.",
-            report.runner_id,
-            controller.as_deref().unwrap_or("unavailable"),
-        ));
+    if !terminal_daemon_ownership_blocks_mutation(report) {
+        if let RecoveryRefreshGuidance::IdentityDrift { controller, runner } =
+            recovery_refresh_guidance(report)
+        {
+            hints.push(format!(
+                "Runner `{}` reports exact Homeboy build drift: controller={} runner={runner}. Recovery will not recommend refresh-homeboy until ancestry is verified; use `--allow-downgrade` only for an intentional rollback.",
+                report.runner_id,
+                controller.as_deref().unwrap_or("unavailable"),
+            ));
+        }
     }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
@@ -1721,6 +1814,20 @@ fn reverse_runner_status_hints(
     session: &RunnerSession,
     hints: &mut Vec<String>,
 ) {
+    if terminal_daemon_ownership_blocks_mutation(report) {
+        if session.broker_url.is_none() {
+            hints.push(format!(
+                "Reverse runner `{}` has no broker URL. Inspect the persisted session and daemon ownership evidence before any lifecycle action.",
+                report.runner_id
+            ));
+        } else {
+            hints.push(format!(
+                "Reverse runner `{}` has a broker-backed job view. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active`.",
+                report.runner_id, report.runner_id
+            ));
+        }
+        return;
+    }
     if session.broker_url.is_none() {
         hints.push(format!(
             "Reverse runner `{}` has no broker URL; active-job listing, logs, and cancel require reconnecting with `homeboy runner connect <controller-id> --reverse --reverse-runner {} --broker-url <url>`.",
@@ -1901,7 +2008,8 @@ fn runner_status_operator_commands_with_recovery_guidance(
     }
 
     if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
-        freshness.active_jobs > 0
+        freshness.has_recovery_ownership_proof()
+            && freshness.active_jobs > 0
             && freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch)
     }) {
         if let Some(command) = freshness.adoption_command.as_ref() {
@@ -1933,7 +2041,25 @@ fn runner_status_operator_commands_with_recovery_guidance(
         }
     }
 
+    if terminal_daemon_ownership_blocks_mutation(report) {
+        commands.retain(|command| !is_terminal_ownership_mutating_command(command));
+    }
+
     commands
+}
+
+fn is_terminal_ownership_mutating_command(command: &RunnerOperatorCommand) -> bool {
+    matches!(
+        command.scope,
+        "unknown_owner_reconcile"
+            | "agent_task_retry"
+            | "job_cancel"
+            | "broker_reconcile"
+            | "generation_reconcile"
+            | "daemon_refresh"
+            | "daemon_reconcile_split_view"
+            | "daemon_reconnect_fresh_idle"
+    )
 }
 
 #[cfg(test)]

@@ -938,7 +938,7 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
 }
 
 pub(super) fn unavailable_recovery_freshness(
-    runner_id: &str,
+    _runner_id: &str,
     error: impl Into<String>,
 ) -> DaemonFreshnessReport {
     DaemonFreshnessReport {
@@ -953,9 +953,8 @@ pub(super) fn unavailable_recovery_freshness(
             error.into()
         )),
         // No lease, PID, or job count survived the transport failure, so no
-        // lease-specific action can be named. Rebuilding the controller session
-        // is the only honest step, and it is emitted as typed steps rather than
-        // left to a downstream prose fallback.
+        // controller mutation is authorized. A later probe must establish typed
+        // ownership before any reconnect can be proposed.
         adoption_command: None,
         binary_hash: None,
         daemon_version: None,
@@ -963,7 +962,7 @@ pub(super) fn unavailable_recovery_freshness(
         runtime_paths: None,
         active_jobs: 0,
         termination_evidence: None,
-        repair_plan: daemon_repair::reconnect_plan(runner_id),
+        repair_plan: Vec::new(),
     }
 }
 

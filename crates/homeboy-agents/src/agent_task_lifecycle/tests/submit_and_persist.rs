@@ -4054,19 +4054,24 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
     });
 }
 
-/// Stays on `with_isolated_home` (#7505) — `mark_running` is the subject; see
-/// `running_observation_projects_each_terminal_aggregate_state`.
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). `mark_running` used to pin this test to an ambient home: its pin
+/// migration took the admission lock under `runtime_root()`, which is
+/// machine-global, so a rooted store was not enough to isolate it. The lock now
+/// lives under the root the store was built from, and the submission, the first
+/// running projection and the rejection of the second all name one home.
 #[test]
 fn mark_running_rejects_live_running_record() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("run-live-owner")).expect("submitted");
-        mark_running("run-live-owner").expect("marked running");
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(test_context.path_roots());
+    let plan = test_plan();
+    submit_plan_in_store(&lifecycle_store, &plan, Some("run-live-owner")).expect("submitted");
+    mark_running_in_store(&lifecycle_store, "run-live-owner").expect("marked running");
 
-        let error = mark_running("run-live-owner").expect_err("live run rejected");
+    let error =
+        mark_running_in_store(&lifecycle_store, "run-live-owner").expect_err("live run rejected");
 
-        assert!(error.message.contains("already running"));
-    });
+    assert!(error.message.contains("already running"));
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

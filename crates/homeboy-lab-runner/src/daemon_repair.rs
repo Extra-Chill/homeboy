@@ -230,6 +230,12 @@ pub(crate) fn controller_frame_plan(
     if report.fresh && report.stale_reason_code.is_none() {
         return Vec::new();
     }
+    // A mismatch identifies an incompatible binary, but not necessarily the
+    // daemon that owns it. Do not turn that observation into a refresh until
+    // the remote probe has established ownership well enough to authorize it.
+    if !report.has_recovery_ownership_proof() {
+        return Vec::new();
+    }
     // Adoption eligibility is authored by the daemon after its process and
     // candidate checks. `PidDead` alone is insufficient once the report has
     // crossed the runner boundary: a conflicting candidate deliberately clears
@@ -280,11 +286,10 @@ pub(crate) fn controller_frame_plan(
     if report.restartable {
         return reconnect_plan(runner_id);
     }
-    // A stale report that matched no branch above named a real problem and no
-    // authorized mutation. Returning an empty plan hands the operator nothing
-    // at all, so the honest answer is the read-only re-probe: the evidence that
-    // would let a later pass match a branch (#11103).
-    vec![action_step(RUNNER_DIAGNOSE, diagnose_action(runner_id))]
+    // A stale report that matched no branch names a real problem but authorizes
+    // no mutation. The report's ownership evidence is the terminal diagnostic;
+    // prescribing another probe here can make doctor recommend itself forever.
+    Vec::new()
 }
 
 /// Render a plan as the `&&`-joined shell text used in operator prose.
@@ -301,6 +306,7 @@ pub(crate) fn render(steps: &[DaemonRepairStep]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::daemon::DaemonRecoveryEvidence;
 
     fn report(
         stale_reason_code: Option<DaemonStaleReasonCode>,
@@ -347,6 +353,7 @@ mod tests {
     #[test]
     fn a_dead_lease_becomes_an_explicit_runner_side_adoption() {
         let mut report = report(Some(DaemonStaleReasonCode::PidDead), 1, false);
+        report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
         report.adoption_command =
             Some("homeboy daemon adopt-orphan --lease-id lease-remote".to_string());
         assert_eq!(
@@ -369,8 +376,10 @@ mod tests {
 
     #[test]
     fn durable_jobs_without_an_owning_lease_become_explicit_reconciliation() {
+        let mut report = report(Some(DaemonStaleReasonCode::LeaseMissing), 2, false);
+        report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
         assert_eq!(
-            plan(&report(Some(DaemonStaleReasonCode::LeaseMissing), 2, false)),
+            plan(&report),
             vec![(
                 RUNNER_RECONCILE_LEASELESS_ORPHANS.to_string(),
                 "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()
@@ -405,12 +414,10 @@ mod tests {
 
     #[test]
     fn identity_drift_refreshes_the_runner_binary_rather_than_reconnecting_it() {
+        let mut report = report(Some(DaemonStaleReasonCode::BuildIdentityMismatch), 0, true);
+        report.recovery_evidence = Some(DaemonRecoveryEvidence::Recoverable);
         assert_eq!(
-            plan(&report(
-                Some(DaemonStaleReasonCode::BuildIdentityMismatch),
-                0,
-                true
-            )),
+            plan(&report),
             vec![(
                 RUNNER_REFRESH_HOMEBOY.to_string(),
                 "homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string()
@@ -419,13 +426,23 @@ mod tests {
     }
 
     #[test]
-    fn a_restartable_lease_rebuilds_the_controller_session() {
+    fn incompatible_daemon_without_ownership_evidence_has_no_repair_plan() {
+        let mut report = report(Some(DaemonStaleReasonCode::VersionMismatch), 0, false);
+        report.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
+        report.ownership_evidence = Some("daemon lease owner could not be established".to_string());
+
+        assert!(
+            controller_frame_plan("homeboy-lab", &report).is_empty(),
+            "version skew alone must not authorize a daemon mutation"
+        );
+    }
+
+    #[test]
+    fn a_restartable_lease_with_typed_ownership_rebuilds_the_controller_session() {
+        let mut report = report(Some(DaemonStaleReasonCode::RuntimePathsDrift), 0, true);
+        report.recovery_evidence = Some(DaemonRecoveryEvidence::Recoverable);
         assert_eq!(
-            plan(&report(
-                Some(DaemonStaleReasonCode::RuntimePathsDrift),
-                0,
-                true
-            )),
+            plan(&report),
             vec![
                 (
                     RUNNER_DISCONNECT.to_string(),
@@ -439,26 +456,19 @@ mod tests {
         );
     }
 
-    /// #11103: a report that matches no repair branch used to return an empty
-    /// plan, so the operator was handed a stale daemon and nothing to do about
-    /// it. The fallback is read-only rather than a guessed mutation.
+    /// A report with insufficient ownership evidence remains terminal. A
+    /// read-only doctor fallback would be self-referential when this plan was
+    /// projected by doctor itself.
     #[test]
-    fn a_report_matching_no_branch_still_produces_an_actionable_step() {
-        let plan = controller_frame_plan(
-            "homeboy-lab",
-            &report(Some(DaemonStaleReasonCode::TransportUnreachable), 0, false),
-        );
-
-        assert_eq!(plan.len(), 1, "an unmatched stale report is never empty");
-        assert_eq!(plan[0].code, RUNNER_DIAGNOSE);
-        assert_eq!(
-            plan[0].command,
-            "homeboy runner doctor homeboy-lab --scope lab-offload"
-        );
-        let action = plan[0].action.as_ref().expect("fallback carries argv");
-        assert_eq!(action.safety, ActionSafety::ReadOnly);
-        assert_eq!(action.args[0], "runner");
-        assert_eq!(action.args[1], "doctor");
+    fn unmatched_stale_reports_without_typed_ownership_have_no_automatic_repair() {
+        for evidence in [None, Some(DaemonRecoveryEvidence::Unavailable)] {
+            let mut report = report(Some(DaemonStaleReasonCode::TransportUnreachable), 0, true);
+            report.recovery_evidence = evidence;
+            assert!(
+                controller_frame_plan("homeboy-lab", &report).is_empty(),
+                "{evidence:?} ownership evidence must not authorize reconnect"
+            );
+        }
     }
 
     /// Every branch must carry argv, or the executor is back to shell-parsing
@@ -480,8 +490,13 @@ mod tests {
                 for active_jobs in [0, 1] {
                     let mut report = report(Some(code), active_jobs, restartable);
                     report.adoption_command = Some("daemon-authored".to_string());
+                    report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
                     let plan = controller_frame_plan("homeboy-lab", &report);
-                    assert!(!plan.is_empty(), "{code:?} produced no step at all");
+                    if plan.is_empty() {
+                        // Unavailable ownership evidence is terminal, not an
+                        // implicit read-only or mutating recovery command.
+                        continue;
+                    }
                     for step in plan {
                         let action = step.action.as_ref().unwrap_or_else(|| {
                             panic!("{code:?} step {} carries no argv", step.code)
@@ -509,10 +524,9 @@ mod tests {
             DaemonStaleReasonCode::RuntimePathsDrift,
             DaemonStaleReasonCode::TransportUnreachable,
         ] {
-            for command in plan(&report(Some(code), 1, true))
-                .into_iter()
-                .map(|(_, command)| command)
-            {
+            let mut report = report(Some(code), 1, true);
+            report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
+            for command in plan(&report).into_iter().map(|(_, command)| command) {
                 assert!(
                     command.starts_with("homeboy runner "),
                     "{code:?} produced a non-controller-frame command: {command}"

@@ -147,6 +147,7 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
             "homeboy / Audit",
             "homeboy / Lint",
             "homeboy / Test",
+            "homeboy / Required Gates Executed",
         ],
         "the versioned policy must enumerate every main-merge gate"
     );
@@ -516,6 +517,28 @@ fn github_mode_passes_when_live_enforcement_matches_the_declaration() {
 }
 
 #[test]
+fn github_mode_rejects_rulesets_that_omit_the_terminal_execution_verdict() {
+    let scratch = Scratch::new("missing-terminal-verdict");
+    let contexts: Vec<String> = declared_contexts()
+        .into_iter()
+        .filter(|context| context != "homeboy / Required Gates Executed")
+        .collect();
+    let rules = scratch.write("rules.json", &live_rules(&contexts, true));
+    let output = run_validator("--github", &[("REQUIRED_GATES_LIVE_RULES", rules.as_str())]);
+
+    assert!(
+        !output.status.success(),
+        "a ruleset without the terminal execution verdict permits cancelled or skipped gates to merge: {}",
+        stdout_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("enforcement is divergent"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
 fn github_mode_fails_closed_when_live_state_cannot_be_read() {
     let scratch = Scratch::new("github-unverified");
     let output = run_validator(
@@ -580,7 +603,7 @@ fn enforcement_evidence_records_branch_ruleset_bypass_and_head_sha() {
         "branch=main",
         "ruleset=13680120",
         "head=0000000000000000000000000000000000000000",
-        "declared=7",
+        "declared=8",
         "live=0",
         "bypass_actors=0",
         "current_user_can_bypass=never",
