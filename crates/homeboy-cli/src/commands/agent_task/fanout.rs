@@ -2386,6 +2386,9 @@ fn cook_batch_argv(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
             command.extend([flag.to_string(), value.clone()]);
         }
     }
+    for value in &args.worktrees {
+        command.extend(["--worktree".to_string(), value.clone()]);
+    }
     for value in &args.gates.gate_toolchain_specs {
         command.extend([
             "--gate-toolchain-spec".to_string(),
@@ -2563,6 +2566,87 @@ fn queue_or_reuse_worktrees(
     let mut to_create = Vec::new();
     for cook in &plan.cooks {
         let branch = cook.head.as_ref().expect("generated cooks have heads");
+        if cook.adopted_worktree {
+            let resolution = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                &cook.to_worktree,
+                &homeboy::core::defaults::load_config(),
+                None,
+                None,
+            )?;
+            let workspace = &resolution.worktree;
+            if workspace.branch != *branch {
+                return Err(Error::validation_invalid_argument(
+                    "worktree",
+                    "explicit worktree branch does not match its Cook child",
+                    Some(cook.to_worktree.clone()),
+                    None,
+                ));
+            }
+            if workspace.task_url.as_deref() != cook.task_url.as_deref() {
+                return Err(Error::validation_invalid_argument(
+                    "worktree",
+                    "explicit worktree tracker does not match its Cook child",
+                    Some(cook.to_worktree.clone()),
+                    None,
+                ));
+            }
+            if cook
+                .protected_branches
+                .iter()
+                .any(|protected| protected == branch)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "worktree",
+                    "explicit worktree branch is protected",
+                    Some(cook.to_worktree.clone()),
+                    None,
+                ));
+            }
+            let path = PathBuf::from(&workspace.path);
+            homeboy::core::worktree_providers::validate_task_worktree_root(
+                &path,
+                &cook.to_worktree,
+            )?;
+            let base = homeboy::core::git::run_git(
+                &path,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{}^{{commit}}", args.from),
+                ],
+                "resolve explicit worktree base",
+            )?;
+            let head = homeboy::core::git::run_git(
+                &path,
+                &["rev-parse", "--verify", "HEAD^{commit}"],
+                "resolve explicit worktree HEAD",
+            )?;
+            if !homeboy::core::git::is_ancestor(
+                &path.display().to_string(),
+                base.trim(),
+                head.trim(),
+            )
+            .unwrap_or(false)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "worktree",
+                    "explicit worktree does not descend from the immutable Cook base",
+                    Some(cook.to_worktree.clone()),
+                    None,
+                ));
+            }
+            reused.push(worktree::WorktreeQueueCreateRow {
+                branch: branch.clone(),
+                handle: cook.to_worktree.clone(),
+                status: worktree::WorktreeQueueCreateStatus::Created,
+                command: vec!["adopted".to_string(), cook.to_worktree.clone()],
+                retry_after_seconds: None,
+                active_lock_holder: None,
+                path: Some(workspace.path.clone()),
+                error: None,
+            });
+            continue;
+        }
         match (!provider_workspace_creation)
             .then(|| active_registered_worktree_path(&cook.to_worktree))
         {
@@ -3259,6 +3343,8 @@ struct BatchCookSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_context: Option<String>,
     to_worktree: String,
+    #[serde(default)]
+    adopted_worktree: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_command: Option<String>,
     #[serde(default)]
@@ -3617,6 +3703,16 @@ fn build_cook_batch_plan_with_profiles(
     args: &AgentTaskFanoutCookBatchArgs,
     profiles: VerificationProfiles,
 ) -> Result<BatchCookFanoutPlan> {
+    let bindings = parse_explicit_worktree_bindings(&args.worktrees)?;
+    if !bindings.is_empty()
+        && bindings
+            .keys()
+            .any(|issue| !args.issues.iter().any(|declared| declared == issue))
+    {
+        return Err(invalid_fanout(
+            "--worktree binding names an issue outside this Cook-batch",
+        ));
+    }
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
     for issue_url in &args.issues {
@@ -3633,6 +3729,7 @@ fn build_cook_batch_plan_with_profiles(
             slugify(&issue.repo)
         );
         let worktree = format!("{}@{}", args.repo, slugify(&branch));
+        let explicit_worktree = bindings.get(issue_url).cloned();
         let prompt = render_prompt(
             args.prompt_template.as_deref(),
             &issue,
@@ -3678,7 +3775,8 @@ fn build_cook_batch_plan_with_profiles(
                 })
                 .to_string(),
             ),
-            to_worktree: worktree,
+            to_worktree: explicit_worktree.clone().unwrap_or(worktree),
+            adopted_worktree: explicit_worktree.is_some(),
             provider_command: None,
             verify,
             private_verify,
@@ -3705,6 +3803,11 @@ fn build_cook_batch_plan_with_profiles(
             ai_tool: args.ai_tool.clone().unwrap_or_else(default_ai_tool),
             ai_used_for: default_ai_used_for(),
         });
+    }
+    if bindings.len() != args.issues.len() && !bindings.is_empty() {
+        return Err(invalid_fanout(
+            "--worktree bindings must cover every Cook-batch issue exactly once",
+        ));
     }
     profiles.validate_assignments(&cooks)?;
     let first = cooks
@@ -3741,6 +3844,34 @@ fn build_cook_batch_plan_with_profiles(
             "from": args.from,
         }),
     })
+}
+
+fn parse_explicit_worktree_bindings(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut bindings = BTreeMap::new();
+    for value in values {
+        let (issue, handle) = value.split_once('=').ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree",
+                "--worktree must use ISSUE_URL=HANDLE",
+                Some(value.clone()),
+                None,
+            )
+        })?;
+        IssueRef::parse(issue)?;
+        if handle.trim().is_empty()
+            || bindings
+                .insert(issue.to_string(), handle.to_string())
+                .is_some()
+        {
+            return Err(Error::validation_invalid_argument(
+                "worktree",
+                "each --worktree issue binding must be unique and name a handle",
+                Some(value.clone()),
+                None,
+            ));
+        }
+    }
+    Ok(bindings)
 }
 
 #[derive(Debug, Deserialize)]
@@ -5860,6 +5991,7 @@ fi
             base: "main".to_string(),
             branch_prefix: "fix".to_string(),
             fanout_id: Some("issue-wave".to_string()),
+            worktrees: Vec::new(),
             prompt_template: None,
             backend: Some("sandbox".to_string()),
             selector: Some("sample.executor-provider".to_string()),
@@ -6380,6 +6512,73 @@ fi
                 invocation.options.source_worktree_path.as_deref(),
                 Some(workspace.path())
             );
+        });
+    }
+
+    #[test]
+    fn cook_batch_adopts_explicit_three_child_worktree_bindings_idempotently() {
+        with_isolated_home(|_| {
+            let mut args = cook_batch_args();
+            args.issues
+                .push("https://github.com/Extra-Chill/homeboy/issues/6455".to_string());
+            args.worktrees = vec![
+                "https://github.com/Extra-Chill/homeboy/issues/6453=provider@prepared-6453"
+                    .to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/6454=provider@prepared-6454"
+                    .to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/6455=provider@prepared-6455"
+                    .to_string(),
+            ];
+            let first = build_cook_batch_plan(&args).expect("plan explicit adoptions");
+            let replay = build_cook_batch_plan(&args).expect("replay explicit adoptions");
+            assert_eq!(
+                first, replay,
+                "replay must retain child and worktree identities"
+            );
+            assert_eq!(first.cooks.len(), 3);
+            assert!(first.cooks.iter().all(|cook| cook.adopted_worktree));
+            assert_eq!(
+                first
+                    .cooks
+                    .iter()
+                    .map(|cook| cook.to_worktree.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "provider@prepared-6453",
+                    "provider@prepared-6454",
+                    "provider@prepared-6455"
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn cook_batch_rejects_partial_duplicate_and_unrelated_worktree_bindings() {
+        with_isolated_home(|_| {
+            let mut partial = cook_batch_args();
+            partial.worktrees = vec![
+                "https://github.com/Extra-Chill/homeboy/issues/6453=provider@prepared-6453"
+                    .to_string(),
+            ];
+            assert!(build_cook_batch_plan(&partial).is_err());
+
+            let mut duplicate = cook_batch_args();
+            duplicate.worktrees = vec![
+                "https://github.com/Extra-Chill/homeboy/issues/6453=provider@prepared-6453"
+                    .to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/6453=provider@other-6453"
+                    .to_string(),
+            ];
+            assert!(build_cook_batch_plan(&duplicate).is_err());
+
+            let mut unrelated = cook_batch_args();
+            unrelated.worktrees = vec![
+                "https://github.com/Extra-Chill/homeboy/issues/6453=provider@prepared-6453"
+                    .to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/9999=provider@prepared-9999"
+                    .to_string(),
+            ];
+            assert!(build_cook_batch_plan(&unrelated).is_err());
         });
     }
 

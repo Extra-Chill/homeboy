@@ -30,6 +30,7 @@ Run generic agent task plans
 | `homeboy agent-task run` | Execute a previously submitted durable run |
 | `homeboy agent-task run-next` | Claim and execute the oldest queued durable run, optionally within one fanout |
 | `homeboy agent-task submit` | Persist an agent-task plan and return a durable run id without executing it |
+| `homeboy agent-task validate-plan` | Validate a plan and provider readiness without creating a lifecycle record |
 | `homeboy agent-task status` | Read durable run status |
 | `homeboy agent-task watch` | Poll a run until it reaches a terminal state |
 | `homeboy agent-task list` | List durable runs, newest first |
@@ -331,6 +332,18 @@ Persist an agent-task plan and return a durable run id without executing it
 | --- | --- | --- |
 | `--plan` | `<JSON|@FILE|->` | Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json` |
 | `--run-id` | `<ID>` | _no help text_ |
+
+## `homeboy agent-task validate-plan`
+
+```sh
+homeboy agent-task validate-plan [OPTIONS]
+```
+
+Validate a plan and provider readiness without creating a lifecycle record
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--plan` | `<JSON|@FILE|->` | Agent-task plan as inline JSON, `@FILE`, or `-`. Validation creates no lifecycle record |
 
 ## `homeboy agent-task status`
 
@@ -751,6 +764,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--base` | `<BRANCH>` | _no help text_ |
 | `--branch-prefix` | `<PREFIX>` | _no help text_ |
 | `--fanout-id` | `<ID>` | _no help text_ |
+| `--worktree` | `<ISSUE_URL=HANDLE>` | Bind one issue URL to an existing provider-managed worktree handle. Repeat as `--worktree ISSUE_URL=HANDLE`. Every supplied issue must have exactly one binding; Homeboy validates and adopts the exact destination instead of requesting provider creation |
 | `--prompt-template` | `<TEXT>` | _no help text_ |
 | `--backend` | `<BACKEND>` | _no help text_ |
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
