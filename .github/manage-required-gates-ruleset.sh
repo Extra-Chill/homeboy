@@ -28,7 +28,7 @@ if [ ! -f "${config}" ] || [ -z "${evidence}" ]; then
 fi
 
 project_ruleset() {
-  jq -S '{name, target, enforcement, conditions, rules}'
+  jq -S '{name, target, enforcement, bypass_actors: (.bypass_actors // []), conditions, rules}'
 }
 
 desired="$(project_ruleset < "${config}")"

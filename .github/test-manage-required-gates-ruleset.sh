@@ -46,6 +46,7 @@ run --operation reconcile --evidence "${tmp}/reconcile.json"
 jq -e '.operation == "reconcile" and .changed == true and .matched == true' "${tmp}/reconcile.json" >/dev/null
 grep -Fq -- '--method PUT' "${tmp}/gh.log"
 jq -e '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]] | length == 8' "${tmp}/state.json" >/dev/null
+jq -e '.bypass_actors == []' "${tmp}/state.json" >/dev/null
 
 : > "${tmp}/gh.log"
 run --operation audit --evidence "${tmp}/converged.json"
