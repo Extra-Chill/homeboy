@@ -1392,6 +1392,19 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if let Some(report) = status
+        .daemon_freshness
+        .as_ref()
+        .filter(|report| report.has_terminal_recovery_ownership_blocker())
+    {
+        return Some(format!(
+            "connected runner `{runner_id}` daemon recovery is blocked because typed ownership evidence is insufficient: {}",
+            report
+                .ownership_evidence
+                .as_deref()
+                .unwrap_or("no ownership evidence was recorded")
+        ));
+    }
     if let Some(warning) = status.admission_blocking_stale_daemon() {
         let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
@@ -1432,9 +1445,38 @@ fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<Daem
     if let Some(report) = status
         .daemon_freshness
         .as_ref()
-        .filter(|report| !report.repair_plan.is_empty())
+        .filter(|report| report.has_terminal_recovery_ownership_blocker())
+    {
+        return vec![DaemonRepairStep::text(
+            daemon_repair::RUNNER_DIAGNOSE,
+            format!(
+                "Daemon recovery is blocked because typed ownership evidence is insufficient: {}",
+                report
+                    .ownership_evidence
+                    .as_deref()
+                    .unwrap_or("no ownership evidence was recorded")
+            ),
+        )];
+    }
+    if let Some(report) = status
+        .daemon_freshness
+        .as_ref()
+        .filter(|report| !report.repair_plan.is_empty() && report.has_recovery_ownership_proof())
     {
         return report.repair_plan.clone();
+    }
+    if status
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|report| !report.fresh)
+    {
+        // This projection is used by runner doctor itself. A stale report with
+        // typed proof but no validated action must terminate with its evidence,
+        // not recommend the identical doctor invocation that produced it.
+        return vec![DaemonRepairStep::text(
+            daemon_repair::RUNNER_DIAGNOSE,
+            "Daemon recovery is blocked because no validated recovery action was derived from the current typed daemon evidence.".to_string(),
+        )];
     }
     if let Some(warning) = status.stale_daemon.as_ref() {
         let steps: Vec<_> = warning
@@ -1758,7 +1800,7 @@ mod daemon_repair_step_tests {
             restartable: false,
             lease_id: Some("lease-dead".to_string()),
             pid: Some(4545),
-            recovery_evidence: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
             adoption_command: None,
             binary_hash: None,
@@ -1848,26 +1890,77 @@ mod daemon_repair_step_tests {
     }
 
     #[test]
-    fn generic_reconnect_fires_only_when_nothing_specific_is_known() {
-        let report = status_report("homeboy-lab", Some(freshness_with_plan(Vec::new())), None);
+    fn unavailable_ownership_plan_offers_a_non_circular_terminal_diagnostic() {
+        let mut freshness = freshness_with_plan(vec![daemon_repair::action_step(
+            daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
+            daemon_repair::reconcile_leaseless_orphans_action("homeboy-lab"),
+        )]);
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+        freshness.recovery_evidence =
+            Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable);
+        freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
+        let report = status_report("homeboy-lab", Some(freshness), None);
 
         let steps = daemon_repair_steps("homeboy-lab", &report);
 
-        assert_eq!(
-            steps
-                .iter()
-                .map(|step| (step.code.as_str(), step.command.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("runner_disconnect", "homeboy runner disconnect homeboy-lab"),
-                ("runner_connect", "homeboy runner connect homeboy-lab"),
-            ]
-        );
-        // The rendered prose is the same text the old joined-string fallback
-        // produced, so operator-facing messages are unchanged.
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].code, daemon_repair::RUNNER_DIAGNOSE);
         assert_eq!(
             daemon_repair_command("homeboy-lab", &report),
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+            "Daemon recovery is blocked because typed ownership evidence is insufficient: ambiguous remote daemon candidates"
+        );
+        assert!(steps[0].action.is_none());
+        assert!(daemon_repair_action("homeboy-lab", &report).is_none());
+    }
+
+    #[test]
+    fn terminal_ownership_evidence_is_not_rendered_as_a_restart_command() {
+        let mut freshness = freshness_with_plan(Vec::new());
+        freshness.recovery_evidence =
+            Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable);
+        freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
+        let report = status_report(
+            "homeboy-lab",
+            Some(freshness),
+            Some(RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "homeboy 0.218.0".to_string(),
+                "homeboy 0.219.0".to_string(),
+                Some("homeboy 0.218.0+old".to_string()),
+                Some("homeboy 0.219.0+new".to_string()),
+            )),
+        );
+
+        let reason = connected_runner_not_ready_reason("homeboy-lab", &report)
+            .expect("terminal ownership blocks preparation");
+
+        assert!(reason.contains("typed ownership evidence is insufficient"));
+        assert!(reason.contains("ambiguous remote daemon candidates"));
+        assert!(!reason.contains("restart the active daemon"));
+        assert!(!reason.contains("refresh with `"));
+        assert!(!reason.contains("homeboy runner"));
+    }
+
+    #[test]
+    fn typed_proof_without_a_validated_plan_offers_a_non_circular_terminal_diagnostic() {
+        let mut freshness = freshness_with_plan(Vec::new());
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseSchemaMismatch);
+        freshness.recovery_evidence =
+            Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable);
+        let report = status_report("homeboy-lab", Some(freshness), None);
+
+        let steps = daemon_repair_steps("homeboy-lab", &report);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].code, daemon_repair::RUNNER_DIAGNOSE);
+        assert!(steps[0].action.is_none());
+        assert!(steps[0].command.contains("no validated recovery action"));
+        assert!(!steps[0].command.contains("runner doctor"));
+        assert_ne!(
+            daemon_repair_command("homeboy-lab", &report),
+            "homeboy runner doctor homeboy-lab --scope lab-offload"
         );
     }
 }

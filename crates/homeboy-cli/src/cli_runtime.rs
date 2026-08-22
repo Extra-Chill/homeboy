@@ -829,7 +829,14 @@ fn schedule_runner_exec_recovery() {
     if cfg!(test) {
         return;
     }
-    let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery() else {
+    // Startup recovery is one unit of work, so the boundary resolves the roots
+    // once and every step below claims, spawns against, and terminalizes the
+    // same installation. Each callee resolving its own would let the survey,
+    // the owner claim, and the failure record land in different homes (#7505).
+    let Ok(roots) = homeboy::core::paths::PathRoots::from_environment() else {
+        return;
+    };
+    let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery(&roots) else {
         return;
     };
     if !schedule.is_new_owner {
@@ -846,6 +853,7 @@ fn schedule_runner_exec_recovery() {
                 &schedule.owner_id,
                 &schedule.owner_token,
                 &error,
+                &roots,
             );
             return;
         }
@@ -867,6 +875,7 @@ fn schedule_runner_exec_recovery() {
             &schedule.owner_id,
             &schedule.owner_token,
             &error,
+            &roots,
         );
     }
 }

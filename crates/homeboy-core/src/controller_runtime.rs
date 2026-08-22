@@ -1060,8 +1060,16 @@ pub fn migrate_legacy_pin_and_persist(
     runtime: &Value,
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
-    let root = runtime_root()?;
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    migrate_legacy_pin_and_persist_in_root(&runtime_root()?, runtime, persist)
+}
+
+/// [`migrate_legacy_pin_and_persist`] under an already-resolved runtime root.
+pub fn migrate_legacy_pin_and_persist_in_root(
+    runtime_root: &Path,
+    runtime: &Value,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
     let migrated = migrate_legacy_pin_unlocked(runtime)?;
     if &migrated != runtime {
         persist(&migrated)?;
@@ -1143,8 +1151,18 @@ pub fn recover_pin_and_persist(
     source: Option<&Path>,
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
-    let root = runtime_root()?;
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    recover_pin_and_persist_in_root(&runtime_root()?, runtime, artifact, source, persist)
+}
+
+/// [`recover_pin_and_persist`] under an already-resolved runtime root.
+pub fn recover_pin_and_persist_in_root(
+    runtime_root: &Path,
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
     let recovered = recover_pin_unlocked(runtime, artifact, source)?;
     persist(&recovered)?;
     Ok(recovered)
@@ -1289,7 +1307,17 @@ fn recover_pin_unlocked(
 }
 
 fn runtime_root() -> Result<PathBuf> {
-    let root = paths::controller_runtimes_store()?;
+    runtime_root_in(&paths::PathRoots::from_environment()?.data().to_path_buf())
+}
+
+/// [`runtime_root`] below an already-resolved data root.
+///
+/// The admission lock this root carries is machine-global when the root is
+/// ambient: two tests marking a run running serialize against each other even
+/// with separate stores. Supplying the root is what makes that lock local to
+/// the caller's installation (#7505).
+pub fn runtime_root_in(data_root: &Path) -> Result<PathBuf> {
+    let root = paths::controller_runtimes_store_in_root(data_root);
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),

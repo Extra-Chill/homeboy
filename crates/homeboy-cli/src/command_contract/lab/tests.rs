@@ -38,6 +38,15 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(compact.contains("--task-url <URL>"), "{compact}");
     assert!(compact.contains("--preview"), "{compact}");
     assert!(compact.contains("--help-full"), "{compact}");
+    // Resource admission directs operators to this explicit local override, so
+    // it must remain discoverable in the compact task-dispatch help.
+    assert!(compact.contains("--placement <PLACEMENT>"), "{compact}");
+    assert!(compact.contains("`auto` (default)"), "{compact}");
+    assert!(
+        compact.contains("`local` is an explicit authorized override"),
+        "{compact}"
+    );
+    assert!(!compact.contains("--runner <RUNNER_ID>"), "{compact}");
     assert!(!compact.contains("--max-provider-rotations"), "{compact}");
     assert!(full.contains("--max-provider-rotations"), "{full}");
     assert!(full.contains("--provider-command"), "{full}");

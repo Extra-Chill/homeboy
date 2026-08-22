@@ -303,6 +303,11 @@ pub fn controller_runtimes_store() -> Result<PathBuf> {
     homeboy_data_store(CONTROLLER_RUNTIMES_STORE)
 }
 
+/// Controller runtimes store below an already-resolved data root.
+pub fn controller_runtimes_store_in_root(data_root: &Path) -> PathBuf {
+    homeboy_data_store_in_root(data_root, CONTROLLER_RUNTIMES_STORE)
+}
+
 /// Controller scratch store below an already-resolved data root.
 pub fn controller_scratch_store_in_root(data_root: &Path) -> PathBuf {
     homeboy_data_store_in_root(data_root, CONTROLLER_SCRATCH_STORE)

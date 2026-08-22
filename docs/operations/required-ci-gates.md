@@ -35,7 +35,7 @@ required contexts, strict setting, and bypass actors:
 
 ```
 ::notice::required-gates enforcement basis=live-branch-rules repo=… branch=main
-  ruleset=… head=… declared=7 live=0 rules=0 strict=false bypass_actors=0
+  ruleset=… head=… declared=8 live=0 rules=0 strict=false bypass_actors=0
   current_user_can_bypass=never outcome=unenforced
 ```
 
@@ -120,9 +120,11 @@ gh api repos/Extra-Chill/homeboy/rulesets/13680120
 all exit non-zero. It is deliberately not what CI runs.
 
 The final command is review evidence. Its `required_status_checks` rule must
-contain exactly the seven contexts in the payload and set
-`strict_required_status_checks_policy` to `true`. Test the installation with a
-PR that leaves `homeboy / Test`, `homeboy / Lint`, or `homeboy / Audit` pending;
+contain exactly the eight contexts in the payload and set
+`strict_required_status_checks_policy` to `true`. The terminal
+`homeboy / Required Gates Executed` context is required because it fails when
+the other gates are cancelled or skipped. Test the installation with a PR that
+leaves it, `homeboy / Test`, `homeboy / Lint`, or `homeboy / Audit` pending;
 GitHub must report the PR as blocked until the check succeeds. Until that apply
 happens, the CI job reports `unenforced` on every pull request, which is the
 honest answer rather than a silent green tick.

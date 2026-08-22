@@ -84,14 +84,20 @@ pub struct RunnerExecRecoveryOwnerWork {
 /// Reserve a durable, independently inspectable owner before a background
 /// recovery worker is spawned. Scheduling only reads local evidence; remote
 /// reconciliation belongs to the owner, never to the mutating caller.
-pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecoverySchedule>> {
-    let reader = ObservationStore::open_scheduler_reader()?;
+/// The reader that finds candidates and the writer that claims the singleton
+/// owner must describe the same installation. Resolving each from the
+/// environment independently let this survey one home and claim the lease in
+/// another, so both share the caller's roots (#7505).
+pub fn schedule_terminal_runner_exec_recovery(
+    roots: &homeboy_core::paths::PathRoots,
+) -> Result<Option<RunnerExecRecoverySchedule>> {
+    let reader = ObservationStore::open_scheduler_reader_in_roots(roots)?;
     let candidates = recovery_candidates(&reader)?;
     drop(reader);
     if candidates.is_empty() {
         return Ok(None);
     }
-    let store = ObservationStore::open_scheduler_writer()?;
+    let store = ObservationStore::open_scheduler_writer_in_roots(roots)?;
     // The store's expiring claim is keyed by run ID. A stable ID is therefore
     // the singleton identity; a fresh UUID here would only make each scheduler
     // claim itself and permit overlapping recovery workers.
@@ -156,8 +162,11 @@ fn recovery_schedule(
 fn reconcile_terminal_runner_exec_runs_with_owner(
     worker: &RecoveryWorker,
     source_run_id: &str,
+    roots: &homeboy_core::paths::PathRoots,
 ) -> Result<(usize, usize, Option<RunnerExecRecoveryDiagnostic>)> {
-    let store = ObservationStore::open_initialized()?;
+    // Reconciliation runs under the caller's child lock and writes the same
+    // runs the caller already opened, so it shares the caller's roots (#7505).
+    let store = ObservationStore::open_initialized_in_roots(roots)?;
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
@@ -708,13 +717,19 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
     let stop = Arc::new(AtomicBool::new(false));
     let heartbeat_stop = Arc::clone(&stop);
     let heartbeat_worker = worker.clone();
+    // The heartbeat renews the same lease the caller's lock arbitrates, so it
+    // carries the caller's roots instead of resolving its own. Reading the
+    // environment again here is the disagreement the function doc warns about:
+    // this thread runs for up to a day, and a repoint mid-run would renew the
+    // lease in one installation while the child lock guards another (#7505).
+    let heartbeat_roots = roots.clone();
     let heartbeat = thread::spawn(move || {
         while !heartbeat_stop.load(Ordering::Acquire) {
             thread::sleep(RECOVERY_LEASE_HEARTBEAT);
             if heartbeat_stop.load(Ordering::Acquire) {
                 break;
             }
-            let Ok(store) = ObservationStore::open_initialized() else {
+            let Ok(store) = ObservationStore::open_initialized_in_roots(&heartbeat_roots) else {
                 break;
             };
             if heartbeat_worker.renew(&store).is_err() {
@@ -722,7 +737,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
             }
         }
     });
-    let result = reconcile_terminal_runner_exec_runs_with_owner(&worker, &source_run_id);
+    let result = reconcile_terminal_runner_exec_runs_with_owner(&worker, &source_run_id, &roots);
     stop.store(true, Ordering::Release);
     let _ = heartbeat.join();
     match result {
@@ -806,12 +821,15 @@ fn try_acquire_child_lock_in_roots(
     }
 }
 
+/// Terminalizes the owner record the scheduler just claimed, so it resolves the
+/// same roots the claim used rather than reading the environment again (#7505).
 pub fn record_scheduled_terminal_runner_exec_recovery_spawn_failure(
     owner_id: &str,
     owner_token: &str,
     error: &std::io::Error,
+    roots: &homeboy_core::paths::PathRoots,
 ) -> Result<()> {
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_initialized_in_roots(roots)?;
     let Some(owner) = store.get_run(owner_id)? else {
         return Ok(());
     };
@@ -964,6 +982,14 @@ mod tests {
     use homeboy_core::{Error, ErrorCode};
     use std::sync::{Arc, Barrier};
 
+    /// These cases already run inside `with_isolated_home`, so reading the
+    /// environment here observes that isolated home. Naming the roots keeps the
+    /// call sites honest about what the scheduler is being pointed at, and lets
+    /// a future case point one at a different home without touching globals.
+    fn test_roots() -> homeboy_core::paths::PathRoots {
+        homeboy_core::paths::PathRoots::from_environment().expect("path roots")
+    }
+
     #[test]
     fn startup_recovery_does_not_materialize_unrelated_active_payloads() {
         with_isolated_home(|_| {
@@ -1042,7 +1068,7 @@ mod tests {
                 .expect("historical runner job");
             }
 
-            let schedule = schedule_terminal_runner_exec_recovery()
+            let schedule = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule recovery")
                 .expect("historical jobs need an owner");
             assert_eq!(
@@ -1133,7 +1159,7 @@ mod tests {
 
             let mut child_ids = BTreeSet::new();
             for attempt in 1..=MAX_SOURCE_RECOVERY_DEFERRALS {
-                let owner = schedule_terminal_runner_exec_recovery()
+                let owner = schedule_terminal_runner_exec_recovery(&test_roots())
                     .expect("schedule")
                     .expect("owner");
                 let work = run_scheduled_terminal_runner_exec_recovery(
@@ -1202,7 +1228,7 @@ mod tests {
             assert_eq!(child_ids.len(), 1, "retries reuse one child identity");
             assert_eq!(children.len(), 1, "retries do not accumulate children");
             assert_ne!(children[0].status, RunStatus::Running.as_str());
-            assert!(schedule_terminal_runner_exec_recovery()
+            assert!(schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("final schedule")
                 .is_none());
         });
@@ -1221,7 +1247,7 @@ mod tests {
                 )
                 .expect("source");
             }
-            let owner = schedule_terminal_runner_exec_recovery()
+            let owner = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule")
                 .expect("owner");
             let work =
@@ -1269,7 +1295,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 workers.push(std::thread::spawn(move || {
                     barrier.wait();
-                    schedule_terminal_runner_exec_recovery().expect("schedule")
+                    schedule_terminal_runner_exec_recovery(&test_roots()).expect("schedule")
                 }));
             }
             barrier.wait();
@@ -1367,7 +1393,7 @@ mod tests {
                 &[],
             )
             .expect("historical runner job");
-            let first = schedule_terminal_runner_exec_recovery()
+            let first = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule")
                 .expect("owner");
             let store = ObservationStore::open_initialized().expect("store");
@@ -1379,7 +1405,7 @@ mod tests {
             store
                 .update_run_metadata(&owner.id, owner.metadata_json)
                 .expect("expire lease");
-            let second = schedule_terminal_runner_exec_recovery()
+            let second = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule")
                 .expect("replacement owner");
             assert!(second.is_new_owner);

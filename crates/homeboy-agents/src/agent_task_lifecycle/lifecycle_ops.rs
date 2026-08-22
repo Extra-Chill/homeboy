@@ -2152,12 +2152,17 @@ fn migrate_record_controller_runtime_in_store(
         return Ok(());
     };
     let original = runtime.clone();
-    let migrated =
-        homeboy_core::controller_runtime::migrate_legacy_pin_and_persist(&original, |migrated| {
+    let runtime_root =
+        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
+    let migrated = homeboy_core::controller_runtime::migrate_legacy_pin_and_persist_in_root(
+        &runtime_root,
+        &original,
+        |migrated| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 migrated.clone();
             lifecycle_store.write_record(record)
-        })?;
+        },
+    )?;
     record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
 }
@@ -2517,32 +2522,6 @@ pub fn clear_cook_controller_failure_in_store(
     })?;
     let _ = record;
     Ok(())
-}
-
-/// Persist Cook phase together with a sample of what the provider is doing.
-///
-/// The activity sample is written into the same record as the phase so
-/// `agent-task status` answers "is this cook making progress?" from durable
-/// state, without the reader having to find the worktree and run `ps` and
-/// `git status` by hand (#11482). It is evidence, not authority: an absent
-/// sample leaves the previously recorded one in place rather than erasing it,
-/// because a single failed probe is not proof the provider stopped working.
-pub fn record_cook_progress_with_activity(
-    run_id: &str,
-    phase: &str,
-    attempt: u32,
-    detail: Option<&str>,
-    activity: Option<Value>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_progress_with_activity_in_store(
-        &lifecycle_store,
-        run_id,
-        phase,
-        attempt,
-        detail,
-        activity,
-    )
 }
 
 pub fn record_cook_progress_with_activity_in_store(
