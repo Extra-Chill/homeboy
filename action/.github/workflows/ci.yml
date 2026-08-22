@@ -933,22 +933,19 @@ jobs:
           name: homeboy-test-shard-candidate-${{ matrix.shard_id }}-${{ github.run_attempt }}
           path: differential-phase
 
-      # Mirrors "Fail candidate phase when terminal evidence is not pass" in the
-      # unsharded candidate job. The action deliberately continues through
-      # publication so reconciliation receives the terminal evidence, and the
-      # upload above has already run, so aggregation is unaffected. Differential
-      # reconciliation owns the final verdict when enabled; otherwise each shard
-      # still reports its own terminal failure.
-      #
-      # Without this, a shard that fails or exceeds test-timeout-seconds reports
-      # success while writing "timeout" into its manifest. Reconciliation then
-      # correctly refuses to pass an unmeasured suite, producing N green shard
-      # checks and one red aggregator: a reviewer scanning shard results sees
-      # only success, and the real cause is nowhere near the failing check.
-      #
-      - name: Fail candidate Test shard when terminal evidence is not pass
-        if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'
-        run: exit 1
+      # Artifacts are published before this step. Aggregation always runs after
+      # shard failures, while a green producing check now proves its uploaded
+      # terminal result is present, coherent, and passing.
+      - name: Validate candidate Test shard terminal provenance
+        if: always()
+        env:
+          TEST_SHARD_TERMINAL_ROOT: differential-phase/candidate
+          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
+          TEST_SHARD_PHASE: candidate
+          TEST_SHARD_COMMAND: ${{ matrix.command }}
+          TEST_SHARD_ID: ${{ matrix.shard_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh validate-terminal
       - name: Restore consumer Git exclusions
         if: always() && steps.prepare-workspace.outcome == 'success'
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
