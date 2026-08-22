@@ -168,10 +168,12 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "ID_OR_PATH")]
     pub workspace: Option<String>,
 
-    /// Repo/component slug for metadata and task grouping, e.g. sample-plugin.
-    /// Cook infers this from an explicit --workspace or --cwd Git checkout when
-    /// its configured remote mapping is unambiguous; an explicit value must
-    /// match the checkout.
+    /// Repository or configured component slug for metadata and task grouping,
+    /// e.g. sample-plugin. Cook accepts configured component aliases and
+    /// normalizes them to the configured component before provisioning. It
+    /// infers this from an explicit --workspace or --cwd Git checkout when its
+    /// configured remote mapping is unambiguous; an explicit value must match
+    /// the checkout.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 
