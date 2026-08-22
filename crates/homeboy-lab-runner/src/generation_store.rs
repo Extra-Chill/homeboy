@@ -1860,6 +1860,32 @@ pub(crate) fn promote_pending_replacement(runner_id: &str, session: &RunnerSessi
     })
 }
 
+/// Locked entry point used only by the process-isolation test below.
+///
+/// Production reaches `record_authenticated_admission_locked` from inside an
+/// already-held registry lock (see `reconcile`). This wrapper acquires the
+/// lock itself, which is precisely what
+/// `process_isolated_authenticated_admission_preserves_concurrent_job_admission`
+/// spawns two processes to verify: that a concurrent job record cannot lose
+/// accepted ownership while an admission holds the registry. Nothing in the
+/// shipped binary calls it, so it is compiled out rather than carried.
+#[cfg(test)]
+/// Persist a daemon that has already passed the authenticated connection and
+/// endpoint identity checks as the admission owner. This survives controller
+/// session-file drift, while retaining older generations for any work pinned
+/// to them.
+pub(crate) fn record_authenticated_admission(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<()> {
+    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("authenticated daemon session has no lease ID")
+    })?;
+    with_registry_lock(runner_id, || {
+        record_authenticated_admission_locked(runner_id, session, generation)
+    })
+}
+
 fn record_authenticated_admission_locked(
     runner_id: &str,
     session: &RunnerSession,
@@ -2729,6 +2755,13 @@ mod tests {
             registry["job_owners"]["accepted-during-reconcile"], "lease-fresh",
             "a stale legacy migration must reload rather than erase accepted ownership"
         );
+    }
+
+    #[test]
+    #[ignore = "invoked by process_isolated_authenticated_admission_preserves_concurrent_job_admission"]
+    fn process_record_authenticated_admission() {
+        let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+        record_authenticated_admission("runner-a", &fresh).expect("record authenticated admission");
     }
 
     #[test]
