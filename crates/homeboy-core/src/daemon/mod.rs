@@ -55,7 +55,10 @@ pub use control::{
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 use patch_capture::{capture_baseline, capture_patch_report};
-use runner_files::{create_runner_file_directory, download_runner_file, upload_runner_file};
+use runner_files::{
+    abort_runner_file_chunk_upload, create_runner_file_directory, download_runner_file,
+    reap_expired_uploads, upload_capabilities, upload_runner_file, upload_runner_file_chunk,
+};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
@@ -920,6 +923,32 @@ pub(super) struct FileUploadRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(super) struct FileUploadChunkRequest {
+    runner_id: String,
+    path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    upload_id: String,
+    offset: u64,
+    content_base64: String,
+    #[serde(rename = "final")]
+    final_chunk: bool,
+    #[serde(default)]
+    sha256: Option<String>,
+    size_bytes: u64,
+    #[serde(default)]
+    private: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FileUploadAbortRequest {
+    runner_id: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    upload_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct LifecycleStopRequest {
     lease_id: String,
     #[serde(default)]
@@ -1228,11 +1257,13 @@ where
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
     let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
+    let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
     let orchestration_reconciler = spawn_orchestration_reconciler(orchestration_shutdown_rx);
+    let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
     let mut serve_result = Ok(());
@@ -1260,10 +1291,12 @@ where
     let _ = completion_shutdown_tx.send(());
     let _ = schedule_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
+    let _ = upload_shutdown_tx.send(());
     let _ = local_child_reconciler.join();
     let _ = completion_notifier.join();
     let _ = schedule_ticker.join();
     let _ = orchestration_reconciler.join();
+    let _ = upload_reaper.join();
     serve_result.map(|()| state)
 }
 
@@ -1272,6 +1305,20 @@ where
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
 const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
+const UPLOAD_REAP_INTERVAL_SECS: u64 = 60;
+
+/// Reap abandoned uploads without depending on another request arriving.
+fn spawn_upload_reaper(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        reap_expired_uploads();
+        if shutdown
+            .recv_timeout(std::time::Duration::from_secs(UPLOAD_REAP_INTERVAL_SECS))
+            .is_ok()
+        {
+            return;
+        }
+    })
+}
 
 /// Environment variable overriding how often the daemon checks for due
 /// schedules, in seconds. Defaults to [`SCHEDULE_TICK_DEFAULT_INTERVAL_SECS`].
@@ -1662,6 +1709,7 @@ where
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
+    reap_expired_uploads();
     match (method, path.split('?').next().unwrap_or(path)) {
         ("GET", "/lifecycle/identity") => match daemon_endpoint_identity(path) {
             Ok(body) => HttpResponse {
@@ -1826,10 +1874,23 @@ where
             Ok(body) => daemon_endpoint_response("files.upload", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
+        ("POST", "/files/upload-chunk") => match upload_runner_file_chunk(body, &broker_auth) {
+            Ok(body) => daemon_endpoint_response("files.upload_chunk", body),
+            Err(err) => remote_runner::auth_or_bad_request(err),
+        },
+        ("POST", "/files/upload-chunk/abort") => {
+            match abort_runner_file_chunk_upload(body, &broker_auth) {
+                Ok(body) => daemon_endpoint_response("files.upload_chunk.abort", body),
+                Err(err) => remote_runner::auth_or_bad_request(err),
+            }
+        }
         ("POST", "/files/download") => match download_runner_file(body, &broker_auth) {
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
+        ("GET", "/files/capabilities") => {
+            daemon_endpoint_response("files.capabilities", upload_capabilities())
+        }
         ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
             HttpResponse {
                 status_code: 405,
@@ -1857,9 +1918,11 @@ where
             artifact: None,
         },
         ("GET", "/lifecycle/stop") => method_not_allowed(),
-        ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
-            method_not_allowed()
-        }
+        ("GET", "/files/mkdir")
+        | ("GET", "/files/upload")
+        | ("GET", "/files/upload-chunk")
+        | ("GET", "/files/upload-chunk/abort")
+        | ("GET", "/files/download") => method_not_allowed(),
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs/reconcile")
         | ("POST", "/runner/workspace-claims/acquire")
@@ -5789,6 +5852,7 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// Prevent a recovery from observing idle work and then racing a new durable
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
+#[cfg(target_os = "linux")]
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
     acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
 }
@@ -5800,6 +5864,7 @@ pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>
 
 enum DaemonAdmissionLockMode {
     Shared,
+    #[cfg(target_os = "linux")]
     Exclusive,
 }
 
@@ -5832,6 +5897,7 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             std::os::fd::AsRawFd::as_raw_fd(&file),
             match mode {
                 DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
+                #[cfg(target_os = "linux")]
                 DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
             },
         )
@@ -5845,12 +5911,13 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::LockFileEx;
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
         let flags = match mode {
             DaemonAdmissionLockMode::Shared => 0,
+            #[cfg(target_os = "linux")]
             DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
         };
         if unsafe {
@@ -5950,8 +6017,10 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(super) struct DaemonAdmissionFence(File);
 
+#[cfg(target_os = "linux")]
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]
@@ -6191,6 +6260,8 @@ pub fn handle_reverse_broker_test_connection(
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    const MAX_UPLOAD_CHUNK_BODY_BYTES: usize = 96 * 1024;
     let mut request = Vec::new();
     let mut buffer = [0; 8 * 1024];
     let headers_end = loop {
@@ -6199,6 +6270,12 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
             return Ok(request);
         }
         request.extend_from_slice(&buffer[..bytes]);
+        if request.len() > MAX_HEADER_BYTES && find_header_end(&request).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP request headers exceed the 16 KiB limit",
+            ));
+        }
         if let Some(index) = find_header_end(&request) {
             break index;
         }
@@ -6206,6 +6283,23 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 
     let headers = String::from_utf8_lossy(&request[..headers_end]);
     let content_length = http_content_length(&headers).unwrap_or(0);
+    let upload_chunk_request = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|target| {
+            target
+                .split_once('?')
+                .map(|(path, _)| path)
+                .or(Some(target))
+        })
+        .is_some_and(|path| path == "/files/upload-chunk");
+    if upload_chunk_request && content_length > MAX_UPLOAD_CHUNK_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "upload chunk request body exceeds the 96 KiB limit",
+        ));
+    }
     let body_start = headers_end + 4;
     let body_bytes = request.len().saturating_sub(body_start);
     let remaining = content_length.saturating_sub(body_bytes);
