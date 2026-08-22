@@ -536,6 +536,7 @@ fn copy_runner_exec_artifact_source_in_roots(
                         source: format!("{server_id}:{path_string}"),
                         destination: temp_path.display().to_string(),
                         recursive: true,
+                        directory_contents: false,
                         compress: true,
                         dry_run: false,
                         exclude: Vec::new(),
