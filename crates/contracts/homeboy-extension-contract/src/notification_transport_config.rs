@@ -38,6 +38,10 @@ pub struct NotificationRouteResolverResponse {
     pub status: NotificationRouteResolverStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
+    /// Extension-owned names for caller context that would permit a match.
+    /// Values are never included, keeping resolver diagnostics safe to persist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_context: Vec<String>,
 }
 
 /// Safe, read-only transport metadata exposed by extension discovery surfaces.

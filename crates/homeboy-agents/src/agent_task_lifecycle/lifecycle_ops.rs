@@ -1761,6 +1761,9 @@ where
     if let Some(route) = homeboy_core::notification_route::current() {
         route.insert_into_metadata(&mut metadata);
     }
+    if let Some(resolution) = homeboy_core::notification_route::current_resolution() {
+        resolution.insert_into_metadata(&mut metadata);
+    }
     if let Some(submission_metadata) = submission_metadata {
         metadata
             .as_object_mut()

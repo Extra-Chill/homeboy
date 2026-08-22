@@ -880,6 +880,19 @@ identifiers in core lifecycle state. Provider-specific execution settings belong
 in `--provider-config`; durable lifecycle commands remain headless and can be
 inspected later with `agent-task status`, `agent-task logs`, or `agent-task review`.
 
+To verify that an installed notification resolver receives the current bridge
+context without launching provider work, run the normal read-only Cook preview:
+
+```bash
+homeboy agent-task cook --preview --repo <repo> --task-url <issue-url> --prompt "verify notification resolver context" --no-finalize
+```
+
+Inspect `resolved.notification_resolution`: `resolver` proves the context selected
+a route, while `route_less`, `resolver_transport`, and `missing_context` provide
+safe remediation without exposing the opaque destination. Detached route-less
+submissions emit the same diagnosis before durable handoff, and `agent-task
+status <cook-id>` preserves it with the latest notification delivery outcome.
+
 `--backend` selects the generic executor backend, `--dispatch-provider-id` (also
 accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from

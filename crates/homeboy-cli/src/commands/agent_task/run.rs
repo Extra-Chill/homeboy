@@ -155,6 +155,30 @@ pub(crate) fn cook_attached_local_placement_disclosure(
     })
 }
 
+/// Warn before a detached Cook becomes observable only through durable status.
+pub(crate) fn detached_cook_route_less_warning(
+    resolution: &homeboy::core::notification_route::NotificationRouteResolution,
+) -> Option<String> {
+    if resolution.classification != "route_less" {
+        return None;
+    }
+    let resolver = resolution
+        .resolver_transport
+        .as_deref()
+        .map(|transport| format!(" installed resolver transport {transport}"))
+        .unwrap_or_else(|| " no installed resolver transport matched".to_string());
+    let missing = (!resolution.missing_context.is_empty()).then(|| {
+        format!(
+            "; provide caller context: {}",
+            resolution.missing_context.join(", ")
+        )
+    });
+    Some(format!(
+        "cook: detached notification route is route-less;{resolver}{missing}. Terminal updates will not return to the launching notification destination; inspect them with `homeboy agent-task status <cook-id>`",
+        missing = missing.unwrap_or_default(),
+    ))
+}
+
 fn cook_resolved_policy_disclosure(max_attempts: u32, plan: &AgentTaskPlan) -> String {
     let budget = &plan.options.execution_budget;
     format!(
@@ -231,6 +255,7 @@ pub(crate) fn preview_cook(
     let (args, provision) = resolve_cook_preview_destination(args)?;
     let replay = cook_preview_replay_argv(&args);
     let placement = preview_placement_policy_with_admission(&replay.argv);
+    let notification_resolution = homeboy::core::notification_route::current_resolution();
     if matches!(
         provision["action"].as_str(),
         Some("materialization_required" | "unresolved_provider")
@@ -247,6 +272,7 @@ pub(crate) fn preview_cook(
                     "head": args.head,
                     "placement": placement,
                     "workspace": provision,
+                    "notification_resolution": notification_resolution,
                 },
                 "replay_argv": replay.argv,
                 "replay_requires": replay.requires,
@@ -353,6 +379,7 @@ pub(crate) fn preview_cook(
                     "draft": args.draft_pr,
                     "ai_tool": args.ai_tool,
                 },
+                "notification_resolution": notification_resolution,
             },
             "replay_argv": replay.argv,
             "replay_requires": replay.requires,
@@ -5842,7 +5869,8 @@ mod tests {
     use super::{
         cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, durable_cook_identity_lines, preflight_continue_cook,
+        cook_resolved_policy_disclosure, detached_cook_route_less_warning,
+        durable_cook_identity_lines, preflight_continue_cook,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
 
@@ -5928,6 +5956,22 @@ mod tests {
             None
         );
         assert_eq!(cook_attached_local_placement_disclosure(None, false), None);
+    }
+
+    #[test]
+    fn detached_route_less_warning_names_only_safe_resolver_diagnostics() {
+        let mut resolution =
+            homeboy::core::notification_route::NotificationRouteResolution::new("route_less");
+        resolution.resolver_transport = Some("generic.completed".to_string());
+        resolution.missing_context = vec!["CALLER_THREAD_ID".to_string()];
+
+        let warning = detached_cook_route_less_warning(&resolution).expect("warning");
+        assert!(warning.contains("generic.completed"));
+        assert!(warning.contains("CALLER_THREAD_ID"));
+        assert!(!warning.contains("opaque-destination"));
+
+        resolution.classification = "resolver".to_string();
+        assert!(detached_cook_route_less_warning(&resolution).is_none());
     }
 
     #[test]

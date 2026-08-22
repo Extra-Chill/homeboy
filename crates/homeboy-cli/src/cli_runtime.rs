@@ -573,12 +573,12 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
-        let mut notification_route =
-            match crate::core::notification_route_resolver::resolve_from_cli_or_env(
+        let mut notification_resolution =
+            match crate::core::notification_route_resolver::resolve_from_cli_or_env_with_evidence(
                 cli.notification_transport.as_deref(),
                 cli.notification_route.as_deref(),
             ) {
-                Ok(route) => route,
+                Ok(resolution) => resolution,
                 Err(err) => {
                     output_runtime::emit_json_result_for_identity(
                         Err(err),
@@ -589,6 +589,7 @@ impl CliRuntime {
                     return std::process::ExitCode::from(2);
                 }
             };
+        let mut notification_route = notification_resolution.route.clone();
         if let Some(route) = &notification_route {
             // Placement routing happens before the thread-local command scope.
             // Mirror the selected route into its existing durable handoff input.
@@ -668,22 +669,42 @@ impl CliRuntime {
                 )
         ) && notification_route.is_none()
         {
-            notification_route = match crate::core::notification_route_resolver::resolve_installed()
-            {
-                Ok(route) => route,
-                Err(err) => {
-                    output_runtime::emit_json_result_for_identity(
-                        Err(err),
-                        output_file.as_deref(),
-                        2,
-                        &command_identity,
-                    );
-                    return std::process::ExitCode::from(2);
-                }
-            };
+            notification_resolution =
+                match crate::core::notification_route_resolver::resolve_installed_with_evidence() {
+                    Ok(resolution) => resolution,
+                    Err(err) => {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(err),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                };
+            notification_route = notification_resolution.route.clone();
             if let Some(route) = &notification_route {
                 cli.notification_transport = Some(route.transport.clone());
                 cli.notification_route = Some(route.route.clone());
+            }
+        }
+        if cli.detach_after_handoff
+            && notification_route.is_none()
+            && matches!(
+                &cli.command,
+                Commands::AgentTask(agent_task)
+                    if matches!(
+                        &agent_task.command,
+                        crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                    )
+            )
+        {
+            if let Some(warning) =
+                crate::commands::agent_task::run::detached_cook_route_less_warning(
+                    &notification_resolution.evidence,
+                )
+            {
+                eprintln!("{warning}");
             }
         }
 
@@ -742,11 +763,18 @@ impl CliRuntime {
         // placement routing can consume controller transport markers.
         crate::commands::utils::execution_provenance::capture(&cli, &normalized);
 
-        let route_result = crate::commands::route::route_after_parse_with_provenance(
-            &cli,
-            &normalized,
-            output_file.as_deref(),
-            Some(&command_provenance),
+        let route_result = crate::core::notification_route::with_current_resolution(
+            Some(notification_resolution.evidence.clone()),
+            || {
+                crate::core::notification_route::with_current(notification_route.clone(), || {
+                    crate::commands::route::route_after_parse_with_provenance(
+                        &cli,
+                        &normalized,
+                        output_file.as_deref(),
+                        Some(&command_provenance),
+                    )
+                })
+            },
         );
         if managed_runner_placement {
             resource_policy::clear_managed_runner_placement_context();
@@ -773,18 +801,23 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code = crate::core::notification_route::with_current(notification_route, || {
-            #[cfg(test)]
-            record_marker_context_before_run_command();
-            commands::output_runtime::run_command(
-                cli.command,
-                command_spec,
-                output_file.as_deref(),
-                &command_identity,
-                command_provenance,
-                cli.placement,
-            )
-        });
+        let exit_code = crate::core::notification_route::with_current_resolution(
+            Some(notification_resolution.evidence),
+            || {
+                crate::core::notification_route::with_current(notification_route, || {
+                    #[cfg(test)]
+                    record_marker_context_before_run_command();
+                    commands::output_runtime::run_command(
+                        cli.command,
+                        command_spec,
+                        output_file.as_deref(),
+                        &command_identity,
+                        command_provenance,
+                        cli.placement,
+                    )
+                })
+            },
+        );
         // The command's initial outcome is now durable and returned. Historical
         // runner evidence is a separately owned
         // best-effort recovery concern and cannot delay that boundary.
