@@ -2945,6 +2945,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission_fence() {
     let _home = HomeGuard::new();
