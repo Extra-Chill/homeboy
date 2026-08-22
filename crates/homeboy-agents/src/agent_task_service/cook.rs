@@ -6320,12 +6320,16 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         }
         PathBuf::from(identity.path)
     } else {
-        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+        let trusted_unpushed = continuation
+            .as_ref()
+            .map(|continuation| cook_owned_unpushed_destination(continuation))
+            .transpose()?
+            .flatten();
+        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
             &options.to_worktree,
             &homeboy_core::defaults::load_config(),
-            continuation
-                .as_ref()
-                .map(|continuation| &continuation.baseline),
+            continuation.as_ref().map(|continuation| &continuation.baseline),
+            trusted_unpushed.as_ref(),
         )?
         .worktree
         .path
@@ -6909,6 +6913,80 @@ struct TrackedPromotionContinuation {
     candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate,
 }
 
+/// A gate-failed promotion may be committed by Cook's recovery path before its
+/// final push. Accept only one direct child of the recorded pre-promotion HEAD
+/// whose tree is the recorded promoted candidate; this proves the commit did
+/// not add unrelated work.
+fn cook_owned_unpushed_destination(
+    continuation: &TrackedPromotionContinuation,
+) -> Result<Option<homeboy_core::worktree_providers::TrustedUnpushedWorktree>> {
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+        &continuation.candidate
+    else {
+        return Ok(None);
+    };
+    let path = &continuation.path;
+    let clean = homeboy_core::git::run_git(
+        path,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify Cook-owned committed candidate cleanliness",
+    )?
+    .trim()
+    .is_empty();
+    if !clean {
+        return Ok(None);
+    }
+    let head = homeboy_core::git::run_git(
+        path,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "resolve Cook-owned committed candidate HEAD",
+    )?
+    .trim()
+    .to_string();
+    if head == fingerprint.head {
+        return Ok(None);
+    }
+    let parent = homeboy_core::git::run_git(
+        path,
+        &["rev-parse", "--verify", "HEAD^"],
+        "resolve Cook-owned committed candidate parent",
+    )?
+    .trim()
+    .to_string();
+    let tree = homeboy_core::git::run_git(
+        path,
+        &["rev-parse", "--verify", "HEAD^{tree}"],
+        "resolve Cook-owned committed candidate tree",
+    )?
+    .trim()
+    .to_string();
+    if parent != fingerprint.head || tree != fingerprint.tree {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            "clean unpushed checkout is not the exact one-commit Cook-owned promoted candidate",
+            Some(path.display().to_string()),
+            None,
+        );
+        error.details["workspace"] = serde_json::json!({
+            "classification": "workspace.cook_owned_unpushed_commit_mismatch",
+            "reason": if parent != fingerprint.head { "divergent_ancestry" } else { "unrelated_unpushed_commit" },
+            "owning_layer": "cook",
+            "path": path,
+            "expected_parent": fingerprint.head,
+            "actual_parent": parent,
+            "expected_tree": fingerprint.tree,
+            "actual_tree": tree,
+        });
+        return Err(error);
+    }
+    Ok(Some(
+        homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+            path: path.clone(),
+            head,
+        },
+    ))
+}
+
 /// A dirty destination is reusable only for the exact post-apply candidate
 /// checkpoint owned by this Cook attempt. Core verifies the supplied baseline
 /// during provider resolution; Cook binds it to this attempt's target identity.
@@ -6935,12 +7013,12 @@ fn tracked_promotion_continuation(
         promotion.status,
         AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
     ) && (has_post_apply_checkpoint || authenticated_legacy_review);
-    // A gate-failed candidate remains eligible only when this exact lifecycle
-    // route selected its exact Cook attempt. Plan metadata is caller-controlled
-    // and is therefore never authorization for dirty-worktree reuse.
-    let route_authorized_gate_failure = promotion.status.gate_failed()
-        && has_post_apply_checkpoint
-        && has_cook_continue_route(options);
+    // A gate-failed candidate remains eligible only when its immutable recipe,
+    // indexed attempt, and run record all identify this Cook. This survives a
+    // failed controller process without treating caller-controlled route or
+    // plan metadata as authorization for dirty-worktree reuse.
+    let route_authorized_gate_failure =
+        promotion.status.gate_failed() && has_post_apply_checkpoint && cook_owns_attempt(options)?;
     if !(normal_continuation || route_authorized_gate_failure) {
         return Ok(None);
     }
@@ -7034,6 +7112,48 @@ fn tracked_promotion_continuation(
     }))
 }
 
+fn cook_owns_attempt(options: &AgentTaskCookServiceOptions) -> Result<bool> {
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let recipe = match recipe_store.load_recipe(&options.cook_id) {
+        Ok(recipe) => recipe,
+        Err(_) => return Ok(false),
+    };
+    let Some(attempt) = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == options.initial_run_id)
+    else {
+        return Ok(false);
+    };
+    let recipe_tasks = attempt
+        .plan
+        .tasks
+        .iter()
+        .map(|task| task.workspace.task_url.as_deref())
+        .collect::<Vec<_>>();
+    let option_tasks = options
+        .initial_plan
+        .tasks
+        .iter()
+        .map(|task| task.workspace.task_url.as_deref())
+        .collect::<Vec<_>>();
+    if recipe_tasks != option_tasks
+        || recipe
+            .finalization
+            .get("to_worktree")
+            .and_then(Value::as_str)
+            != Some(options.to_worktree.as_str())
+    {
+        return Ok(false);
+    }
+    let record = agent_task_lifecycle::exact_record(&options.initial_run_id)?;
+    Ok(
+        record.metadata.get("cook_id").and_then(Value::as_str) == Some(options.cook_id.as_str())
+            && record.metadata.get("cook_attempt").and_then(Value::as_u64)
+                == Some(u64::from(attempt.attempt)),
+    )
+}
+
 fn authenticate_tracked_promotion_continuation(
     target: &std::path::Path,
     continuation: &TrackedPromotionContinuation,
@@ -7070,7 +7190,8 @@ fn authenticate_tracked_promotion_continuation(
     }
     let actual =
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())?;
-    if actual != continuation.candidate {
+    if actual != continuation.candidate && cook_owned_unpushed_destination(continuation)?.is_none()
+    {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             "Cook continuation destination differs from its exact tracked post-apply candidate",

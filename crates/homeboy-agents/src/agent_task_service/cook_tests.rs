@@ -11119,6 +11119,8 @@ fn tracked_promotion_continuation_options(
     target: &std::path::Path,
 ) -> AgentTaskCookServiceOptions {
     let mut options = promotion_claim_options(cook_id, run_id);
+    options.initial_plan =
+        batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher)).initial_plan;
     options.to_worktree = target.display().to_string();
     options.source_worktree_path = Some(target.to_path_buf());
     options
@@ -11128,7 +11130,20 @@ fn record_tracked_promotion_continuation(
     options: &AgentTaskCookServiceOptions,
     target: &std::path::Path,
 ) {
+    if !CookRecipeStore::from_current_data_root()
+        .unwrap()
+        .recipe_exists(&options.cook_id)
+    {
+        persist_initial_recipe(options).unwrap();
+    }
     agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+        .unwrap();
+    agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+        record.metadata["cook_id"] = serde_json::json!(options.cook_id);
+        record.metadata["cook_attempt"] = serde_json::json!(1);
+    })
+    .unwrap();
+    agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, &options.initial_run_id)
         .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.initial_run_id)).unwrap();
     checkpoint["status"] = serde_json::json!("gate_failed");
@@ -11192,6 +11207,89 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
 
         assert!(!agent_task_lifecycle::run_record_exists(&options.initial_run_id).unwrap());
         assert!(tracked_promotion_continuation(&options).unwrap().is_none());
+    });
+}
+
+#[test]
+fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let target = tempfile::tempdir().expect("target");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(target.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(target.path().join("tracked.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "--quiet", "-b", "cook-candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.path().join("tracked.txt"), "promoted\n").unwrap();
+        let options = tracked_promotion_continuation_options(
+            "cook-owned-unpushed",
+            "run-cook-owned-unpushed",
+            target.path(),
+        );
+        record_tracked_promotion_continuation(&options, target.path());
+        assert!(Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "cook: retain candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        let continuation = tracked_promotion_continuation(&options)
+            .unwrap()
+            .expect("durable Cook attribution");
+        assert!(cook_owned_unpushed_destination(&continuation)
+            .unwrap()
+            .is_some());
+
+        std::fs::write(target.path().join("unrelated.txt"), "drift\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "unrelated.txt"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "unrelated"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        let error = cook_owned_unpushed_destination(&continuation).unwrap_err();
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.cook_owned_unpushed_commit_mismatch"
+        );
+        assert_eq!(error.details["workspace"]["reason"], "divergent_ancestry");
     });
 }
 
@@ -11485,18 +11583,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         crate::agent_task_candidate_baseline::register();
 
         assert!(
-            tracked_promotion_continuation(&options).unwrap().is_none(),
-            "gate-failed promotion requires cook-continue context"
+            tracked_promotion_continuation(&options).unwrap().is_some(),
+            "a durably attributed gate-failed promotion re-enters without a route token"
         );
         options.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
             "schema": "homeboy/agent-task-cook-continue-context/v1",
             "run_id": options.initial_run_id,
         });
-        assert!(
-            tracked_promotion_continuation(&options).unwrap().is_none(),
-            "forged plan metadata cannot authorize a gate-failed continuation"
-        );
-        authorize_cook_continue_route(&options).unwrap();
         let continuation = tracked_promotion_continuation(&options)
             .unwrap()
             .expect("tracked promotion continuation");
