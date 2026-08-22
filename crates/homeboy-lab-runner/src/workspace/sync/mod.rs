@@ -3672,7 +3672,7 @@ fn linux_process_is_self_or_descendant(mut pid: u32, ancestor: u32) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
-    let output = Command::new("lsof")
+    let output = std::process::Command::new("lsof")
         .args(["-Fn", "+D", &path.display().to_string()])
         .output();
     match output {
