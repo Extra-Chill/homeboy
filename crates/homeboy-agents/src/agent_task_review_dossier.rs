@@ -55,6 +55,9 @@ pub struct AgentTaskReviewEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiReviewVerificationClaim {
     pub command: String,
+    /// Provider-measured wall time. Controller gate timing is retained separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u128>,
     pub total: u64,
     pub passed: u64,
     pub failed: u64,
@@ -329,7 +332,7 @@ impl AiFilledReviewForm {
     pub fn requirement_feedback() -> &'static str {
         "Return a `review_form` object in your task outputs with: `summary` (what is changing and why), \
 `what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
-assessment), optional `verification` entries with an exact command and total/passed/failed/ignored counts, and \
+ assessment), optional `verification` entries with an exact command, elapsed_ms, and total/passed/failed/ignored counts, and \
 `used_for` (a concise, self-reflective description of the process you took — distinct from the summary of what \
 changed). Homeboy derives reviewer-visible verification from its durable candidate gate evidence. A successful \
 `used_for` is a genuine process reflection."
@@ -1646,6 +1649,7 @@ mod tests {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection::tests".into(),
+            elapsed_ms: None,
             total: 127,
             passed: 124,
             failed: 3,
@@ -1653,6 +1657,7 @@ mod tests {
         });
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection".into(),
+            elapsed_ms: None,
             total: 127,
             passed: 124,
             failed: 2,
@@ -1674,6 +1679,7 @@ mod tests {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection".into(),
+            elapsed_ms: None,
             total: 177,
             passed: 175,
             failed: 2,
@@ -1692,6 +1698,7 @@ mod tests {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "php artisan test".into(),
+            elapsed_ms: None,
             total: 7,
             passed: 7,
             failed: 0,

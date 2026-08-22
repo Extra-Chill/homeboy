@@ -884,12 +884,14 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     .expect_err("explicit stale daemon should require an explicit refresh");
 
     assert!(err.message.contains("connected but is not ready"));
-    assert!(err.message.contains("daemon is stale"));
-    assert!(err.message.contains("homeboy 0.218.0"));
-    assert!(err.message.contains("homeboy 0.219.0"));
+    // A stale report whose ownership proof is incomplete takes the terminal
+    // ownership-blocker branch, which replaces the stale-daemon branch rather
+    // than adding to it: no severity line, no version drift pair, and no
+    // refresh command, because none of them are authorized without that proof.
     assert!(err
         .message
         .contains("typed ownership evidence is insufficient"));
+    assert!(!err.message.contains("daemon is stale"));
     assert!(!err
         .message
         .contains("homeboy runner doctor lab --scope lab-offload"));

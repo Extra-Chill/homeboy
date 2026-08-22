@@ -11,6 +11,8 @@ pub struct TransferConfig {
     pub destination: String,
     /// Transfer directories recursively
     pub recursive: bool,
+    /// Target a directory's contents rather than the directory itself.
+    pub directory_contents: bool,
     /// Compress data during transfer
     pub compress: bool,
     /// Show what would be transferred without doing it
@@ -23,6 +25,10 @@ pub struct TransferConfig {
 pub struct TransferOutput {
     pub source: String,
     pub destination: String,
+    /// Source passed to the transfer backend after directory semantics are resolved.
+    pub effective_source: String,
+    /// Destination directory receiving the transfer contents.
+    pub effective_destination: String,
     pub method: String,
     pub direction: String,
     pub recursive: bool,
@@ -44,6 +50,8 @@ fn transfer_output(
     TransferOutput {
         source: config.source.clone(),
         destination: config.destination.clone(),
+        effective_source: effective_source(config),
+        effective_destination: config.destination.clone(),
         method: method.into(),
         direction: direction.into(),
         recursive: config.recursive,
@@ -52,6 +60,18 @@ fn transfer_output(
         error,
         dry_run,
     }
+}
+
+fn effective_source(config: &TransferConfig) -> String {
+    if config.directory_contents {
+        directory_contents_path(&config.source)
+    } else {
+        config.source.clone()
+    }
+}
+
+fn directory_contents_path(path: &str) -> String {
+    format!("{}/.", path.trim_end_matches('/'))
 }
 
 /// A parsed transfer target: either local or remote.
@@ -169,12 +189,17 @@ fn plan_push(
     let client = SshClient::from_server(&srv, server_id)?;
 
     let remote_target = format!("{}@{}:{}", client.user, client.host, remote_path);
+    let effective_local_path = if config.directory_contents {
+        directory_contents_path(local_path)
+    } else {
+        local_path.to_string()
+    };
 
     if config.dry_run {
         log_status!(
             "dry-run",
             "Would push {} -> {}:{}",
-            local_path,
+            effective_local_path,
             server_id,
             remote_path
         );
@@ -205,13 +230,13 @@ fn plan_push(
         scp_args.push("-C".to_string());
     }
 
-    scp_args.push(local_path.to_string());
+    scp_args.push(effective_local_path.clone());
     scp_args.push(remote_target);
 
     log_status!(
         "transfer",
         "Pushing {} -> {}:{}",
-        local_path,
+        effective_local_path,
         server_id,
         remote_path
     );
@@ -233,14 +258,19 @@ fn plan_pull(
     let srv = super::load(server_id)?;
     let client = SshClient::from_server(&srv, server_id)?;
 
-    let remote_target = format!("{}@{}:{}", client.user, client.host, remote_path);
+    let effective_remote_path = if config.directory_contents {
+        directory_contents_path(remote_path)
+    } else {
+        remote_path.to_string()
+    };
+    let remote_target = format!("{}@{}:{}", client.user, client.host, effective_remote_path);
 
     if config.dry_run {
         log_status!(
             "dry-run",
             "Would pull {}:{} -> {}",
             server_id,
-            remote_path,
+            effective_remote_path,
             local_path
         );
         return Ok(TransferPlan {
@@ -279,7 +309,7 @@ fn plan_pull(
         "transfer",
         "Pulling {}:{} -> {}",
         server_id,
-        remote_path,
+        effective_remote_path,
         local_path
     );
 
@@ -518,6 +548,7 @@ mod tests {
                 source: "./missing-artifact.zip".to_string(),
                 destination: "prod:/tmp/artifact.zip".to_string(),
                 recursive: false,
+                directory_contents: false,
                 compress: true,
                 dry_run: true,
                 exclude: Vec::new(),
@@ -543,6 +574,7 @@ mod tests {
                 source: "old:/var/www/uploads".to_string(),
                 destination: "new:/var/www/uploads".to_string(),
                 recursive: true,
+                directory_contents: false,
                 compress: true,
                 dry_run: true,
                 exclude: vec!["cache".to_string()],
@@ -555,6 +587,50 @@ mod tests {
             assert!(out.recursive);
             assert!(out.compress);
             assert!(out.dry_run);
+        });
+    }
+
+    #[test]
+    fn sync_to_existing_destination_plans_directory_contents() {
+        with_isolated_home(|_| {
+            save_server("sandbox");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: "local/existing-dir".to_string(),
+                destination: "sandbox:/existing/same-dir".to_string(),
+                recursive: true,
+                directory_contents: true,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run sync");
+
+            assert_eq!(code, 0);
+            assert_eq!(out.effective_source, "local/existing-dir/.");
+            assert_eq!(out.effective_destination, "sandbox:/existing/same-dir");
+        });
+    }
+
+    #[test]
+    fn sync_to_missing_destination_plans_directory_contents() {
+        with_isolated_home(|_| {
+            save_server("sandbox");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: "local/existing-dir".to_string(),
+                destination: "sandbox:/missing/same-dir".to_string(),
+                recursive: true,
+                directory_contents: true,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run sync");
+
+            assert_eq!(code, 0);
+            assert_eq!(out.effective_source, "local/existing-dir/.");
+            assert_eq!(out.effective_destination, "sandbox:/missing/same-dir");
         });
     }
 

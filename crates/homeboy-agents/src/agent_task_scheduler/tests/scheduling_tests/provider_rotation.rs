@@ -6,19 +6,8 @@ use super::shared::*;
 mod provider_rotation_tests {
     use super::*;
 
-    struct DirtyCandidateThenSuccessExecutor {
-        observed_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
-        calls: AtomicUsize,
-        declared_mismatched_patch: bool,
-    }
-
     struct AdoptionExecutor {
         observed: Arc<Mutex<Option<crate::agent_task::AgentTaskAttemptWorkspace>>>,
-    }
-
-    struct AdoptCandidateThenSuccessExecutor {
-        calls: AtomicUsize,
-        patch: String,
     }
 
     struct ProviderReportedRotationExecutor {
@@ -26,9 +15,18 @@ mod provider_rotation_tests {
     }
 
     struct DirtyCandidateThenTerminalExecutor {
-        calls: AtomicUsize,
+        calls: Arc<AtomicUsize>,
         terminal: AgentTaskOutcomeStatus,
         terminal_outputs: Value,
+    }
+
+    struct CandidateMissingReviewFormExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct ProviderReportedTimeoutExecutor {
+        calls: Arc<AtomicUsize>,
+        returns_patch: bool,
     }
 
     impl AgentTaskExecutorAdapter for ProviderReportedRotationExecutor {
@@ -86,6 +84,72 @@ mod provider_rotation_tests {
         }
     }
 
+    impl AgentTaskExecutorAdapter for CandidateMissingReviewFormExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace");
+            fs::write(
+                std::path::Path::new(root).join("candidate.txt"),
+                "candidate\n",
+            )
+            .expect("candidate edit");
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for ProviderReportedTimeoutExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            }
+
+            let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
+            result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+            if self.returns_patch {
+                let patch = "diff --git a/candidate.txt b/candidate.txt\nnew file mode 100644\n--- /dev/null\n+++ b/candidate.txt\n@@ -0,0 +1 @@\n+candidate\n";
+                let path = std::path::Path::new(
+                    request
+                        .workspace
+                        .root
+                        .as_deref()
+                        .expect("attempt workspace"),
+                )
+                .join("candidate.patch");
+                fs::write(&path, patch).expect("candidate patch");
+                result.artifacts.push(AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "provider-timeout-patch".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("candidate.patch".to_string()),
+                    label: None,
+                    role: Some("patch".to_string()),
+                    semantic_key: None,
+                    path: Some(path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(patch.len() as u64),
+                    sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                        patch.as_bytes(),
+                    )),
+                    metadata: Value::Null,
+                });
+            }
+            result
+        }
+    }
+
     impl AgentTaskExecutorAdapter for AdoptionExecutor {
         fn execute(
             &self,
@@ -98,109 +162,6 @@ mod provider_rotation_tests {
                 .lock()
                 .expect("observed workspace")
                 .replace(request.workspace.attempt.expect("attempt ownership"));
-            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-        }
-    }
-
-    impl AgentTaskExecutorAdapter for AdoptCandidateThenSuccessExecutor {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                let root = request.workspace.root.as_deref().expect("attempt root");
-                let patch_path = std::path::Path::new(root).join("candidate.patch");
-                fs::write(&patch_path, &self.patch).expect("candidate patch");
-                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
-                outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
-                outcome.artifacts.push(AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "candidate".to_string(),
-                    kind: "patch".to_string(),
-                    name: Some("candidate.patch".to_string()),
-                    label: None,
-                    role: Some("patch".to_string()),
-                    semantic_key: None,
-                    path: Some(patch_path.display().to_string()),
-                    url: None,
-                    mime: Some("text/x-patch".to_string()),
-                    size_bytes: None,
-                    sha256: None,
-                    metadata: Value::Null,
-                });
-                return outcome;
-            }
-            let root = request.workspace.root.as_deref().expect("attempt root");
-            assert!(std::path::Path::new(root).join("candidate.txt").is_file());
-            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-        }
-    }
-
-    impl AgentTaskExecutorAdapter for DirtyCandidateThenSuccessExecutor {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            let root = request
-                .workspace
-                .root
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .expect("attempt workspace");
-            self.observed_roots
-                .lock()
-                .expect("observed roots")
-                .push(root.clone());
-            assert_eq!(
-                request.executor.config["workspace_root"],
-                root.display().to_string(),
-                "provider workspace config follows the isolated attempt root"
-            );
-            assert!(
-                request
-                    .executor
-                    .config
-                    .get("workspace_permission_root")
-                    .is_none(),
-                "scheduler must not add provider-owned config without a capability declaration"
-            );
-            assert_eq!(
-                request.executor.config["cwd"],
-                root.display().to_string(),
-                "provider cwd follows the isolated attempt root"
-            );
-            if call == 0 {
-                fs::write(root.join("candidate.txt"), "candidate\n").expect("candidate edit");
-                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
-                outcome.failure_classification = Some(AgentTaskFailureClassification::Timeout);
-                if self.declared_mismatched_patch {
-                    let patch_path = root.join("reported.patch");
-                    fs::write(&patch_path, "not the candidate patch\n").expect("mismatched patch");
-                    outcome.artifacts.push(AgentTaskArtifact {
-                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "mismatched-patch".to_string(),
-                        kind: "patch".to_string(),
-                        name: Some("reported.patch".to_string()),
-                        label: None,
-                        role: Some("patch".to_string()),
-                        semantic_key: None,
-                        path: Some(patch_path.display().to_string()),
-                        url: None,
-                        mime: Some("text/x-patch".to_string()),
-                        size_bytes: None,
-                        sha256: None,
-                        metadata: Value::Null,
-                    });
-                }
-                return outcome;
-            }
-            assert!(
-                !root.join("candidate.txt").exists(),
-                "the rotated provider must receive a clean attempt checkout"
-            );
             outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
         }
     }
@@ -402,150 +363,158 @@ mod provider_rotation_tests {
     }
 
     #[test]
-    fn rotation_compacts_exact_recoverable_patch() {
-        rotation_compacts_only_exact_recoverable_patch(false);
+    fn timeout_candidate_converges_before_failed_rotation() {
+        retained_timeout_candidate_converges_before_rotation();
     }
 
     #[test]
-    fn rotation_retains_mismatched_recoverable_patch() {
-        rotation_compacts_only_exact_recoverable_patch(true);
+    fn timeout_candidate_converges_before_empty_rotation() {
+        retained_timeout_candidate_converges_before_rotation();
     }
 
-    fn rotation_compacts_only_exact_recoverable_patch(declared_mismatched_patch: bool) {
+    #[test]
+    fn timeout_candidate_converges_before_another_provider_rotation() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let run_id = "timeout-candidate-convergence";
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(&workspace)
+            .status()
+            .expect("configure repository identity")
+            .success());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit run");
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenTerminalExecutor {
+            calls: Arc::clone(&calls),
+            terminal: AgentTaskOutcomeStatus::Succeeded,
+            terminal_outputs: Value::Null,
+        }))
+        .with_run_id(run_id)
+        .run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::PartialRecoverable
+        );
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::CandidateRecoverable
+        );
+        assert!(aggregate.events.iter().all(|event| !event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider rotation queued"))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_reported_timeout_with_fingerprinted_patch_converges() {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
-        let observed_roots = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenSuccessExecutor {
-            observed_roots: Arc::clone(&observed_roots),
-            calls: AtomicUsize::new(0),
-            declared_mismatched_patch,
-        }))
-        .with_run_id("cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874");
+        let calls = Arc::new(AtomicUsize::new(0));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.tasks[0].executor.model = Some("primary-model".to_string());
-        plan.tasks[0].executor.config = json!({
-            "workspace_root": workspace.display().to_string(),
-            "cwd": workspace.display().to_string(),
-            "nested": { "workspace_root": workspace.display().to_string() },
-        });
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
 
-        // Scheduling against a run id needs that run to exist durably:
-        // `reserve_provider_execution` reads the record before it will let a
-        // provider execute, so without this every task fails admission with
-        // "agent-task run record not found" instead of rotating.
-        crate::agent_tasks::lifecycle::submit_plan(
-            &plan,
-            Some("cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874"),
-        )
-        .expect("submit plan");
-        crate::agent_tasks::lifecycle::mark_running(
-            "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874",
-        )
-        .expect("mark running");
-
-        let aggregate = scheduler.run(plan);
+        let aggregate = AgentTaskScheduler::new(Arc::new(ProviderReportedTimeoutExecutor {
+            calls: Arc::clone(&calls),
+            returns_patch: true,
+        }))
+        .run(plan);
 
         assert_eq!(
             aggregate.status,
-            AgentTaskAggregateStatus::Succeeded,
-            "{aggregate:#?}"
+            AgentTaskAggregateStatus::PartialRecoverable
         );
-        assert!(
-            !workspace.join("candidate.txt").exists(),
-            "the managed task worktree must remain untouched"
-        );
-        let roots = observed_roots.lock().expect("observed roots");
-        assert_eq!(roots.len(), 2);
-        assert_ne!(roots[0], workspace);
-        assert_ne!(roots[1], workspace);
-        assert_ne!(roots[0], roots[1]);
-        let candidate = aggregate.outcomes[0]
-            .artifacts
-            .iter()
-            .find(|artifact| {
-                artifact.id
-                    == if declared_mismatched_patch {
-                        "mismatched-patch"
-                    } else {
-                        "task-1-attempt-1-uncommitted-changes"
-                    }
-            })
-            .expect("failed attempt patch candidate is retained for promotion");
-        assert_eq!(candidate.kind, "patch");
-        assert_eq!(candidate.metadata["producer_attempt"], 1);
-        assert_eq!(candidate.metadata["provider_rotation_index"], 0);
-        assert_eq!(candidate.metadata["provider_backend"], "test");
-        assert_eq!(candidate.metadata["provider_model"], "primary-model");
-        assert!(candidate
-            .sha256
-            .as_deref()
-            .is_some_and(|sha256| sha256.len() == 64));
         assert_eq!(
-            candidate.metadata["run_id"],
-            "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874"
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::CandidateRecoverable
         );
-        assert_eq!(candidate.metadata["task_id"], "task-1");
-        let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))
-            .expect("candidate patch remains available");
-        if declared_mismatched_patch {
-            assert_eq!(patch, "not the candidate patch\n");
-        } else {
-            assert!(patch.contains("diff --git a/candidate.txt b/candidate.txt"));
-        }
-        assert!(candidate
-            .path
-            .as_deref()
-            .is_some_and(|path| path.contains("agent-task/attempt-patches/cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874/task-1")));
-        // The first attempt left an uncommitted candidate, but the finalized
-        // durable patch byte-for-byte proves the staged checkout against base.
-        // Rotation can therefore unregister it without retaining multi-GB
-        // build state; the second clean attempt is retired normally.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(aggregate.outcomes[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.provider_timeout_recoverable_candidate"
+        }));
+        assert!(aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation")
+            .is_none());
+    }
+
+    #[test]
+    fn provider_reported_timeout_without_patch_rotates() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(ProviderReportedTimeoutExecutor {
+            calls: Arc::clone(&calls),
+            returns_patch: false,
+        }))
+        .run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
-            roots[0].exists(),
-            declared_mismatched_patch,
-            "only an exactly represented candidate may retain its checkout"
-        );
-        assert!(
-            !roots[1].exists(),
-            "clean succeeding attempt checkout is retired after its executor thread stops"
+            aggregate.outcomes[0].metadata["provider_rotation"]["attempts"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
         );
     }
 
     #[test]
-    fn timeout_candidate_remains_recoverable_after_failed_rotation() {
-        retained_timeout_candidate_survives_terminal_rotation(
-            AgentTaskOutcomeStatus::ProviderError,
-            Value::Null,
-            "candidate_recoverable",
+    fn missing_review_form_with_a_valid_patch_converges_without_rotation() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(CandidateMissingReviewFormExecutor {
+            calls: Arc::clone(&calls),
+        }))
+        .run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
         );
+        assert!(aggregate.outcomes[0].outputs["review_form"].is_null());
+        assert!(aggregate.events.iter().all(|event| !event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider rotation queued"))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn timeout_candidate_remains_recoverable_after_empty_rotation() {
-        retained_timeout_candidate_survives_terminal_rotation(
-            AgentTaskOutcomeStatus::Succeeded,
-            json!({
-                "provider_run_result": {
-                    "completed": false,
-                    "reply": "",
-                    "messages": [],
-                    "tool_calls": []
-                }
-            }),
-            "candidate_recoverable",
-        );
-    }
-
-    fn retained_timeout_candidate_survives_terminal_rotation(
-        terminal: AgentTaskOutcomeStatus,
-        terminal_outputs: Value,
-        expected_terminal_status: &str,
-    ) {
+    fn retained_timeout_candidate_converges_before_rotation() {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -567,10 +536,11 @@ mod provider_rotation_tests {
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit run");
+        let calls = Arc::new(AtomicUsize::new(0));
         let aggregate = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenTerminalExecutor {
-            calls: AtomicUsize::new(0),
-            terminal,
-            terminal_outputs,
+            calls: Arc::clone(&calls),
+            terminal: AgentTaskOutcomeStatus::ProviderError,
+            terminal_outputs: Value::Null,
         }))
         .with_run_id(run_id)
         .run(plan);
@@ -585,90 +555,15 @@ mod provider_rotation_tests {
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
         assert_eq!(
             outcome.failure_classification,
-            Some(AgentTaskFailureClassification::Provider)
+            Some(AgentTaskFailureClassification::Timeout)
         );
         assert!(outcome.artifacts.iter().any(|artifact| {
             artifact.kind == "patch"
                 && artifact.metadata["producer_attempt"] == 1
                 && artifact.metadata["provider_rotation_index"] == 0
         }));
-        let attempts = outcome.metadata["provider_rotation"]["attempts"]
-            .as_array()
-            .expect("rotation evidence");
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0]["status"], "timeout");
-        assert_eq!(attempts[1]["status"], expected_terminal_status);
-    }
-
-    #[test]
-    fn rotation_adopts_only_the_explicit_portable_candidate() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
-        assert!(Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo.git"
-            ])
-            .current_dir(&workspace)
-            .status()
-            .expect("remote")
-            .success());
-        let patch = "diff --git a/candidate.txt b/candidate.txt\nnew file mode 100644\n--- /dev/null\n+++ b/candidate.txt\n@@ -0,0 +1 @@\n+candidate\n".to_string();
-        let scheduler = AdoptCandidateThenSuccessExecutor {
-            calls: AtomicUsize::new(0),
-            patch,
-        };
-        let mut plan = plan_with_tasks(1);
-        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
-            backend: Some("provider-b".to_string()),
-            adoption: Some(AgentTaskCandidateAdoption {
-                source_run_id: String::new(),
-                source_task_id: String::new(),
-                source_attempt: 0,
-                provider_backend: String::new(),
-                provider_selector: None,
-                provider_model: None,
-                task_base_sha: String::new(),
-                repository_identity: String::new(),
-                workspace_identity: String::new(),
-                artifact_id: String::new(),
-                sha256: String::new(),
-                decision: AgentTaskCandidateAdoptionDecision::AdoptPreviousCandidate,
-                content: None,
-            }),
-            ..Default::default()
-        }]));
-        enable_rotation(&mut plan);
-
-        // Recording a provider execution is durable, so the run it belongs to
-        // has to exist before the scheduler dispatches it.
-        crate::agent_task_lifecycle::submit_plan(&plan, Some("run-adopt"))
-            .expect("durable run record");
-        let aggregate = AgentTaskScheduler::new(Arc::new(scheduler))
-            .with_run_id("run-adopt")
-            .run(plan);
-
-        assert_eq!(
-            aggregate.status,
-            AgentTaskAggregateStatus::Succeeded,
-            "{aggregate:#?}"
-        );
-        assert_eq!(
-            aggregate.outcomes[0].metadata["candidate_adoption"]["artifact_id"],
-            "candidate"
-        );
-        assert!(aggregate.outcomes[0].artifacts.iter().any(|artifact| {
-            artifact.id == "candidate"
-                && artifact
-                    .url
-                    .as_deref()
-                    .is_some_and(|url| url.contains("/artifacts#task=task-1"))
-        }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(outcome.metadata.pointer("/provider_rotation").is_none());
     }
 
     #[test]

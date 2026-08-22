@@ -1047,9 +1047,9 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     // runtime that creates it rather than inheriting the source's (possibly stale)
     // pinned runtime. Delegating Retry here stamped the replacement with the
     // obsolete runtime after an upgrade (Extra-Chill/homeboy#8550).
-    let run_id = match &cli.command {
+    let run_id: Option<String> = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
-            crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(args.run_id.clone()),
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
                 if args.bridge
                     && crate::agents::agent_tasks::service::terminal_transport_recovery_required(
@@ -1058,8 +1058,19 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             {
                 None
             }
-            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
-            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(args.run_id.clone()),
+            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(args.run_id.clone()),
+            // Promotion mutates the durable source run (checkpointing apply and
+            // final reports) and must therefore execute under the controller
+            // runtime that admitted that run. Without this branch a promoted
+            // runtime could own the process that writes an older run's record,
+            // and any live stderr progress would be stranded behind a later
+            // routing boundary.
+            crate::commands::agent_task::AgentTaskCommand::Promote(args) => {
+                crate::agents::agent_tasks::lifecycle::status(&args.source)
+                    .ok()
+                    .map(|record| record.run_id)
+            }
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
                 if matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);
@@ -1073,7 +1084,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let Some(run_id) = run_id else {
         return Ok(None);
     };
-    delegate_agent_task_lifecycle_to_resolved_runtime(run_id, normalized_args)
+    delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
 }
 
 fn delegate_cook_continue_to_pinned_runtime(

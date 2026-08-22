@@ -4,6 +4,44 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.352.0] - 2026-08-22
+
+### Added
+- compare patch candidates
+- stream durable progress
+
+### Changed
+- reuse compatible Cargo targets
+- remove blanket dead_code suppression from commands and command_contract
+- run the gate-build binary in prepare and host instead of rebuilding
+- drop the Intel macOS target and the duplicate release preflight build
+- cover merge candidate finalization recovery
+- root the controller-runtime admission lock
+- delete 13 ambient wrappers nothing called
+
+### Fixed
+- retry transient worktree provider resolves
+- preserve detached handoff output parity
+- update two readiness tests to the fenced-recovery contract
+- sync directory contents into destination
+- reenter owned promoted candidates
+- keep failure recording rooted
+- infer repository base
+- scope agent task review evidence
+- converge recovered candidates early
+- reject octopus candidates at finalization
+- require merge proof at finalization
+- finalize verified existing candidates on recovery
+- bind merge adoption to verified base
+- adopt verified-base merge candidates
+- recover verified no-change cooks
+- finalize reviewed existing candidates
+- resolve startup recovery roots at the CLI boundary
+- require terminal gates execution verdict
+- carry the caller's roots into the lease heartbeat
+- fence recovery on ownership proof
+- expose placement in compact help
+
 ## [0.351.3] - 2026-08-21
 
 ### Changed

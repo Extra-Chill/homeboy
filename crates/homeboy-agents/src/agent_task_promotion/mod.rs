@@ -23,15 +23,17 @@ pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };
 pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
-pub use promote::promote;
-pub use promote::promote_with_checkpoint;
-pub use promote::resume_promoted_patch;
+pub(crate) use promote::emit_promotion_progress;
 pub(crate) use promote::with_gate_supervision;
 pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub(crate) use promote::{
     canonical_recoverable_patch_artifacts_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store,
+};
+pub use promote::{
+    promote, promote_with_checkpoint, resume_promoted_patch, with_promotion_progress,
+    PromotionProgress, PromotionProgressCallback,
 };
 pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{

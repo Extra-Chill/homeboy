@@ -6,10 +6,15 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
+
+const CANONICAL_PATCH_CANDIDATE_LIMIT: usize = 16;
+const CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT: u64 = 256 * 1024;
+const CANONICAL_PATCH_BYTES_TOTAL_LIMIT: u64 = 1024 * 1024;
 use crate::agent_task_gate::{
     AgentTaskGateCandidateCheckout, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
     AgentTaskGateVisibility,
@@ -42,6 +47,48 @@ use gate_run::PromotionGateRun;
 
 thread_local! {
     static GATE_SUPERVISION: RefCell<Option<Arc<crate::agent_task_gate::GateSupervision>>> = const { RefCell::new(None) };
+    static PROMOTION_PROGRESS: RefCell<Option<PromotionProgressCallback>> = const { RefCell::new(None) };
+}
+
+pub type PromotionProgressCallback = Arc<dyn Fn(&PromotionProgress) -> Result<()> + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub struct PromotionProgress {
+    pub phase: &'static str,
+    pub gate: Option<String>,
+    pub last_progress: Option<String>,
+}
+
+pub fn with_promotion_progress<T>(
+    progress: PromotionProgressCallback,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    PROMOTION_PROGRESS.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "promotion progress scopes cannot nest"
+        );
+        *slot.borrow_mut() = Some(progress);
+        let result = operation();
+        *slot.borrow_mut() = None;
+        result
+    })
+}
+
+pub(crate) fn emit_promotion_progress(
+    phase: &'static str,
+    gate: Option<String>,
+    last_progress: Option<String>,
+) {
+    PROMOTION_PROGRESS.with(|slot| {
+        if let Some(progress) = slot.borrow().as_ref() {
+            let _ = progress(&PromotionProgress {
+                phase,
+                gate,
+                last_progress,
+            });
+        }
+    });
 }
 
 pub(crate) fn with_gate_supervision<T>(
@@ -576,6 +623,11 @@ fn promote_with_provider_and_checkpoint_internal(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<AgentTaskPromotionReport> {
+    emit_promotion_progress(
+        "apply",
+        None,
+        Some("validating promotion input".to_string()),
+    );
     validate_workspace_handle(&options.to_worktree)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
@@ -749,6 +801,32 @@ fn promote_with_provider_and_checkpoint_internal(
             .as_deref()
             .map(crate::agent_task_promotion::candidate_fingerprint)
             .transpose()?;
+        // An empty provider patch can be a review of a candidate that was
+        // already committed on the declared destination. Retain that immutable
+        // candidate delta so Cook can distinguish it from a base-equal no-op.
+        let verified_base = worktree_path
+            .zip(options.base_ref.as_deref())
+            .map(|(path, base)| capture_declared_base(path, Some(base)))
+            .transpose()?
+            .flatten();
+        let changed_files = verified_base
+            .as_ref()
+            .map(|base| {
+                git_output(
+                    worktree_path.expect("verified base requires a worktree path"),
+                    &["diff", "--name-only", &base.sha, "HEAD"],
+                )
+                .map(|output| {
+                    output
+                        .lines()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         return Ok(AgentTaskPromotionReport {
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -762,11 +840,11 @@ fn promote_with_provider_and_checkpoint_internal(
                 path: patch_path.display().to_string(),
                 sha256: artifact.sha256,
             },
-            changed_files: Vec::new(),
+            changed_files,
             command_evidence: Vec::new(),
             deterministic_gates: gates.deterministic_gates,
             gate_results: gates.gate_results,
-            verified_base: None,
+            verified_base,
             provenance: json!({
                 "source_schema": outcome.schema,
                 "artifact_metadata": artifact.metadata,
@@ -817,6 +895,7 @@ fn promote_with_provider_and_checkpoint_internal(
         // be replaced before the provider opens it.
         let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
         let provider_patch_path = normalized_patch_file.path().display().to_string();
+        emit_promotion_progress("apply", None, Some("applying patch".to_string()));
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
@@ -908,7 +987,6 @@ fn promote_with_provider_and_checkpoint_internal(
     let gate_feedback_baseline = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
-
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
@@ -1533,6 +1611,17 @@ fn promote_committed_changes(
     let gate_feedback_baseline = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
+    let adoption_merge = committed_patch.adoption_merge.as_ref().map(|proof| {
+        json!({
+            "candidate_parent": &proof.candidate_parent,
+            "resolved_base_parent": &proof.resolved_base_parent,
+            "candidate_tree": &proof.candidate_tree,
+            "resolved_base_tree": &proof.resolved_base_tree,
+            "candidate": &committed_patch.candidate,
+            "changed_files": &normalized_patch.changed_files,
+            "patch_sha256": &committed_patch.sha256,
+        })
+    });
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -1564,6 +1653,7 @@ fn promote_committed_changes(
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
             "historical_task_base": committed_patch.historical_task_base,
+            "adoption_merge": adoption_merge,
             "candidate": candidate,
             "destination_baseline": candidate,
             "gate_feedback_baseline": gate_feedback_baseline,
@@ -1647,6 +1737,11 @@ fn run_promotion_gates(
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
 ) -> Result<PromotionGateRun> {
+    emit_promotion_progress(
+        "hydration",
+        None,
+        Some("preparing candidate and dependencies".to_string()),
+    );
     if worktree_path.is_dir() {
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             worktree_path,
@@ -1720,6 +1815,11 @@ fn run_promotion_gates(
                 blocking_gate_id,
             )
         } else {
+            emit_promotion_progress(
+                "gate",
+                Some(format!("gate-{}", index + 1)),
+                Some("starting deterministic gate".to_string()),
+            );
             run_promotion_gate(
                 options,
                 provider,
@@ -1738,6 +1838,11 @@ fn run_promotion_gates(
         }
         deterministic_gates.push(gate);
     }
+    emit_promotion_progress(
+        "cleanup",
+        None,
+        Some("cleaning promotion gate resources".to_string()),
+    );
     let has_gate_failure = deterministic_gates
         .iter()
         .any(|gate| gate.status == AgentTaskGateStatus::Failed);
@@ -2550,7 +2655,13 @@ fn select_recoverable_patch_artifact(
 #[derive(Debug, Clone)]
 pub struct CanonicalRecoverablePatchArtifacts {
     pub artifacts: Vec<AgentTaskArtifact>,
+    /// Normalized patch bodies keyed by canonical artifact ID. Callers use this
+    /// only for bounded, deterministic projections; full patches remain at their
+    /// durable artifact addresses.
+    pub patch_contents: BTreeMap<String, String>,
     pub unavailable: Vec<Value>,
+    pub omitted_candidate_count: usize,
+    pub omitted_patch_bytes: u64,
 }
 
 /// Resolve and normalize recoverable provider artifacts into deterministic patch
@@ -2589,9 +2700,15 @@ fn canonical_recoverable_patch_artifacts_internal(
         .cloned()
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    let omitted_candidate_count = candidates
+        .len()
+        .saturating_sub(CANONICAL_PATCH_CANDIDATE_LIMIT);
+    candidates.truncate(CANONICAL_PATCH_CANDIDATE_LIMIT);
 
-    let mut canonical = Vec::<(String, AgentTaskArtifact)>::new();
+    let mut canonical = Vec::<(String, AgentTaskArtifact, String)>::new();
     let mut unavailable = Vec::new();
+    let mut read_patch_bytes = 0_u64;
+    let mut omitted_patch_bytes = 0_u64;
     for mut artifact in candidates {
         let Some(kind) = canonical_patch_kind(&artifact.kind) else {
             continue;
@@ -2610,6 +2727,25 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
+        let patch_bytes = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                unavailable
+                    .push(json!({ "id": artifact.id, "path": path, "reason": error.to_string() }));
+                continue;
+            }
+        };
+        if patch_bytes > CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT
+            || read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT
+        {
+            omitted_patch_bytes = omitted_patch_bytes.saturating_add(patch_bytes);
+            unavailable.push(json!({
+                "id": artifact.id,
+                "reason": "canonical_patch_byte_budget_exceeded",
+                "size_bytes": patch_bytes,
+            }));
+            continue;
+        }
         let patch = match std::fs::read_to_string(&path) {
             Ok(patch) => patch,
             Err(error) => {
@@ -2618,6 +2754,7 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
+        read_patch_bytes = read_patch_bytes.saturating_add(patch_bytes);
         if let Err(error) = validate_artifact_content(&artifact, &patch) {
             unavailable.push(json!({ "id": artifact.id, "path": path, "reason": error.message }));
             continue;
@@ -2632,17 +2769,26 @@ fn canonical_recoverable_patch_artifacts_internal(
         };
         let digest = content_hash::sha256_hex(normalized.content.as_bytes());
         let identity = canonical_patch_identity_with_digest(&artifact, &digest);
-        if !canonical.iter().any(|(existing, _)| existing == &identity) {
-            canonical.push((identity, artifact));
+        if !canonical
+            .iter()
+            .any(|(existing, _, _)| existing == &identity)
+        {
+            canonical.push((identity, artifact, normalized.content));
         }
     }
 
     Ok(CanonicalRecoverablePatchArtifacts {
         artifacts: canonical
+            .iter()
+            .map(|(_, artifact, _)| artifact.clone())
+            .collect(),
+        patch_contents: canonical
             .into_iter()
-            .map(|(_, artifact)| artifact)
+            .map(|(_, artifact, patch)| (artifact.id, patch))
             .collect(),
         unavailable,
+        omitted_candidate_count,
+        omitted_patch_bytes,
     })
 }
 

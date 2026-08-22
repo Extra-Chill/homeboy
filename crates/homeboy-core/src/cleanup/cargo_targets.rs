@@ -154,6 +154,19 @@ pub fn acquire_managed_cargo_target(
     source_path: &Path,
     explicit_target: Option<&str>,
 ) -> Result<ManagedCargoTarget> {
+    acquire_managed_cargo_target_with_compatibility(owner, source_path, explicit_target, &[])
+}
+
+/// Acquire a target store whose identity is bound to the repository and the
+/// declared build compatibility surface.  Cargo still owns fine-grained crate
+/// fingerprints inside this directory; this boundary prevents unrelated build
+/// universes from sharing the directory at all.
+pub fn acquire_managed_cargo_target_with_compatibility(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+    declared_environment: &[(&str, &str)],
+) -> Result<ManagedCargoTarget> {
     if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
         let target_dir = PathBuf::from(target);
         let target_dir = if target_dir.is_absolute() {
@@ -169,7 +182,7 @@ pub fn acquire_managed_cargo_target(
         });
     }
 
-    let compatibility = cargo_target_repository_identity(source_path);
+    let compatibility = cargo_target_compatibility_identity(source_path, declared_environment);
     let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
@@ -177,6 +190,40 @@ pub fn acquire_managed_cargo_target(
         owner: owner.to_string(),
         _lease: Some(lease),
     })
+}
+
+fn cargo_target_compatibility_identity(
+    source_path: &Path,
+    declared_environment: &[(&str, &str)],
+) -> String {
+    let mut inputs = BTreeMap::new();
+    inputs.insert(
+        "repository".to_string(),
+        cargo_target_repository_identity(source_path),
+    );
+    inputs.insert(
+        "platform".to_string(),
+        format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+    );
+    for name in [
+        "Cargo.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+    ] {
+        let path = source_path.join(name);
+        let digest = fs::read(&path)
+            .map(|bytes| content_hash::sha256_hex(&bytes))
+            .unwrap_or_else(|_| "absent".to_string());
+        inputs.insert(format!("input:{name}"), digest);
+    }
+    for (name, value) in declared_environment {
+        inputs.insert(format!("env:{name}"), (*value).to_string());
+    }
+    content_hash::sha256_hex(
+        &serde_json::to_vec(&inputs).expect("Cargo compatibility inputs serialize"),
+    )
 }
 
 /// Cargo itself separates compatible crate fingerprints inside one target
@@ -1052,6 +1099,58 @@ mod tests {
             "homeboy cleanup --include shared-cargo-targets --apply"
         );
         assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn compatibility_identity_reuses_matching_inputs_and_rejects_changes() {
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "lock-a").unwrap();
+        fs::write(
+            workspace.path().join("rust-toolchain.toml"),
+            "channel = 'stable'",
+        )
+        .unwrap();
+        let first = cargo_target_compatibility_identity(
+            workspace.path(),
+            &[
+                ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+                ("RUSTFLAGS", ""),
+            ],
+        );
+        let warm = cargo_target_compatibility_identity(
+            workspace.path(),
+            &[
+                ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+                ("RUSTFLAGS", ""),
+            ],
+        );
+        assert_eq!(first, warm);
+        fs::write(workspace.path().join("Cargo.lock"), "lock-b").unwrap();
+        assert_ne!(
+            first,
+            cargo_target_compatibility_identity(
+                workspace.path(),
+                &[
+                    ("CARGO_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+                    ("RUSTFLAGS", "")
+                ],
+            )
+        );
+        fs::write(
+            workspace.path().join("rust-toolchain.toml"),
+            "channel = 'nightly'",
+        )
+        .unwrap();
+        assert_ne!(
+            warm,
+            cargo_target_compatibility_identity(
+                workspace.path(),
+                &[
+                    ("CARGO_BUILD_TARGET", "aarch64-apple-darwin"),
+                    ("RUSTFLAGS", "-Dwarnings")
+                ],
+            )
+        );
     }
 
     #[test]

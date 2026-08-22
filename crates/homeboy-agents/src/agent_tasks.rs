@@ -392,7 +392,7 @@ pub mod promotion {
         AgentTaskPromotionNotification, AgentTaskPromotionOptions, AgentTaskPromotionReport,
         AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
         AgentTaskPromotionVerifiedBase, CanonicalRecoverablePatchArtifacts,
-        AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+        PromotionProgressCallback, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 }
 
@@ -484,12 +484,12 @@ pub mod service {
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state, cook_batch_job_submission,
         detached_batch_coordinator_control, discover_runs, enqueue_terminal_continuation,
-        evidence_ref_task_id, execute_promotion, hydrate_evidence_ref, hydrate_evidence_summary,
-        load_recipe, load_recipe_for_attempt, logs, normalize_plan_workspaces,
-        offloaded_status_remediation, persist_initial_recipe, persist_manual_finalization_intent,
-        persist_provider_boundary_replay_evidence, persisted_status,
-        preflight_cook_continuation_admission, prepare_manual_finalization_identity,
-        promotion_is_resumable, promotion_source, read_plan,
+        evidence_ref_task_id, execute_promotion, execute_promotion_with_progress,
+        hydrate_evidence_ref, hydrate_evidence_summary, load_recipe, load_recipe_for_attempt, logs,
+        normalize_plan_workspaces, offloaded_status_remediation, persist_initial_recipe,
+        persist_manual_finalization_intent, persist_provider_boundary_replay_evidence,
+        persisted_status, preflight_cook_continuation_admission,
+        prepare_manual_finalization_identity, promotion_is_resumable, promotion_source, read_plan,
         reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,
         reconstruct_adoption_options_with_dispatcher, reconstruct_options_with_dispatcher,
         record_replacement_gate_proof, recover_cook_pr, recover_terminal_transport_proxy_evidence,
