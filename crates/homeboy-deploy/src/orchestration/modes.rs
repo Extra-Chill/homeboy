@@ -143,6 +143,11 @@ pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationRe
                 .with_component_status(status)
                 .with_content_manifest(manifest)
                 .with_source_identity(c, config.head);
+            if let Some(package) = canonical_packages.get(&c.id) {
+                result = result
+                    .with_artifact_path(Some(package.path.display().to_string()))
+                    .with_artifact_source(DeployArtifactSource::ReleaseAsset);
+            }
             if let Some(state) = release_state {
                 result = result.with_release_state(state);
             }

@@ -1120,6 +1120,58 @@ mod tests {
     }
 
     #[test]
+    fn deploy_modes_report_the_explicit_archive_version_source() {
+        let component = Component {
+            id: "wp-codebox".to_string(),
+            local_path: "/source/wp-codebox".to_string(),
+            build_artifact: Some("build/wp-codebox.zip".to_string()),
+            version_targets: Some(vec![
+                homeboy_core::component::VersionTarget {
+                    file: "npm-shrinkwrap.json".to_string(),
+                    pattern: None,
+                    artifact_path: None,
+                },
+                homeboy_core::component::VersionTarget {
+                    file: "wp-codebox.php".to_string(),
+                    pattern: None,
+                    artifact_path: Some("wp-codebox/wp-codebox.php".to_string()),
+                },
+            ]),
+            ..Component::default()
+        };
+        let result_for = |status| {
+            ComponentDeployResult::new(&component, "/srv/site")
+                .with_status(status)
+                .with_versions(Some("0.22.0".to_string()), None)
+        };
+        let mut result = DeployOrchestrationResult {
+            results: vec![
+                result_for("checked"),
+                result_for("planned"),
+                result_for("success"),
+            ],
+            summary: DeploySummary {
+                total: 3,
+                succeeded: 1,
+                failed: 0,
+                skipped: 0,
+            },
+            deploy_run_id: None,
+        };
+
+        attach_version_sources(&mut result, std::slice::from_ref(&component));
+
+        for row in result.results {
+            let source = row
+                .version_sources
+                .and_then(|sources| sources.artifact)
+                .expect("artifact source");
+            assert_eq!(source.file, "wp-codebox/wp-codebox.php");
+            assert_eq!(source.path, "wp-codebox/wp-codebox.php");
+        }
+    }
+
+    #[test]
     fn deploy_tag_for_version_formats_regular_release_tag() {
         let component = make_component("sample-plugin", "/tmp/not-a-git-repo");
 
