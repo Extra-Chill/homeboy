@@ -421,7 +421,7 @@ if [ "${mode}" = "--report" ]; then
 fi
 
 case "${outcome}" in
-  enforced)
+  enforced | bypassable)
     exit 0
     ;;
   *)

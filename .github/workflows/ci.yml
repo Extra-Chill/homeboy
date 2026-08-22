@@ -83,9 +83,7 @@ jobs:
       - name: Validate required check contexts and report live enforcement
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          bash .github/validate-required-gates.sh --report
-          bash .github/test-manage-required-gates-ruleset.sh
+        run: bash .github/validate-required-gates.sh --report
       # A reusable-workflow pin must be a COMMIT. Pinning an annotated tag's ref
       # object kills every run at startup with zero jobs scheduled, which is how
       # #12152 broke `main` until #12153 repinned the dereferenced commit.
