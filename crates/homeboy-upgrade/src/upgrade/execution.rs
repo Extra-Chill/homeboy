@@ -163,7 +163,14 @@ pub(crate) fn execute_upgrade(
             }
             let workspace_root = resolve_source_workspace(source_path)?;
             let source_revision = prepare_source_workspace_for_upgrade(&workspace_root)?;
-            let built_binary = source_built_binary_path(&workspace_root);
+            // Keep this lease alive through the build and promotion. Cleanup can
+            // reclaim a terminal target, but cannot remove this live output.
+            let cargo_target = homeboy_core::acquire_isolated_cargo_target(
+                "source-upgrade",
+                &workspace_root,
+                env::var("CARGO_TARGET_DIR").ok().as_deref(),
+            )?;
+            let built_binary = source_built_binary_path(cargo_target.target_dir());
 
             // Execute the upgrade command from defaults
             let cmd = source_upgrade_command_for_prepared_workspace(
@@ -171,7 +178,12 @@ pub(crate) fn execute_upgrade(
                 &workspace_root,
                 explicit_source_path,
             )?;
-            run_source_upgrade_command(&cmd, &workspace_root, SOURCE_UPGRADE_TIMEOUT)?;
+            run_source_upgrade_command(
+                &cmd,
+                &workspace_root,
+                SOURCE_UPGRADE_TIMEOUT,
+                Some((cargo_target.target_dir(), cargo_target.resolution())),
+            )?;
             let replacement_target = active_binary_path().ok();
             // Source command output is streamed to the invoking process so
             // controller timeouts can distinguish a build from a stalled run.
@@ -409,6 +421,7 @@ fn run_source_upgrade_command(
     command: &str,
     workspace_root: &Path,
     timeout: Duration,
+    cargo_target: Option<(&Path, &str)>,
 ) -> Result<()> {
     upgrade_phase("building source workspace");
     let mut child_command = Command::new("sh");
@@ -418,6 +431,11 @@ fn run_source_upgrade_command(
         .env(REENTRANCY_GUARD_ENV, "1")
         .env(SOURCE_BUILD_ONLY_ENV, "1")
         .stdin(Stdio::null());
+    if let Some((cargo_target_dir, resolution)) = cargo_target {
+        child_command
+            .env("CARGO_TARGET_DIR", cargo_target_dir)
+            .env("HOMEBOY_CARGO_TARGET_RESOLUTION", resolution);
+    }
     let guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
         Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
     })?;
@@ -448,11 +466,7 @@ fn run_source_upgrade_command(
                     });
                 }
                 return Err(append_cleanup_failure_context(
-                    upgrade_failure_error(
-                        InstallMethod::Source,
-                        &format!("source upgrade command exited with {}", status),
-                        None,
-                    ),
+                    source_upgrade_command_failure(status, cargo_target.map(|(path, _)| path)),
                     cleanup.err(),
                 ));
             }
@@ -477,6 +491,26 @@ fn run_source_upgrade_command(
             }
         }
     }
+}
+
+fn source_upgrade_command_failure(
+    status: std::process::ExitStatus,
+    cargo_target_dir: Option<&Path>,
+) -> Error {
+    if let Some(target) = cargo_target_dir.filter(|target| !target.exists()) {
+        return Error::internal_unexpected(format!(
+            "source upgrade build output was deleted while its lifecycle lease was active: {}",
+            target.display()
+        ))
+        .with_hint(
+            "The leased Cargo target vanished before the build process exited. This is external deletion, not target filesystem capacity exhaustion.",
+        );
+    }
+    upgrade_failure_error(
+        InstallMethod::Source,
+        &format!("source upgrade command exited with {status}"),
+        None,
+    )
 }
 
 /// Keep the command failure actionable while retaining bounded cleanup evidence.
@@ -1414,32 +1448,8 @@ fn source_install_matches_binary_path(built_binary: &Path, active_binary: &Path)
     binary_files_match(built_binary, active_binary)
 }
 
-/// Cargo resolves a relative CARGO_TARGET_DIR from its current working directory.
-/// Source upgrades run Cargo from the source workspace, so use that same base here.
-fn source_built_binary_path(workspace_root: &Path) -> PathBuf {
-    source_built_binary_path_for_target_dir(
-        workspace_root,
-        env::var_os("CARGO_TARGET_DIR").as_deref(),
-    )
-}
-
-fn source_built_binary_path_for_target_dir(
-    workspace_root: &Path,
-    cargo_target_dir: Option<&std::ffi::OsStr>,
-) -> PathBuf {
-    let target_dir = cargo_target_dir
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                workspace_root.join(path)
-            }
-        })
-        .unwrap_or_else(|| workspace_root.join("target"));
-
-    target_dir.join("release/homeboy")
+fn source_built_binary_path(cargo_target_dir: &Path) -> PathBuf {
+    cargo_target_dir.join("release/homeboy")
 }
 
 fn binary_files_match(left: &Path, right: &Path) -> Result<bool> {

@@ -21,12 +21,12 @@ use crate::{git, Error, Result};
 
 mod cargo_targets;
 pub use cargo_targets::{
-    acquire_managed_cargo_target, acquire_managed_cargo_target_for_environment,
-    acquire_managed_cargo_target_with_compatibility, acquire_shared_cargo_target,
-    cargo_target_compatibility, cleanup_shared_cargo_targets, shared_cargo_target_inventory,
-    shared_cargo_target_root, shared_cargo_target_storage_status, CargoTargetCleanupOptions,
-    CargoTargetCleanupOutput, CargoTargetCompatibility, CargoTargetStorageStatus,
-    ManagedCargoTarget, SharedCargoTargetLease,
+    acquire_isolated_cargo_target, acquire_managed_cargo_target,
+    acquire_managed_cargo_target_for_environment, acquire_managed_cargo_target_with_compatibility,
+    acquire_shared_cargo_target, cargo_target_compatibility, cleanup_shared_cargo_targets,
+    shared_cargo_target_inventory, shared_cargo_target_root, shared_cargo_target_storage_status,
+    CargoTargetCleanupOptions, CargoTargetCleanupOutput, CargoTargetCompatibility,
+    CargoTargetStorageStatus, ManagedCargoTarget, SharedCargoTargetLease,
 };
 mod automatic_retention;
 pub use automatic_retention::{

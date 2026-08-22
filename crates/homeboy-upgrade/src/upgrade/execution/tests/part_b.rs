@@ -743,7 +743,7 @@ fn explicit_source_upgrade_runs_build_phase_without_upstream_on_local_branch_or_
             source_upgrade_command_for_prepared_workspace(&upgrade_command, checkout.path(), true)
                 .expect("explicit source command");
 
-        run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5))
+        run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5), None)
             .expect("guarded upgrade command reaches build phase");
         assert_eq!(std::fs::read_to_string(build_marker).unwrap(), "built");
     }
@@ -779,7 +779,7 @@ fn explicit_source_upgrade_skips_git_switch_main_and_reaches_build_phase() {
         source_upgrade_command_for_prepared_workspace(&upgrade_command, checkout.path(), true)
             .expect("explicit source command");
 
-    run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5))
+    run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5), None)
         .expect("guarded upgrade command reaches build phase despite git switch main");
 
     assert_eq!(std::fs::read_to_string(build_marker).unwrap(), "built");

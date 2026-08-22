@@ -91,6 +91,7 @@ fn source_upgrade_command_returns_after_same_binary_success() {
         "printf 'built same-version binary\\n'",
         workspace.path(),
         Duration::from_secs(1),
+        None,
     )
     .expect("source command completes");
 }
@@ -104,7 +105,7 @@ fn source_build_command_receives_build_only_contract() {
         quote_path(&observed.display().to_string())
     );
 
-    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1), None)
         .expect("source build completes");
 
     assert_eq!(
@@ -206,7 +207,7 @@ fn source_upgrade_completion_reaps_background_process_group() {
         quote_path(&pid_file.display().to_string())
     );
 
-    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1), None)
         .expect("source command completes");
 
     let child_pid = std::fs::read_to_string(&pid_file)
@@ -238,8 +239,9 @@ fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
         quote_path(&pid_file.display().to_string())
     );
 
-    let err = run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50))
-        .expect_err("long-running source command times out");
+    let err =
+        run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50), None)
+            .expect_err("long-running source command times out");
     assert!(
         err.details.to_string().to_lowercase().contains("timed out"),
         "unexpected timeout error: {err:?}"
@@ -403,37 +405,57 @@ fn source_install_byte_match_rejects_same_version_stale_binary() {
 }
 
 #[test]
-fn source_built_binary_path_uses_source_local_target_by_default() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_built_binary_path_uses_the_managed_target() {
+    let target = Path::new("/managed/homeboy-cargo-target");
 
     assert_eq!(
-        source_built_binary_path_for_target_dir(workspace, None),
-        workspace.join("target/release/homeboy")
+        source_built_binary_path(target),
+        target.join("release/homeboy")
     );
 }
 
 #[test]
-fn source_built_binary_path_uses_absolute_cargo_target_dir() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_build_command_uses_the_managed_target_outside_the_checkout() {
+    let workspace = tempfile::tempdir().expect("workspace");
     let target_dir = Path::new("/shared/cargo-target");
+    let observed = workspace.path().join("cargo-target");
+    let command = format!(
+        "printf '%s' \"$CARGO_TARGET_DIR\" > {}",
+        quote_path(&observed.display().to_string())
+    );
+
+    run_source_upgrade_command(
+        &command,
+        workspace.path(),
+        Duration::from_secs(1),
+        Some((target_dir, "isolated")),
+    )
+    .expect("source build completes");
 
     assert_eq!(
-        source_built_binary_path_for_target_dir(workspace, Some(target_dir.as_os_str())),
-        target_dir.join("release/homeboy")
+        std::fs::read_to_string(observed).expect("target value"),
+        "/shared/cargo-target"
     );
 }
 
 #[test]
-fn source_built_binary_path_resolves_relative_cargo_target_dir_from_workspace() {
-    let workspace = Path::new("/workspace/homeboy");
+fn source_upgrade_reports_external_target_deletion_separately_from_capacity() {
+    let target = tempfile::tempdir().expect("target");
+    let deleted = target.path().join("deleted");
+    let status = Command::new("sh")
+        .args(["-c", "exit 1"])
+        .status()
+        .expect("status");
 
-    assert_eq!(
-        source_built_binary_path_for_target_dir(
-            workspace,
-            Some(std::ffi::OsStr::new("shared/target"))
-        ),
-        workspace.join("shared/target/release/homeboy")
-    );
+    let error = source_upgrade_command_failure(status, Some(&deleted));
+
+    assert!(error
+        .message
+        .contains("deleted while its lifecycle lease was active"));
+    assert!(error
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("external deletion")));
 }
 
 #[test]
