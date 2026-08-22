@@ -57,6 +57,11 @@ pub fn apply(
 
     repair_managed_sources(client, report);
 
+    if let Some(repair) = terminal_daemon_recovery_repair(report) {
+        report.repairs.push(repair);
+        return;
+    }
+
     // The report already carries a lease-specific, controller-frame plan.
     // Executing it is the whole point of `--repair`; the fixed
     // disconnect/connect pair below is the fallback for a connected daemon whose
@@ -164,6 +169,144 @@ pub fn apply(
     }
 }
 
+fn terminal_daemon_recovery_blocker(report: &RunnerDoctorOutput) -> bool {
+    report
+        .daemon_recovery
+        .as_ref()
+        .is_some_and(|recovery| recovery.blocks_automatic_recovery())
+}
+
+fn terminal_daemon_recovery_repair(report: &RunnerDoctorOutput) -> Option<RunnerRepair> {
+    terminal_daemon_recovery_blocker(report).then(|| RunnerRepair {
+        id: "repair.daemon".to_string(),
+        status: RunnerDoctorStatus::Warning,
+        message: format!(
+            "No automatic daemon repair was applied because the current daemon evidence authorizes no recovery: {}",
+            report
+                .daemon_recovery
+                .as_ref()
+                .and_then(|recovery| recovery.ownership_evidence.as_deref())
+                .unwrap_or("no ownership evidence was recorded")
+        ),
+        commands: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::runner::doctor::types::{
+        RunnerCapabilities, RunnerResources, RunnerTargetSummary,
+    };
+
+    #[test]
+    fn unavailable_lease_missing_ownership_with_a_plan_is_terminal() {
+        for recovery_evidence in [Some(
+            homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable,
+        )] {
+            let mut report = RunnerDoctorOutput {
+                variant: "doctor",
+                command: "runner.doctor",
+                runner_id: "lab".to_string(),
+                runner: RunnerTargetSummary {
+                    target_type: "ssh",
+                    registry: None,
+                    server: None,
+                },
+                status: RunnerDoctorStatus::Error,
+                capabilities: RunnerCapabilities::default(),
+                resources: RunnerResources::default(),
+                checks: Vec::new(),
+                secret_env_migration: None,
+                diagnostics: None,
+                daemon_recovery: Some(homeboy::core::daemon::DaemonFreshnessReport {
+                    fresh: false,
+                    stale_reason_code: Some(
+                        homeboy::core::daemon::DaemonStaleReasonCode::LeaseMissing,
+                    ),
+                    restartable: false,
+                    lease_id: None,
+                    pid: None,
+                    recovery_evidence,
+                    ownership_evidence: Some("remote lease ownership unavailable".to_string()),
+                    adoption_command: None,
+                    binary_hash: None,
+                    daemon_version: Some("0.349.0".to_string()),
+                    daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
+                    runtime_paths: None,
+                    active_jobs: 0,
+                    termination_evidence: None,
+                    repair_plan: vec![homeboy::core::daemon::DaemonRepairStep::text(
+                        "runner_reconcile_leaseless_orphans",
+                        "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+                    )],
+                }),
+                admission_summary: None,
+                provider_readiness: None,
+                repairs: Vec::new(),
+            };
+
+            assert!(
+                !apply_daemon_repair_plan("lab", &mut report),
+                "unavailable ownership must reject a non-empty reconciliation plan"
+            );
+            let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
+
+            assert_eq!(repair.status, RunnerDoctorStatus::Warning);
+            assert!(repair.commands.is_empty());
+            assert!(repair
+                .message
+                .contains("remote lease ownership unavailable"));
+        }
+    }
+
+    #[test]
+    fn stale_typed_proof_without_a_plan_is_terminal_before_generic_reconnect() {
+        let report = RunnerDoctorOutput {
+            variant: "doctor",
+            command: "runner.doctor",
+            runner_id: "lab".to_string(),
+            runner: RunnerTargetSummary {
+                target_type: "ssh",
+                registry: None,
+                server: None,
+            },
+            status: RunnerDoctorStatus::Error,
+            capabilities: RunnerCapabilities::default(),
+            resources: RunnerResources::default(),
+            checks: Vec::new(),
+            secret_env_migration: None,
+            diagnostics: None,
+            daemon_recovery: Some(homeboy::core::daemon::DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(
+                    homeboy::core::daemon::DaemonStaleReasonCode::LeaseSchemaMismatch,
+                ),
+                restartable: true,
+                lease_id: None,
+                pid: None,
+                recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
+                ownership_evidence: Some("no validated recovery action".to_string()),
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
+            admission_summary: None,
+            provider_readiness: None,
+            repairs: Vec::new(),
+        };
+
+        let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
+        assert!(repair.commands.is_empty());
+        assert!(repair.message.contains("no validated recovery action"));
+    }
+}
+
 /// What an executor should do about one typed repair step.
 ///
 /// Dispatch is a pure function of the step's code plus typed evidence from the
@@ -250,7 +393,7 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
     let Some(recovery) = report.daemon_recovery.as_ref() else {
         return false;
     };
-    if recovery.repair_plan.is_empty() {
+    if recovery.repair_plan.is_empty() || !recovery.has_recovery_ownership_proof() {
         return false;
     }
 

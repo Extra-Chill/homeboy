@@ -326,6 +326,89 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
     assert_eq!(report.daemon_recovery.expect("recovery").active_jobs, 1);
 }
 
+#[test]
+fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
+    let recovery = homeboy::core::daemon::DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(homeboy::core::daemon::DaemonStaleReasonCode::VersionMismatch),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some(
+            "remote daemon lease ownership could not be established".to_string(),
+        ),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: Some("0.349.0".to_string()),
+        daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    };
+    let runner = Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: Some("lab".to_string()),
+        workspace_root: None,
+        settings: server::RunnerSettings::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: server::RunnerPolicy::default(),
+    };
+    let server = server::Server {
+        id: "lab".to_string(),
+        aliases: Vec::new(),
+        host: "example.test".to_string(),
+        user: "runner".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: Default::default(),
+        runner: None,
+    };
+    let summary = homeboy::runner::runners::RunnerAdmissionSummary {
+        runner_id: "lab".to_string(),
+        connected: false,
+        daemon_fresh: false,
+        daemon_compatible: false,
+        accepting_jobs: false,
+        active_job_count: 0,
+        live_daemon_job_count: 0,
+        retained_durable_job_count: 0,
+        unresolved_retained_projection_count: 0,
+        admission_blocking_job_ids: Vec::new(),
+        unresolved_job_owners: Vec::new(),
+        unresolved_generation_ids: Vec::new(),
+        stale_job_count: 0,
+        daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
+        blocking_generation: None,
+        draining_generation_count: 0,
+        safe_to_rotate: false,
+        next_action: None,
+    };
+
+    let report =
+        remote::disconnected_report("lab", &runner, &server, Some(recovery), Some(summary));
+
+    assert_eq!(report.checks[0].remediation, None);
+    assert_eq!(
+        report.checks[0]
+            .details
+            .get("ownership_evidence")
+            .map(String::as_str),
+        Some("remote daemon lease ownership could not be established")
+    );
+    assert_eq!(
+        report.admission_summary.expect("admission").next_action,
+        None,
+        "doctor must not recommend the invocation that produced this terminal diagnosis"
+    );
+}
+
 /// #11103: the repair plan was computed everywhere and executed nowhere.
 /// `--repair` refused most scopes outright and, for the one scope it handled,
 /// emitted a fixed disconnect/connect pair regardless of what the report said.

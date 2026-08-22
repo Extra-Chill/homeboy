@@ -56,6 +56,7 @@ fn scope_cook_help(command: Command) -> Command {
         "no_finalize",
         "draft_pr",
         "max_attempts",
+        "placement",
     ];
 
     fn visit(command: Command, path: &[String]) -> Command {

@@ -1027,8 +1027,8 @@ fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
 #[test]
 fn remote_recovery_without_evidence_emits_no_repair_plan() {
     // Nothing was proven about ownership or liveness, so no lease-specific step
-    // can be named. An empty plan is the honest answer and is what lets the
-    // generic reconnect fallback fire downstream.
+    // can be named. An empty plan is the honest answer; downstream projections
+    // retain it as a terminal diagnostic rather than reconnecting blindly.
     let status = remote_daemon_status_for_test(false, false, 1, "lease-unknown", 4545);
 
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
@@ -1052,20 +1052,7 @@ fn unavailable_remote_recovery_is_fail_closed() {
     assert!(recovery.lease_id.is_none());
     assert!(recovery.pid.is_none());
     assert!(recovery.adoption_command.is_none());
-    // No lease-specific action is knowable, but the controller-side session
-    // rebuild is, and it must arrive as typed steps rather than as prose
-    // assembled by a downstream fallback (#10302).
-    assert_eq!(
-        recovery
-            .repair_plan
-            .iter()
-            .map(|step| (step.code.as_str(), step.command.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            ("runner_disconnect", "homeboy runner disconnect homeboy-lab"),
-            ("runner_connect", "homeboy runner connect homeboy-lab"),
-        ]
-    );
+    assert!(recovery.repair_plan.is_empty());
 }
 
 #[test]
