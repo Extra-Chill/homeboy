@@ -900,8 +900,8 @@ mod tests {
 #[derive(Args, Debug, Clone)]
 #[command(disable_help_flag = true)]
 pub struct AgentTaskCookArgs {
-    /// Show the compact task-first Cook help. Use `--help-full` for every
-    /// advanced transport, provider, gate, and recovery option.
+    /// Show compact task-first Cook help. Use `--help-full` for the complete
+    /// Cook option reference.
     #[arg(short = 'h', long, action = clap::ArgAction::HelpShort)]
     pub help: Option<bool>,
     /// Show the complete Cook option reference.

@@ -55,9 +55,8 @@ pub struct Cli {
     )]
     pub notification_route: Option<String>,
 
-    /// Select where eligible work executes without pinning a runner. `auto` uses
-    /// the command contract, controller pressure, and ready Lab capacity. Use
-    /// `--runner <id>` instead to pin a connected Lab runner.
+    /// Select where eligible work executes. `auto` (default) follows command
+    /// policy; `local` is an explicit authorized override.
     #[arg(
         long,
         global = true,
