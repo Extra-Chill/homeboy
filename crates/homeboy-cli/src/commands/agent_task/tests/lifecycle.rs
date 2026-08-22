@@ -72,6 +72,62 @@ fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
     });
 }
 
+#[test]
+fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
+    with_isolated_home(|_| {
+        let run_id = "status-scoped-cleanup";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+        let worktrees = (0..10_000)
+            .map(|index| format!("/workspace/unrelated-{index}"))
+            .collect::<Vec<_>>();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["automatic_artifact_retention"] = json!({
+                "status": "completed",
+                "worktree_count": worktrees.len(),
+                "worktrees": worktrees,
+            });
+        })
+        .expect("persist unrelated cleanup inventory");
+
+        let (value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            bounded: false,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("full status");
+
+        assert!(value["metadata"]
+            .get("automatic_artifact_retention")
+            .is_none());
+        assert_eq!(value["cleanup_evidence"][0]["count"], 10_000);
+        assert_eq!(
+            value["cleanup_evidence"][0]["ref"],
+            format!(
+                "homeboy://agent-task/run/{run_id}/status#metadata.automatic_artifact_retention"
+            )
+        );
+        assert!(value["tasks"].is_array());
+        assert!(!value.to_string().contains("/workspace/unrelated-9999"));
+        assert!(value.to_string().len() < 16 * 1024);
+
+        let persisted = agent_task_lifecycle::status(run_id).expect("persisted record");
+        assert_eq!(
+            persisted.metadata["automatic_artifact_retention"]["worktrees"]
+                .as_array()
+                .map(Vec::len),
+            Some(10_000)
+        );
+    });
+}
+
 #[derive(Debug)]
 struct RecoverableRunnerDispatcher {
     unavailable: AtomicBool,
