@@ -141,9 +141,13 @@ phase_run() {
   "$@" &
   pid=$!
   (
-    local elapsed=0 over_budget=false
+    local elapsed=0 over_budget=false sleep_pid=''
+    trap '[ -z "${sleep_pid}" ] || kill "${sleep_pid}" 2>/dev/null || true' EXIT TERM INT
     while kill -0 "${pid}" 2>/dev/null; do
-      sleep "${heartbeat_seconds}"
+      sleep "${heartbeat_seconds}" &
+      sleep_pid=$!
+      wait "${sleep_pid}" || exit 0
+      sleep_pid=''
       if kill -0 "${pid}" 2>/dev/null; then
         elapsed="$(( $(date +%s) - started ))"
         if phase_annotations_verbose; then
