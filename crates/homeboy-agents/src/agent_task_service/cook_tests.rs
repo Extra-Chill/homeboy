@@ -4707,6 +4707,11 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
                 .success());
         }
         std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        std::fs::write(
+            source.join("package.json"),
+            r#"{"scripts":{"test":"true"}}"#,
+        )
+        .expect("write package manifest");
         assert!(Command::new("git")
             .args(["add", "."])
             .current_dir(&source)
@@ -4789,6 +4794,7 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         // durable retry and workspace lifecycle rather than local execution.
         options.initial_run_id = run_id.to_string();
         options.max_attempts = 2;
+        options.gates.verify = vec!["npm test".to_string()];
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -4888,6 +4894,29 @@ fn review_12349_same_cook_retry_resumes_pending_provider_lookup_after_resolver_t
         assert_eq!(
             resumed_plan.tasks[0].workspace.root.as_deref(),
             Some(workspace.to_str().expect("utf8 workspace"))
+        );
+        let workspace_identity = resumed_plan.tasks[0].metadata["cook_workspace_identity"].clone();
+
+        let recipe = super::super::load_recipe(cook_id).expect("same durable Cook recipe");
+        let mut repeated_options = super::super::reconstruct_options_with_dispatcher(
+            &recipe,
+            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+        )
+        .expect("reconstruct materialized Cook retry");
+        repeated_options.initial_run_id = retry.record.run_id.clone();
+        repeated_options.initial_plan = agent_task_lifecycle::load_plan(&retry.record.run_id)
+            .expect("load materialized durable retry plan");
+        run_cook(CookContext::new(repeated_options, Arc::new(UnusedExecutor)))
+            .expect("repeated continuation reuses the materialized workspace");
+        let repeated_plan = agent_task_lifecycle::load_plan(&retry.record.run_id)
+            .expect("load repeated durable retry plan");
+        assert_eq!(
+            repeated_plan.tasks[0].workspace.root.as_deref(),
+            Some(workspace.to_str().expect("utf8 workspace"))
+        );
+        assert_eq!(
+            repeated_plan.tasks[0].metadata["cook_workspace_identity"],
+            workspace_identity
         );
     });
 }
