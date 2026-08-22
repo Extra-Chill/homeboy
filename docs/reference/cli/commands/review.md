@@ -141,6 +141,9 @@ Run tests for a component
 | `--since` | `<REF>` | Git ref to compare against for drift detection (tag, commit, branch) |
 | `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 | `--ci-job` | `<ID>` | Run using env and passthrough args from a single extension-declared CI test job |
+| `--differential` | flag | Compare this test result with a cached measurement of the base revision |
+| `--differential-base` | `<REF>` | Base ref for a differential test comparison |
+| `--populate-differential-baseline` | flag | On a differential cache miss, run the base revision and record its measurement |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |

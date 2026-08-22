@@ -411,6 +411,7 @@ mod tests {
             // This artifact fixture does not represent a Cargo execution.
             cargo_target: None,
             ci_context: None,
+            differential: None,
             extension_phase_timings: vec![ExtensionPhaseTiming {
                 name: "provider".to_string(),
                 duration_ms: 1,

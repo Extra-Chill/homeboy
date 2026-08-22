@@ -91,8 +91,18 @@ Runs the lint workflow. Common flags: `--summary`, `--file`, `--glob`,
 
 Runs the test workflow. Common flags: `--skip-lint`, `--coverage`,
 `--coverage-min`, `--analyze`, `--drift`, `--write`, `--since`,
-`--changed-since`, `--ci-job`, `--json-summary`, and trailing test-runner args
-after `--`.
+`--changed-since`, `--ci-job`, `--differential`, `--json-summary`, and trailing
+test-runner args after `--`.
+
+`--differential` classifies a failed candidate against a SHA-keyed local
+measurement of `--differential-base` (default `origin/main`). A cache miss is a
+blocking `no_baseline` verdict unless `--populate-differential-baseline` is
+used to run the base commit in a temporary worktree and record it. Cache keys
+include the repository, component configuration, settings, CI job, lint mode,
+and exact trailing argument vector, so only like-for-like invocations reuse a
+measurement. Coverage, changed-scope, analysis, drift, write, and source-owned
+baseline modes must be run separately until they have equivalent differential
+measurement contracts.
 
 ### `review build`
 

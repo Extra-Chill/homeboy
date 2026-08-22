@@ -27,7 +27,7 @@ Manage standalone component configurations
 | `homeboy component set` | Update component configuration fields |
 | `homeboy component delete` | Delete a component configuration |
 | `homeboy component rename` | Rename a component (changes ID directly) |
-| `homeboy component list` | List all available components |
+| `homeboy component list` | List registered components without opening their checkouts |
 | `homeboy component projects` | List projects using this component |
 | `homeboy component shared` | Show which components are shared across projects |
 | `homeboy component env` | Detect runtime environment requirements from the component's source files |
@@ -127,10 +127,14 @@ Rename a component (changes ID directly)
 ## `homeboy component list`
 
 ```sh
-homeboy component list
+homeboy component list [OPTIONS]
 ```
 
-List all available components
+List registered components without opening their checkouts
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Enrich every row from its checkout, including portable and Git metadata |
 
 ## `homeboy component projects`
 
