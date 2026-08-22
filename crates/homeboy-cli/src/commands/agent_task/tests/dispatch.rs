@@ -52,6 +52,34 @@ fn register_component(id: &str, path: &std::path::Path, remote_url: &str) {
     .expect("register component");
 }
 
+fn register_component_with_aliases(
+    id: &str,
+    aliases: &[&str],
+    path: &std::path::Path,
+    remote_url: &str,
+) {
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: id.to_string(),
+            aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
+            local_path: path.display().to_string(),
+            remote_url: Some(remote_url.to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register component");
+}
+
+fn write_component_without_collision_validation(component: homeboy::core::component::Component) {
+    let directory = homeboy::core::paths::components().expect("component config directory");
+    std::fs::create_dir_all(&directory).expect("create component config directory");
+    std::fs::write(
+        directory.join(format!("{}.json", component.id)),
+        serde_json::to_vec(&component).expect("serialize component config"),
+    )
+    .expect("write component config");
+}
+
 fn add_remote(path: &std::path::Path, name: &str, remote_url: &str) {
     let status = Command::new("git")
         .args(["remote", "add", name, remote_url])
@@ -310,6 +338,112 @@ fn repo_only_cook_without_registered_component_persists_requested_repository_exp
 }
 
 #[test]
+fn cook_normalizes_repository_alias_to_component_identity_for_every_destination_form() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("repository checkout");
+        init_runtime_component_checkout(checkout.path());
+        let remote = "https://github.com/example/blocks-engine.git";
+        add_remote(checkout.path(), "origin", remote);
+        register_component_with_aliases(
+            "php-transformer",
+            &["blocks-engine"],
+            checkout.path(),
+            remote,
+        );
+
+        let issue = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "blocks-engine".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/blocks-engine/issues/12844".to_string(),
+            "--base".to_string(),
+            "trunk".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("normalize issue repository alias");
+        let cwd = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "blocks-engine".to_string(),
+            "--cwd".to_string(),
+            checkout.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("normalize cwd repository alias");
+        let worktree = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "blocks-engine".to_string(),
+            "--to-worktree".to_string(),
+            checkout.path().display().to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("normalize worktree repository alias");
+
+        for args in [&issue, &cwd, &worktree] {
+            assert_eq!(args.dispatch.repo.as_deref(), Some("php-transformer"));
+            let identity = args
+                .repository_identity
+                .as_ref()
+                .expect("identity evidence");
+            assert_eq!(identity["repository_name"], "blocks-engine");
+            assert_eq!(identity["component_id"], "php-transformer");
+        }
+        assert_eq!(
+            issue.to_worktree.as_deref(),
+            Some("php-transformer@fix-issue-12844-blocks-engine")
+        );
+        assert_eq!(issue.base.as_deref(), Some("trunk"));
+
+        let plan =
+            super::super::run::compile_cook_plan(&worktree, json!({ "action": "lookup_pending" }))
+                .expect("compile normalized durable plan");
+        assert_eq!(
+            plan.metadata["cook_repository_identity"]["repository_name"],
+            "blocks-engine"
+        );
+        assert_eq!(
+            plan.metadata["cook_repository_identity"]["component_id"],
+            "php-transformer"
+        );
+
+        let component_id = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "php-transformer".to_string(),
+            "--to-worktree".to_string(),
+            "php-transformer@component-id".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("normalize configured component id");
+        let identity = component_id
+            .repository_identity
+            .expect("component-id identity evidence");
+        assert_eq!(identity["repository_name"], "blocks-engine");
+        assert_eq!(identity["component_id"], "php-transformer");
+    });
+}
+
+#[test]
 fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_branches() {
     with_isolated_home(|_| {
         for branch in ["main", "master", "trunk", "release/2026"] {
@@ -391,6 +525,108 @@ fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_br
             );
         }
     });
+}
+
+#[test]
+fn cook_rejects_ambiguous_repository_identity_across_destination_forms() {
+    for (kind, first, second) in [
+        (
+            "duplicate alias",
+            (
+                "first",
+                vec!["shared"],
+                "https://github.com/example/first.git",
+            ),
+            (
+                "second",
+                vec!["shared"],
+                "https://github.com/example/second.git",
+            ),
+        ),
+        (
+            "normalized alias",
+            (
+                "first",
+                vec!["shared.git"],
+                "https://github.com/example/first.git",
+            ),
+            (
+                "second",
+                vec!["shared"],
+                "https://github.com/example/second.git",
+            ),
+        ),
+        (
+            "duplicate remote",
+            ("first", Vec::new(), "https://github.com/example/shared.git"),
+            (
+                "second",
+                Vec::new(),
+                "ssh://git@github.com/example/shared.git",
+            ),
+        ),
+    ] {
+        with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("repository checkout");
+            init_runtime_component_checkout(checkout.path());
+            add_remote(checkout.path(), "origin", first.2);
+            for (id, aliases, remote) in [first, second] {
+                write_component_without_collision_validation(homeboy::core::component::Component {
+                    id: id.to_string(),
+                    aliases: aliases.into_iter().map(str::to_string).collect(),
+                    local_path: checkout.path().display().to_string(),
+                    remote_url: Some(remote.to_string()),
+                    ..Default::default()
+                });
+            }
+
+            for form in ["issue", "cwd", "to-worktree"] {
+                let mut command = vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "implement the fix".to_string(),
+                    "--repo".to_string(),
+                    "shared".to_string(),
+                ];
+                match form {
+                    "issue" => command.extend([
+                        "--task-url".to_string(),
+                        "https://github.com/example/shared/issues/12844".to_string(),
+                    ]),
+                    "cwd" => {
+                        command.extend(["--cwd".to_string(), checkout.path().display().to_string()])
+                    }
+                    "to-worktree" => command.extend([
+                        "--to-worktree".to_string(),
+                        "first@identity-collision".to_string(),
+                    ]),
+                    _ => unreachable!(),
+                }
+                command.push("--no-finalize".to_string());
+                let error =
+                    super::super::run::resolve_cook_destination(cook_args_from_cli(command))
+                        .expect_err(
+                            "ambiguous configured identity must reject before provisioning",
+                        );
+                assert!(error
+                    .message
+                    .contains("matches multiple configured component identities"));
+                assert!(error.message.contains("first"));
+                assert!(error.message.contains("second"));
+                assert_eq!(error.details["field"], "repo", "{kind} via {form}");
+                assert_eq!(
+                    error.details["tried"],
+                    json!([
+                        "homeboy agent-task cook --repo first ...",
+                        "homeboy agent-task cook --repo second ..."
+                    ]),
+                    "{kind} via {form}"
+                );
+            }
+        });
+    }
 }
 
 #[test]
@@ -2009,6 +2245,8 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             "homeboy".to_string(),
             "--task-url".to_string(),
             "https://github.com/Extra-Chill/homeboy/issues/12601".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
             "--no-finalize".to_string(),
         ]))
         .expect("derive issue destination without provisioning it");
@@ -2016,6 +2254,13 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             .expect("ensure-only provider is deferred until durable Cook admission");
 
         assert_eq!(provision["action"], "lookup_pending");
+        let plan = super::super::run::compile_cook_plan(&args, provision.clone())
+            .expect("compile issue-derived Cook with its deferred provision intent");
+        assert_eq!(plan.metadata["cook_provision"], provision);
+        assert_eq!(
+            plan.tasks[0].metadata["worktree_provision"],
+            plan.metadata["cook_provision"]
+        );
         assert!(
             !ensured.exists(),
             "provider ensure must wait for durable Cook admission"
