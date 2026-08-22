@@ -1699,22 +1699,8 @@ pub(crate) fn run_lab_offload_inner(
         .build(),
     );
     eprintln!(
-        "Lab offload: runner `{}` Homeboy binary `{}`; active daemon {}; refresh with `{}`.",
-        runner_id,
-        homeboy_path,
-        runner_homeboy_daemon_display(&runner_homeboy),
-        runner_homeboy["refresh_commands"]
-            .as_array()
-            .map(|commands| commands
-                .iter()
-                .filter_map(|command| command.as_str())
-                .collect::<Vec<_>>()
-                .join(" && "))
-            .unwrap_or_else(|| format!(
-                "homeboy runner disconnect {} && homeboy runner connect {}",
-                shell::quote_arg(runner_id),
-                shell::quote_arg(runner_id)
-            ))
+        "{}",
+        lab_offload_runner_homeboy_progress(runner_id, homeboy_path, &runner_homeboy)
     );
     if blocking_runner_homeboy_drift {
         return Err(stale_runner_homeboy_error(
@@ -2505,6 +2491,31 @@ pub(crate) fn run_lab_offload_inner(
     })
 }
 
+fn lab_offload_runner_homeboy_progress(
+    runner_id: &str,
+    homeboy_path: &str,
+    runner_homeboy: &serde_json::Value,
+) -> String {
+    let prefix = format!(
+        "Lab offload: runner `{runner_id}` Homeboy binary `{homeboy_path}`; active daemon {}",
+        runner_homeboy_daemon_display(runner_homeboy),
+    );
+    let refresh_commands = runner_homeboy["refresh_commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if refresh_commands.is_empty() {
+        format!("{prefix}; controller and daemon identities match.")
+    } else {
+        format!(
+            "{prefix}; refresh with `{}`.",
+            refresh_commands.join(" && ")
+        )
+    }
+}
+
 fn runner_workspace_ttl() -> String {
     homeboy_core::defaults::load_config()
         .lab
@@ -2854,6 +2865,44 @@ mod tests {
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
     };
     use std::sync::{Arc, Barrier, Mutex};
+
+    #[test]
+    fn lab_offload_progress_omits_refresh_when_identities_match() {
+        let progress = lab_offload_runner_homeboy_progress(
+            "lab",
+            "/runner/homeboy",
+            &serde_json::json!({
+                "active_daemon_build_identity": "homeboy 0.354.1+exact",
+                "refresh_commands": [],
+            }),
+        );
+
+        assert_eq!(
+            progress,
+            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.354.1+exact; controller and daemon identities match."
+        );
+        assert!(!progress.contains("refresh with"));
+    }
+
+    #[test]
+    fn lab_offload_progress_renders_complete_refresh_command_when_needed() {
+        let progress = lab_offload_runner_homeboy_progress(
+            "lab",
+            "/runner/homeboy",
+            &serde_json::json!({
+                "active_daemon_build_identity": "homeboy 0.353.1+old",
+                "refresh_commands": [
+                    "homeboy runner refresh-homeboy lab --ref abc --reconnect",
+                    "homeboy runner connect lab"
+                ],
+            }),
+        );
+
+        assert_eq!(
+            progress,
+            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref abc --reconnect && homeboy runner connect lab`."
+        );
+    }
 
     #[test]
     fn concurrent_same_id_rigs_dispatch_from_their_admitted_registry_after_promotion() {

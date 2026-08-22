@@ -2,6 +2,99 @@ use super::super::*;
 use std::collections::BTreeMap;
 use types::{HomeboyProbe, RunnerDoctorStatus};
 
+fn configured_homeboy(version: &str) -> HomeboyProbe {
+    HomeboyProbe {
+        version: version.to_string(),
+        path: Some("/runner/configured/homeboy".to_string()),
+    }
+}
+
+fn preferred_homeboy(version: &str) -> probes::RemoteHomeboyCandidate {
+    probes::RemoteHomeboyCandidate {
+        path: "/runner/preferred/homeboy".to_string(),
+        version: version.to_string(),
+    }
+}
+
+#[test]
+fn lab_homeboy_path_drift_keeps_a_newer_configured_binary() {
+    let check = probes::lab_homeboy_path_drift_check(
+        "lab",
+        &configured_homeboy("0.354.1+current"),
+        &preferred_homeboy("0.284.0+old"),
+        BTreeMap::new(),
+    )
+    .expect("stale preferred binary is diagnosed");
+
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("older than configured"));
+    assert!(check.message.contains("remains selected"));
+    assert!(check.remediation.as_deref().is_some_and(|value| {
+        value.contains("Update or remove stale preferred binary") && !value.contains("runner set")
+    }));
+}
+
+#[test]
+fn lab_homeboy_path_drift_recommends_a_clean_newer_preferred_binary() {
+    let check = probes::lab_homeboy_path_drift_check(
+        "lab",
+        &configured_homeboy("0.353.1+current"),
+        &preferred_homeboy("0.354.1+new"),
+        BTreeMap::new(),
+    )
+    .expect("newer preferred binary is diagnosed");
+
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("newer than configured"));
+    assert_eq!(
+        check.remediation.as_deref(),
+        Some("Point runner `lab` at the newer preferred binary with `homeboy runner set lab --json '{\"homeboy_path\":\"/runner/preferred/homeboy\"}'`")
+    );
+}
+
+#[test]
+fn lab_homeboy_path_drift_rejects_dirty_preferred_binary() {
+    let check = probes::lab_homeboy_path_drift_check(
+        "lab",
+        &configured_homeboy("0.353.1+current"),
+        &preferred_homeboy("0.354.1+candidate-dirty"),
+        BTreeMap::new(),
+    )
+    .expect("dirty preferred binary is diagnosed");
+
+    assert!(check.message.contains("dirty build"));
+    assert!(check.remediation.as_deref().is_some_and(|value| {
+        value.contains("Update or remove stale preferred binary") && !value.contains("runner set")
+    }));
+}
+
+#[test]
+fn lab_homeboy_path_drift_is_absent_for_exact_match() {
+    assert!(probes::lab_homeboy_path_drift_check(
+        "lab",
+        &configured_homeboy("0.354.1+exact"),
+        &preferred_homeboy("0.354.1+exact"),
+        BTreeMap::new(),
+    )
+    .is_none());
+}
+
+#[test]
+fn lab_homeboy_path_drift_keeps_configured_binary_for_different_build_identity() {
+    let check = probes::lab_homeboy_path_drift_check(
+        "lab",
+        &configured_homeboy("0.354.1+current"),
+        &preferred_homeboy("0.354.1+different-build"),
+        BTreeMap::new(),
+    )
+    .expect("different build identity is diagnosed");
+
+    assert!(check.message.contains("different build identity"));
+    assert!(check.remediation.as_deref().is_some_and(|value| {
+        value.contains("Update or remove stale preferred binary") && !value.contains("runner set")
+    }));
+}
+
 #[test]
 fn lab_homeboy_path_shadow_is_ok_when_configured_homeboy_is_current() {
     let mut details = BTreeMap::new();

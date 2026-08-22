@@ -265,20 +265,13 @@ pub fn lab_homeboy_path_checks(
     ));
 
     if let Some(candidate) = candidate {
-        let configured_version = configured_probe.version.trim();
-        if configured_version != candidate.version.trim() {
-            checks.push(checks::warning_with_details(
-                "lab.homeboy.path_drift",
-                format!(
-                    "Configured runner Homeboy {configured_version} differs from preferred runner binary {} at {}",
-                    candidate.version, candidate.path
-                ),
-                Some(format!(
-                    "Point runner `{runner_id}` at the preferred binary with `homeboy runner set {runner_id} --json '{{\"homeboy_path\":\"{}\"}}'`",
-                    candidate.path
-                )),
-                configured_details.clone(),
-            ));
+        if let Some(check) = lab_homeboy_path_drift_check(
+            runner_id,
+            configured_probe,
+            &candidate,
+            configured_details.clone(),
+        ) {
+            checks.push(check);
         }
     }
 
@@ -295,6 +288,66 @@ pub fn lab_homeboy_path_checks(
     }
 
     checks
+}
+
+pub(super) fn lab_homeboy_path_drift_check(
+    runner_id: &str,
+    configured: &HomeboyProbe,
+    preferred: &RemoteHomeboyCandidate,
+    details: BTreeMap<String, String>,
+) -> Option<RunnerCheck> {
+    let configured_version = configured.version.trim();
+    let preferred_version = preferred.version.trim();
+    if configured_version == preferred_version {
+        return None;
+    }
+
+    let preferred_is_dirty = preferred_version.contains("dirty");
+    let preferred_precedence = (!preferred_is_dirty)
+        .then(|| {
+            let configured =
+                semver::Version::parse(configured_version.trim_start_matches('v')).ok()?;
+            let preferred =
+                semver::Version::parse(preferred_version.trim_start_matches('v')).ok()?;
+            Some(preferred.cmp_precedence(&configured))
+        })
+        .flatten();
+
+    if preferred_precedence.is_some_and(|precedence| precedence.is_gt()) {
+        return Some(checks::warning_with_details(
+            "lab.homeboy.path_drift",
+            format!(
+                "Preferred runner Homeboy {preferred_version} at {} is newer than configured runner Homeboy {configured_version}",
+                preferred.path
+            ),
+            Some(format!(
+                "Point runner `{runner_id}` at the newer preferred binary with `homeboy runner set {runner_id} --json '{{\"homeboy_path\":\"{}\"}}'`",
+                preferred.path
+            )),
+            details,
+        ));
+    }
+
+    let reason = if preferred_is_dirty {
+        "is a dirty build"
+    } else if preferred_precedence.is_some_and(|precedence| precedence.is_lt()) {
+        "is older than configured"
+    } else {
+        "has a different build identity from configured"
+    };
+    Some(checks::warning_with_details(
+        "lab.homeboy.path_drift",
+        format!(
+            "Preferred runner Homeboy {preferred_version} at {} {reason}; configured Homeboy {configured_version} remains selected",
+            preferred.path
+        ),
+        Some(format!(
+            "Update or remove stale preferred binary at {}; keep runner `{runner_id}` on configured homeboy_path `{}`",
+            preferred.path,
+            configured.path.as_deref().unwrap_or("homeboy")
+        )),
+        details,
+    ))
 }
 
 pub(super) fn homeboy_path_shadow_check(
@@ -1304,9 +1357,9 @@ pub(super) fn provider_env_path_readiness_check_from_probe(
     )
 }
 
-struct RemoteHomeboyCandidate {
-    path: String,
-    version: String,
+pub(super) struct RemoteHomeboyCandidate {
+    pub(super) path: String,
+    pub(super) version: String,
 }
 
 fn remote_homeboy_probe(client: &SshClient, command: &str) -> RemoteHomeboyCandidateProbe {
