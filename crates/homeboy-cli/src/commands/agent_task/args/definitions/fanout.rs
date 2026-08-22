@@ -59,6 +59,12 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub branch_prefix: String,
     #[arg(long = "fanout-id", value_name = "ID")]
     pub fanout_id: Option<String>,
+    /// Bind one issue URL to an existing provider-managed worktree handle.
+    /// Repeat as `--worktree ISSUE_URL=HANDLE`. Every supplied issue must have
+    /// exactly one binding; Homeboy validates and adopts the exact destination
+    /// instead of requesting provider creation.
+    #[arg(long = "worktree", value_name = "ISSUE_URL=HANDLE")]
+    pub worktrees: Vec<String>,
     #[arg(long = "prompt-template", value_name = "TEXT")]
     pub prompt_template: Option<String>,
     #[arg(long = "backend", value_name = "BACKEND")]
