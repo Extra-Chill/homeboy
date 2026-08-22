@@ -330,6 +330,7 @@ pub mod lifecycle {
         run_record_exists_resolved, run_status, runner_diagnostic_probe,
         runner_pinned_runtime_for_mutation, runner_probe_plan, select_cook_candidate_from_attempts,
         status, status_in_store, status_with_options, submit_plan,
+        transition_execution_placement_for_continuation,
         verified_controller_artifact_projection_path, AgentTaskAcceptanceAttestation,
         AgentTaskAcceptanceRecord, AgentTaskAcceptanceRequirement, AgentTaskAcceptanceVerdict,
         AgentTaskAcceptanceVerificationRequest, AgentTaskAcceptanceVerifier,
