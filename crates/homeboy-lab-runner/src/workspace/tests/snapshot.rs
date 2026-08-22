@@ -1547,6 +1547,40 @@ fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
 }
 
 #[test]
+fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    fs::create_dir_all(source.join("src/generated-output")).expect("generated output directory");
+    fs::write(source.join("src/lib.rs"), "pub fn stable() {}\n").expect("source file");
+    fs::write(source.join("src/generated-output/state.json"), "ignored\n").expect("ignored output");
+    for index in 0..128 {
+        let sibling = source.join(format!("worktrees/sibling-{index}"));
+        fs::create_dir_all(&sibling).expect("sibling directory");
+        fs::write(sibling.join("build-output"), "ignored\n").expect("sibling output");
+    }
+
+    let excludes = vec![
+        "./src/generated-output".to_string(),
+        "./worktrees".to_string(),
+    ];
+    let baseline = snapshot_stable_manifest(&source, &excludes).expect("baseline manifest");
+    for destination in [
+        workspace.path().join("first"),
+        workspace.path().join("second"),
+    ] {
+        copy_snapshot_to_directory(&source, &destination, &excludes)
+            .expect("ignored outputs must not enter the staging archive");
+        assert_eq!(
+            snapshot_stable_manifest(&destination, &[]).expect("staged manifest"),
+            baseline,
+            "repeated snapshot must preserve the source manifest"
+        );
+        assert!(!destination.join("src/generated-output").exists());
+        assert!(!destination.join("worktrees").exists());
+    }
+}
+
+#[test]
 fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift() {
     let source = tempfile::tempdir().expect("source");
     let scratch = tempfile::tempdir().expect("admitted scratch");
@@ -1592,6 +1626,11 @@ fn snapshot_stability_rejects_a_mixed_staged_tree_even_if_source_is_restored() {
     )
     .expect_err("mixed staged tree must fail even after source ABA restoration");
     assert_eq!(error.details["classification"], "snapshot_construction");
+    assert!(
+        error.message.contains("bounded differing entries"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("runtime-overlays"), "{error:?}");
 }
 
 #[cfg(unix)]
