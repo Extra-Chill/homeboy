@@ -15,6 +15,7 @@ pub(crate) enum AgentTaskSummaryKind {
     Logs,
     Review,
     Controller,
+    Providers,
 }
 
 pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskSummaryKind> {
@@ -23,6 +24,7 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Status(_) => Some(AgentTaskSummaryKind::Status),
         AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
+        AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
         AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
             AgentTaskControllerCommand::Status(_)
             | AgentTaskControllerCommand::Diagnose(_)
@@ -48,7 +50,35 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
+        AgentTaskSummaryKind::Providers => render_providers_summary(payload),
     }
+}
+
+fn render_providers_summary(payload: &Value) -> Option<String> {
+    let summary = payload.get("operator_summary")?;
+    let state = summary.get("state")?.as_str()?;
+    let provider_count = array_len(payload, &["providers"]).unwrap_or(0);
+    let mut lines = vec![
+        "Agent task providers".to_string(),
+        format!("Status: {state}"),
+        format!("Providers shown: {provider_count}"),
+    ];
+    if state == "selection_required" {
+        let choices = summary
+            .get("selection_choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|choice| choice.get("backend").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if !choices.is_empty() {
+            lines.push(format!("Choose backend: {}", choices.join(", ")));
+        }
+    }
+    if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
+        lines.push(format!("Next: {next_action}"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
@@ -625,6 +655,29 @@ fn finish(lines: Vec<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn providers_summary_presents_selection_without_calling_it_blocked() {
+        let payload = json!({
+            "providers": [{ "backend": "alpha" }, { "backend": "zeta" }],
+            "operator_summary": {
+                "state": "selection_required",
+                "selection_choices": [
+                    { "backend": "alpha", "command": "homeboy agent-task providers --backend alpha --validate-readiness" },
+                    { "backend": "zeta", "command": "homeboy agent-task providers --backend zeta --validate-readiness" }
+                ],
+                "next_action": "homeboy agent-task providers --backend alpha --validate-readiness"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Providers, &payload)
+            .expect("providers summary");
+
+        assert_eq!(
+            summary,
+            "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: alpha, zeta\nNext: homeboy agent-task providers --backend alpha --validate-readiness"
+        );
+    }
 
     #[test]
     fn cook_summary_leads_with_run_status_and_review_next_step() {
