@@ -302,11 +302,6 @@ impl ClaimHeartbeat {
     ) -> Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>> {
         self.owner_lease.clone()
     }
-    pub(super) fn workspace_owner_lease(
-        &self,
-    ) -> Option<homeboy_core::workspace_claim::WorkspaceOwnerLease> {
-        self.owner_lease.lock().expect("owner lease lock").clone()
-    }
 }
 
 impl Drop for ClaimHeartbeat {

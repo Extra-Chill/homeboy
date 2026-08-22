@@ -1348,32 +1348,6 @@ mod tests {
     }
 
     #[test]
-    fn content_manifest_validation_rejects_oversized_and_long_path_metadata() {
-        let entry = WorkspaceContentManifestEntry {
-            path: "file.txt".to_string(),
-            kind: "file".to_string(),
-            sha256: Some("sha256:fixture".to_string()),
-            bytes: Some(1),
-            owner_executable: Some(false),
-        };
-        let oversized = WorkspaceContentManifest {
-            entry_count: 17,
-            entries: vec![entry.clone(); 17],
-        };
-        assert!(validate_content_manifest(&oversized, None).is_ok());
-
-        let long_path = WorkspaceContentManifest {
-            entry_count: 1,
-            entries: vec![WorkspaceContentManifestEntry {
-                path: "a"
-                    .repeat(super::super::snapshot::WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT + 1),
-                ..entry
-            }],
-        };
-        assert!(validate_content_manifest(&long_path, None).is_ok());
-    }
-
-    #[test]
     fn verified_snapshot_baseline_supports_committed_and_uncommitted_candidate_harvesting() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");

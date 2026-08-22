@@ -25,13 +25,12 @@ use homeboy_core::server::{self, Server, SshClient};
 
 use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobRecoveryEvidence,
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot,
-    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerProxyForward,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
-    REVERSE_UNVERIFIED_REASON,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerActiveJobsSnapshot, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
+    RunnerLeaselessRecoveryEvidence, RunnerProxyForward, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, REVERSE_UNVERIFIED_REASON,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -43,7 +42,6 @@ const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15
 const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
 // controller-local tunnel that disappeared during a link flap.
-const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
 const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -60,9 +58,7 @@ use connection_daemon::{
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
-pub(crate) use stop_transport_recovery::{
-    disconnect_with_force, disconnect_with_session, recorded_session,
-};
+pub(crate) use stop_transport_recovery::{disconnect_with_session, recorded_session};
 
 use super::daemon_http_get::daemon_get;
 
@@ -561,32 +557,6 @@ fn rollback_rotated_candidate(
     }
     terminate_tunnel_if_owned(candidate);
     let _ = super::generation_store::rollback_activation(runner_id, current, generation);
-}
-
-fn cleanup_direct_generation_with<Fallback, Tunnel>(
-    session: &RunnerSession,
-    graceful_stop: Result<()>,
-    mut force_stop_remote: Fallback,
-    mut terminate_tunnel: Tunnel,
-) -> Result<()>
-where
-    Fallback: FnMut(u32) -> Result<()>,
-    Tunnel: FnMut(&RunnerSession),
-{
-    let cleanup_result = match graceful_stop {
-        Ok(()) => Ok(()),
-        Err(graceful_error) => match session.remote_daemon_pid {
-            Some(pid) => force_stop_remote(pid).map_err(|fallback_error| {
-                Error::internal_unexpected(format!(
-                    "generation graceful cleanup failed ({}) and exact PID fallback failed ({})",
-                    graceful_error.message, fallback_error.message
-                ))
-            }),
-            None => Err(graceful_error),
-        },
-    };
-    terminate_tunnel(session);
-    cleanup_result
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -2342,47 +2312,6 @@ pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
     Ok(report)
 }
 
-/// Recover only this controller's lost direct SSH projection. The remote daemon
-/// selection remains in `connect`: it revalidates the persisted lease and PID
-/// before opening a fresh tunnel, and refuses every unproven replacement.
-fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) -> Result<()> {
-    let Some(session) = session else {
-        return Ok(());
-    };
-    if session.mode != RunnerTunnelMode::DirectSsh || session_is_live(session) {
-        return Ok(());
-    }
-
-    // Share one reconnect across concurrent readers. The winner rechecks the
-    // persisted projection while holding the compatible writer lease; waiters
-    // then observe that projection instead of opening another tunnel.
-    let _lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
-        "runner direct SSH tunnel recovery",
-        runner_id.to_string(),
-        DIRECT_TUNNEL_RECOVERY_WAIT,
-        super::lab_selection::emit_runtime_promotion_wait,
-    )?;
-    if read_session_or_live_peer(runner_id)?
-        .as_ref()
-        .is_some_and(session_is_live)
-    {
-        return Ok(());
-    }
-
-    let (report, exit_code) = connect(runner_id)?;
-    if report.connected && exit_code == 0 {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "reconnect",
-        report
-            .failure_message
-            .unwrap_or_else(|| "tunnel-only recovery returned no ready session".to_string()),
-        Some(runner_id.to_string()),
-        None,
-    ))
-}
-
 /// Reopen a tunnel to the durable generation which owns `job_id`.
 ///
 /// This deliberately never tests the recorded local port: a dead controller
@@ -2750,97 +2679,6 @@ where
     status_fn(runner_id)
 }
 
-fn reconcile_terminal_phantom_activity(
-    runner_id: &str,
-    session: Option<&RunnerSession>,
-    active_jobs: Vec<ActiveRunnerJobSummary>,
-    stale_jobs: Vec<ActiveRunnerJobSummary>,
-    direct_daemon_active_jobs: Option<usize>,
-) -> (
-    Vec<ActiveRunnerJobSummary>,
-    Vec<ActiveRunnerJobSummary>,
-    Option<usize>,
-    Option<RunnerActiveJobRecoveryEvidence>,
-) {
-    let Some(authoritative_count) = direct_daemon_active_jobs else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    if authoritative_count == active_jobs.len() {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Some(local_url) = session.and_then(|session| session.local_url.as_deref()) else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Ok(client) = Client::builder().timeout(Duration::from_secs(10)).build() else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Ok(response) = client
-        .post(format!(
-            "{}/jobs/reconcile-terminal",
-            local_url.trim_end_matches('/')
-        ))
-        .send()
-    else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    if !response.status().is_success() {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Ok(body) = response.json::<Value>() else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let reconciled = body
-        .pointer("/body/reconciled_count")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let reconciled_job_ids = body
-        .pointer("/body/reconciled_job_ids")
-        .and_then(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .take(100)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if reconciled == 0
-        || reconciled_job_ids.is_empty()
-        || usize::try_from(reconciled).ok() != Some(reconciled_job_ids.len())
-    {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    }
-    let Ok((refreshed_active_jobs, refreshed_stale_jobs)) =
-        runner_jobs(runner_id, session.expect("local URL requires session"))
-    else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    let Some(refreshed_count) = daemon_http_freshness(
-        runner_id,
-        local_url,
-        &session.expect("local URL requires session").homeboy_version,
-        session
-            .expect("local URL requires session")
-            .homeboy_build_identity
-            .as_deref()
-            .unwrap_or(""),
-    )
-    .ok()
-    .map(|freshness| freshness.active_jobs) else {
-        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
-    };
-    (
-        refreshed_active_jobs,
-        refreshed_stale_jobs,
-        Some(refreshed_count),
-        Some(RunnerActiveJobRecoveryEvidence {
-            reconciled_job_ids,
-            prior_active_job_count: authoritative_count,
-            active_job_count: refreshed_count,
-        }),
-    )
-}
-
 fn should_infer_child_run_orphans(
     typed_active_jobs: usize,
     direct_daemon_active_jobs: Option<usize>,
@@ -2974,19 +2812,6 @@ pub(crate) fn authoritative_zero_active_jobs(report: &RunnerStatusReport) -> boo
                 || freshness.recovery_evidence
                     == Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable))
     })
-}
-
-fn runner_daemon_freshness(
-    runner: &Runner,
-    session: Option<&RunnerSession>,
-    connected: bool,
-) -> Result<Option<homeboy_core::daemon::DaemonFreshnessReport>> {
-    runner_daemon_freshness_until(
-        runner,
-        session,
-        connected,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn runner_daemon_freshness_until(
@@ -3139,17 +2964,6 @@ pub(crate) fn probe_verified_direct_daemon_health(
     )
 }
 
-pub(crate) fn tunnel_process_is_owned(
-    pid: u32,
-    identity: &RunnerTunnelProcessStartIdentity,
-) -> bool {
-    session_store::tunnel_process_is_owned(
-        pid,
-        Some(identity),
-        homeboy_core::process::process_start_identity,
-    )
-}
-
 pub(crate) fn tunnel_process_ownership(
     pid: u32,
     identity: &RunnerTunnelProcessStartIdentity,
@@ -3255,19 +3069,6 @@ fn runner_jobs_with_client(
     result
 }
 
-fn orphaned_child_run_jobs(
-    runner_id: &str,
-    session: &RunnerSession,
-    active_jobs: &[ActiveRunnerJobSummary],
-) -> Vec<ActiveRunnerJobSummary> {
-    orphaned_child_run_jobs_until(
-        runner_id,
-        session,
-        active_jobs,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
-}
-
 fn orphaned_child_run_jobs_until(
     runner_id: &str,
     session: &RunnerSession,
@@ -3288,16 +3089,6 @@ fn child_run_has_active_job(run: &RunSummary, active_jobs: &[ActiveRunnerJobSumm
         job.durable_run_id.as_deref() == Some(run.id.as_str())
             || job.command.contains(run.id.as_str())
     })
-}
-
-fn runner_running_runs(session: &RunnerSession) -> Result<Vec<RunSummary>> {
-    if session.local_url.is_none() {
-        return Ok(Vec::new());
-    }
-    runner_running_runs_until(
-        session,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn runner_running_runs_until(
@@ -3845,16 +3636,6 @@ pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<S
     daemon_http_identity(local_url)
 }
 
-pub(crate) fn local_live_session(
-    runner_id: &str,
-    timeout: Duration,
-) -> Result<Option<RunnerSession>> {
-    let Some(session) = read_session_or_live_peer(runner_id)? else {
-        return Ok(None);
-    };
-    Ok(session_is_live_with_timeout(&session, timeout).then_some(session))
-}
-
 /// A connected reverse session has no controller-side identity probe.
 ///
 /// The direct-SSH path reads the runner's configured binary over SSH; a reverse
@@ -3889,19 +3670,6 @@ fn tunnel_verification_gap(
             runner.id, runner.id,
         ),
     ))
-}
-
-fn stale_daemon_warning(
-    runner: &Runner,
-    session: Option<&RunnerSession>,
-    connected: bool,
-) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
-    stale_daemon_warning_until(
-        runner,
-        session,
-        connected,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
 }
 
 fn stale_daemon_warning_until(
