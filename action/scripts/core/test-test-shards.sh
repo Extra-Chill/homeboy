@@ -384,6 +384,14 @@ if select_candidate_baseline pull_request true 'review test' >/dev/null 2>&1; th
   printf 'FAIL: missing canonical candidate shard result selected a baseline\n'; exit 1
 fi
 # shellcheck disable=SC2016
-grep -F 'homeboy-candidate-test-results-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: final Test does not consume canonical candidate results before reconciliation\n'; exit 1; }
+grep -F 'resolve-run-artifact.sh homeboy-candidate-test-results' "${WORKFLOW}" >/dev/null || { printf 'FAIL: final Test does not resolve a prior successful aggregate result on rerun\n'; exit 1; }
+# shellcheck disable=SC2016
+# shellcheck disable=SC2016
+grep -F 'name: ${{ steps.candidate-test-result-artifact.outputs.artifact-name }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: final Test does not consume the resolved aggregate result\n'; exit 1; }
+# shellcheck disable=SC2016
+if grep -A15 'name: Resolve candidate Test result' "${WORKFLOW}" | grep -F 'homeboy-candidate-test-results-${{ github.run_attempt }}' >/dev/null; then
+  printf 'FAIL: final Test still requires a same-attempt aggregate artifact\n'
+  exit 1
+fi
 printf 'PASS: canonical candidate result validation fails closed when the aggregate is absent\n'
 printf 'PASS: policy waits for sharded Test reconciliation while preserving unsharded behavior\n'
