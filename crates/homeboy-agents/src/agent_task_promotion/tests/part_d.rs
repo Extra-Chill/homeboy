@@ -251,16 +251,24 @@ fn normalize_promotion_patch_strips_lab_sandbox_workspace_prefix() {
 }
 
 #[test]
-fn empty_patch_runs_public_and_private_gates_against_destination() {
+fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "homeboy@example.test"]);
     git(&repo, &["config", "user.name", "Homeboy Test"]);
-    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
     git(&repo, &["add", "lib.rs"]);
-    git(&repo, &["commit", "-m", "candidate"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", repo.to_str().expect("repo path")],
+    );
+    git(&repo, &["checkout", "-b", "fix/candidate"]);
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["commit", "-am", "candidate"]);
     let revision = git_head(&repo, "HEAD");
     let (source_path, source) = write_empty_patch_source(&temp);
     let mut provider = FakePromotionWorkspaceProvider {
@@ -274,8 +282,10 @@ fn empty_patch_runs_public_and_private_gates_against_destination() {
             source_run_id: Some("run-empty".to_string()),
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
-            base_ref: None,
-            task_base_sha: None,
+            base_ref: Some("main".to_string()),
+            // Cook's inspected revision can equal the existing candidate. The
+            // declared base remains the publication authority.
+            task_base_sha: Some(revision.clone()),
             candidate_ref: None,
             to_worktree: "repo@candidate".to_string(),
             task_id: None,
@@ -297,6 +307,15 @@ fn empty_patch_runs_public_and_private_gates_against_destination() {
     assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
     assert_eq!(report.provenance["verified_revision"], revision);
+    assert_eq!(report.changed_files, ["lib.rs"]);
+    assert_eq!(
+        report
+            .verified_base
+            .as_ref()
+            .expect("declared base is retained")
+            .base,
+        "main"
+    );
     assert_eq!(provider.apply_calls.len(), 0);
     assert_eq!(provider.verify_calls.len(), 2);
     assert_eq!(provider.verify_calls[0].0, repo);

@@ -245,7 +245,7 @@ fn pre_artifact_interruption_phase(
     }
 }
 
-fn intentional_no_change_from_aggregate(
+pub(crate) fn intentional_no_change_from_aggregate(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
 ) -> Option<AgentTaskIntentionalNoChange> {
     aggregate.outcomes.iter().find_map(|outcome| {
@@ -5699,6 +5699,55 @@ fn run_cook_spine(
                 let declaration = feedback
                     .intentional_no_change
                     .expect("intentional no-change feedback carries its declaration");
+                if !options.no_finalize && !promotion.changed_files.is_empty() {
+                    report_cook_progress(
+                        lifecycle_store,
+                        durable_observer,
+                        &cook_id,
+                        &run_id,
+                        "finalization",
+                        attempt,
+                        Some(
+                            "verified intentional no-change review accepted an existing candidate",
+                        ),
+                    )?;
+                    let finalization =
+                        side_effects.finalize(lifecycle_store, &options, &run_id, &promotion)?;
+                    let final_status = finalization["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let mut report = cook_report(CookReportInput {
+                        cook_id,
+                        status: if matches!(
+                            final_status.as_str(),
+                            "review_ready" | "draft_published"
+                        ) {
+                            "intentional_no_change_finalized_existing_candidate"
+                        } else {
+                            &final_status
+                        },
+                        disposition: CookDisposition::Terminal,
+                        attempts,
+                        finalization: Some(finalization),
+                        stop_reason: None,
+                        exit_code: if matches!(
+                            final_status.as_str(),
+                            "review_ready" | "draft_published"
+                        ) {
+                            0
+                        } else {
+                            1
+                        },
+                        invocation_latest_run_id: Some(&run_id),
+                    });
+                    report.value.intentional_no_change =
+                        Some(AgentTaskCookIntentionalNoChangeReport {
+                            declaration,
+                            review_form,
+                        });
+                    return Ok(report);
+                }
                 let mut report = cook_report(CookReportInput {
                     cook_id,
                     status: "intentional_no_change",
