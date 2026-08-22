@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBatchChild};
+use homeboy::agents::agent_tasks::batch::{
+    claim_fanout_run_batch, persist_fanout_run_batch, record_fanout_run_batch_failure,
+    FanoutRunBatchChild,
+};
 use homeboy::agents::agent_tasks::fanout_supervisor::{portfolio_exists, read_portfolio};
 use homeboy::agents::agent_tasks::lifecycle::submit_plan;
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
@@ -116,6 +119,58 @@ fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
             assert!(portfolio.revision >= expected_minimum_revision);
             assert_eq!(portfolio.children["child"].child_id, "child");
         }
+    });
+}
+
+#[test]
+fn fanout_status_reports_a_pre_child_coordinator_failure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        persist_fanout_run_batch(
+            "failed-before-admission",
+            "failed-before-admission",
+            &[FanoutRunBatchChild {
+                task_id: "child".to_string(),
+                run_id: "missing-child-record".to_string(),
+            }],
+            serde_json::json!({}),
+        )
+        .expect("persist fanout batch");
+        let claim_id = claim_fanout_run_batch("failed-before-admission")
+            .expect("claim batch")
+            .expect("coordinator claim");
+        record_fanout_run_batch_failure(
+            "failed-before-admission",
+            &claim_id,
+            "worktree_preflight",
+            serde_json::json!({ "message": "fixture failure before first child" }),
+        )
+        .expect("persist coordinator failure");
+
+        let output = Command::new(homeboy_bin())
+            .args(["agent-task", "fanout", "status", "failed-before-admission"])
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("run Homeboy fanout status");
+        assert!(
+            !output.status.success(),
+            "terminal coordinator failure exits nonzero"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("fanout status JSON output");
+        assert_eq!(output["data"]["batch"]["status"], "failed");
+        assert_eq!(
+            output["data"]["batch"]["admission_blocker"]["stage"],
+            "worktree_preflight"
+        );
+        assert_eq!(
+            output["data"]["batch"]["admission"],
+            serde_json::json!({
+                "expected": 1,
+                "admitted": 0,
+                "rejected": 1,
+                "absent": 0,
+            })
+        );
     });
 }
 

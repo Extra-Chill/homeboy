@@ -366,8 +366,15 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 }
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    let observations = reconcile_fanout_pr_states(&args.batch_id, false)?;
     let mut report = batch::status(&args.batch_id)?;
+    // A terminal coordinator failure is the authoritative outcome even when it
+    // happened before the first child record existed. Reconciling children first
+    // would turn that diagnostic into a misleading "run record not found".
+    let observations = if report.admission_blocker.is_some() {
+        BTreeMap::new()
+    } else {
+        reconcile_fanout_pr_states(&args.batch_id, false)?
+    };
     if !observations.is_empty() {
         report.dependency_graph = batch::fanout_dependency_graph_with_finalization_statuses(
             &args.batch_id,
