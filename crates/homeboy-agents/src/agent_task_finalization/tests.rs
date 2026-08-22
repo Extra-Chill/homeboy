@@ -2156,6 +2156,124 @@ fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
     });
 }
 
+#[test]
+fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolution_tree() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let git_output = |args: &[&str]| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .expect("git runs")
+                    .stdout,
+            )
+            .expect("git output")
+            .trim()
+            .to_string()
+        };
+        let base_branch = git_output(&["branch", "--show-current"]);
+        let historical_base = git_output(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "candidate"]);
+        std::fs::write(repo.path().join("conflict"), "candidate\n").unwrap();
+        std::fs::write(repo.path().join("candidate-only"), "candidate\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "candidate"]);
+        let candidate_parent = git_output(&["rev-parse", "HEAD"]);
+        git(&["checkout", &base_branch]);
+        std::fs::write(repo.path().join("conflict"), "advanced base\n").unwrap();
+        std::fs::write(repo.path().join("base-only"), "advanced base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "advance verified base"]);
+        let resolved_base_parent = git_output(&["rev-parse", "HEAD"]);
+        git(&["checkout", "candidate"]);
+        assert!(!Command::new("git")
+            .args(["merge", &base_branch, "-m", "merge verified base"])
+            .current_dir(repo.path())
+            .status()
+            .expect("merge runs")
+            .success());
+        std::fs::write(repo.path().join("conflict"), "fully resolved candidate\n").unwrap();
+        git(&["add", "conflict"]);
+        git(&["commit", "--no-edit"]);
+        let merged_candidate = git_output(&["rev-parse", "HEAD"]);
+        let candidate_tree = git_output(&["rev-parse", "HEAD^{tree}"]);
+        let resolved_base_tree = git_output(&["rev-parse", &format!("{base_branch}^{{tree}}")]);
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .expect("fingerprint adopted merge candidate");
+
+        let run_id = "adopted-merge-finalization-recovery";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["candidate-only".to_string(), "conflict".to_string()];
+        promotion.provenance = json!({
+            "candidate": candidate,
+            "historical_task_base": historical_base,
+            "adoption_merge": {
+                "candidate": merged_candidate,
+                "candidate_parent": candidate_parent,
+                "resolved_base_parent": resolved_base_parent,
+                "candidate_tree": candidate_tree,
+                "resolved_base_tree": resolved_base_tree,
+                "changed_files": ["candidate-only", "conflict"]
+            }
+        });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion.clone()).unwrap(),
+        )
+        .unwrap();
+
+        // An empty recovery commit preserves the complete conflict-resolution tree.
+        git(&["commit", "--allow-empty", "-m", "finalization recovery"]);
+        let mut options = real_git_finalization_options(
+            repo.path(),
+            vec!["conflict".to_string(), "candidate-only".to_string()],
+        );
+        options.run_id = run_id.to_string();
+        validate_real_candidate_fingerprint(&options).expect("exact merge recovery accepted");
+
+        let mut mismatched_base = promotion.clone();
+        mismatched_base.provenance["adoption_merge"]["resolved_base_parent"] =
+            json!(candidate_parent);
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(mismatched_base).unwrap(),
+        )
+        .unwrap();
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("mismatched resolved-base parent rejected");
+        assert!(error.message.contains("parents do not match"));
+
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("conflict"), "tree drift\n").unwrap();
+        git(&["add", "conflict"]);
+        git(&["commit", "-m", "recovery tree drift"]);
+        let error = validate_real_candidate_fingerprint(&options).expect_err("tree drift rejected");
+        assert!(error.message.contains("parent and tree exactly match"));
+    });
+}
+
 fn successful_lifecycle(model: &str) -> RunLifecycleRecord {
     RunLifecycleRecord {
         execution: RunExecutionLifecycle {

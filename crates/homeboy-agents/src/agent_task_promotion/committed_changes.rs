@@ -225,11 +225,15 @@ fn resolve_adoption_candidate_base(
                     candidate_tree: git_stdout(
                         cwd,
                         &["rev-parse", &format!("{candidate}^{{tree}}")],
-                    )?,
+                    )?
+                    .trim()
+                    .to_string(),
                     resolved_base_tree: git_stdout(
                         cwd,
                         &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
-                    )?,
+                    )?
+                    .trim()
+                    .to_string(),
                 }),
             ))
         }

@@ -881,6 +881,14 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.changed_files, vec!["candidate.txt"]);
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["head"],
+        merged_candidate
+    );
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["tree"],
+        report.provenance["adoption_merge"]["candidate_tree"]
+    );
     assert_eq!(report.provenance["base_ref"], resolved_base_parent);
     assert_eq!(
         report.provenance["adoption_merge"]["candidate_parent"],
