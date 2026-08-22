@@ -2127,28 +2127,6 @@ fn snapshot_construction_failure(
     error
 }
 
-/// Build the exact shell program a snapshot materialization hands to `sh -c`.
-///
-/// This is the single construction point for that program so a test can assert
-/// against the byte-for-byte string production runs. Composing the archive
-/// pipeline and scratch scoping inline in the caller left the assembled command
-/// unobservable: `scratch_scoped_command` was individually well-formed, yet the
-/// only thing that ever exercised the *composition* was a full materialization,
-/// so a shell-syntax regression reached `sh -c` with no test able to see it and
-/// surfaced as ten unrelated workspace-prune behavior failures (#10399).
-pub(super) fn snapshot_materialization_command(
-    local_path: &Path,
-    target_command: &str,
-    excludes: &[String],
-    scratch: Option<&Path>,
-) -> Result<String> {
-    let command = snapshot_archive_command(local_path, target_command, excludes)?;
-    Ok(match scratch {
-        Some(scratch) => scratch_scoped_command(&command, scratch),
-        None => command,
-    })
-}
-
 /// Scope one snapshot command to an admitted controller scratch filesystem.
 ///
 /// Uses `export` rather than a `TMPDIR=x cmd` assignment prefix: the archive
@@ -2162,75 +2140,6 @@ pub(super) fn scratch_scoped_command(command: &str, scratch: &Path) -> String {
         shell::quote_arg(&scratch.display().to_string()),
         command.trim_end_matches(';')
     )
-}
-
-pub(super) fn snapshot_archive_command(
-    local_path: &Path,
-    target_command: &str,
-    excludes: &[String],
-) -> Result<String> {
-    // A Git-backed snapshot overlays this archive onto an exact checkout. Keep
-    // links whose resolved targets stay in the source tree so tracked Git links
-    // retain their identity. Materialize only external dependency links: their
-    // targets are unavailable at the runner, but plans may traverse them (#3913).
-    let root_excludes = excludes.to_vec();
-    let excludes = excludes
-        .iter()
-        .filter(|pattern| !pattern.starts_with("./"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let archive = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -C \"$stage/source\" {exclude} -cf -",
-        exclude = tar_exclude_args(&excludes),
-    );
-    let source_archive = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf -",
-        src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(&excludes),
-    );
-    let prepare = |source_stream: &str| {
-        format!(
-        "root=$(pwd -P) && stage=$(mktemp -d \"${{TMPDIR:-/tmp}}/homeboy-snapshot.XXXXXX\") && trap 'rm -rf \"$stage\"' EXIT && mkdir -p \"$stage/source\" && {source_stream} | tar --no-xattrs -C \"$stage/source\" -xf - && export root stage && find \"$stage/source\" -type l -exec sh -c {resolve} sh {{}} \\;",
-        resolve = shell::quote_arg(&format!("stage_link=$1; relative=${{stage_link#\"$stage/source\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage/source\" -xf - ;; esac", tar_exclude_args(&excludes))),
-    )
-    };
-
-    // Build both archive streams from the same controller-side manifest.
-    // Optional controller context paths may be absent from a clean source
-    // worktree; only entries observed under the selected root reach tar.
-    // Enumerating names does not read their contents, so tar remains the
-    // failure boundary for an existing unreadable input.
-    let root_input = snapshot_root_manifest_input(local_path, &root_excludes)?;
-    let prepare = prepare(&format!("({root_input}) | {source_archive} --null -T -"));
-    Ok(format!(
-        "(cd {src} && {prepare} && ({root_input}) | {archive} --null -T -) | {target_command}",
-        src = shell::quote_arg(&local_path.display().to_string()),
-    ))
-}
-
-fn snapshot_root_manifest_input(local_path: &Path, excludes: &[String]) -> Result<String> {
-    let entries = fs::read_dir(local_path)
-        .map_err(|err| Error::internal_io(err.to_string(), Some("read snapshot root".to_string())))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read snapshot root entry".to_string()),
-            )
-        })?;
-    let paths = entries
-        .iter()
-        .filter_map(|entry| {
-            let path = format!("./{}", entry.file_name().to_string_lossy());
-            (!is_excluded(local_path, &entry.path(), excludes, &[])).then_some(path)
-        })
-        .map(|path| shell::quote_arg(&path))
-        .collect::<Vec<_>>();
-    Ok(if paths.is_empty() {
-        "printf ''".to_string()
-    } else {
-        format!("printf '%s\\0' {}", paths.join(" "))
-    })
 }
 
 pub(crate) fn effective_snapshot_excludes(

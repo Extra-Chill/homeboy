@@ -4598,6 +4598,13 @@ fn secure_provider_evidence_copy_with_limit(
             None,
         ));
     }
+    if metadata.len() > max_bytes {
+        return Err(provider_evidence_size_error(
+            source_path,
+            metadata.len(),
+            max_bytes,
+        ));
+    }
     let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
         || unsafe { libc::fcntl(input.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0
@@ -4605,13 +4612,6 @@ fn secure_provider_evidence_copy_with_limit(
         return Err(homeboy::core::Error::internal_io(
             std::io::Error::last_os_error().to_string(),
             Some(source_path.display().to_string()),
-        ));
-    }
-    if metadata.len() > max_bytes {
-        return Err(provider_evidence_size_error(
-            source_path,
-            metadata.len(),
-            max_bytes,
         ));
     }
     let parent = directory(destination.parent().expect("destination parent"), true)?;
@@ -4835,10 +4835,15 @@ mod provider_evidence_tests {
         let destination = temp
             .path()
             .join("workspace/.homeboy/evidence/fixture/exact.bin");
-        let exact_source = admit_provider_evidence_source(exact.to_str().expect("UTF-8 path"))
-            .expect("admit exact fixture");
+        let exact_admitted =
+            admit_provider_evidence_source(exact.to_str().expect("exact fixture path is UTF-8"))
+                .expect("admit exact fixture");
+        let above_admitted = admit_provider_evidence_source(
+            above.to_str().expect("above-limit fixture path is UTF-8"),
+        )
+        .expect("admit above-limit fixture");
         let (size, digest) =
-            secure_provider_evidence_copy_with_limit(&exact_source, &destination, 4)
+            secure_provider_evidence_copy_with_limit(&exact_admitted, &destination, 4)
                 .expect("exact boundary is admitted");
         assert_eq!(size, 4);
         assert_eq!(
@@ -4850,10 +4855,8 @@ mod provider_evidence_tests {
             [0, 1, 2, 255]
         );
 
-        let above_source = admit_provider_evidence_source(above.to_str().expect("UTF-8 path"))
-            .expect("admit above-limit fixture");
         let error = secure_provider_evidence_copy_with_limit(
-            &above_source,
+            &above_admitted,
             &temp
                 .path()
                 .join("workspace/.homeboy/evidence/fixture/above.bin"),
