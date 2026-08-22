@@ -2190,6 +2190,9 @@ fn run_provider_lookup_command(
             false,
         )
     })?;
+    if provider_declared_lookup_not_found(&value) {
+        return Ok(Vec::new());
+    }
     if let Some(attribution) = provider_failed_lookup_timeout_attribution(&value) {
         let mut error = Error::validation_invalid_argument(
             "to_worktree",
@@ -2227,6 +2230,22 @@ fn run_provider_lookup_command(
         annotate_provider_lookup_error(&mut error, provider_id, command, operation, "malformed");
         error
     })
+}
+
+/// Command providers may report an absent handle in a successful typed response.
+/// This is a lookup result, unlike a failed command or a malformed response, so
+/// callers can converge it through their configured ensure lifecycle.
+fn provider_declared_lookup_not_found(value: &Value) -> bool {
+    matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("not_found")
+    ) || matches!(
+        value.get("code").and_then(Value::as_str),
+        Some("worktree_not_found")
+    ) || matches!(
+        value.pointer("/error/code").and_then(Value::as_str),
+        Some("worktree_not_found")
+    )
 }
 
 #[derive(Serialize)]
@@ -6599,6 +6618,18 @@ mod tests {
         .expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn typed_worktree_not_found_is_distinct_from_provider_execution_failure() {
+        assert!(provider_declared_lookup_not_found(&serde_json::json!({
+            "status": "error",
+            "error": { "code": "worktree_not_found" }
+        })));
+        assert!(!provider_declared_lookup_not_found(&serde_json::json!({
+            "status": "error",
+            "error": { "code": "provider_execution_failed" }
+        })));
     }
 
     fn fake_list_provider_script(output: Value) -> String {
