@@ -255,7 +255,7 @@ pub(crate) fn preview_cook(
     validate_cook_request_with_provenance(&args, provenance)?;
     let (args, provision) = resolve_cook_preview_destination(args)?;
     let replay = cook_preview_replay_argv(&args);
-    let placement = preview_placement_policy_with_admission(&replay.argv);
+    let placement = preview_placement_policy_with_admission();
     let notification_resolution = homeboy::core::notification_route::current_resolution();
     if matches!(
         provision["action"].as_str(),
@@ -589,52 +589,18 @@ fn preview_placement_policy() -> Value {
     preview_placement_policy_from_argv(&argv)
 }
 
-fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
+fn preview_placement_policy_with_admission() -> Value {
     let mut policy = preview_placement_policy();
-    let placement = match policy["requested"].as_str() {
-        Some("local") => crate::cli_surface::Placement::Local,
-        Some("lab") => crate::cli_surface::Placement::Lab,
-        Some("lab-or-local") => crate::cli_surface::Placement::LabOrLocal,
-        _ => crate::cli_surface::Placement::Auto,
-    };
-    let runner = policy["runner"].as_str();
-    let detach_after_handoff = policy["detach_after_handoff"].as_bool().unwrap_or(false);
-    let admission = match crate::commands::resources::run_preflight() {
-        Ok((resources, _)) => {
-            let readiness = (!placement.is_explicit_local_override())
-                .then(crate::runner::lab_runner_readiness)
-                .transpose()
-                .ok()
-                .flatten();
-            crate::commands::utils::resource_policy::cook_preview_placement_admission(
-                crate::commands::utils::resource_policy::HotCommand {
-                    label: "agent-task cook/run-plan/retry --run",
-                    lab_offload_supported: true,
-                    lab_offload_unsupported_reason: None,
-                    allows_warm_runner_coordination: true,
-                    offload_only_when_hot: false,
-                },
-                &resources,
-                placement,
-                runner,
-                detach_after_handoff,
-                readiness.as_ref(),
-                replay_args,
-            )
-        }
-        Err(error) => crate::commands::utils::resource_policy::CookPreviewPlacementAdmission {
-            schema: "homeboy/cook-preview-placement-admission/v1",
-            state: crate::commands::utils::resource_policy::CookPreviewPlacementAdmissionState::Indeterminate,
-            revalidate_before_execution: true,
-            blockers: vec![
-                crate::commands::utils::resource_policy::CookPreviewPlacementBlocker {
-                    id: "controller_resource_snapshot_unavailable".to_string(),
-                    detail: error.message,
-                },
-            ],
-            deferred_to: Some("controller_resource_snapshot".to_string()),
-            recovery: None,
-        },
+    // Resource and Lab inventory are live execution inputs. Reading either here
+    // made a read-only preview wait on the same unavailable control plane it was
+    // intended to diagnose. Execution revalidates this admission after preview.
+    let admission = crate::commands::utils::resource_policy::CookPreviewPlacementAdmission {
+        schema: "homeboy/cook-preview-placement-admission/v1",
+        state: crate::commands::utils::resource_policy::CookPreviewPlacementAdmissionState::Indeterminate,
+        revalidate_before_execution: true,
+        blockers: Vec::new(),
+        deferred_to: Some("execution_placement_admission".to_string()),
+        recovery: None,
     };
     policy["admission"] =
         serde_json::to_value(admission).expect("Cook preview placement admission serializes");
@@ -1287,6 +1253,90 @@ mod preview_tests {
                 preview["resolved"]["placement"]["admission"]["revalidate_before_execution"],
                 true
             );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["deferred_to"],
+                "execution_placement_admission"
+            );
+        });
+    }
+
+    #[test]
+    fn local_preview_matches_live_prompt_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("prompt source");
+            std::fs::write(
+                source.path(),
+                "Read /private/evidence.json before editing.\n",
+            )
+            .expect("write prompt");
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                &format!("@{}", source.path().display()),
+                "--to-worktree",
+                env!("CARGO_MANIFEST_DIR"),
+                "--no-finalize",
+            ]);
+
+            let live =
+                validate_cook_request(&args).expect_err("live preflight rejects undeclared path");
+            let preview = preview_cook(args, None).expect_err("preview rejects the same path");
+            assert_eq!(preview.code, live.code);
+            assert_eq!(preview.message, live.message);
+            assert_eq!(preview.details, live.details);
+        });
+    }
+
+    #[test]
+    fn local_preview_projects_prompt_evidence_without_execution_admission() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("evidence source");
+            std::fs::write(source.path(), "Read this task evidence before editing.\n")
+                .expect("write prompt");
+            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace root");
+            let (preview, exit_code) = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    &format!("@{}", source.path().display()),
+                    "--to-worktree",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                    "--no-finalize",
+                    "--provider-evidence",
+                    &format!(
+                        r#"{{"id":"prompt","source":"{}"}}"#,
+                        source.path().display()
+                    ),
+                ]),
+                None,
+            )
+            .expect("local preview");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["workspace"]["action"], "planned_reuse");
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["deferred_to"],
+                "execution_placement_admission"
+            );
+            let evidence_path = preview["resolved"]["provider"]["config"]["evidence_inputs"][0]
+                ["path"]
+                .as_str()
+                .expect("projected evidence path");
+            assert!(evidence_path.starts_with(workspace.to_str().expect("UTF-8 workspace")));
+            assert!(!evidence_path.contains(&source.path().display().to_string()));
         });
     }
 
@@ -3425,11 +3475,16 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
-    validate_provider_evidence_inputs(
-        &args.provider_evidence_inputs,
-        args.dispatch.prompt.as_deref(),
-    )?;
-    let dispatch = dispatch_args_for_cook(args);
+    // Resolve @file input before scanning its provider-visible content. The host
+    // path is an ingestion detail, not evidence; stdin remains unread here.
+    let mut dispatch = dispatch_args_for_cook(args);
+    if dispatch.prompt.as_deref().is_some_and(|spec| {
+        spec.starts_with('@')
+            && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(spec).is_none()
+    }) {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
