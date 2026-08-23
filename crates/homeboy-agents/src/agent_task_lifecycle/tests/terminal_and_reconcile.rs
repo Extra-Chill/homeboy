@@ -3081,7 +3081,8 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         let run_id = "run-cancel-scratch-replay";
         let plan = test_plan();
         submit_plan(&plan, Some(run_id)).expect("submitted");
-        reserve_provider_execution(run_id, &plan.tasks[0], 1).expect("provider execution reserved");
+        reserve_provider_execution_in_store(&test_lifecycle_store(), run_id, &plan.tasks[0], 1)
+            .expect("provider execution reserved");
 
         let released = crate::controller_scratch::allocate_attempt(
             run_id,
@@ -3257,7 +3258,13 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-live")).expect("submitted");
         mark_running("owner-live").expect("running");
-        reserve_provider_execution("owner-live", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-live",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
 
         let first = status("owner-live").expect("first status");
         let second = status("owner-live").expect("second status");
@@ -3279,7 +3286,13 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-live-late-import")).expect("submitted");
         mark_running("owner-live-late-import").expect("running");
-        reserve_provider_execution("owner-live-late-import", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-live-late-import",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         record_provider_execution_terminal("owner-live-late-import", "task-a", 1, "succeeded")
             .expect("provider success recorded");
 
@@ -3307,7 +3320,13 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-legacy")).expect("submitted");
         mark_running("owner-legacy").expect("running");
-        reserve_provider_execution("owner-legacy", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-legacy",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         rewrite_record_for_test("owner-legacy", |record| {
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
@@ -3341,7 +3360,13 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         let plan = test_plan();
         submit_plan(&plan, Some("owner-pid-reused")).expect("submitted");
         mark_running("owner-pid-reused").expect("running");
-        reserve_provider_execution("owner-pid-reused", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-pid-reused",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         rewrite_record_for_test("owner-pid-reused", |record| {
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
         })
@@ -3368,7 +3393,13 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-dead")).expect("submitted");
         mark_running("owner-dead").expect("running");
-        reserve_provider_execution("owner-dead", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-dead",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3407,7 +3438,13 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-late-success")).expect("submitted");
         mark_running("owner-late-success").expect("running");
-        reserve_provider_execution("owner-late-success", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-late-success",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
             .expect("provider success recorded");
         let mut owner = Command::new("sleep")
@@ -3441,8 +3478,13 @@ fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-no-owner")).expect("submitted");
         mark_running("provider-failed-no-owner").expect("running");
-        reserve_provider_execution("provider-failed-no-owner", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-no-owner",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         record_provider_execution_terminal("provider-failed-no-owner", "task-a", 1, "failed")
             .expect("provider failure recorded");
         rewrite_record_for_test("provider-failed-no-owner", |record| {
@@ -3478,8 +3520,13 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-owner-dead")).expect("submitted");
         mark_running("provider-failed-owner-dead").expect("running");
-        reserve_provider_execution("provider-failed-owner-dead", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-owner-dead",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         record_provider_execution_terminal("provider-failed-owner-dead", "task-a", 1, "failed")
             .expect("provider failure recorded");
         let mut owner = Command::new("sleep")
@@ -3517,7 +3564,13 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
         let plan = test_plan();
         submit_plan(&plan, Some("cancel-race")).expect("submitted");
         mark_running("cancel-race").expect("running");
-        reserve_provider_execution("cancel-race", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "cancel-race",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         record_provider_execution_terminal("cancel-race", "task-a", 1, "succeeded")
             .expect("provider success recorded");
 
@@ -3541,8 +3594,13 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-terminal-cancel-race")).expect("submitted");
         mark_running("provider-terminal-cancel-race").expect("running");
-        reserve_provider_execution("provider-terminal-cancel-race", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-terminal-cancel-race",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         cancel_run("provider-terminal-cancel-race", Some("stale owner"))
             .expect("cancellation recorded");
 
@@ -3568,8 +3626,13 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("invalid-provider-terminal-state")).expect("submitted");
-        reserve_provider_execution("invalid-provider-terminal-state", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "invalid-provider-terminal-state",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
 
         let error = record_provider_execution_terminal(
             "invalid-provider-terminal-state",

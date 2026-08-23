@@ -2038,7 +2038,14 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
         crate::agents::agent_task_service::persist_initial_recipe(&options)
             .expect("persist Cook recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist Cook attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("bind Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind Cook attempt");
         agent_task_lifecycle::record_pre_execution_failure(
             run_id,
             &plan,
@@ -3500,7 +3507,9 @@ fn replay_input_failure_never_commits_a_manifest_and_retry_is_clean() {
 fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let cook_id = "supervised-replay-worker";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
             cook_id,
             serde_json::json!({ "request_ref": "sha256:request" }),
             "queued",
@@ -3541,7 +3550,9 @@ fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
 fn rejected_admission_rebinding_writes_no_snapshot_bytes() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let cook_id = "snapshot-rebinding";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
             cook_id,
             serde_json::json!({ "request_ref": "sha256:first" }),
             "queued",
@@ -3889,12 +3900,14 @@ fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materiali
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+
             let mut permissions = std::fs::metadata(&promotion_provider).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(&promotion_provider, permissions).unwrap();
         }
                 let cook_id = "e2e-unmaterialized-replay";
-                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"), 
                     cook_id,
                     serde_json::json!({
                         "placement": { "requested": "auto", "local_fallback": false },

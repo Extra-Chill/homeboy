@@ -5,6 +5,14 @@ use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
+
 #[test]
 fn promotion_source_resolves_completed_run_id() {
     with_temp_home(|| {
@@ -365,10 +373,20 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             Arc::new(NoChangeReviewExecutor),
         )
         .expect("intentional no-change retry completed");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, candidate_run_id)
-            .expect("record substantive candidate");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
-            .expect("record latest no-change retry");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            candidate_run_id,
+        )
+        .expect("record substantive candidate");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            retry_run_id,
+        )
+        .expect("record latest no-change retry");
         agent_task_lifecycle::record_promotion(
             retry_run_id,
             json!({
@@ -494,10 +512,17 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
     with_temp_home(|| {
         let cook_id = "cook-detached-status-parent";
         let child_run_id = "cook-detached-status-parent-attempt-1";
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-            .expect("record detached Cook parent");
-        agent_task_lifecycle::reserve_detached_cook_handoff_materialization(cook_id, child_run_id)
-            .expect("reserve detached Cook child");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("record detached Cook parent");
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            child_run_id,
+        )
+        .expect("reserve detached Cook child");
 
         let (reserved_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
@@ -575,8 +600,13 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
             "detached_materializing_attempt"
         );
 
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, child_run_id)
-            .expect("publish Cook index");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            child_run_id,
+        )
+        .expect("publish Cook index");
         let (published_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
             exact: false,
@@ -640,10 +670,20 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
             Arc::new(InspectingExecutor::noop(retry_run_id)),
         )
         .expect("retry Cook record completed");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, cook_id)
-            .expect("record initial Cook attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
-            .expect("record later Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            cook_id,
+        )
+        .expect("record initial Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            retry_run_id,
+        )
+        .expect("record later Cook attempt");
 
         let (default_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),

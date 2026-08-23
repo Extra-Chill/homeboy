@@ -5019,6 +5019,13 @@ fn batch_commands(batch_id: &str, placement: Placement) -> Value {
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use crate::cli_surface::{Cli, Commands, Placement};
     use crate::commands::agent_task::{AgentTaskCommand, AgentTaskFanoutCommand};
@@ -8461,8 +8468,11 @@ fi
         with_isolated_home(|_| {
             let batch_id = "contended-public-status";
             let run_id = "contended-public-status-child";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(run_id)
-                .expect("persist child lifecycle record");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                run_id,
+            )
+            .expect("persist child lifecycle record");
             batch::persist_fanout_run_batch(
                 batch_id,
                 batch_id,
