@@ -1070,6 +1070,8 @@ pub struct AgentTaskCookArgs {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct CookPromptSnapshot {
+    #[serde(skip)]
+    pub content: String,
     pub source: String,
     pub sha256: String,
     pub size_bytes: usize,

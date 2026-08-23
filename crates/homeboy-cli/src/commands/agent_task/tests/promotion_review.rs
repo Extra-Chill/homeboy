@@ -780,6 +780,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: None,
+                    prompt_is_literal: false,
                     tasks: Vec::new(),
                     cwd: None,
                     workspace: None,
@@ -1191,6 +1192,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
+                    prompt_is_literal: false,
                     tasks: Vec::new(),
                     cwd: Some(target.display().to_string()),
                     workspace: None,

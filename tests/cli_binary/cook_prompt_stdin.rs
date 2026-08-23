@@ -112,14 +112,14 @@ fn cook_snapshots_multiline_stdin_once_in_the_durable_recipe() {
     );
     assert_eq!(
         recipe["attempts"][0]["plan"]["tasks"][0]["metadata"]["prompt_source"],
+        "-"
+    );
+    assert_eq!(
+        recipe["attempts"][0]["plan"]["metadata"]["prompt_input_v1"]["source"],
         "stdin"
     );
     assert_eq!(
-        recipe["attempts"][0]["plan"]["metadata"]["prompt_input"]["source"],
-        "stdin"
-    );
-    assert_eq!(
-        recipe["attempts"][0]["plan"]["metadata"]["prompt_input"]["sha256"],
+        recipe["attempts"][0]["plan"]["metadata"]["prompt_input_v1"]["sha256"],
         format!(
             "sha256:{}",
             homeboy_engine_primitives::content_hash::sha256_hex(prompt.as_bytes())

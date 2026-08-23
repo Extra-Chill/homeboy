@@ -335,8 +335,7 @@ pub(crate) fn preview_cook(
                 None,
             )
         })?;
-        let mut dispatch = dispatch_args_for_cook(&args);
-        resolve_dispatch_prompt(&mut dispatch)?;
+        let dispatch = resolved_dispatch_args_for_cook(&args)?;
         let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
         compile_args.dispatch.prompt = dispatch.prompt;
         let evidence =
@@ -1468,7 +1467,7 @@ mod preview_tests {
                 "--backend".to_string(),
                 "fixture".to_string(),
                 "--prompt".to_string(),
-                "inspect the task".to_string(),
+                "-".to_string(),
                 "--to-worktree".to_string(),
                 workspace,
                 "--no-finalize".to_string(),
@@ -1479,9 +1478,15 @@ mod preview_tests {
             let Commands::AgentTask(agent_task) = cli.command else {
                 panic!("agent-task command");
             };
-            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+            let super::super::AgentTaskCommand::Cook(mut args) = agent_task.command else {
                 panic!("Cook command");
             };
+            args.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
+                content: "@/not/a/prompt/file".to_string(),
+                source: "stdin".to_string(),
+                sha256: "sha256:fixture".to_string(),
+                size_bytes: "@/not/a/prompt/file".len(),
+            });
             let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
 
             assert_eq!(exit_code, 0);
@@ -3821,10 +3826,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         project_provider_evidence_inputs(&args.provider_evidence_inputs, workspace, None)?;
     }
 
-    let mut dispatch_args = dispatch_args_for_cook(&args);
-    // Resolve @file / stdin / stored-ref prompts before anything consumes the
-    // prompt, so the executor receives the exact bytes (#10100).
-    resolve_dispatch_prompt(&mut dispatch_args)?;
+    let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -3873,15 +3875,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
-    }
-    if let Some(snapshot) = &args.prompt_snapshot {
-        for task in &mut initial_plan.tasks {
-            // The prompt is carried by `instructions`; metadata records the
-            // transport without duplicating private stdin content.
-            task.metadata["prompt_source"] = serde_json::json!(snapshot.source);
-        }
-        initial_plan.metadata["prompt_input"] = serde_json::to_value(snapshot)
-            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     if args.require_acceptance {
         let authority = args.acceptance_authority.clone().ok_or_else(|| {
@@ -4054,6 +4047,22 @@ pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
     dispatch_args
 }
 
+/// Resolve a Cook prompt without treating an ingress snapshot as another
+/// structured spec. The original `dispatch.prompt` remains source provenance;
+/// the typed snapshot supplies literal task content.
+fn resolved_dispatch_args_for_cook(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<DispatchArgs> {
+    let mut dispatch = dispatch_args_for_cook(args);
+    if let Some(snapshot) = &args.prompt_snapshot {
+        dispatch.prompt = Some(snapshot.content.clone());
+        dispatch.prompt_is_literal = true;
+    } else {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    Ok(dispatch)
+}
+
 fn resolve_cook_execution_budget(
     args: &AgentTaskCookArgs,
     plan: &mut AgentTaskPlan,
@@ -4127,7 +4136,10 @@ pub(super) fn resolve_dispatch_prompt(
 /// Snapshot stdin at the Cook ingress boundary. Later compilation may happen in
 /// a detached child or retry a plan, neither of which owns the original stream.
 pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
-    if args.prompt_snapshot.is_some() || args.dispatch.prompt.as_deref() != Some("-") {
+    if args.prompt_snapshot.is_some()
+        || args.attempt_plan.is_some()
+        || args.dispatch.prompt.as_deref() != Some("-")
+    {
         return Ok(());
     }
 
@@ -4140,15 +4152,17 @@ pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::cor
             Some(vec!["Pipe a non-empty prompt, for example: homeboy agent-task cook --prompt - < task.md".to_string()]),
         ));
     }
+    let size_bytes = content.len();
+    let sha256 = format!(
+        "sha256:{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
+    );
     args.prompt_snapshot = Some(super::args::CookPromptSnapshot {
+        content,
         source: "stdin".to_string(),
-        sha256: format!(
-            "sha256:{}",
-            homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
-        ),
-        size_bytes: content.len(),
+        sha256,
+        size_bytes,
     });
-    args.dispatch.prompt = Some(content);
     Ok(())
 }
 
@@ -4231,10 +4245,13 @@ mod rotation_disclosure_tests {
 #[cfg(test)]
 mod prompt_input_tests {
     use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
 
     fn dispatch_with_prompt(prompt: Option<&str>) -> DispatchArgs {
         DispatchArgs {
             prompt: prompt.map(str::to_string),
+            prompt_is_literal: false,
             tasks: Vec::new(),
             cwd: None,
             workspace: None,
@@ -4325,6 +4342,40 @@ mod prompt_input_tests {
         resolve_dispatch_prompt(&mut args).expect("no prompt is fine");
         assert!(args.prompt.is_none());
     }
+
+    #[test]
+    fn stdin_snapshot_literals_are_never_reparsed_as_structured_prompt_specs() {
+        for literal in ["-", "@/missing/prompt.md", "@prompt:missing", " \n\t"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "-",
+                "--backend",
+                "fixture",
+                "--no-finalize",
+            ])
+            .expect("parse Cook");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let crate::commands::agent_task::AgentTaskCommand::Cook(mut cook) = agent_task.command
+            else {
+                panic!("Cook command");
+            };
+            cook.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
+                content: literal.to_string(),
+                source: "stdin".to_string(),
+                sha256: "sha256:test".to_string(),
+                size_bytes: literal.len(),
+            });
+
+            let dispatch = resolved_dispatch_args_for_cook(&cook).expect("literal snapshot");
+            assert_eq!(dispatch.prompt.as_deref(), Some(literal));
+            assert_eq!(cook.dispatch.prompt.as_deref(), Some("-"));
+        }
+    }
 }
 
 /// Compile the one durable provider-cell plan used by local Cook and Lab handoff.
@@ -4379,8 +4430,7 @@ pub(crate) fn compile_cook_plan(
                 .map(|path| path.display().to_string())
         })
         .transpose()?;
-    let mut dispatch = dispatch_args_for_cook(args);
-    resolve_dispatch_prompt(&mut dispatch)?;
+    let mut dispatch = resolved_dispatch_args_for_cook(args)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
@@ -4437,6 +4487,13 @@ pub(crate) fn compile_cook_plan(
     }
     if let Some(resolution) = &args.base_resolution {
         plan.metadata["cook_base_resolution"] = resolution.clone();
+    }
+    if let Some(snapshot) = &args.prompt_snapshot {
+        for task in &mut plan.tasks {
+            task.metadata["prompt_source"] = serde_json::json!(args.dispatch.prompt);
+        }
+        plan.metadata["prompt_input_v1"] = serde_json::to_value(snapshot)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     for task in &mut plan.tasks {
         if pending_lookup {
