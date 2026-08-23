@@ -613,16 +613,36 @@ fn run_materialized_provider_command_once_contained(
         );
     };
 
-    // The scheduler may replace a task workspace with an isolated attempt
-    // worktree. That task root is the execution cwd; a manifest cwd is only a
-    // fallback for requests without a workspace.
-    let cwd = request
-        .request
-        .workspace
-        .root
-        .as_deref()
-        .map(PathBuf::from)
-        .or(provider_cwd);
+    // Workspace identity stays at the Git root for scheduler admission and
+    // baseline replacement. A component-relative cwd is resolved only after
+    // that identity is established, so nested packages execute correctly in
+    // both the original worktree and isolated retry baselines.
+    let cwd = match request.request.workspace.root.as_deref() {
+        Some(root) => match homeboy_core::resolve_contained_local_path(
+            root,
+            request
+                .request
+                .executor
+                .config
+                .get("component_cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("."),
+            "component_cwd",
+        ) {
+            Ok(cwd) => Some(cwd),
+            Err(error) => {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.component_cwd_invalid",
+                    error.to_string(),
+                    json!({ "provider": provider.id }),
+                )
+            }
+        },
+        None => provider_cwd,
+    };
     let cwd_identity = cwd.as_deref().map(workspace_identity).transpose();
     let cwd_identity = match cwd_identity {
         Ok(identity) => identity,
