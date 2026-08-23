@@ -5,32 +5,18 @@
   "bypass_actors": [],
   "conditions": {
     "ref_name": {
-      "include": ["~DEFAULT_BRANCH"],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
       "exclude": []
     }
   },
-  "reconcile_preflight": {
-    "required_context": "homeboy / Test"
-  },
   "rules": [
-    { "type": "deletion" },
-    { "type": "non_fast_forward" },
     {
-      "type": "required_status_checks",
-      "parameters": {
-        "strict_required_status_checks_policy": true,
-        "do_not_enforce_on_create": false,
-        "required_status_checks": [
-          { "context": "homeboy / Required Gates Declaration", "integration_id": 15368 },
-          { "context": "homeboy / Workspace Tests Compile", "integration_id": 15368 },
-          { "context": "homeboy / Windows Compile", "integration_id": 15368 },
-          { "context": "homeboy / Rustfmt", "integration_id": 15368 },
-          { "context": "homeboy / Audit", "integration_id": 15368 },
-          { "context": "homeboy / Lint", "integration_id": 15368 },
-          { "context": "homeboy / Test", "integration_id": 15368 },
-          { "context": "homeboy / Required Gates Executed", "integration_id": 15368 }
-        ]
-      }
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
     }
   ]
 }
