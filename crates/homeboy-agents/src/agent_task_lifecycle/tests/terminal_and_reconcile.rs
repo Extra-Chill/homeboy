@@ -348,8 +348,13 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
         })
         .expect("project legacy pin");
 
-        let recovered = recover_controller_runtime(&record.run_id, Some(&artifact), None)
-            .expect("recover exact artifact");
+        let recovered = recover_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            &record.run_id,
+            Some(&artifact),
+            None,
+        )
+        .expect("recover exact artifact");
         let pinned = std::path::PathBuf::from(
             recovered["originating"]["pinned_executable"]
                 .as_str()
@@ -366,7 +371,8 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
                 [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
             recovered
         );
-        validate_controller_runtime(&record.run_id).expect("recovered runtime validates");
+        validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
+            .expect("recovered runtime validates");
     });
 }
 

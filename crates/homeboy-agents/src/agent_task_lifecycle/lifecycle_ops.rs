@@ -3091,12 +3091,6 @@ pub fn load_plan_for_execution_in_store(
     lifecycle_store.read_controller_plan_for_execution(&run_id)
 }
 
-/// Validate a queued lifecycle's pinned controller without scheduling provider work.
-pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    validate_controller_runtime_in_store(&lifecycle_store, run_id)
-}
-
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
 /// store.
 ///
@@ -3277,16 +3271,6 @@ fn migrate_record_controller_runtime_in_store(
     )?;
     record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
-}
-
-/// Repair only the executable artifact named by durable controller provenance.
-pub fn recover_controller_runtime(
-    run_id: &str,
-    artifact: Option<&std::path::Path>,
-    source: Option<&std::path::Path>,
-) -> Result<Value> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    recover_controller_runtime_in_store(&lifecycle_store, run_id, artifact, source)
 }
 
 /// Repair a run's pinned controller executable against an explicitly rooted
@@ -4611,12 +4595,6 @@ fn trusted_plan_environment_variables(plan: &AgentTaskPlan) -> Vec<String> {
     names.into_iter().take(16).collect()
 }
 
-/// Re-arm a quarantined record by exact durable run ID after its provenance is repaired.
-pub fn rearm_quarantined_run(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    rearm_quarantined_run_in_store(&lifecycle_store, run_id)
-}
-
 /// Re-arm a quarantined record inside an explicitly rooted store.
 ///
 /// This is the clearing half of the quarantine pair, and it has to read and
@@ -4651,13 +4629,6 @@ pub fn rearm_quarantined_run_in_store(
                 None,
             )
         })
-}
-
-/// Quarantine one exact queued run without changing its lifecycle state or
-/// removing any evidence. It can only return through `rearm_quarantined_run`.
-pub fn quarantine_queued_run_exact(run_id: &str, reason: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    quarantine_queued_run_exact_in_store(&lifecycle_store, run_id, reason)
 }
 
 /// Quarantine one exact queued run inside an explicitly rooted store.

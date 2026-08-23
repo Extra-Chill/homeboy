@@ -1288,7 +1288,8 @@ fn quarantine_and_cancellation_race_keeps_cancellation_terminal() {
             agent_task_lifecycle::cancel_run("quarantine-cancel-race", Some("operator cancel"))
         });
         barrier.wait();
-        let quarantine = agent_task_lifecycle::quarantine_queued_run_exact(
+        let quarantine = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
             "quarantine-cancel-race",
             "operator quarantine",
         );
@@ -1314,9 +1315,12 @@ fn quarantined_run_requires_explicit_rearm_before_it_is_eligible() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("quarantine-rearm"))
             .expect("run submitted");
         let operator_reason = format!("maintenance\n{}", "x".repeat(300));
-        let quarantined =
-            agent_task_lifecycle::quarantine_queued_run_exact("quarantine-rearm", &operator_reason)
-                .expect("exact queued run quarantined");
+        let quarantined = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
+            "quarantine-rearm",
+            &operator_reason,
+        )
+        .expect("exact queued run quarantined");
 
         assert_eq!(quarantined.state, AgentTaskRunState::Queued);
         assert!(!quarantined.state.is_terminal());
@@ -1337,8 +1341,11 @@ fn quarantined_run_requires_explicit_rearm_before_it_is_eligible() {
             .contains('\n'));
         assert!(agent_task_lifecycle::mark_running("quarantine-rearm").is_err());
 
-        let rearmed = agent_task_lifecycle::rearm_quarantined_run("quarantine-rearm")
-            .expect("exact quarantined run rearmed");
+        let rearmed = agent_task_lifecycle::rearm_quarantined_run_in_store(
+            &test_lifecycle_store(),
+            "quarantine-rearm",
+        )
+        .expect("exact quarantined run rearmed");
         assert_eq!(rearmed.state, AgentTaskRunState::Queued);
         assert!(rearmed.metadata.get("queue_quarantine").is_none());
     });
@@ -1350,8 +1357,12 @@ fn quarantine_and_rearm_reject_sanitized_aliases_without_mutating_the_literal_re
         agent_task_lifecycle::submit_plan(&test_plan(), Some("foo_bar"))
             .expect("literal record submitted");
 
-        let quarantine_error = agent_task_lifecycle::quarantine_queued_run_exact("foo/bar", "bad")
-            .expect_err("sanitized alias rejected");
+        let quarantine_error = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
+            "foo/bar",
+            "bad",
+        )
+        .expect_err("sanitized alias rejected");
         let unchanged = lifecycle_status("foo_bar").expect("literal record remains queued");
         assert_eq!(
             quarantine_error.code.as_str(),
@@ -1360,10 +1371,17 @@ fn quarantine_and_rearm_reject_sanitized_aliases_without_mutating_the_literal_re
         assert_eq!(unchanged.state, AgentTaskRunState::Queued);
         assert!(unchanged.metadata.get("queue_quarantine").is_none());
 
-        agent_task_lifecycle::quarantine_queued_run_exact("foo_bar", "explicit quarantine")
-            .expect("literal record quarantined");
-        let rearm_error = agent_task_lifecycle::rearm_quarantined_run("foo/bar")
-            .expect_err("sanitized alias rejected");
+        agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
+            "foo_bar",
+            "explicit quarantine",
+        )
+        .expect("literal record quarantined");
+        let rearm_error = agent_task_lifecycle::rearm_quarantined_run_in_store(
+            &test_lifecycle_store(),
+            "foo/bar",
+        )
+        .expect_err("sanitized alias rejected");
         let quarantined = lifecycle_status("foo_bar").expect("quarantine remains intact");
         assert_eq!(rearm_error.code.as_str(), "validation.invalid_argument");
         assert_eq!(quarantined.state, AgentTaskRunState::Queued);
@@ -2001,7 +2019,11 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
                 && blocker.recovery_command
                     == format!("homeboy --placement local agent-task status {attempt_id}")
         }));
-        assert!(agent_task_lifecycle::reconcile_record_health(true).is_ok());
+        assert!(agent_task_lifecycle::reconcile_record_health_in_store(
+            &test_lifecycle_store(),
+            true
+        )
+        .is_ok());
     });
 }
 
@@ -2663,7 +2685,9 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
             "homeboy runner reconcile offline-unknown-runner"
         );
 
-        let preview = agent_task_lifecycle::reconcile_record_health(true).expect("preview repair");
+        let preview =
+            agent_task_lifecycle::reconcile_record_health_in_store(&test_lifecycle_store(), true)
+                .expect("preview repair");
         assert_eq!(preview.considered, 1);
         assert_eq!(preview.quarantined, 0);
         assert_eq!(preview.records[0].run_id, fixture_run_id);
@@ -2673,7 +2697,9 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
         );
         assert_eq!(preview.records[0].action, "would-quarantine");
 
-        let repaired = agent_task_lifecycle::reconcile_record_health(false).expect("apply repair");
+        let repaired =
+            agent_task_lifecycle::reconcile_record_health_in_store(&test_lifecycle_store(), false)
+                .expect("apply repair");
         assert_eq!(repaired.quarantined, 1);
         let health = agent_task_lifecycle::record_health_summary_in_store(&test_lifecycle_store())
             .expect("quarantine health");

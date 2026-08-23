@@ -18,6 +18,13 @@ use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 enum TestRunnerReconciliation {
     Snapshot(Box<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     ConfirmedAbsent(usize),
@@ -316,7 +323,13 @@ fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
                 });
             })
             .expect("project legacy pin");
-            recover_controller_runtime(&record.run_id, Some(artifact), None).expect("recover pin");
+            recover_controller_runtime_in_store(
+                &test_lifecycle_store(),
+                &record.run_id,
+                Some(artifact),
+                None,
+            )
+            .expect("recover pin");
         }
         rewrite_record_for_test(&terminal.run_id, |record| {
             // Use `set_run_state` so the run state and its lifecycle execution

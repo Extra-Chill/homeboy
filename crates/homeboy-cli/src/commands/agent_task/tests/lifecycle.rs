@@ -79,6 +79,14 @@ use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBat
 
 use super::super::AgentTaskCommand;
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
+
 #[test]
 fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
     with_isolated_home(|_| {
@@ -3912,8 +3920,11 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             std::env::current_exe().expect("current test executable"),
             "dependent core must not pin the libtest harness"
         );
-        homeboy::agents::agent_task_lifecycle::validate_controller_runtime("run-next-a")
-            .expect("pinned controller identity validates");
+        homeboy::agents::agent_task_lifecycle::validate_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            "run-next-a",
+        )
+        .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
         let (_value, exit_code) = run_next_with_executor_and_fanout(
@@ -4100,7 +4111,8 @@ fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cli-quarantine-diagnostic"))
             .expect("submitted");
-        homeboy::agents::agent_task_lifecycle::quarantine_queued_run_exact(
+        homeboy::agents::agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
             "run-cli-quarantine-diagnostic",
             "maintenance\nwindow\u{0000}",
         )
