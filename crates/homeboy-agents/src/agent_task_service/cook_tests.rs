@@ -12078,6 +12078,27 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(None)
     }
+    fn verify_remote_candidate(
+        &mut self,
+        _path: &str,
+        _head: &str,
+        candidate_sha: &str,
+    ) -> Result<String> {
+        Ok(candidate_sha.to_string())
+    }
+    fn quarantine_capability(
+        &mut self,
+        newly_created: bool,
+        was_draft: bool,
+    ) -> Result<crate::agent_task_finalization::AgentTaskPrQuarantineCapability> {
+        Ok(if newly_created {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr
+        } else if was_draft {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft
+        } else {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+        })
+    }
     fn create_pr(
         &mut self,
         _path: &str,
@@ -12122,6 +12143,27 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             repository: "Extra-Chill/homeboy".to_string(),
             head_repository: "Extra-Chill/homeboy".to_string(),
             changed_files: changed_files.to_vec(),
+        })
+    }
+    fn quarantine_pr(
+        &mut self,
+        _path: &str,
+        _pr: &AgentTaskPrRef,
+        capability: crate::agent_task_finalization::AgentTaskPrQuarantineCapability,
+    ) -> Result<String> {
+        Ok(match capability {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr => {
+                "new_pr_closed".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
+                "existing_pr_already_draft".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
+                "existing_pr_converted_to_draft".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::Unsupported => {
+                "unsupported".to_string()
+            }
         })
     }
 }

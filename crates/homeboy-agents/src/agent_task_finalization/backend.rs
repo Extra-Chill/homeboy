@@ -1,7 +1,7 @@
 use super::{
     AgentTaskPrCandidateState, AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend,
-    AgentTaskPrFinalizationOptions, AgentTaskPrRef, AgentTaskPrResolvedBase,
-    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    AgentTaskPrFinalizationOptions, AgentTaskPrQuarantineCapability, AgentTaskPrRef,
+    AgentTaskPrResolvedBase, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
@@ -417,6 +417,33 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }))
     }
 
+    fn verify_remote_candidate(
+        &mut self,
+        path: &str,
+        head: &str,
+        candidate_sha: &str,
+    ) -> Result<String> {
+        let observed = remote_branch_head(path, head)?.unwrap_or_default();
+        if observed != candidate_sha {
+            return Ok(observed);
+        }
+        Ok(candidate_sha.to_string())
+    }
+
+    fn quarantine_capability(
+        &mut self,
+        newly_created: bool,
+        was_draft: bool,
+    ) -> Result<AgentTaskPrQuarantineCapability> {
+        Ok(if newly_created {
+            AgentTaskPrQuarantineCapability::CloseNewPr
+        } else if was_draft {
+            AgentTaskPrQuarantineCapability::PreserveExistingDraft
+        } else {
+            AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+        })
+    }
+
     fn create_pr(
         &mut self,
         path: &str,
@@ -488,22 +515,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }
         let candidate_tree =
             git_output(path, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?;
-        let remote_sha = remote_branch_head(path, head)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "publication_binding",
-                "pushed remote head disappeared before PR verification",
-                None,
-                None,
-            )
-        })?;
-        if remote_sha != candidate_sha {
-            return Err(Error::validation_invalid_argument(
-                "publication_binding",
-                "pushed remote ref changed before PR verification",
-                None,
-                None,
-            ));
-        }
         let repository = gh_json(path, &["repo", "view", "--json", "nameWithOwner"])?
             ["nameWithOwner"]
             .as_str()
@@ -529,26 +540,16 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .to_string();
         if pr_value["baseRefName"].as_str() != Some(base)
             || pr_value["headRefName"].as_str() != Some(head)
-            || repository.is_empty()
-            || head_repository != repository
-            || pr_head_sha != candidate_sha
         {
             return Err(Error::validation_invalid_argument(
                 "publication_binding",
-                "GitHub PR does not match the requested same-repository head or verified candidate SHA",
+                "GitHub PR does not match the requested base and head refs",
                 None,
                 None,
             ));
         }
         // Re-read after GitHub observation to reject a force-update race.
-        if remote_branch_head(path, head)?.as_deref() != Some(candidate_sha) {
-            return Err(Error::validation_invalid_argument(
-                "publication_binding",
-                "pushed remote ref changed while verifying the GitHub PR head",
-                None,
-                None,
-            ));
-        }
+        let remote_sha = remote_branch_head(path, head)?.unwrap_or_default();
         Ok(AgentTaskPublicationBinding {
             candidate_sha: candidate_sha.to_string(),
             candidate_tree,
@@ -558,6 +559,53 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             head_repository,
             changed_files: super::normalize_changed_files(changed_files),
         })
+    }
+
+    fn quarantine_pr(
+        &mut self,
+        path: &str,
+        pr: &AgentTaskPrRef,
+        capability: AgentTaskPrQuarantineCapability,
+    ) -> Result<String> {
+        let (args, state) = match capability {
+            AgentTaskPrQuarantineCapability::CloseNewPr => (
+                vec!["pr".to_string(), "close".to_string(), pr.number.to_string()],
+                "new_pr_closed",
+            ),
+            AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
+                return Ok("existing_pr_already_draft".to_string())
+            }
+            AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => (
+                vec![
+                    "pr".to_string(),
+                    "ready".to_string(),
+                    pr.number.to_string(),
+                    "--undo".to_string(),
+                ],
+                "existing_pr_converted_to_draft",
+            ),
+            AgentTaskPrQuarantineCapability::Unsupported => {
+                return Err(Error::validation_invalid_argument(
+                    "publication_quarantine",
+                    "backend does not support a safe PR quarantine transition",
+                    None,
+                    None,
+                ))
+            }
+        };
+        let output = std::process::Command::new("gh")
+            .args(&args)
+            .current_dir(path)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(format!(
+                "gh {} failed while quarantining publication drift: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(state.to_string())
     }
 }
 
