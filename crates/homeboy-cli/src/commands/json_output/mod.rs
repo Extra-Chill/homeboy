@@ -900,6 +900,12 @@ fn dispatch(
         Err(command) => *command,
     };
 
+    if let Commands::AgentTask(args) = command {
+        return map(crate::commands::agent_task::run_with_placement(
+            args, placement,
+        ));
+    }
+
     dispatch_registered(command)
 }
 
