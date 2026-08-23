@@ -535,6 +535,8 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub structured_sidecars: Vec<homeboy_extension::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_cache: Option<homeboy_extension::CiCacheSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub materialization_source: Option<homeboy_extension::ExtensionMaterializationSourceContract>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub contract_producers: Vec<homeboy_extension::ExtensionContractProducer>,
@@ -1011,6 +1013,7 @@ fn show_extension(
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
         structured_sidecars: homeboy_extension::structured_sidecars(&extension),
+        ci_cache: extension.ci.as_ref().and_then(|ci| ci.cache.clone()),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),
         requires,
@@ -2154,6 +2157,54 @@ mod tests {
                 extension.contract_producers[0].produces[0].kind,
                 homeboy_extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
+        });
+    }
+
+    #[test]
+    fn extension_show_emits_ci_cache_contract() {
+        with_isolated_home(|home| {
+            let extension_id = "cached-runtime";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Cached runtime",
+  "version": "1.0.0",
+  "ci": {
+    "cache": {
+      "namespace": "toolchain",
+      "key_files": ["toolchain.lock"],
+      "paths": [
+        {"root": "home", "path": ".tool/registry"},
+        {"root": "homeboy-data", "path": "build-targets"},
+        {"root": "component", "path": "target", "env": "BUILD_TARGET_DIR"}
+      ]
+    }
+  }
+}"#,
+            )
+            .expect("extension manifest");
+
+            let (output, exit_code) =
+                show_extension(extension_id, ExtensionReadinessMode::Skip).expect("show extension");
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+            let cache = extension.ci_cache.expect("CI cache contract");
+            assert_eq!(cache.namespace, "toolchain");
+            assert_eq!(cache.key_files, vec!["toolchain.lock"]);
+            assert_eq!(cache.paths.len(), 3);
+            assert_eq!(
+                cache.paths[1].root,
+                homeboy_extension::CiCachePathRoot::HomeboyData
+            );
+            assert_eq!(cache.paths[1].path, "build-targets");
+            assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
         });
     }
 

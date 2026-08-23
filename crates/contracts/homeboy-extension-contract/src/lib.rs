@@ -11,7 +11,8 @@
 
 pub use action_types::HttpMethod;
 pub use ci_config::{
-    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+    CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
+    CiJobSpec, CiLocalContext, CiProfileSpec,
 };
 pub use manifest_capability_config::AgentRuntimeManifestConfig;
 pub use manifest_capability_config::{DiscoveryMarkerConfig, ScriptsConfig};
