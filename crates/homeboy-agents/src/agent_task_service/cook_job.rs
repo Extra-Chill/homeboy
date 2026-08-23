@@ -578,6 +578,13 @@ pub fn cook_retry_job_submission(
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
 
@@ -789,8 +796,11 @@ mod tests {
     fn an_unfinished_cook_terminalizes_as_failed() {
         with_isolated_home(|_| {
             let cook_id = "cook-never-submitted";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             let mut job =
                 AgentTaskCookJob::parse(request_of(cook_id, 4242)).expect("parse request");
             job.phase = AgentTaskCookJobPhase::Supervising;
@@ -834,8 +844,11 @@ mod tests {
     fn cancelling_a_supervised_job_terminates_the_detached_child() {
         with_isolated_home(|_| {
             let cook_id = "cook-driver-cancel";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             let child = std::process::Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
@@ -843,7 +856,8 @@ mod tests {
             let start_identity = homeboy_core::process::process_start_identity(child.id())
                 .expect("inspect fixture")
                 .expect("fixture has a start identity");
-            agent_task_lifecycle::record_detached_cook_handoff_child(
+            agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 child.id(),
                 start_identity.clone(),
@@ -872,16 +886,24 @@ mod tests {
         with_isolated_home(|_| {
             let cook_id = "cook-retry-cancel";
             let plan = crate::agent_task_scheduler::AgentTaskPlan::new("retry-cancel", Vec::new());
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             for (attempt, run_id) in [
                 (1, "cook-retry-cancel-attempt-1"),
                 (2, "cook-retry-cancel-attempt-2"),
                 (3, "cook-retry-cancel-attempt-3"),
             ] {
                 agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
-                agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
-                    .expect("index attempt");
+                agent_task_lifecycle::record_cook_attempt_in_store(
+                    &test_lifecycle_store(),
+                    cook_id,
+                    attempt,
+                    run_id,
+                )
+                .expect("index attempt");
             }
 
             let submission =
