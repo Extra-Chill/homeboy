@@ -21,13 +21,14 @@ await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
-if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (args[0] === 'runtime' && args[1] === 'descriptor') {
   const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
   process.stdout.write(JSON.stringify({
     schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
     capabilities,
     contractManifest: {
+      schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } },
       capabilities: {
         runtimeServices: { schema: 'wp-codebox/runtime-service-capabilities/v1', capabilities },
       },

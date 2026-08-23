@@ -88,7 +88,7 @@ cache_update_script() {
 set -euo pipefail
 
 fail() {
-    if [ -n "${ACTIVE_BACKUP:-}" ] && [ -d "$ACTIVE_BACKUP" ]; then
+    if [ -n "${ACTIVE_BACKUP:-}" ] && [ -e "$ACTIVE_BACKUP" ]; then
         [ ! -e "$CACHE_DIR" ] || rm -rf "$CACHE_DIR" 2>/dev/null || true
         mv "$ACTIVE_BACKUP" "$CACHE_DIR" 2>/dev/null || true
     fi
@@ -112,6 +112,8 @@ PARENT_DIR="$(dirname "$CACHE_DIR")"
 LOCK_DIR="${CACHE_DIR}.update-lock"
 CANDIDATE_DIR=""
 ACTIVE_BACKUP=""
+RELEASE_DIR=""
+PREVIOUS_RELEASE_DIR=""
 
 command -v git >/dev/null 2>&1 || fail "git is required to update WP Codebox cache"
 command -v "$NPM_BIN" >/dev/null 2>&1 || fail "npm executable not found on runner: $NPM_BIN"
@@ -124,15 +126,15 @@ case "$NPM_BIN" in
         ;;
 esac
 
-if [ -e "$CACHE_DIR" ] && [ ! -d "$CACHE_DIR/.git" ]; then
-    fail "cache dir exists but is not a git checkout: $CACHE_DIR"
-fi
-
 mkdir -p "$PARENT_DIR"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     fail "another WP Codebox cache update is already running: $CACHE_DIR"
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+if [ -e "$CACHE_DIR" ] && [ ! -d "$CACHE_DIR/.git" ]; then
+    fail "cache dir exists but is not a git checkout: $CACHE_DIR"
+fi
 
 # Build and verify a sibling checkout. The active source remains fully usable
 # until this candidate has its checkout, artifacts, identity, and readiness.
@@ -168,16 +170,26 @@ printf '%s' "$DESCRIPTOR" | node -e 'let descriptor; try { descriptor = JSON.par
 CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
 printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CANDIDATE_DIR/.homeboy-runtime-identity.json" || fail "failed to record staged WP Codebox runtime identity"
 
-# Directory renames keep readers on either complete checkout. If promotion is
-# interrupted, fail() restores the previous checkout and its identity together.
+# The stable cache path is an atomically replaced symlink to an immutable
+# release directory. The update lock also protects the one-time migration from
+# a legacy directory cache, so readers never use PATH while source is absent.
+RELEASE_DIR="${CACHE_DIR}.releases/${SHA}.$$"
+mkdir -p "$(dirname "$RELEASE_DIR")" || fail "failed to create WP Codebox release directory"
+mv "$CANDIDATE_DIR" "$RELEASE_DIR" || fail "failed to stage immutable WP Codebox release"
+CANDIDATE_DIR=""
+NEXT_LINK="${CACHE_DIR}.next.$$"
+ln -s "$RELEASE_DIR" "$NEXT_LINK" || fail "failed to create WP Codebox cache pointer"
 if [ -e "$CACHE_DIR" ]; then
+    PREVIOUS_RELEASE_DIR="$(readlink "$CACHE_DIR" 2>/dev/null || true)"
     ACTIVE_BACKUP="${CACHE_DIR}.previous.$$"
     mv "$CACHE_DIR" "$ACTIVE_BACKUP" || fail "failed to preserve active WP Codebox cache before promotion"
 fi
-mv "$CANDIDATE_DIR" "$CACHE_DIR" || fail "failed to promote staged WP Codebox cache"
-CANDIDATE_DIR=""
-rm -rf "$ACTIVE_BACKUP" || fail "failed to remove previous WP Codebox cache after promotion"
+mv "$NEXT_LINK" "$CACHE_DIR" || fail "failed to promote WP Codebox cache pointer"
+[ -n "$ACTIVE_BACKUP" ] && rm -rf "$ACTIVE_BACKUP"
 ACTIVE_BACKUP=""
+case "$PREVIOUS_RELEASE_DIR" in
+    "${CACHE_DIR}.releases"/*) rm -rf "$PREVIOUS_RELEASE_DIR" ;;
+esac
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
 }

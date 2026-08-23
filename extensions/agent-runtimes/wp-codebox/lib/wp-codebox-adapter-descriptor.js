@@ -63,10 +63,11 @@ function wpCodeboxBin(options = {}) {
     wpCodeboxBinFromRuntimeComponent(env),
     managedWpCodeboxBin(env),
   ];
+  const managedUpdating = managedWpCodeboxCacheIsUpdating(env);
   return firstValue(
     ...configuredCandidates,
     ...packagedRuntimeCandidates,
-    options.executable === undefined ? descriptor.executable : options.executable,
+    managedUpdating ? '' : (options.executable === undefined ? descriptor.executable : options.executable),
   );
 }
 
@@ -87,6 +88,15 @@ function managedWpCodeboxBin(env = process.env) {
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const candidate = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
   return isExecutableFile(candidate) ? candidate : '';
+}
+
+function managedWpCodeboxCacheIsUpdating(env = process.env) {
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  try {
+    return fs.statSync(path.join(installDir, 'source.update-lock')).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function isExecutableFile(filePath) {

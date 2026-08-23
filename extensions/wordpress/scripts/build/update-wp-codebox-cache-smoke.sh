@@ -80,6 +80,10 @@ case "${args[*]}" in
         printf '%s\n' 'built' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
         printf '%s\n' '#!/usr/bin/env node' "// $(git -C "$prefix" rev-parse HEAD)" > "${prefix}/packages/cli/dist/index.js"
         chmod +x "${prefix}/packages/cli/dist/index.js"
+        if [ "${WAIT_FOR_BUILD:-}" = '1' ]; then
+            touch "${UPDATE_READY}"
+            while [ ! -f "${UPDATE_RELEASE}" ]; do sleep 0.01; done
+        fi
         ;;
     *)
         echo "unexpected npm args: ${args[*]}" >&2
@@ -126,6 +130,8 @@ case "$OUTPUT" in
 esac
 [ -f "${CACHE_DIR}/npm-install-ran" ] || { echo "npm install marker missing" >&2; exit 1; }
 [ -f "${CACHE_DIR}/node_modules/@automattic/wp-codebox-core/dist/index.js" ] || { echo "core package artifact missing" >&2; exit 1; }
+[ -L "$CACHE_DIR" ] || { echo "Managed cache path is not a stable release pointer" >&2; exit 1; }
+INITIAL_RELEASE="$(readlink "$CACHE_DIR")"
 INITIAL_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Initial exact SHA was not selected" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Initial managed CLI is not ready" >&2; exit 1; }
@@ -148,6 +154,38 @@ esac
 [ "$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')" = "$INITIAL_CLI_SHA" ] || { echo "Incompatible update replaced managed CLI bytes" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Incompatible update left managed CLI unready" >&2; exit 1; }
 
+# Hold a writer after it has acquired the update lock. Both resolver families
+# must fail as updating rather than reach the stale PATH candidate.
+STALE_PATH="${WORK_DIR}/stale-path"
+STALE_MARKER="${WORK_DIR}/stale-path-invoked"
+mkdir -p "$STALE_PATH"
+cat > "${STALE_PATH}/wp-codebox" <<EOF
+#!/usr/bin/env bash
+touch "$STALE_MARKER"
+exit 0
+EOF
+chmod +x "${STALE_PATH}/wp-codebox"
+UPDATE_READY="${WORK_DIR}/update-ready"
+UPDATE_RELEASE="${WORK_DIR}/update-release"
+WAIT_FOR_BUILD=1 UPDATE_READY="$UPDATE_READY" UPDATE_RELEASE="$UPDATE_RELEASE" PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$COMPATIBLE_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" > "${WORK_DIR}/concurrent-update.out" 2>&1 &
+UPDATE_PID=$!
+for _ in $(seq 1 500); do [ -f "$UPDATE_READY" ] && break; sleep 0.01; done
+[ -f "$UPDATE_READY" ] || { echo "Concurrent update did not reach the build barrier" >&2; exit 1; }
+set +e
+CONCURRENT_SHELL_OUTPUT="$(HOMEBOY_WP_CODEBOX_INSTALL_DIR="$(dirname "$CACHE_DIR")" PATH="${STALE_PATH}:$PATH" bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin' wp-codebox-resolution "${SCRIPT_DIR}/../lib/wp-codebox-paths.sh" 2>&1)"
+CONCURRENT_SHELL_STATUS=$?
+set -e
+[ "$CONCURRENT_SHELL_STATUS" -ne 0 ] && [[ "$CONCURRENT_SHELL_OUTPUT" == *"cache is updating"* ]] || { echo "Shell resolver did not fail as updating: $CONCURRENT_SHELL_OUTPUT" >&2; exit 1; }
+node - "$(cd "${SCRIPT_DIR}/../.." && pwd)" "$(dirname "$CACHE_DIR")" "${STALE_PATH}" <<'NODE'
+const path = require('node:path');
+const { preflightWpCodeboxRuntime } = require(path.join(process.argv[2], '..', 'agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js'));
+const result = preflightWpCodeboxRuntime({ env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: process.argv[3], PATH: `${process.argv[4]}:${process.env.PATH}` } });
+if (result.reason !== 'wp_codebox_managed_updating') process.exit(1);
+NODE
+[ ! -e "$STALE_MARKER" ] || { echo "Concurrent reader executed stale PATH runtime" >&2; exit 1; }
+touch "$UPDATE_RELEASE"
+wait "$UPDATE_PID"
+
 OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$COMPATIBLE_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${COMPATIBLE_SHA}"*) ;;
@@ -161,6 +199,7 @@ esac
 COMPATIBLE_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
 [ "$COMPATIBLE_CLI_SHA" != "$INITIAL_CLI_SHA" ] || { echo "Successful exact-SHA update did not replace managed CLI bytes" >&2; exit 1; }
 grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-identity.json" || { echo "Successful exact-SHA update did not replace managed identity" >&2; exit 1; }
+[ ! -e "$INITIAL_RELEASE" ] || { echo "Successful update did not clean the superseded immutable release" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" runtime descriptor --json | grep -q 'browser-contained-site-open' || { echo "Successful exact-SHA update left managed CLI unready" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'

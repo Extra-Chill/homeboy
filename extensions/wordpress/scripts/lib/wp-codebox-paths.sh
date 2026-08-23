@@ -74,6 +74,13 @@ homeboy_wp_codebox_resolve_bin() {
         return 1
     fi
 
+    # Cache promotion takes this lock before a legacy directory is migrated to
+    # the stable source symlink. Never fall through to PATH in that interval.
+    if homeboy_wp_codebox_managed_cache_is_updating; then
+        echo "Error: the managed WP Codebox cache is updating; retry after the update completes." >&2
+        return 1
+    fi
+
     if [ -d "$(homeboy_wp_codebox_managed_install_root)/source" ]; then
         candidate="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
         if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
@@ -152,6 +159,12 @@ homeboy_wp_codebox_global_cli_candidates() {
 
 homeboy_wp_codebox_managed_install_root() {
     printf '%s\n' "${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+}
+
+homeboy_wp_codebox_managed_cache_is_updating() {
+    local install_dir
+    install_dir="$(homeboy_wp_codebox_managed_install_root)"
+    [ -d "${install_dir}/source.update-lock" ]
 }
 
 # Machine-scoped override file written by setup (scripts/build/setup.sh) into

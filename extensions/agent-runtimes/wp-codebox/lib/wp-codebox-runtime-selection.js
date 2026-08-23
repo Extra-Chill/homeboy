@@ -32,6 +32,7 @@ function selectWpCodeboxRuntime(options = {}) {
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const managedSource = path.join(installDir, 'source');
   const managed = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+  const updating = managedCacheUpdateInProgress(installDir, options);
   const packaged = packagedWpCodeboxBin(env, options);
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
@@ -46,10 +47,12 @@ function selectWpCodeboxRuntime(options = {}) {
     ? candidates.configured
     : candidates.packaged.available
       ? candidates.packaged
-    : directoryExists(managedSource, options)
+      : updating
+        ? { ...candidates.managed, source: 'managed-updating', available: false }
+      : directoryExists(managedSource, options)
       ? candidates.managed
       : [candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
-  return { candidates, selected };
+  return { candidates, selected, updating };
 }
 
 function preflightWpCodeboxRuntime(options = {}) {
@@ -57,6 +60,9 @@ function preflightWpCodeboxRuntime(options = {}) {
   const requiredVersion = options.requiredVersion || REQUIRED_WP_CODEBOX_VERSION;
   if (!selection.selected.path) {
     return failure(selection, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
+  }
+  if (selection.updating && !configuredRuntime(options)) {
+    return failure(selection, requiredVersion, '', 'wp_codebox_managed_updating', 'retry after the managed WP Codebox cache update completes');
   }
   if (!selection.selected.available) {
     return failure(selection, requiredVersion, '', `wp_codebox_${selection.selected.source}_binary_missing`, 'homeboy extension setup wordpress');
@@ -92,6 +98,9 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (!binary) {
     return failure({ selected, candidates: {} }, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
   }
+  if (managed && managedCacheUpdateInProgress(managedInstallDir(options), options)) {
+    return failure({ selected, candidates: {} }, requiredVersion, '', 'wp_codebox_managed_updating', 'retry after the managed WP Codebox cache update completes');
+  }
   const result = (options.spawnSync || spawnSync)(binary, [...args, '--version'], {
     encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
   });
@@ -116,6 +125,25 @@ function managedCommandBinary(binary, args, options = {}) {
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const managed = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
   return [binary, ...args].some((entry) => sameFile(entry, managed, options)) ? managed : '';
+}
+
+function managedInstallDir(options = {}) {
+  const env = options.env || process.env;
+  return env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+}
+
+function managedCacheUpdateInProgress(installDir, options = {}) {
+  try {
+    return (options.fs || fs).statSync(path.join(installDir, 'source.update-lock')).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function configuredRuntime(options = {}) {
+  const env = options.env || process.env;
+  const settings = { ...settingsFromEnv(env), ...(options.settings || {}) };
+  return Boolean(firstValue(options.bin, options.runtimeBin, options.runtime_bin, options.wpCodeboxBin, options.wp_codebox_bin, env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN, settings.runtime_bin, settings.wp_codebox_bin, settings.wpCodeboxBin));
 }
 
 function sameFile(left, right, options = {}) {
