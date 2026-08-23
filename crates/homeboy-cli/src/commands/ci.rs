@@ -4,12 +4,6 @@ mod gate;
 mod plan;
 mod scope;
 
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub fn test_external_check_detail_resolver_fixture() {
-    external_check_detail_resolver::test_cross_platform_fixture();
-}
-
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;

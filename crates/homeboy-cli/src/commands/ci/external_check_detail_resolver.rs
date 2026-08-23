@@ -369,7 +369,10 @@ fn invoke(
             Ok(None) => {
                 cleanup(&containment, &mut child, false);
                 join_readers(stdout_reader, stderr_reader);
-                return Err(InvocationFailure::Unavailable("Resolver timed out.".into()));
+                return Err(InvocationFailure::Unavailable(
+                    "Resolver timed out at its deadline; its process tree was terminated. Inspect the extension resolver command and its child-process cleanup."
+                        .into(),
+                ));
             }
             Err(error) => {
                 cleanup(&containment, &mut child, false);
@@ -450,23 +453,54 @@ fn bound(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(super) fn test_cross_platform_fixture() {
+#[cfg(test)]
+#[test]
+fn cross_platform_fixture() {
     const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
 
-    for (mode, expected_detail, expected_diagnostic) in [
-        ("success", true, None),
-        ("unavailable", false, Some("unavailable")),
-        ("malformed", false, Some("malformed")),
-        ("missing-executable", false, Some("unavailable")),
+    for (mode, expected_detail, expected_diagnostic, budget, expected_message) in [
+        ("success", true, None, Duration::from_secs(10), None),
+        (
+            "unavailable",
+            false,
+            Some("unavailable"),
+            Duration::from_secs(10),
+            None,
+        ),
+        (
+            "malformed",
+            false,
+            Some("malformed"),
+            Duration::from_secs(10),
+            None,
+        ),
+        (
+            "missing-executable",
+            false,
+            Some("unavailable"),
+            Duration::from_secs(10),
+            None,
+        ),
+        (
+            "timeout",
+            false,
+            Some("unavailable"),
+            Duration::from_millis(200),
+            Some("process tree was terminated"),
+        ),
     ] {
         homeboy::core::test_support::with_isolated_home(|_| {
             install_fixture_extension(mode, FIXTURE_MODE_ENV);
+            let started = Instant::now();
             let (details, diagnostics) = hydrate(
                 "fixture-ci",
                 "failure",
                 Some("https://example.test/build/42"),
-                Instant::now() + Duration::from_secs(10),
+                started + budget,
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{mode}: resolver timeout did not return after process cleanup"
             );
             assert_eq!(
                 details.len() == 1,
@@ -480,6 +514,12 @@ pub(super) fn test_cross_platform_fixture() {
                 expected_diagnostic,
                 "{mode}"
             );
+            if let Some(expected_message) = expected_message {
+                assert!(
+                    diagnostics[0].message.contains(expected_message),
+                    "{mode}: {diagnostics:?}"
+                );
+            }
             if mode == "success" {
                 assert_eq!(details[0].actions, ["fixture-ci replay 42"]);
                 let mut resolver_slots = MAX_RESOLVERS;
@@ -526,7 +566,7 @@ pub(super) fn test_cross_platform_fixture() {
     });
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     let root = homeboy::core::paths::homeboy().unwrap();
     let extension = root.join("extensions").join("fixture-external-check");
@@ -555,7 +595,7 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     std::env::set_var(fixture_mode_env, mode);
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -564,7 +604,7 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\ncase \"${fixture_mode_env}\" in\nsuccess) printf '%s\\n' '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}' ;;\nmalformed) printf '%s' 'not json' ;;\nunavailable) exit 23 ;;\n*) exit 24 ;;\nesac\n"
+            "#!/bin/sh\ncase \"${fixture_mode_env}\" in\nsuccess) printf '%s\\n' '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}' ;;\nmalformed) printf '%s' 'not json' ;;\nunavailable) exit 23 ;;\ntimeout) sleep 30 ;;\n*) exit 24 ;;\nesac\n"
         ),
     )
     .unwrap();
@@ -572,14 +612,14 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     name.into()
 }
 
-#[cfg(all(any(test, feature = "test-support"), windows))]
+#[cfg(all(test, windows))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     let name = "fixture-resolver.cmd";
     let path = extension.join(name);
     std::fs::write(
         &path,
         format!(
-            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nexit /b 24\r\n"
+            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nif \"%{fixture_mode_env}%\"==\"timeout\" timeout /t 30 /nobreak >nul\r\nexit /b 24\r\n"
         ),
     )
     .unwrap();
@@ -589,8 +629,6 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
 
     #[test]
     fn target_url_strips_fragments_and_credentials() {
@@ -679,7 +717,7 @@ mod tests {
         .expect_err("resolver must time out");
         assert!(matches!(
             error,
-            InvocationFailure::Unavailable(ref message) if message == "Resolver timed out."
+            InvocationFailure::Unavailable(ref message) if message.contains("process tree was terminated")
         ));
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .unwrap()
