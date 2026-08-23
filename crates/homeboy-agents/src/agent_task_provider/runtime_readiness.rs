@@ -64,7 +64,7 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
     Ok(())
 }
 
-fn readiness_verdict(
+pub(crate) fn readiness_verdict(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     cache: &mut ProviderRuntimeReadinessCache,
@@ -89,7 +89,7 @@ fn readiness_verdict(
     Ok(verdict)
 }
 
-fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
+pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
     let mut config = config.as_object().cloned().unwrap_or_default();
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
         // The executor resolves its selected model ahead of config.model.
@@ -147,7 +147,7 @@ fn readiness_error(
     let reason = if verdict.reason.is_empty() {
         "provider-owned readiness check failed".to_string()
     } else {
-        verdict.reason.clone()
+        homeboy_core::redaction::redact_string(&verdict.reason)
     };
     let mut hints = vec![json!({
         "kind": "provider_runtime_readiness_failed",
@@ -161,7 +161,7 @@ fn readiness_error(
     })
     .to_string()];
     if !verdict.remediation.trim().is_empty() {
-        hints.push(verdict.remediation.clone());
+        hints.push(homeboy_core::redaction::redact_string(&verdict.remediation));
     }
     Error::validation_invalid_argument(
         "provider_runtime_readiness",
