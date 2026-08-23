@@ -414,7 +414,7 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
         &aggregate.outcomes[0],
         VALID_PATCH,
         &sha256_hex(VALID_PATCH),
-        Some(&left_store),
+        &left_store,
     )
     .expect("retain committed changes")
     .expect("retained path");

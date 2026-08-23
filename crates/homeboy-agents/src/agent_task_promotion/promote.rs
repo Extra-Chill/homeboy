@@ -117,12 +117,16 @@ pub fn promote_with_checkpoint(
     options: AgentTaskPromotionOptions,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
+    // One promotion is one unit of work, so the store it records against
+    // resolves once here and is passed down. The interior used to receive
+    // `None` and re-resolve the environment partway through (#7505).
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
         &mut provider,
         &mut checkpoint,
-        None,
+        &observation_store,
     )?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
@@ -149,7 +153,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
         options,
         &mut provider,
         &mut checkpoint,
-        Some(observation_store),
+        observation_store,
     )?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
@@ -174,7 +178,18 @@ pub fn resume_promoted_patch(
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
-    resume_promoted_patch_internal(options, target_path, previous, None, false, None)
+    // One promotion is one unit of work, so the store it records against
+    // resolves once here and is passed down. The interior used to receive
+    // `None` and re-resolve the environment partway through (#7505).
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    resume_promoted_patch_internal(
+        options,
+        target_path,
+        previous,
+        &observation_store,
+        false,
+        None,
+    )
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -187,7 +202,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         options,
         target_path,
         previous,
-        Some(observation_store),
+        observation_store,
         false,
         None,
     )
@@ -206,7 +221,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
         options,
         target_path,
         previous,
-        Some(observation_store),
+        observation_store,
         true,
         gate_workspace,
     )
@@ -216,7 +231,7 @@ fn resume_promoted_patch_internal(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
     replacement_gates: bool,
     gate_workspace: Option<&Path>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -604,7 +619,11 @@ pub(super) fn promote_with_provider_and_checkpoint(
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, None)
+    // One promotion is one unit of work, so the store it records against
+    // resolves once here and is passed down. The interior used to receive
+    // `None` and re-resolve the environment partway through (#7505).
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, &observation_store)
 }
 
 #[cfg(test)]
@@ -614,19 +633,14 @@ pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(
-        options,
-        provider,
-        checkpoint,
-        Some(observation_store),
-    )
+    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, observation_store)
 }
 
 fn promote_with_provider_and_checkpoint_internal(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
     emit_promotion_progress(
         "apply",
@@ -1176,12 +1190,15 @@ fn gate_feedback_baseline_for_artifact(
 /// identity before a follow-up can reuse a dirty destination. Older baselines
 /// without source identity retain their existing strict path/hash contract.
 pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
-    bind_gate_feedback_baseline_internal(baseline, None)
+    // One call is one unit of work, so the store resolves once here rather
+    // than at each projection lookup inside (#7505).
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    bind_gate_feedback_baseline_internal(baseline, &observation_store)
 }
 
 fn bind_gate_feedback_baseline_internal(
     baseline: Option<Value>,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<Option<Value>> {
     let Some(mut baseline) = baseline else {
         return Ok(None);
@@ -1246,27 +1263,15 @@ fn bind_gate_feedback_baseline_internal(
                 None,
             )
         })?;
-    let projection = match observation_store {
-        Some(store) => {
-            crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
-                store,
-                &run_id,
-                &task_id,
-                &artifact_id,
-                &kind,
-                &sha256,
-                None,
-            )?
-        }
-        None => crate::agent_task_lifecycle::verified_controller_artifact_projection(
-            &run_id,
-            &task_id,
-            &artifact_id,
-            &kind,
-            &sha256,
-            None,
-        )?,
-    };
+    let projection = crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
+        observation_store,
+        &run_id,
+        &task_id,
+        &artifact_id,
+        &kind,
+        &sha256,
+        None,
+    )?;
     let (record_id, _) = projection
     .ok_or_else(|| Error::validation_invalid_argument(
         "gate_feedback_candidate_baseline",
@@ -1463,7 +1468,7 @@ fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     artifact: Option<&AgentTaskArtifact>,
@@ -1676,18 +1681,13 @@ pub(super) fn retain_committed_changes_artifact(
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    // The caller resolves one store for the whole promotion; this projection
+    // is written against that store rather than re-resolving the environment
+    // partway through a promotion already in flight (#7505).
+    store: &homeboy_core::observation::ObservationStore,
 ) -> Result<Option<PathBuf>> {
     let Some(run_id) = options.source_run_id.as_deref() else {
         return Ok(None);
-    };
-    let ambient_store;
-    let store = match observation_store {
-        Some(store) => store,
-        None => {
-            ambient_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-            &ambient_store
-        }
     };
     if store.get_run(run_id)?.is_none() {
         return Ok(None);
@@ -2646,7 +2646,7 @@ pub(crate) fn select_patch_artifact(
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let canonical =
         canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
@@ -2696,7 +2696,10 @@ pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
-    canonical_recoverable_patch_artifacts_internal(outcome, options, None)
+    // One call is one unit of work, so the store resolves once here rather
+    // than at each projection lookup inside (#7505).
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    canonical_recoverable_patch_artifacts_internal(outcome, options, &observation_store)
 }
 
 pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
@@ -2704,13 +2707,13 @@ pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
     options: &AgentTaskPromotionOptions,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
-    canonical_recoverable_patch_artifacts_internal(outcome, options, Some(observation_store))
+    canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)
 }
 
 fn canonical_recoverable_patch_artifacts_internal(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome
         .artifacts
@@ -2861,19 +2864,16 @@ fn resolve_artifact_path(
     task_id: &str,
     source_run_id: Option<&str>,
     source_path: Option<&Path>,
-    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PathBuf> {
     if let Some(run_id) = source_run_id {
-        let projected = match observation_store {
-            Some(store) => {
-                crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
-                    store, run_id, task_id, artifact,
-                )?
-            }
-            None => crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
-                run_id, task_id, artifact,
-            )?,
-        };
+        let projected =
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
+                observation_store,
+                run_id,
+                task_id,
+                artifact,
+            )?;
         if let Some(projected) = projected {
             return Ok(projected);
         }
