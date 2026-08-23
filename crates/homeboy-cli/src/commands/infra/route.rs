@@ -2096,9 +2096,10 @@ fn run_split_placement_fanout(
                         command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
                     },
                 ),
-        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher(
+        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
             args.clone(),
             &attempt_dispatcher,
+            placement,
         )?,
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command:
@@ -2109,9 +2110,10 @@ fn run_split_placement_fanout(
                     },
                 ),
         }) if args.run_plan => {
-            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
+            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher_and_placement(
                 *args.clone(),
                 &attempt_dispatcher,
+                placement,
             )?
         }
         _ => return Ok(None),

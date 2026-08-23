@@ -78,6 +78,18 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     run_with_cook_progress(args, Some(&progress))
 }
 
+/// Global placement selects child provider attempts; fanout coordination itself
+/// remains controller-local.
+pub(crate) fn run_with_placement(
+    args: AgentTaskArgs,
+    placement: crate::cli_surface::Placement,
+) -> CmdResult<Value> {
+    if let AgentTaskCommand::Fanout(fanout_args) = args.command {
+        return fanout::fanout_with_placement(fanout_args, placement);
+    }
+    run(args)
+}
+
 fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str>) -> String {
     let identity = match (cook_id, run_id) {
         (_, Some(run_id)) => format!(" [{run_id}]"),
