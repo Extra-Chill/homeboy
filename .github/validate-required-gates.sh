@@ -101,56 +101,48 @@ done < <(jq -r '
   | .parameters.required_status_checks[]?.context
 ' "${config}")
 
-if [ "${#contexts[@]}" -eq 0 ]; then
-  echo "required-gates policy declares no required checks" >&2
-  exit 1
-fi
-
-if [ "$(printf '%s\n' "${contexts[@]}" | sort -u | wc -l | tr -d ' ')" -ne "${#contexts[@]}" ]; then
-  echo "required-gates policy declares duplicate check contexts" >&2
-  exit 1
-fi
-
-for context in "${contexts[@]}"; do
-  if grep -Fq "name: ${context}" "${ci_workflow}"; then
-    continue
+if [ "${#contexts[@]}" -gt 0 ]; then
+  if [ "$(printf '%s\n' "${contexts[@]}" | sort -u | wc -l | tr -d ' ')" -ne "${#contexts[@]}" ]; then
+    echo "required-gates policy declares duplicate check contexts" >&2
+    exit 1
   fi
 
-  # Anchored: an unanchored `title: ${title}` is a SUBSTRING match, and
-  # `comment-section-title: Test` satisfied it. That made the declaration check
-  # for `homeboy / Test` vacuous — it passed with the Test job repointed at a
-  # foreign workflow and no longer running `review test` at all (#10997).
-  title="${context#homeboy / }"
-  if grep -Fq 'name: homeboy / ${{ matrix.title }}' "${ci_workflow}" \
-    && grep -Eq "^[[:space:]]+title: ${title}[[:space:]]*$" "${ci_workflow}"; then
-    continue
-  fi
+  for context in "${contexts[@]}"; do
+    if grep -Fq "name: ${context}" "${ci_workflow}"; then
+      continue
+    fi
 
-  # `homeboy / Test` is the caller job name plus the called reconciliation job
-  # name, so no literal `name: homeboy / Test` exists to match. Accept the
-  # reusable-workflow call instead — at a floating major OR a pinned commit SHA.
-  # This branch previously required `@v2` and had therefore been dead since the
-  # pin became a full SHA, which is why the broken title match above was the
-  # only thing keeping this context green.
-  if [ "${context}" = "homeboy / Test" ] \
-    && grep -Eq 'uses: Extra-Chill/homeboy-action/\.github/workflows/ci\.yml@(v[0-9]+|[0-9a-f]{40})' "${ci_workflow}" \
-    && grep -Fq 'commands: review test' "${ci_workflow}"; then
-    continue
-  fi
+    # Anchored: an unanchored `title: ${title}` is a SUBSTRING match, and
+    # `comment-section-title: Test` satisfied it. That made the declaration check
+    # for `homeboy / Test` vacuous — it passed with the Test job repointed at a
+    # foreign workflow and no longer running `review test` at all (#10997).
+    title="${context#homeboy / }"
+    if grep -Fq 'name: homeboy / ${{ matrix.title }}' "${ci_workflow}" \
+      && grep -Eq "^[[:space:]]+title: ${title}[[:space:]]*$" "${ci_workflow}"; then
+      continue
+    fi
 
-  {
+    # `homeboy / Test` is the caller job name plus the called reconciliation job
+    # name, so no literal `name: homeboy / Test` exists to match. Accept the
+    # reusable-workflow call instead — at a floating major OR a pinned commit SHA.
+    if [ "${context}" = "homeboy / Test" ] \
+      && grep -Eq 'uses: Extra-Chill/homeboy-action/\.github/workflows/ci\.yml@(v[0-9]+|[0-9a-f]{40})' "${ci_workflow}" \
+      && grep -Fq 'commands: review test' "${ci_workflow}"; then
+      continue
+    fi
+
     echo "required check '${context}' is not emitted by ${ci_workflow}" >&2
     exit 1
-  }
-done
+  done
 
-if ! jq -e '
-  .rules[]
-  | select(.type == "required_status_checks")
-  | .parameters.strict_required_status_checks_policy == true
-' "${config}" >/dev/null; then
-  echo "required-gates policy must require checks on the current PR head" >&2
-  exit 1
+  if ! jq -e '
+    .rules[]
+    | select(.type == "required_status_checks")
+    | .parameters.strict_required_status_checks_policy == true
+  ' "${config}" >/dev/null; then
+    echo "required-gates policy must require checks on the current PR head" >&2
+    exit 1
+  fi
 fi
 
 # ── Claim 1b: the declaration must reach a TERMINAL execution gate (#12573) ───
@@ -336,7 +328,11 @@ if read_live_rules; then
   fi
 
   if [ "${live_rule_count}" -eq 0 ]; then
-    outcome='unenforced'
+    if [ "${declared_count}" -eq 0 ]; then
+      outcome='not-required'
+    else
+      outcome='unenforced'
+    fi
   elif [ "${live_contexts}" != "${declared_contexts}" ] || [ "${live_strict}" != 'true' ]; then
     outcome='divergent'
   elif { [ "${bypass_count}" != 'unknown' ] && [ "${bypass_count}" -gt 0 ]; } \
@@ -356,6 +352,10 @@ echo "::notice::required-gates enforcement basis=live-branch-rules repo=${repo} 
 apply_hint="Use the approved Required Gates Ruleset workflow from current main after its exact SHA has a successful homeboy / Test check, then verify with 'bash .github/validate-required-gates.sh --github'. See docs/operations/required-ci-gates.md."
 
 case "${outcome}" in
+  not-required)
+    headline="The canonical policy and live rules require no status checks on ${branch}. CI remains reporting-only."
+    echo "::notice::required-gates: ${headline}"
+    ;;
   enforced)
     headline="GitHub requires all ${declared_count} declared contexts on ${branch}."
     echo "::notice::required-gates: ${headline}"
@@ -421,7 +421,7 @@ if [ "${mode}" = "--report" ]; then
 fi
 
 case "${outcome}" in
-  enforced)
+  enforced | not-required)
     exit 0
     ;;
   *)
