@@ -3,8 +3,11 @@ use crate::engine::command::{
     wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
     SupervisedCommandHeartbeat, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
-use crate::server::ssh_args::{client_option_args, shell_join_args, SshArgOptions, SshPortFlag};
+use crate::server::ssh_args::{
+    client_option_args, client_ssh_args, shell_join_args, SshArgOptions, SshPortFlag,
+};
 use serde::Serialize;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -83,11 +86,7 @@ fn transfer_scope(config: &TransferConfig) -> &'static str {
 }
 
 fn effective_source(config: &TransferConfig) -> String {
-    if config.directory_contents {
-        directory_contents_path(&config.source)
-    } else {
-        config.source.clone()
-    }
+    config.source.clone()
 }
 
 fn directory_contents_path(path: &str) -> String {
@@ -137,8 +136,14 @@ pub fn parse_target(target: &str) -> TransferTarget {
 }
 
 enum TransferBackend {
-    Scp { args: Vec<String> },
-    Shell { command: String },
+    Scp {
+        args: Vec<String>,
+        prepare: Option<Vec<String>>,
+        has_sources: bool,
+    },
+    Shell {
+        command: String,
+    },
 }
 
 struct TransferPlan {
@@ -209,11 +214,7 @@ fn plan_push(
     let client = SshClient::from_server(&srv, server_id)?;
 
     let remote_target = format!("{}@{}:{}", client.user, client.host, remote_path);
-    let effective_local_path = if config.directory_contents {
-        directory_contents_path(local_path)
-    } else {
-        local_path.to_string()
-    };
+    let effective_local_path = local_path.to_string();
 
     if config.dry_run {
         log_status!(
@@ -226,7 +227,11 @@ fn plan_push(
         return Ok(TransferPlan {
             method: "scp".to_string(),
             direction: "push".to_string(),
-            backend: TransferBackend::Scp { args: Vec::new() },
+            backend: TransferBackend::Scp {
+                args: Vec::new(),
+                prepare: None,
+                has_sources: false,
+            },
         });
     }
 
@@ -250,7 +255,46 @@ fn plan_push(
         scp_args.push("-C".to_string());
     }
 
-    scp_args.push(effective_local_path.clone());
+    let (prepare, sources) = if config.directory_contents && local.is_dir() {
+        let command = format!(
+            "mkdir -p -- {}",
+            crate::engine::shell::quote_arg(remote_path)
+        );
+        let prepare = client_ssh_args(
+            &client,
+            SshArgOptions {
+                strict_host_key_checking_no: true,
+                batch_mode: true,
+                port_flag: Some(SshPortFlag::Lowercase),
+                command: Some(&command),
+                ..SshArgOptions::default()
+            },
+        );
+        let mut sources = std::fs::read_dir(local)
+            .map_err(|error| {
+                crate::Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read directory {}", local.display())),
+                )
+            })?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path().to_string_lossy().into_owned())
+                    .map_err(|error| {
+                        crate::Error::internal_io(
+                            error.to_string(),
+                            Some(format!("read directory entry in {}", local.display())),
+                        )
+                    })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        sources.sort();
+        (Some(prepare), sources)
+    } else {
+        (None, vec![local_path.to_string()])
+    };
+    let has_sources = !sources.is_empty();
+    scp_args.extend(sources);
     scp_args.push(remote_target);
 
     log_status!(
@@ -264,7 +308,11 @@ fn plan_push(
     Ok(TransferPlan {
         method: "scp".to_string(),
         direction: "push".to_string(),
-        backend: TransferBackend::Scp { args: scp_args },
+        backend: TransferBackend::Scp {
+            args: scp_args,
+            prepare,
+            has_sources,
+        },
     })
 }
 
@@ -296,7 +344,11 @@ fn plan_pull(
         return Ok(TransferPlan {
             method: "scp".to_string(),
             direction: "pull".to_string(),
-            backend: TransferBackend::Scp { args: Vec::new() },
+            backend: TransferBackend::Scp {
+                args: Vec::new(),
+                prepare: None,
+                has_sources: false,
+            },
         });
     }
 
@@ -336,7 +388,11 @@ fn plan_pull(
     Ok(TransferPlan {
         method: "scp".to_string(),
         direction: "pull".to_string(),
-        backend: TransferBackend::Scp { args: scp_args },
+        backend: TransferBackend::Scp {
+            args: scp_args,
+            prepare: None,
+            has_sources: true,
+        },
     })
 }
 
@@ -428,6 +484,15 @@ fn execute_plan(
     config: &TransferConfig,
     plan: TransferPlan,
 ) -> crate::Result<(TransferOutput, i32)> {
+    execute_plan_with(config, plan, Path::new("scp"), Path::new("ssh"))
+}
+
+fn execute_plan_with(
+    config: &TransferConfig,
+    plan: TransferPlan,
+    scp_program: &Path,
+    ssh_program: &Path,
+) -> crate::Result<(TransferOutput, i32)> {
     if config.dry_run {
         return Ok(plan.dry_run_output(config));
     }
@@ -437,9 +502,64 @@ fn execute_plan(
         log_status!("transfer", "Method: {}", plan.method);
     }
 
+    let source = bounded_identity(&effective_source(config));
+    let destination = bounded_identity(&effective_destination(config));
+    let scope = transfer_scope(config);
+
+    if let TransferBackend::Scp {
+        prepare: Some(args),
+        ..
+    } = &plan.backend
+    {
+        let mut command = Command::new(ssh_program);
+        command.args(args);
+        match run_transfer_command(&mut command, |elapsed| {
+            eprintln!(
+                "[transfer] phase=preparing elapsed={}s source={} destination={} scope={}",
+                elapsed.as_secs(),
+                source,
+                destination,
+                scope
+            );
+        }) {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                return transfer_backend_failure(
+                    config,
+                    plan.method,
+                    plan.direction,
+                    &String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            Err(error) => {
+                return transfer_execution_failure(
+                    config,
+                    plan.method,
+                    plan.direction,
+                    "ssh preparation",
+                    &error,
+                );
+            }
+        }
+    }
+
+    if matches!(
+        &plan.backend,
+        TransferBackend::Scp {
+            has_sources: false,
+            ..
+        }
+    ) {
+        log_status!("transfer", "Complete");
+        return Ok((
+            transfer_output(config, plan.method, plan.direction, true, None, false),
+            0,
+        ));
+    }
+
     let mut command = match &plan.backend {
-        TransferBackend::Scp { args } => {
-            let mut command = Command::new("scp");
+        TransferBackend::Scp { args, .. } => {
+            let mut command = Command::new(scp_program);
             command.args(args);
             command
         }
@@ -455,9 +575,6 @@ fn execute_plan(
         TransferBackend::Shell { .. } => "transfer",
     };
 
-    let source = bounded_identity(&effective_source(config));
-    let destination = bounded_identity(&effective_destination(config));
-    let scope = transfer_scope(config);
     match run_transfer_command(&mut command, |elapsed| {
         eprintln!(
             "[transfer] phase=transferring elapsed={}s source={} destination={} scope={}",
@@ -523,6 +640,74 @@ fn execute_plan(
             ))
         }
     }
+}
+
+fn transfer_backend_failure(
+    config: &TransferConfig,
+    method: String,
+    direction: String,
+    stderr: &str,
+) -> crate::Result<(TransferOutput, i32)> {
+    let source = bounded_identity(&effective_source(config));
+    let destination = bounded_identity(&effective_destination(config));
+    let scope = transfer_scope(config);
+    let detail = bounded_detail(stderr.trim());
+    eprintln!(
+        "[transfer] phase=failed source={} destination={} scope={} detail={}; destination may be partial; retry: {}",
+        source,
+        destination,
+        scope,
+        detail,
+        retry_command(config),
+    );
+    Ok((
+        transfer_output(
+            config,
+            method,
+            direction,
+            false,
+            Some(format!(
+                "{}; destination may be partial; retry: {}",
+                detail,
+                retry_command(config)
+            )),
+            false,
+        ),
+        1,
+    ))
+}
+
+fn transfer_execution_failure(
+    config: &TransferConfig,
+    method: String,
+    direction: String,
+    backend_label: &str,
+    error: &std::io::Error,
+) -> crate::Result<(TransferOutput, i32)> {
+    let source = bounded_identity(&effective_source(config));
+    let destination = bounded_identity(&effective_destination(config));
+    let scope = transfer_scope(config);
+    eprintln!(
+        "[transfer] phase=failed source={} destination={} scope={}; destination may be partial; retry: {}",
+        source,
+        destination,
+        scope,
+        retry_command(config),
+    );
+    Ok((
+        transfer_output(
+            config,
+            method,
+            direction,
+            false,
+            Some(format!(
+                "Failed to execute {backend_label}: {error}; destination may be partial; retry: {}",
+                retry_command(config)
+            )),
+            false,
+        ),
+        1,
+    ))
 }
 
 fn effective_destination(config: &TransferConfig) -> String {
@@ -672,6 +857,8 @@ fn ssh_shell_args(client: &SshClient) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::time::Duration;
 
@@ -679,9 +866,9 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     use super::{
-        bounded_detail, bounded_identity, execute_plan, parse_target, retry_command,
-        run_transfer_command_with_policy, scp_args, transfer, transfer_scope, TransferBackend,
-        TransferConfig, TransferPlan, TransferTarget,
+        bounded_detail, bounded_identity, execute_plan, execute_plan_with, parse_target, plan_push,
+        retry_command, run_transfer_command_with_policy, scp_args, transfer, transfer_scope,
+        TransferBackend, TransferConfig, TransferPlan, TransferTarget,
     };
     use crate::server::{ManagedSshSession, SshClient};
 
@@ -788,7 +975,7 @@ mod tests {
             .expect("dry run sync");
 
             assert_eq!(code, 0);
-            assert_eq!(out.effective_source, "local/existing-dir/.");
+            assert_eq!(out.effective_source, "local/existing-dir");
             assert_eq!(out.effective_destination, "sandbox:/existing/same-dir");
         });
     }
@@ -810,8 +997,114 @@ mod tests {
             .expect("dry run sync");
 
             assert_eq!(code, 0);
-            assert_eq!(out.effective_source, "local/existing-dir/.");
+            assert_eq!(out.effective_source, "local/existing-dir");
             assert_eq!(out.effective_destination, "sandbox:/missing/same-dir");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_sync_executes_scp_without_a_terminal_dot_source() {
+        with_isolated_home(|_| {
+            save_server("sandbox");
+            let fixture = tempfile::tempdir().expect("transfer fixture");
+            let source = fixture.path().join("source with spaces");
+            std::fs::create_dir(&source).expect("source directory");
+            std::fs::write(source.join("visible file"), "visible").expect("visible fixture");
+            std::fs::write(source.join(".hidden"), "hidden").expect("hidden fixture");
+
+            let remote_destination = fixture.path().join("remote destination");
+            std::fs::create_dir(&remote_destination).expect("remote destination");
+            let scp_transport = fixture.path().join("scp-transport");
+            std::fs::write(
+                &scp_transport,
+                format!(
+                    "#!/bin/sh\nexec scp -t {}\n",
+                    crate::engine::shell::quote_arg(&remote_destination.to_string_lossy())
+                ),
+            )
+            .expect("scp transport");
+            std::fs::set_permissions(&scp_transport, std::fs::Permissions::from_mode(0o755))
+                .expect("executable scp transport");
+
+            let ssh_log = fixture.path().join("ssh-args");
+            let ssh = fixture.path().join("ssh-double");
+            std::fs::write(
+                &ssh,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    ssh_log.display()
+                ),
+            )
+            .expect("ssh double");
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
+                .expect("executable ssh double");
+
+            let config = TransferConfig {
+                source: source.to_string_lossy().into_owned(),
+                destination: "sandbox:/remote path/destination".to_string(),
+                recursive: true,
+                directory_contents: true,
+                compress: false,
+                dry_run: false,
+                exclude: Vec::new(),
+            };
+            let mut plan = plan_push(
+                &config,
+                &config.source,
+                "sandbox",
+                "/remote path/destination",
+            )
+            .expect("plan local sync");
+            let TransferBackend::Scp { args, .. } = &mut plan.backend else {
+                panic!("local sync should use scp");
+            };
+            assert!(args
+                .iter()
+                .any(|arg| *arg == source.join(".hidden").to_string_lossy()));
+            assert!(args
+                .iter()
+                .any(|arg| *arg == source.join("visible file").to_string_lossy()));
+            assert!(!args.iter().any(|arg| arg.ends_with("/.")));
+            args.splice(
+                0..0,
+                [
+                    "-S".to_string(),
+                    scp_transport.to_string_lossy().into_owned(),
+                ],
+            );
+            let (out, code) = execute_plan_with(&config, plan, std::path::Path::new("scp"), &ssh)
+                .expect("execute local sync through installed scp");
+
+            assert_eq!(code, 0);
+            assert!(out.success);
+            assert_eq!(out.effective_source, source.to_string_lossy());
+            let (dry_run, dry_run_code) = transfer(&TransferConfig {
+                source: source.to_string_lossy().into_owned(),
+                destination: "sandbox:/remote path/destination".to_string(),
+                recursive: true,
+                directory_contents: true,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("plan local sync");
+            assert_eq!(dry_run_code, 0);
+            assert_eq!(dry_run.effective_source, out.effective_source);
+            assert_eq!(dry_run.effective_destination, out.effective_destination);
+            assert_eq!(dry_run.direction, out.direction);
+            assert_eq!(
+                std::fs::read_to_string(remote_destination.join(".hidden"))
+                    .expect("copied hidden file"),
+                "hidden"
+            );
+            assert_eq!(
+                std::fs::read_to_string(remote_destination.join("visible file"))
+                    .expect("copied visible file"),
+                "visible"
+            );
+            let ssh_args = std::fs::read_to_string(ssh_log).expect("recorded ssh args");
+            assert!(ssh_args.contains("mkdir -p -- '/remote path/destination'"));
         });
     }
 
