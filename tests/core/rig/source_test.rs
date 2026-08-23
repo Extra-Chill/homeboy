@@ -405,7 +405,7 @@ fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
     .expect("install linked");
     fs::remove_dir_all(package.path()).expect("remove linked source");
 
-    let err = load("alpha").expect_err("stale source error");
+    let err = load(&test_config_root(), "alpha").expect_err("stale source error");
 
     assert!(err.message.contains("linked rig source"));
     assert!(err.message.contains("source path is missing"));
@@ -417,7 +417,9 @@ fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
         .hints
         .iter()
         .any(|hint| hint.message.contains("homeboy rig sources remove")));
-    assert!(!list_ids().expect("list ids").contains(&"alpha".to_string()));
+    assert!(!list_ids(&test_config_root())
+        .expect("list ids")
+        .contains(&"alpha".to_string()));
 }
 
 #[test]

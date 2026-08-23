@@ -36,7 +36,7 @@ fn run_single_rig_bench_fails_fast_on_active_resource_lease() {
         set_rig_resources(home, "studio", resources.clone());
         set_rig_resources(home, "studio-bfb", resources);
 
-        let active_spec = crate::rig::load("studio").expect("load active rig");
+        let active_spec = crate::rig::load(home.path(), "studio").expect("load active rig");
         let _lease =
             crate::rig::lease::acquire_active_run_lease(home.path(), &active_spec, "bench")
                 .expect("acquire active lease")

@@ -5672,15 +5672,19 @@ pub(crate) fn artifact_response_for_path(path: &str) -> Option<HttpResponse> {
 }
 
 fn config_paths_body() -> Result<serde_json::Value> {
+    // Boundary: one `GET /config/paths` request is one unit of work, so the rig
+    // and stack directories are joined onto the same root this response already
+    // reports rather than resolved again (#7505).
+    let config_root = paths::homeboy()?;
     Ok(json!({
-        "homeboy": paths::homeboy()?.display().to_string(),
+        "homeboy": config_root.display().to_string(),
         "homeboy_json": paths::homeboy_json()?.display().to_string(),
         "projects": paths::projects()?.display().to_string(),
         "servers": paths::servers()?.display().to_string(),
         "components": paths::components()?.display().to_string(),
         "extensions": paths::extensions()?.display().to_string(),
-        "rigs": paths::rigs()?.display().to_string(),
-        "stacks": paths::stacks()?.display().to_string(),
+        "rigs": paths::rigs_in_root(&config_root).display().to_string(),
+        "stacks": paths::stacks_in_root(&config_root).display().to_string(),
         "daemon_state": paths::daemon_state_file()?.display().to_string(),
         "daemon_jobs": paths::daemon_jobs_file()?.display().to_string(),
     }))
