@@ -54,14 +54,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The tests below drive the store-rooted entry points. Resolving the store
-/// once here keeps the ambient lookup in one place and lets the ambient
-/// wrappers be deleted (#7505).
-fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
-    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-        .expect("lifecycle store")
-}
-
 /// A durable store that `homeboy-agents` roots explicitly.
 struct Store {
     /// The type name as it reads in a parameter position, with or without a

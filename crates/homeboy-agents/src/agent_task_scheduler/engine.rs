@@ -1,7 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -45,6 +45,11 @@ pub struct AgentTaskScheduler {
     run_id: Option<String>,
     harvest_context: HarvestExecutionContext,
     lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    /// The store the durable provider-execution records resolve against when
+    /// no caller injected one. It is resolved at most once per scheduler so
+    /// that the reservation, the terminal record, and the cleanup record are
+    /// guaranteed to name the same installation (#7505).
+    resolved_lifecycle_store: OnceLock<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
     #[cfg(test)]
     scratch_root: Option<std::path::PathBuf>,
 }
@@ -62,6 +67,7 @@ impl AgentTaskScheduler {
             run_id: None,
             harvest_context: HarvestExecutionContext::default(),
             lifecycle_store: None,
+            resolved_lifecycle_store: OnceLock::new(),
             #[cfg(test)]
             scratch_root: None,
         }
@@ -83,6 +89,28 @@ impl AgentTaskScheduler {
     ) -> Self {
         self.lifecycle_store = Some(lifecycle_store);
         self
+    }
+
+    /// The store the durable provider-execution records are written through.
+    ///
+    /// A reservation, its terminal record, and its cleanup record are one
+    /// exactly-once sequence spanning a provider execution that can run for
+    /// minutes. They used to resolve the environment independently, so a
+    /// repoint mid-execution could reserve in one installation and record the
+    /// terminal state in another, leaving the reservation held. Resolving at
+    /// most once here makes that impossible (#7505).
+    fn durable_lifecycle_store(
+        &self,
+    ) -> homeboy_core::Result<&crate::agent_task_lifecycle::AgentTaskLifecycleStore> {
+        if let Some(store) = self.lifecycle_store.as_ref() {
+            return Ok(store);
+        }
+        if let Some(store) = self.resolved_lifecycle_store.get() {
+            return Ok(store);
+        }
+        let store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        Ok(self.resolved_lifecycle_store.get_or_init(|| store))
     }
 
     #[cfg(test)]
@@ -683,12 +711,9 @@ impl AgentTaskScheduler {
                 };
 
                 if let Some(run_id) = self.run_id.as_deref() {
-                    let reservation = match self.lifecycle_store.as_ref() {
-                        Some(store) => store.reserve_provider_execution(run_id, &request, attempt),
-                        None => crate::agent_task_lifecycle::reserve_provider_execution(
-                            run_id, &request, attempt,
-                        ),
-                    };
+                    let reservation = self.durable_lifecycle_store().and_then(|store| {
+                        store.reserve_provider_execution(run_id, &request, attempt)
+                    });
                     match reservation {
                         Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::Acquired) => {}
                         Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved) => {
@@ -868,24 +893,15 @@ impl AgentTaskScheduler {
                             AgentTaskOutcomeStatus::CandidateRecoverable => "candidate_recoverable",
                             _ => "failed",
                         };
-                        let terminal = match self.lifecycle_store.as_ref() {
-                            Some(store) => store.record_provider_execution_terminal_with_model(
+                        let terminal = self.durable_lifecycle_store().and_then(|store| {
+                            store.record_provider_execution_terminal_with_model(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 terminal_state,
                                 outcome.selected_model(),
-                            ),
-                            None => {
-                                crate::agent_task_lifecycle::record_provider_execution_terminal_with_model(
-                                    run_id,
-                                    &outcome.task_id,
-                                    result.attempt,
-                                    terminal_state,
-                                    outcome.selected_model(),
-                                )
-                            }
-                        };
+                            )
+                        });
                         if let Err(error) = terminal {
                             outcome.status = AgentTaskOutcomeStatus::Failed;
                             outcome.failure_classification =
@@ -1263,20 +1279,14 @@ impl AgentTaskScheduler {
                         &outcome,
                     );
                     if let Some(run_id) = running_task.run_id.as_deref() {
-                        let _ = match self.lifecycle_store.as_ref() {
-                            Some(store) => store.record_provider_execution_cleanup_elapsed(
+                        let _ = self.durable_lifecycle_store().and_then(|store| {
+                            store.record_provider_execution_cleanup_elapsed(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 provider_completed_at.elapsed().as_millis() as u64,
-                            ),
-                            None => crate::agent_task_lifecycle::record_provider_execution_cleanup_elapsed(
-                                run_id,
-                                &outcome.task_id,
-                                result.attempt,
-                                provider_completed_at.elapsed().as_millis() as u64,
-                            ),
-                        };
+                            )
+                        });
                     }
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                     if candidate_completion == AgentTaskCandidateCompletionPolicy::FirstGreen

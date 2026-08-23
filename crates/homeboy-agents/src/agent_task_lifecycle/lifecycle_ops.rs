@@ -3323,18 +3323,6 @@ pub enum ProviderExecutionReservation {
     AlreadyReserved,
 }
 
-/// Durably reserve one provider execution before the scheduler blocks on the
-/// backend. A resumed controller must reconcile an existing reservation rather
-/// than dispatching the same `(task_id, attempt)` a second time.
-pub fn reserve_provider_execution(
-    run_id: &str,
-    task: &AgentTaskRequest,
-    attempt: u32,
-) -> Result<ProviderExecutionReservation> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
-}
-
 pub fn reserve_provider_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3775,25 +3763,6 @@ pub fn record_provider_execution_terminal(
     )
 }
 
-/// Record a terminal provider result with its normalized concrete model.
-pub fn record_provider_execution_terminal_with_model(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    state: &str,
-    model: Option<&str>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_with_model_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        state,
-        model,
-    )
-}
-
 pub fn record_provider_execution_terminal_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3954,24 +3923,6 @@ pub fn has_active_provider_execution_in_store(
                 .iter()
                 .any(|execution| execution["state"] == json!("running"))
         }))
-}
-
-/// Record the controller time spent after a provider returned and before its
-/// terminal outcome was fully harvested and finalized.
-pub fn record_provider_execution_cleanup_elapsed(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    elapsed_ms: u64,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_cleanup_elapsed_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        elapsed_ms,
-    )
 }
 
 pub fn record_provider_execution_cleanup_elapsed_in_store(
