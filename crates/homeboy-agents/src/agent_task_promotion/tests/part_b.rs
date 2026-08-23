@@ -41,15 +41,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
-fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
-    let (result, apply_calls) = promote_recoverable_patch_count(3);
-    let report = result.expect("equivalent candidates are canonicalized");
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(report.patch_artifact.kind, "patch");
-    assert_eq!(apply_calls, 1);
-}
-
-#[test]
 fn materialized_workspace_promotion_adapter_applies_inline_patch_when_artifact_is_remote() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");

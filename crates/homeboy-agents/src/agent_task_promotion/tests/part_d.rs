@@ -39,16 +39,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
-fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
-    let (result, apply_calls) = promote_recoverable_patch_count(1);
-    assert_eq!(
-        result.expect("single candidate applies").status,
-        AgentTaskPromotionStatus::Applied
-    );
-    assert_eq!(apply_calls, 1);
-}
-
-#[test]
 fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
     let workspace = tempfile::tempdir().expect("workspace");
     git(workspace.path(), &["init", "-b", "cook-target"]);

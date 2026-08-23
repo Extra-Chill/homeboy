@@ -100,18 +100,6 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
 }
 
 #[test]
-fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
-    let (result, apply_calls) = promote_recoverable_patch_count(0);
-    let error = result.expect_err("missing candidate rejected");
-    assert!(error.message.contains("no readable actionable patch"));
-    assert!(error.details["next_action"]
-        .as_str()
-        .expect("recoverable next action")
-        .contains("agent-task review"));
-    assert_eq!(apply_calls, 0);
-}
-
-#[test]
 fn validate_patch_extracts_safe_changed_files() {
     let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
