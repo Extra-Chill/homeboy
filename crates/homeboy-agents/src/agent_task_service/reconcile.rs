@@ -1237,6 +1237,101 @@ mod tests {
     }
 
     #[test]
+    fn controller_heartbeat_keeps_slow_pre_provider_materialization_out_of_runner_pid_watchdog() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-controller-pre-provider-heartbeat";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+                record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+            })
+            .expect("runner has not been submitted yet");
+            agent_task_lifecycle::record_cook_progress_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store"),
+                run_id,
+                "worktree_provider_ensure",
+                1,
+                Some("provider budget is 120 seconds; ensure remains active after 20 seconds"),
+            )
+            .expect("controller heartbeat");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_progress"]["started_at"] = serde_json::json!(
+                    (chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()
+                );
+                record.metadata["cook_progress"]["provider_budget_ms"] =
+                    serde_json::json!(120_000u64);
+            })
+            .expect("record slow provider evidence");
+
+            let status = agent_task_lifecycle::status(run_id).expect("status while ensure runs");
+            assert!(status.metadata.get("stale_running").is_none());
+            assert_eq!(
+                status.metadata["cook_progress"]["phase"],
+                "worktree_provider_ensure"
+            );
+            assert_eq!(
+                status.metadata["cook_progress"]["provider_budget_ms"],
+                120_000
+            );
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("watchdog pass");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::status(run_id).expect("retained run");
+            assert_eq!(
+                retained.state,
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert!(retained.metadata.get("cancel_reason").is_none());
+        });
+    }
+
+    #[test]
+    fn missing_runner_pid_after_runner_submission_still_cancels() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-missing-post-submission-runner-pid";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+                record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+                record.metadata["cook_progress"] = serde_json::json!({
+                    "phase": "runner_submission",
+                    "attempt": 1,
+                });
+            })
+            .expect("runner submission without PID");
+
+            let stale = agent_task_lifecycle::status(run_id).expect("status after submission");
+            assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("watchdog pass");
+            assert_eq!(report["reconciled"], 1, "{report}");
+            let cancelled = agent_task_lifecycle::status(run_id).expect("cancelled run");
+            assert_eq!(
+                cancelled.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(cancelled.metadata["cancel_reason"], "missing_runner_pid");
+        });
+    }
+
+    #[test]
     fn concurrent_planned_submissions_survive_delayed_runner_identity_publication() {
         use std::sync::{Arc, Barrier};
 
