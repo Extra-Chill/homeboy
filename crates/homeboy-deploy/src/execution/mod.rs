@@ -168,6 +168,7 @@ mod tests {
                 source_commit: "0123456789abcdef".to_string(),
             }),
             resume_run_id: None,
+            target: None,
         };
 
         let prepared = prepare_component_deploy(
@@ -250,6 +251,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         let result = resolve_preflight_artifact_path(
@@ -317,6 +319,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -357,6 +360,7 @@ mod tests {
             tagged: true,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -408,6 +412,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -459,6 +464,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -501,6 +507,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         match release_artifact_plan(&component, &config, false, false) {
@@ -556,6 +563,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -636,6 +644,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         let artifact = resolve_preflight_artifact_path(
@@ -962,6 +971,7 @@ mod tests {
             tagged,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 

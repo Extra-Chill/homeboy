@@ -6,6 +6,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
 
 use super::lifecycle::DeployObservation;
+use super::route::DeployTarget;
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 
 pub(super) fn run_if_configured(
@@ -56,13 +57,7 @@ pub(super) fn run_if_configured(
         .collect::<Result<Vec<_>>>()?;
     let provider_count = component_ids
         .iter()
-        .filter(|id| {
-            project
-                .components
-                .iter()
-                .find(|attachment| attachment.id == **id)
-                .is_some_and(|attachment| attachment.selects_deployment_provider())
-        })
+        .filter(|id| super::route::resolve(project, id, config) == DeployTarget::Provider)
         .count();
     if config.check && provider_count > 0 && provider_count < components.len() {
         return Err(Error::validation_invalid_argument(
@@ -191,7 +186,12 @@ fn run_component(
             "components.deployment_provider_input",
             "Selected deployment provider has no component provider policy",
             Some(component.id.clone()),
-            None,
+            (config.target == Some(DeployTarget::Provider)).then(|| {
+                vec![
+                    "--target provider requires the component to declare deployment_provider in its homeboy.json".to_string(),
+                    "Deploy the server deliverable instead: --target server".to_string(),
+                ]
+            }),
         )
     })?;
     let layered = homeboy_extension::deployment_provider_layered_input(
@@ -228,11 +228,29 @@ fn run_component(
         .is_some_and(|layered| layered.target_required)
         && target_input.is_none()
     {
+        // A dual-deliverable component still has a deployable server artifact
+        // here, so the remedy is two-sided: configure the provider target, or
+        // say which deliverable this deploy meant (#12853).
+        let mut tried = vec![format!(
+            "Select this provider target by setting components[].deployment_provider_input for '{}' on project '{}'",
+            component.id, project_id
+        )];
+        if !component
+            .build_artifact
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            tried.push(
+                "Deploy this component's server artifact instead: homeboy deploy --component <id> --target server"
+                    .to_string(),
+            );
+        }
         return Err(Error::validation_invalid_argument(
             "components.deployment_provider_input",
             "Deployment provider requires project provider input",
             Some(component.id.clone()),
-            None,
+            Some(tried),
         ));
     }
 
@@ -309,7 +327,13 @@ fn run_component(
     };
     let mut result = ComponentDeployResult::new(component, "").with_status(status);
     result.warnings.push(
-        "deployment route: provider (selected by project deployment provider target)".to_string(),
+        match config.target {
+            Some(DeployTarget::Provider) => {
+                "deployment route: provider (selected by --target provider)"
+            }
+            _ => "deployment route: provider (selected by project deployment provider target)",
+        }
+        .to_string(),
     );
     if is_layered {
         result.local_path = None;
@@ -498,6 +522,7 @@ mod tests {
         validate_repository_policy, CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT,
         FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
     };
+    use crate::route::DeployTarget;
     use crate::DeployConfig;
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
     use homeboy_core::error::Error;
@@ -818,6 +843,82 @@ mod tests {
                 .is_none(),
             "the standard deployment route must remain available when no provider target is selected"
         );
+    }
+
+    /// The provider is an option, not an owner. `--target server` must reach the
+    /// standard deployment route even on a project that configures a provider
+    /// target, so a dual-deliverable component stays deployable both ways.
+    #[test]
+    fn an_explicit_server_target_declines_a_selected_provider() {
+        let repository = provider_repository("fixture");
+        let project = provider_project(repository.path());
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.target = Some(DeployTarget::Server);
+
+        assert!(
+            run_if_configured("site", &project, &config, None)
+                .expect("an explicit server target must not invoke the provider")
+                .is_none(),
+            "--target server must fall through to the standard deployment route"
+        );
+    }
+
+    /// The reported failure (#12853). Routing to the provider is now explicit,
+    /// so when its required input is missing the error must name both ways out:
+    /// configure the target, or deploy the server deliverable instead.
+    #[test]
+    fn a_missing_provider_target_reports_the_server_deliverable_as_a_remedy() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = tempfile::tempdir().expect("repository");
+            std::fs::write(
+                repository.path().join("homeboy.json"),
+                serde_json::json!({
+                    "id": "fixture",
+                    "build_artifact": "dist/fixture.zip",
+                    "deployment_provider": {
+                        "extension": "fixture-provider",
+                        "provider": "fixture.deploy",
+                        "policy": { "repository": "shared" }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("dual-deliverable component");
+            write_provider_extension_with_target_requirement(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+                true,
+            );
+            let project = Project {
+                id: "extrachill-site".to_string(),
+                components: vec![ProjectComponentAttachment {
+                    id: "fixture".to_string(),
+                    local_path: repository.path().to_string_lossy().to_string(),
+                    remote_path: Some("wp-content/plugins/fixture".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut config = DeployConfig::check_all_no_pull_head();
+            config.target = Some(DeployTarget::Provider);
+
+            let error = run_if_configured("extrachill-site", &project, &config, None)
+                .expect_err("an explicitly requested provider must not fall back silently");
+
+            assert_eq!(
+                error.details["field"],
+                "components.deployment_provider_input"
+            );
+            let tried = error.details["tried"].to_string();
+            assert!(
+                tried.contains("deployment_provider_input") && tried.contains("extrachill-site"),
+                "the provider remedy must name the project attachment: {tried}"
+            );
+            assert!(
+                tried.contains("--target server"),
+                "the server deliverable must stay reachable: {tried}"
+            );
+        });
     }
 
     #[test]

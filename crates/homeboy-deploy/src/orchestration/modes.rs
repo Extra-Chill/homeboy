@@ -260,15 +260,12 @@ pub(super) fn run_dry_run_mode(
                 result = result.with_deployed_ref(deploy_ref);
             }
             result = with_dry_run_artifact_plan(result, c, config);
-            if project
-                .components
-                .iter()
-                .find(|attachment| attachment.id == c.id)
-                .is_some_and(|attachment| !attachment.selects_deployment_provider())
-            {
+            if crate::route::resolve(project, &c.id, config) == crate::route::DeployTarget::Server {
                 result.warnings.push(
-                    "deployment route: standard (no project deployment provider target selected)"
-                        .to_string(),
+                    crate::route::server_route_disclosure(c, project, config).unwrap_or_else(|| {
+                        "deployment route: standard (no project deployment provider target selected)"
+                            .to_string()
+                    }),
                 );
             }
             if config.check {
@@ -467,6 +464,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         let result = run_dry_run_mode(
@@ -503,6 +501,9 @@ mod tests {
         );
     }
 
+    /// A component that builds a server artifact *and* declares a provider is
+    /// dual-deliverable. The plan must name the deliverable it selected and the
+    /// one it did not, so a server route is never a silent choice (#12853).
     #[test]
     fn standard_dry_run_reports_route_when_repository_provider_is_not_targeted() {
         let component = Component {
@@ -542,9 +543,63 @@ mod tests {
         )
         .expect("standard dry-run plan");
 
-        assert!(result.results[0].warnings.iter().any(|warning| {
-            warning == "deployment route: standard (no project deployment provider target selected)"
-        }));
+        let route = result.results[0]
+            .warnings
+            .iter()
+            .find(|warning| warning.starts_with("deployment route:"))
+            .expect("the selected deployment route must be reported");
+        assert!(route.starts_with("deployment route: server"));
+        assert!(route.contains("this project selects no provider target"));
+        assert!(route.contains("'fixture.deploy'"));
+        assert!(route.contains("--target provider"));
+    }
+
+    /// `--target provider` is an operator decision, so the plan must not
+    /// re-decide it back to the server route.
+    #[test]
+    fn an_explicit_provider_target_is_not_reported_as_a_server_route() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/source/fixture".to_string(),
+            remote_path: "wp-content/plugins/fixture".to_string(),
+            deployment_provider: Some(homeboy_core::component::DeploymentProviderAttachment {
+                extension: "fixture-provider".to_string(),
+                provider: "fixture.deploy".to_string(),
+                contract: None,
+                policy: Some(serde_json::json!({ "repository": "shared" })),
+            }),
+            ..Component::default()
+        };
+        let project = Project {
+            components: vec![homeboy_core::project::ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: component.local_path.clone(),
+                remote_path: Some(component.remote_path.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.check = false;
+        config.all = false;
+        config.component_ids = vec!["fixture".to_string()];
+        config.dry_run = true;
+        config.target = Some(crate::route::DeployTarget::Provider);
+
+        let result = run_dry_run_mode(
+            std::slice::from_ref(&component),
+            &HashMap::new(),
+            &HashMap::new(),
+            &project,
+            "/srv/site",
+            &config,
+        )
+        .expect("provider-targeted dry-run plan");
+
+        assert!(!result.results[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("deployment route: server")));
     }
 
     #[test]
@@ -607,6 +662,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         let result = run_dry_run_mode(
@@ -701,6 +757,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
         config.prepared_artifact = Some(PreparedDeployArtifact {
             component_id: "fixture".to_string(),
@@ -769,6 +826,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         };
 
         let checked = run_check_mode(CheckModeInput {

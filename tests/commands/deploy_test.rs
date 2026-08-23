@@ -1,4 +1,4 @@
-use super::{resolve_multi_args, resume_deploy_command, run, DeployArgs};
+use super::{resolve_multi_args, resume_deploy_command, run, DeployArgs, DeployTargetArg};
 use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use std::collections::BTreeMap;
@@ -477,6 +477,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         release_set: None,
         requested_ref: None,
         tagged: false,
+        target: None,
         resume: None,
         exact_refs: BTreeMap::new(),
         resolved_refs: BTreeMap::new(),
@@ -510,4 +511,66 @@ fn exact_ref_deploy_accepts_an_independent_expected_version() {
     };
     assert_eq!(args.requested_ref.as_deref(), Some("v0.170.8"));
     assert_eq!(args.version.as_deref(), Some("0.170.8"));
+}
+
+/// A dual-deliverable component needs a way to say which target a deploy means,
+/// and the flag must reject anything it cannot select (#12853).
+#[test]
+fn deploy_target_selects_a_named_deliverable() {
+    for (value, expected) in [
+        ("server", DeployTargetArg::Server),
+        ("provider", DeployTargetArg::Provider),
+    ] {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "deploy",
+            "--project",
+            "project-a",
+            "--component",
+            "component-a",
+            "--target",
+            value,
+        ])
+        .expect("--target accepts each selectable deliverable");
+
+        let Commands::Deploy(args) = cli.command else {
+            panic!("expected deploy command");
+        };
+        assert_eq!(args.target, Some(expected));
+    }
+
+    assert!(
+        Cli::try_parse_from([
+            "homeboy",
+            "deploy",
+            "--project",
+            "project-a",
+            "--component",
+            "component-a",
+            "--target",
+            "worker",
+        ])
+        .is_err(),
+        "an unselectable target must be rejected at parse time"
+    );
+}
+
+/// Omitting `--target` keeps the inferred route, so an optional provider never
+/// forces the flag onto every existing deploy.
+#[test]
+fn deploy_without_target_leaves_the_route_inferred() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "--project",
+        "project-a",
+        "--component",
+        "component-a",
+    ])
+    .expect("deploy without --target");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert_eq!(args.target, None);
 }

@@ -112,6 +112,11 @@ pub struct DeployConfig {
     pub prepared_artifact: Option<PreparedDeployArtifact>,
     /// Resume a durable multi-target deploy run after exact identity validation.
     pub resume_run_id: Option<String>,
+    /// Explicitly select which deliverable a dual-deliverable component deploys.
+    ///
+    /// `None` infers the route from project target configuration. An explicit
+    /// value is an operator decision and is never re-decided (#12853).
+    pub target: Option<crate::route::DeployTarget>,
 }
 
 impl DeployConfig {
@@ -143,6 +148,7 @@ impl DeployConfig {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 }
