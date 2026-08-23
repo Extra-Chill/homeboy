@@ -18,6 +18,7 @@ use crate::BenchDiagnostic;
 use crate::BenchMetricPolicyPreset;
 use crate::BenchResponsivenessSummary;
 use crate::BenchRunDistribution;
+use crate::BenchStageEvidence;
 use crate::{BenchGate, BenchGateResult};
 use crate::{BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary};
 
@@ -110,6 +111,10 @@ pub struct BenchRunMetadata {
     pub rig_package: Option<RigPackageEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleResultMetadata>,
+    /// Completed runner-owned stages that may be considered by a later bench
+    /// invocation. Each stage binds its producer, inputs, and output bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<BenchStageEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
 }
