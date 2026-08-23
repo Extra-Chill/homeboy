@@ -41,6 +41,7 @@ pub(crate) struct ProcessGroupCleanupGuard {
     containment: Option<crate::process::ProcessContainment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessCleanupReport {
     pub(crate) incomplete: Option<String>,
     pub(crate) warning: Option<String>,
