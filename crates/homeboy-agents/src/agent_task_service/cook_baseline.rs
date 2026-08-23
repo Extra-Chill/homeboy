@@ -1033,6 +1033,7 @@ mod tests {
         compare_gate_failures_to_verified_base(
             &mut promotion,
             temp.path(),
+            temp.path(),
             &base,
             std::time::Duration::from_secs(1),
             |_compared, _total| Ok(()),
