@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
@@ -20,10 +21,9 @@ use homeboy_core::process::{
 };
 use serde_json::{json, Value};
 
-use super::{
-    AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
-    AgentTaskManagedServiceReadinessKind,
-};
+#[cfg(test)]
+use super::AgentTaskManagedServiceLifecycle;
+use super::{AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceReadinessKind};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentTaskManagedServiceRecord {

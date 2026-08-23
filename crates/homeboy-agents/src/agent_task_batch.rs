@@ -1695,10 +1695,6 @@ pub fn record_dependency_action_receipt_in_store(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::{
-        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
-    };
-    use crate::agent_task_scheduler::AgentTaskExecutorAdapter;
 
     fn batch_store() -> (tempfile::TempDir, AgentTaskBatchStore) {
         let temp = tempfile::tempdir().expect("temporary batch data root");

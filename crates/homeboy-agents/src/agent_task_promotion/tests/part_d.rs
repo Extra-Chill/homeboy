@@ -4,13 +4,12 @@
 use super::super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
     ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::normalize_promotion_patch;
 use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionReport,
+    AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
 use homeboy_core::defaults::{
