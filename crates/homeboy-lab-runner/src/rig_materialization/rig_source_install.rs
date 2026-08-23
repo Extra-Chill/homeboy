@@ -51,6 +51,15 @@ pub(super) fn remote_package_path(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ResolvedInstalledRigSource {
+    /// The complete worktree copied to the runner.
+    pub snapshot_root: String,
+    /// The declared local package authority boundary.
+    pub source_root: String,
+    pub package_path: String,
+}
+
 /// Resolve installed local-source metadata before staging it for Lab.
 ///
 /// Relative paths are meaningful only below the repository or worktree chosen
@@ -60,7 +69,7 @@ pub(super) fn resolve_installed_rig_source(
     source_root: Option<&str>,
     package_path: &str,
     declared_source_root: &str,
-) -> Result<(String, String)> {
+) -> Result<ResolvedInstalledRigSource> {
     let source_root = source_root.unwrap_or(package_path);
     let source_is_relative = Path::new(source_root).is_relative();
     let package_is_relative = Path::new(package_path).is_relative();
@@ -96,7 +105,7 @@ pub(super) fn resolve_installed_rig_source(
         ));
     }
 
-    let source_root = if source_is_relative {
+    let snapshot_root = if source_is_relative {
         // Materialize the declared worktree so package dependencies and
         // templates outside a nested rig directory remain available.
         declared_root
@@ -104,9 +113,10 @@ pub(super) fn resolve_installed_rig_source(
             .expect("relative source requires declared root")
             .clone()
     } else {
-        declared_source
+        declared_source.clone()
     };
-    let source_root = source_directory(source_root);
+    let snapshot_root = source_directory(snapshot_root);
+    let source_root = source_directory(declared_source);
     let package_path = package_directory(rig_id, package_path)?;
 
     if !package_path.starts_with(&source_root) {
@@ -120,10 +130,11 @@ pub(super) fn resolve_installed_rig_source(
         ));
     }
 
-    Ok((
-        source_root.display().to_string(),
-        package_path.display().to_string(),
-    ))
+    Ok(ResolvedInstalledRigSource {
+        snapshot_root: snapshot_root.display().to_string(),
+        source_root: source_root.display().to_string(),
+        package_path: package_path.display().to_string(),
+    })
 }
 
 fn source_directory(path: PathBuf) -> PathBuf {
@@ -502,7 +513,7 @@ mod tests {
         std::fs::create_dir_all(rig_file.parent().expect("rig parent")).expect("rig parent");
         std::fs::write(&rig_file, "{}").expect("rig file");
 
-        let (source_root, package_path) = resolve_installed_rig_source(
+        let resolved = resolve_installed_rig_source(
             "fixture-matrix",
             Some("rigs/fixture-matrix/rig.json"),
             "rigs/fixture-matrix/rig.json",
@@ -511,7 +522,7 @@ mod tests {
         .expect("relative source resolves from declared worktree");
 
         assert_eq!(
-            source_root,
+            resolved.snapshot_root,
             worktree
                 .path()
                 .canonicalize()
@@ -520,7 +531,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            package_path,
+            resolved.package_path,
             rig_file
                 .parent()
                 .unwrap()
@@ -530,7 +541,11 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            remote_package_path(&source_root, &package_path, "/runner/worktree"),
+            remote_package_path(
+                &resolved.snapshot_root,
+                &resolved.package_path,
+                "/runner/worktree"
+            ),
             "/runner/worktree/rigs/fixture-matrix"
         );
     }
@@ -589,6 +604,75 @@ mod tests {
     }
 
     #[test]
+    fn directory_source_root_authorizes_nested_package_but_not_sibling() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let source_root = worktree.path().join("rigs/a");
+        let nested_package = source_root.join("nested");
+        let sibling_package = worktree.path().join("rigs/b");
+        std::fs::create_dir_all(&nested_package).expect("nested package");
+        std::fs::create_dir_all(&sibling_package).expect("sibling package");
+
+        let resolved = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/a"),
+            "rigs/a/nested",
+            &worktree.path().display().to_string(),
+        )
+        .expect("nested package is authorized by declared source directory");
+        assert_eq!(
+            resolved.snapshot_root,
+            worktree
+                .path()
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            resolved.source_root,
+            source_root.canonicalize().unwrap().display().to_string()
+        );
+
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/a"),
+            "rigs/b",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("sibling package is outside declared source directory");
+        assert!(error.message.contains("outside the declared source root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_source_root_rejects_symlinked_sibling_package() {
+        use std::os::unix::fs::symlink;
+
+        let worktree = tempfile::tempdir().expect("worktree");
+        std::fs::create_dir_all(worktree.path().join("rigs/a")).expect("source package");
+        std::fs::create_dir_all(worktree.path().join("rigs/b")).expect("sibling package");
+        symlink(
+            worktree.path().join("rigs/a"),
+            worktree.path().join("rigs/a-link"),
+        )
+        .expect("symlink source package");
+        symlink(
+            worktree.path().join("rigs/b"),
+            worktree.path().join("rigs/b-link"),
+        )
+        .expect("symlink sibling package");
+
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/a-link"),
+            "rigs/b-link",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("symlink to sibling is outside declared source directory");
+        assert!(error.message.contains("outside the declared source root"));
+    }
+
+    #[test]
     fn relative_rig_source_rejects_worktree_traversal() {
         let worktree = tempfile::tempdir().expect("worktree");
         let error = resolve_installed_rig_source(
@@ -608,7 +692,7 @@ mod tests {
         let rig_file = package.path().join("rig.json");
         std::fs::write(&rig_file, "{}").expect("rig file");
 
-        let (source_root, package_path) = resolve_installed_rig_source(
+        let resolved = resolve_installed_rig_source(
             "fixture-matrix",
             Some(&package.path().display().to_string()),
             &rig_file.display().to_string(),
@@ -617,9 +701,9 @@ mod tests {
         .expect("absolute source preserves existing behavior");
 
         assert_eq!(
-            source_root,
+            resolved.snapshot_root,
             package.path().canonicalize().unwrap().display().to_string()
         );
-        assert_eq!(package_path, source_root);
+        assert_eq!(resolved.package_path, resolved.source_root);
     }
 }
