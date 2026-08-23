@@ -587,38 +587,6 @@ mod tests {
         });
     }
 
-    fn executor_test_request() -> AgentTaskExecutorRequest {
-        let request = test_request();
-        // Use a deterministic isolated `.../runner/artifacts/task` directory
-        // instead of the host `std::env::temp_dir()`. The provenance assertions
-        // check the retained path ends in that stable segment; the ambient temp
-        // dir is host-dependent (and, once canonicalized, never contained the
-        // asserted path), making the test pass or fail by host configuration
-        // rather than behavior (#8964). The tempdir is intentionally leaked so the
-        // captured path stays valid for the lifetime of the test process.
-        let root = tempfile::Builder::new()
-            .prefix("hb-executor-artifacts-")
-            .tempdir()
-            .expect("executor artifacts root")
-            .keep();
-        let artifacts_path = root.join("runner").join("artifacts").join("task");
-        std::fs::create_dir_all(&artifacts_path).expect("create isolated artifacts path");
-        AgentTaskExecutorRequest {
-            artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("artifact root identity"),
-            artifacts_path,
-            artifacts_path_provenance: crate::agent_task::AgentTaskArtifactsPathProvenance {
-                owner: "homeboy".to_string(),
-                locality: "runner".to_string(),
-                plan_id: "plan-1".to_string(),
-                run_id: Some("run-1".to_string()),
-                task_id: request.task_id.clone(),
-                attempt: 1,
-            },
-            request,
-            resolved_runtime_tools: Vec::new(),
-        }
-    }
-
     #[test]
     fn persisted_input_redacts_secrets_but_retains_contracts_paths_and_artifacts() {
         with_artifact_root(|_| {

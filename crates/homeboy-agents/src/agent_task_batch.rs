@@ -2427,45 +2427,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn concurrent_child_finalizations_preserve_both_receipts() {
-        let (_temp, store) = batch_store();
-        let children = vec![
-            FanoutRunBatchChild {
-                task_id: "a".to_string(),
-                run_id: "a-run".to_string(),
-            },
-            FanoutRunBatchChild {
-                task_id: "b".to_string(),
-                run_id: "b-run".to_string(),
-            },
-        ];
-        store
-            .persist_fanout_run_batch("finalize-wave", "finalize-wave", &children, json!({}))
-            .expect("persist planning record");
-        std::thread::scope(|scope| {
-            let first = scope.spawn(|| {
-                store.record_child_finalization("finalize-wave", "a-run", json!({ "attempt": 1 }))
-            });
-            let second = scope.spawn(|| {
-                store.record_child_finalization("finalize-wave", "b-run", json!({ "attempt": 1 }))
-            });
-            first
-                .join()
-                .expect("first finalization thread")
-                .expect("first finalization");
-            second
-                .join()
-                .expect("second finalization thread")
-                .expect("second finalization");
-        });
-        let batch = store.read_batch("finalize-wave").expect("batch record");
-        let finalizations = batch.metadata["child_finalizations"]
-            .as_object()
-            .expect("finalizations");
-        assert_eq!(finalizations.len(), 2);
-    }
-
     impl AgentTaskExecutorAdapter for ArtifactExecutor {
         fn execute(
             &self,

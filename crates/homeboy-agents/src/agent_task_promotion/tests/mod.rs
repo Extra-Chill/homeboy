@@ -397,37 +397,6 @@ pub(super) fn recoverable_patch_source(
     (source_path, source)
 }
 
-pub(super) fn promote_recoverable_patch_count(
-    patch_count: usize,
-) -> (Result<AgentTaskPromotionReport>, usize) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, patch_count);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-    let result = promote_with_provider(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_command: None,
-            provider_invocation: None,
-        },
-        &mut provider,
-    );
-    (result, provider.apply_calls.len())
-}
-
 pub(super) fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

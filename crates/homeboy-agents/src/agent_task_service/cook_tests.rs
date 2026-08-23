@@ -1063,18 +1063,6 @@ struct CanonicalSelectionSideEffects {
 }
 
 impl CookSideEffectService for CanonicalSelectionSideEffects {
-    fn promote(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &AgentTaskCookServiceOptions,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        self.promotions.fetch_add(1, Ordering::SeqCst);
-        let artifact = canonical_cook_patch_artifact_id(options, run_id)?;
-        *self.selected_artifact.lock().unwrap() = artifact;
-        Ok(promotion(run_id))
-    }
-
     fn recover_moving_base(
         &mut self,
         _lifecycle_store: &AgentTaskLifecycleStore,
@@ -4050,40 +4038,6 @@ impl CandidateAdoptionFixture {
         fixture
     }
 
-    fn authenticate_pre_provider_recovery(&mut self) {
-        agent_task_lifecycle::record_lab_offload_phase(
-            &self.run_id,
-            "fixture-lab",
-            "lab_handoff_preacceptance",
-            None,
-            None,
-            None,
-            Some(&self.options.initial_plan),
-        )
-        .unwrap();
-        let attempt = super::super::load_recipe(&self.cook_id)
-            .unwrap()
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == self.run_id)
-            .unwrap()
-            .attempt;
-        agent_task_lifecycle::record_cook_attempt(&self.cook_id, attempt, &self.run_id).unwrap();
-        agent_task_lifecycle::record_pre_execution_failure(
-            &self.run_id,
-            &self.options.initial_plan,
-            "lab_handoff_preacceptance",
-            &Error::internal_unexpected("fixture pre-provider transport failure"),
-        )
-        .unwrap();
-        let record = agent_task_lifecycle::status(&self.run_id).unwrap();
-        assert_eq!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Failed
-        );
-        assert!(candidate_adoption_source(&record, &self.options.initial_plan.tasks[0]).is_ok());
-    }
-
     fn append_adoptable_attempt(&mut self, attempt: u32) {
         assert!(attempt > 1);
         let run_id = agent_task_lifecycle::cook_attempt_run_id(&self.cook_id, attempt);
@@ -4123,28 +4077,6 @@ impl CandidateAdoptionFixture {
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
         self.adopt_run_with_inherited_failure_acceptance(
             run_id, false, dispatcher, executor, backend,
-        )
-    }
-
-    fn adopt_run_with_inherited_failure_acceptance(
-        &self,
-        run_id: &str,
-        accept_inherited_failures: bool,
-        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-        executor: SharedAgentTaskExecutor,
-        backend: &mut CaptureBackend,
-    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-        adopt_cook_candidate_with_dispatcher_and_backend(
-            run_id,
-            &self.candidate,
-            AgentTaskCandidateAdoptionOptions {
-                ai_model: Some("openai/gpt-5.6-terra".to_string()),
-                replace_interrupted: false,
-                accept_inherited_failures,
-            },
-            dispatcher,
-            executor,
-            backend,
         )
     }
 }
@@ -5761,28 +5693,6 @@ fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
         assert_eq!(retry.record.metadata["retry_of"], run_id);
         assert!(retry.record.metadata["cook_id"].is_null());
     });
-}
-
-fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> AgentTaskCookServiceOptions {
-    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-    options.initial_run_id = format!("{cook_id}-attempt-1");
-    options.max_attempts = max_attempts;
-    super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
-    super::super::materialize_initial_cook_attempt(&options).expect("materialize first attempt");
-    agent_task_lifecycle::record_pre_execution_failure(
-        &options.initial_run_id,
-        &options.initial_plan,
-        "gate_environment.preserve",
-        &Error::validation_invalid_argument(
-            "CARGO_HOME",
-            "required environment capability is unavailable",
-            None,
-            None,
-        )
-        .with_retryable(true),
-    )
-    .expect("record retryable environment failure");
-    options
 }
 
 #[test]

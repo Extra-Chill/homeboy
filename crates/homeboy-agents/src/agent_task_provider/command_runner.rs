@@ -1515,29 +1515,6 @@ pub(super) fn run_provider_command_once(
     run_materialized_provider_command_once(&materialized, provider, None, 1)
 }
 
-#[cfg(test)]
-fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
-    let artifacts_path = std::env::temp_dir()
-        .join("homeboy-agent-task-provider-tests")
-        .join(homeboy_core::paths::sanitize_path_segment(&request.task_id))
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&artifacts_path).expect("test executor artifact root");
-    AgentTaskExecutorRequest {
-        request: request.clone(),
-        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("test artifact identity"),
-        artifacts_path,
-        artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
-            owner: "homeboy".to_string(),
-            locality: "runner".to_string(),
-            plan_id: "provider-unit-test".to_string(),
-            run_id: None,
-            task_id: request.task_id.clone(),
-            attempt: 1,
-        },
-        resolved_runtime_tools: Vec::new(),
-    }
-}
-
 fn spawn_output_reader<R>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,
