@@ -1,6 +1,7 @@
 use clap::Args;
 use serde_json::Value;
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -899,6 +900,13 @@ fn should_persist_manual_preflight_intent(
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
     let mut errors = Vec::new();
+    if let Err(error) = validate_finalization_base(
+        args.path.as_deref(),
+        &args.base,
+        args.verified_base_sha.as_deref(),
+    ) {
+        errors.push(error);
+    }
     for raw in &args.gate_results {
         if let Err(error) = parse_gate_results(std::slice::from_ref(raw)) {
             errors.push(error);
@@ -942,11 +950,119 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
         .collect();
     let mut error = errors.remove(0);
     error.message = format!(
-        "finalize-pr input validation failed with {} independent error(s)",
-        diagnostics.len()
+        "finalize-pr input validation failed with {} independent error(s): {}",
+        diagnostics.len(),
+        error.message
     );
     error.details = serde_json::json!({ "diagnostics": diagnostics });
     Err(error)
+}
+
+fn validate_finalization_base(
+    path: Option<&str>,
+    base: &str,
+    verified_base_sha: Option<&str>,
+) -> homeboy::core::Result<()> {
+    if !is_branch_name(base) {
+        return Err(invalid_finalization_base(base));
+    }
+    if let Some(verified_base_sha) = verified_base_sha {
+        if !is_full_git_object_id(verified_base_sha) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "verified_base_sha",
+                "--verified-base-sha must be a full immutable Git object ID",
+                Some(verified_base_sha.to_string()),
+                None,
+            ));
+        }
+    }
+    // A local branch is authoritative even when its name looks like an object ID.
+    if local_branch_exists(path, base) {
+        return Ok(());
+    }
+    if is_pseudo_ref(base)
+        || is_abbreviated_git_object_id(base)
+        || resolves_git_revision(path, base)
+    {
+        return Err(invalid_finalization_base(base));
+    }
+    Ok(())
+}
+
+fn invalid_finalization_base(base: &str) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "base",
+        "--base must name a branch, not an immutable revision or Git revision expression; use --base <branch> and --verified-base-sha <full-sha> for immutable proof",
+        Some(base.to_string()),
+        None,
+    )
+}
+
+fn local_branch_exists(path: Option<&str>, base: &str) -> bool {
+    git_ref_exists(path, &format!("refs/heads/{base}"))
+}
+
+fn resolves_git_revision(path: Option<&str>, base: &str) -> bool {
+    git_ref_exists(path, base)
+}
+
+fn git_ref_exists(path: Option<&str>, reference: &str) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            reference,
+        ])
+        .current_dir(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn is_branch_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.starts_with("refs/")
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.contains("//")
+        && !value.contains([' ', '~', '^', ':', '?', '*', '[', '\\'])
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && !value.split('/').any(|component| {
+            component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+        })
+        && value != "@"
+}
+
+fn is_abbreviated_git_object_id(value: &str) -> bool {
+    (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_pseudo_ref(value: &str) -> bool {
+    matches!(
+        value,
+        "HEAD"
+            | "FETCH_HEAD"
+            | "ORIG_HEAD"
+            | "MERGE_HEAD"
+            | "CHERRY_PICK_HEAD"
+            | "REVERT_HEAD"
+            | "BISECT_HEAD"
+            | "AUTO_MERGE"
+    )
+}
+
+fn is_full_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_public_contract(raw: &str) -> homeboy::core::Result<AgentTaskPublicContract> {
@@ -3915,6 +4031,101 @@ esac
             "validated",
             true,
         ));
+    }
+
+    #[test]
+    fn finalization_base_validation_rejects_immutable_and_revision_bases() {
+        for base in [
+            "a".repeat(40),
+            "abcd".to_string(),
+            "HEAD".to_string(),
+            "main~1".to_string(),
+            "refs/heads/main".to_string(),
+            "CHERRY_PICK_HEAD".to_string(),
+            "REVERT_HEAD".to_string(),
+            "BISECT_HEAD".to_string(),
+            "AUTO_MERGE".to_string(),
+        ] {
+            let error =
+                validate_finalization_base(None, &base, None).expect_err("base is not a branch");
+            assert_eq!(
+                error.code,
+                homeboy::core::error::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(error.message.contains("--verified-base-sha"));
+        }
+    }
+
+    #[test]
+    fn finalization_base_validation_allows_branch_names_and_full_verified_sha() {
+        let verified_base_sha = "a".repeat(40);
+
+        validate_finalization_base(None, "main", Some(&verified_base_sha))
+            .expect("default branch is valid");
+        validate_finalization_base(None, "release/2026.08", Some(&verified_base_sha))
+            .expect("slash-separated branch is valid");
+    }
+
+    #[test]
+    fn finalization_base_validation_defers_missing_branch_to_remote_resolution() {
+        validate_finalization_base(None, "missing-remote-branch", None)
+            .expect("branch syntax is valid even when origin does not have it");
+    }
+
+    #[test]
+    fn finalization_base_validation_rejects_abbreviated_verified_sha() {
+        let error = validate_finalization_base(None, "main", Some("abcdef0"))
+            .expect_err("verified base must be immutable");
+
+        assert_eq!(
+            error.code,
+            homeboy::core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("full immutable Git object ID"));
+    }
+
+    #[test]
+    fn finalization_base_validation_allows_existing_hex_named_branch() {
+        let repo = tempfile::tempdir().expect("temporary repository");
+        run_git(repo.path(), &["init", "--initial-branch=main"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.test"]);
+        run_git(repo.path(), &["config", "user.name", "Finalization Test"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
+        run_git(repo.path(), &["add", "base.txt"]);
+        run_git(repo.path(), &["commit", "-m", "base"]);
+        run_git(repo.path(), &["branch", "abcd"]);
+
+        validate_finalization_base(repo.path().to_str(), "abcd", None)
+            .expect("existing refs/heads branch wins over object-like syntax");
+    }
+
+    #[test]
+    fn immutable_base_rejection_precedes_manual_lifecycle_reservation() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let run_id = "manual-immutable-base";
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                run_id,
+                "--path",
+                "/not-used-before-validation",
+                "--base",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--title",
+                "Reject immutable base",
+                "--commit-message",
+                "fixture",
+                "--ai-used-for",
+                "validation coverage",
+            ]);
+
+            assert!(error.message.contains("--base must name a branch"));
+            assert!(error.message.contains("--verified-base-sha"));
+            assert!(agent_task_lifecycle::status(run_id).is_err());
+        });
     }
 
     fn provider_fixture(id: &str, backend: &str) -> AgentTaskExecutorProvider {
