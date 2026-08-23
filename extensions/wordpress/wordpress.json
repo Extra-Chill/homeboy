@@ -1206,6 +1206,13 @@
   },
   "settings": [
     {
+      "id": "standalone_php_test_paths",
+      "label": "Standalone PHP test paths",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative PHP paths or shell-glob patterns that identify executable standalone PHP tests in changed-file scopes. Matching files run through the bounded host-PHP runner; PHPUnit and *-smoke.php conventions remain available without this declaration."
+    },
+    {
       "id": "validation_dependencies",
       "label": "Validation Dependencies",
       "type": "array",

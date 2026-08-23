@@ -183,6 +183,8 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     done <<< "$smoke_files_raw"
 
     echo "PHP_SMOKE_SUMMARY:passed=${passed} failed=${failed}"
+    WORDPRESS_STANDALONE_PHP_SMOKE_PASSED="$passed"
+    WORDPRESS_STANDALONE_PHP_SMOKE_FAILED="$failed"
     [ "$failed" -eq 0 ] || return "$last_failure_exit"
 }
 
@@ -887,6 +889,42 @@ homeboy_wordpress_is_php_smoke_file() {
     esac
 }
 
+# Components that use executable PHP scripts without the shared `*-smoke.php`
+# convention declare their component-relative paths or shell-glob patterns in
+# standalone_php_test_paths. The declaration classifies already-selected files;
+# it never broadens a changed scope or turns support files into tests by default.
+homeboy_wordpress_is_declared_standalone_php_test_file() {
+    local test_file="$1"
+    local declared_path
+    local declared_paths
+
+    case "$test_file" in
+        *.php)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    declared_paths="$(homeboy_setting standalone_php_test_paths '.standalone_php_test_paths // [] | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end')" || {
+        echo "ERROR: standalone_php_test_paths must be an array of strings." >&2
+        return 2
+    }
+    while IFS= read -r declared_path; do
+        [ -n "$declared_path" ] || continue
+        case "$declared_path" in
+            /*|..|../*|*/../*)
+                echo "ERROR: standalone_php_test_paths contains an invalid component-relative selector: ${declared_path}" >&2
+                return 2
+                ;;
+        esac
+        if [[ "$test_file" == $declared_path ]]; then
+            return 0
+        fi
+    done <<< "$declared_paths"
+    return 1
+}
+
 homeboy_wordpress_load_test_shard_manifest() {
     local manifest_path="${HOMEBOY_TEST_SHARD_MANIFEST:-}"
     local shard_id shard_tests test_file test_rel selected_count
@@ -1013,14 +1051,25 @@ homeboy_wordpress_load_test_shard_manifest() {
 # the manifest decides which need a booted WordPress and which are standalone.
 homeboy_wordpress_run_php_smoke_files() {
     local smoke_files_raw="$1"
-    local smoke_rel smoke_environment
+    local smoke_rel smoke_environment declared_status
     local standalone_php_smoke_files=""
     local wordpress_smoke_files=""
     local status=0
 
+    WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES=0
+
     while IFS= read -r smoke_rel; do
         [ -n "$smoke_rel" ] || continue
-        smoke_environment="$(homeboy_wordpress_test_environment "$smoke_rel")" || return $?
+        # A component declaration is the explicit standalone contract. Existing
+        # smoke files without that declaration retain their manifest-selected
+        # WordPress or standalone environment.
+        if homeboy_wordpress_is_declared_standalone_php_test_file "$smoke_rel"; then
+            smoke_environment="standalone-php"
+        else
+            declared_status=$?
+            [ "$declared_status" -eq 1 ] || return "$declared_status"
+            smoke_environment="$(homeboy_wordpress_test_environment "$smoke_rel")" || return $?
+        fi
         if [ "$smoke_environment" = "standalone-php" ]; then
             standalone_php_smoke_files+="${standalone_php_smoke_files:+$'\n'}${smoke_rel}"
         else
@@ -1032,9 +1081,30 @@ homeboy_wordpress_run_php_smoke_files() {
         homeboy_wordpress_run_standalone_php_smoke_files "$standalone_php_smoke_files" || status=$?
     fi
     if [ -n "$wordpress_smoke_files" ]; then
+        while IFS= read -r smoke_rel; do
+            [ -n "$smoke_rel" ] || continue
+            WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES=$((WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES + 1))
+        done <<< "$wordpress_smoke_files"
         HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$wordpress_smoke_files" bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}" || status=$?
     fi
     return "$status"
+}
+
+homeboy_wordpress_write_changed_scope_results() {
+    local total="$1"
+    local passed="$2"
+    local failed="$3"
+
+    if ! type homeboy_write_test_results >/dev/null 2>&1 && [ -n "${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}" ] && [ -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS" ]; then
+        # shellcheck source=/dev/null
+        source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+    fi
+    if type homeboy_write_test_results >/dev/null 2>&1; then
+        homeboy_write_test_results "$total" "$passed" "$failed" 0 "changed-scope-host-php"
+    elif [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
+        echo "ERROR: WordPress changed-scope result normalization cannot write HOMEBOY_TEST_RESULTS_FILE." >&2
+        return 2
+    fi
 }
 
 homeboy_wordpress_replay_test_shard() {
@@ -1131,6 +1201,13 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
             changed_php_smoke_files+="$changed_test_rel"
             echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=host-php-smoke"
             changed_routed_count=$((changed_routed_count + 1))
+        elif homeboy_wordpress_is_declared_standalone_php_test_file "$changed_test_rel"; then
+            if [ -n "$changed_php_smoke_files" ]; then
+                changed_php_smoke_files+=$'\n'
+            fi
+            changed_php_smoke_files+="$changed_test_rel"
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=host-php-smoke"
+            changed_routed_count=$((changed_routed_count + 1))
         elif homeboy_wordpress_is_phpunit_test_file "$changed_test_rel"; then
             if [ -n "$changed_phpunit_files" ]; then
                 changed_phpunit_files+=$'\n'
@@ -1192,6 +1269,15 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     # changed-test list, which it reads as "run everything" — silently widening
     # a changed-file review to the full suite.
     if [ -n "$changed_php_smoke_files" ] && [ -z "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
+        # A standalone-only scope has exact host-PHP counts. Publish them here
+        # instead of falling through to PHPUnit, whose empty changed scope means
+        # a full-suite run and whose results would not describe these scripts.
+        if [ "${WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES:-0}" -eq 0 ]; then
+            homeboy_wordpress_write_changed_scope_results \
+                "$changed_routed_count" \
+                "${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0}" \
+                "${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}" || changed_scope_status=$?
+        fi
         exit "$changed_scope_status"
     fi
 fi

@@ -55,9 +55,22 @@ homeboy_runner_init() {
 }
 SH
 
+results_writer="${WORKDIR}/write-test-results.sh"
+cat > "$results_writer" <<'SH'
+homeboy_write_test_results() {
+    jq -n --argjson total "$1" --argjson passed "$2" --argjson failed "$3" --argjson skipped "$4" --arg source "$5" \
+        '{total: $total, passed: $passed, failed: $failed, skipped: $skipped, source: $source}' > "$HOMEBOY_TEST_RESULTS_FILE"
+}
+SH
+
 cat > "${component}/tests/standalone-smoke.php" <<'PHP'
 <?php
 echo "standalone smoke ran\n";
+PHP
+
+cat > "${component}/tests/worktree-command-help-snapshots.php" <<'PHP'
+<?php
+echo "standalone declared test ran\n";
 PHP
 
 cat > "${component}/tests/wordpress-smoke.php" <<'PHP'
@@ -137,7 +150,10 @@ run_changed_scope() {
     HOMEBOY_COMPONENT_SHAPE="plugin" \
     HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${WORKDIR}/stubs/host-smoke-wp.sh" \
     HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${WORKDIR}/stubs/wp-codebox.sh" \
+    HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+    HOMEBOY_TEST_RESULTS_FILE="${outfile}.results.json" \
     HOMEBOY_CHANGED_TEST_FILES="$changed" \
+    HOMEBOY_SETTINGS_JSON='{"standalone_php_test_paths":["tests/*-command-help-snapshots.php"]}' \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "$outfile" 2>&1
     status=$?
     set -e
@@ -148,17 +164,20 @@ run_changed_scope() {
 # A changed scope containing a PHPUnit class plus standalone smoke scripts, plus
 # a non-test helper. Every path must be accounted for.
 mixed="${WORKDIR}/mixed.out"
-run_changed_scope "$mixed" $'tests/Unit/OwnershipTest.php\ntests/standalone-smoke.php\ntests/wordpress-smoke.php\ntests/Unit/Support/TestDoubles.php'
+run_changed_scope "$mixed" $'tests/Unit/OwnershipTest.php\ntests/standalone-smoke.php\ntests/worktree-command-help-snapshots.php\ntests/wordpress-smoke.php\ntests/Unit/Support/TestDoubles.php'
 
 assert_contains "$mixed" "CHANGED_SCOPE_ROUTE:tests/Unit/OwnershipTest.php:runner=phpunit"
 assert_contains "$mixed" "CHANGED_SCOPE_ROUTE:tests/standalone-smoke.php:runner=host-php-smoke"
+assert_contains "$mixed" "CHANGED_SCOPE_ROUTE:tests/worktree-command-help-snapshots.php:runner=host-php-smoke"
 assert_contains "$mixed" "CHANGED_SCOPE_ROUTE:tests/wordpress-smoke.php:runner=host-php-smoke"
 assert_contains "$mixed" "CHANGED_SCOPE_EXCLUDED:tests/Unit/Support/TestDoubles.php:reason=unsupported_test_shape"
-assert_contains "$mixed" "CHANGED_SCOPE_SUMMARY:selected=4 routed=3 excluded=1"
+assert_contains "$mixed" "CHANGED_SCOPE_SUMMARY:selected=5 routed=4 excluded=1"
 
 # The standalone smoke actually executed...
 assert_contains "$mixed" "PHP_SMOKE_BEGIN:tests/standalone-smoke.php"
 assert_contains "$mixed" "PHP_SMOKE_OK:tests/standalone-smoke.php"
+assert_contains "$mixed" "PHP_SMOKE_BEGIN:tests/worktree-command-help-snapshots.php"
+assert_contains "$mixed" "PHP_SMOKE_OK:tests/worktree-command-help-snapshots.php"
 # ...the manifest-declared WordPress smoke went to the booted-WordPress runner...
 assert_contains "$mixed" "HOST_SMOKE_BEGIN:tests/wordpress-smoke.php"
 # ...and the PHPUnit class still reached the backend as an explicit scope rather
@@ -177,7 +196,14 @@ assert_contains "$only_smokes" "HOST_SMOKE_BEGIN:tests/wordpress-smoke.php"
 assert_contains "$only_smokes" "CHANGED_SCOPE_SUMMARY:selected=2 routed=2 excluded=0"
 assert_not_contains "$only_smokes" "WP_CODEBOX_STUB"
 
-# --- Scenario 3: a failing smoke fails the scope ----------------------------
+# --- Scenario 3: declared standalone-only scope writes exact results --------
+declared_only="${WORKDIR}/declared-only.out"
+run_changed_scope "$declared_only" 'tests/worktree-command-help-snapshots.php'
+assert_contains "$declared_only" "CHANGED_SCOPE_SUMMARY:selected=1 routed=1 excluded=0"
+assert_contains "$declared_only" "PHP_SMOKE_OK:tests/worktree-command-help-snapshots.php"
+jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "changed-scope-host-php"' "${declared_only}.results.json" >/dev/null
+
+# --- Scenario 4: a failing smoke fails the scope ----------------------------
 # The runner execs the PHPUnit backend, which would replace the process and
 # report only the backend's status. A passing backend must not erase a failing
 # host smoke.
@@ -193,7 +219,17 @@ if [ "$failing_status" -eq 0 ]; then
     exit 1
 fi
 
-# --- Scenario 4: --file on a standalone smoke stops there -------------------
+# A standalone-only failure publishes the same exact result shape as a pass.
+failing_only="${WORKDIR}/failing-only.out"
+failing_only_status=0
+run_changed_scope "$failing_only" 'tests/failing-smoke.php' || failing_only_status=$?
+if [ "$failing_only_status" -eq 0 ]; then
+    echo "Expected a failing standalone-only scope to fail" >&2
+    exit 1
+fi
+jq -e '.total == 1 and .passed == 0 and .failed == 1 and .skipped == 0 and .source == "changed-scope-host-php"' "${failing_only}.results.json" >/dev/null
+
+# --- Scenario 5: --file on a standalone smoke stops there -------------------
 # The WordPress-environment branch execs and therefore terminates; the
 # standalone branch returns, and without an explicit exit a request for one file
 # fell through into the full-suite PHPUnit run below it.
