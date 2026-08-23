@@ -15,7 +15,10 @@ use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
-use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::agent_task_promotion::{
+    candidate_fingerprint, AgentTaskPromotionCandidate, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
+};
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
@@ -4877,7 +4880,9 @@ fn run_cook_spine(
             let mut failed_dispatch_plan = None;
             let execution = (|| {
                 if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                    validate_cook_workspace(&options)?;
+                    validate_cook_workspace(&options).map_err(|error| {
+                        with_pre_execution_phase(error, "workspace_base_ancestry_preflight")
+                    })?;
                 }
                 if options.attempt_dispatcher.is_none() {
                     homeboy_core::cleanup::admit_reconstructable_artifact_work(
@@ -5005,7 +5010,6 @@ fn run_cook_spine(
                         effective_baseline.map(CookFollowUpBaseline::capability),
                     )
                 } else {
-                    validate_cook_workspace(&options)?;
                     admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
@@ -6459,7 +6463,82 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
     }
+    preflight_cook_workspace_base_ancestry(&target, &options.base)?;
     Ok(())
+}
+
+/// A candidate diff is meaningful only when its destination contains the
+/// resolved base. Otherwise base-only files appear to be provider changes.
+fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<()> {
+    let AgentTaskPromotionCandidate::Git { fingerprint } =
+        candidate_fingerprint(target.to_string_lossy().as_ref())?
+    else {
+        return Ok(());
+    };
+    // A destination can be a valid local Git workspace without an origin base
+    // to compare. Preserve that provider-owned contract; when origin already
+    // resolves the declared base, capture its current immutable snapshot below.
+    let tracking_ref = format!("refs/remotes/origin/{base}");
+    let tracking_base = std::process::Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &tracking_ref])
+        .current_dir(target)
+        .status()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !tracking_base.success() {
+        return Ok(());
+    }
+    let Some(resolved_base) =
+        crate::agent_task_promotion::capture_declared_base(target, Some(base))?
+    else {
+        return Ok(());
+    };
+    let counts = homeboy_core::git::run_git(
+        target,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...HEAD", resolved_base.sha),
+        ],
+        "compare Cook destination to resolved base",
+    )?;
+    let Some((behind, ahead)) = counts
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .get(..2)
+        .and_then(|parts| Some((parts[0].parse::<u64>().ok()?, parts[1].parse::<u64>().ok()?)))
+    else {
+        return Err(Error::git_command_failed(
+            "could not classify Cook destination ancestry against resolved base".to_string(),
+        ));
+    };
+    if behind == 0 {
+        return Ok(());
+    }
+    let direction = if ahead == 0 { "behind" } else { "diverged" };
+    let mut error = Error::validation_invalid_argument(
+        "base",
+        format!(
+            "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
+            resolved_base.base, resolved_base.sha
+        ),
+        Some(target.display().to_string()),
+        Some(vec![format!(
+            "Update the destination with `{}` and rerun Cook; provider execution has not started.",
+            format!("git merge --ff-only {}", resolved_base.sha)
+        )]),
+    );
+    error.details["workspace_base_ancestry"] = serde_json::json!({
+        "schema": "homeboy/cook-workspace-base-ancestry/v1",
+        "base": resolved_base.base,
+        "resolved_base": resolved_base.sha,
+        "destination_head": fingerprint.head,
+        "direction": direction,
+        "base_only_commits": behind,
+        "candidate_only_commits": ahead,
+        "next_action": "converge_destination_before_provider",
+    });
+    Err(error)
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can
