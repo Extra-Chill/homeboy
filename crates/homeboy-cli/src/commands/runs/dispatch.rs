@@ -3,6 +3,7 @@
 //! Routes parsed subcommands to their handlers and provides the global
 //! `--runner` guidance surfaced when operators misuse the top-level flag.
 
+use homeboy::core::observation::ObservationStore;
 use homeboy::core::Error;
 
 use super::types::{
@@ -178,19 +179,24 @@ impl RunsArgs {
 }
 
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
+    // Boundary: one `homeboy runs` invocation is one unit of work, so the
+    // observation store is opened exactly once here and handed to the handlers
+    // below. Each of those used to open its own, which made a single command
+    // several independently-resolved stores (#7505).
+    let store = ObservationStore::open_initialized()?;
     match args.command {
-        RunsCommand::List(args) => handlers::list_runs(args, "runs.list"),
+        RunsCommand::List(args) => handlers::list_runs(&store, args, "runs.list"),
         RunsCommand::Distribution(args) => {
-            distribution::runs_distribution(args, "runs.distribution")
+            distribution::runs_distribution(&store, args, "runs.distribution")
         }
         RunsCommand::LatestRun(args) => latest::latest_run(args),
-        RunsCommand::Compare(args) => compare::compare_runs(args),
+        RunsCommand::Compare(args) => compare::compare_runs(&store, args),
         RunsCommand::BenchCompare(args) => bench::bench_compare_from_args(args),
-        RunsCommand::FuzzCompare(args) => fuzz_compare::fuzz_compare_from_args(args),
-        RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
-        RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
-        RunsCommand::Watch(args) => watch::watch_run(args),
-        RunsCommand::Cancel { run_id } => handlers::cancel_run(&run_id),
+        RunsCommand::FuzzCompare(args) => fuzz_compare::fuzz_compare_from_args(&store, args),
+        RunsCommand::Hotspots(args) => hotspots::runs_hotspots(&store, args),
+        RunsCommand::Reconcile(args) => reconcile::reconcile_runs(&store, args),
+        RunsCommand::Watch(args) => watch::watch_run(&store, args),
+        RunsCommand::Cancel { run_id } => handlers::cancel_run(&store, &run_id),
         RunsCommand::Show {
             run_id,
             json: _,
@@ -208,7 +214,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             run_id,
             json: _,
             presentation: _,
-        } => proof::proof(&run_id),
+        } => proof::proof(&store, &run_id),
         RunsCommand::Dossier {
             run_id,
             json: _,
@@ -220,7 +226,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             full,
             field,
         } => {
-            let (output, exit_code) = evidence::evidence_projection(&run_id, full)?;
+            let (output, exit_code) = evidence::evidence_projection(&store, &run_id, full)?;
             if field.is_empty() {
                 Ok((output, exit_code))
             } else {
@@ -230,15 +236,15 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Env { run_id } => handlers::env(&run_id),
         RunsCommand::Artifacts(args) => handlers::artifacts_from_args(args),
         RunsCommand::Artifact(args) => handlers::artifact_command(args),
-        RunsCommand::Findings(args) => findings::findings(args),
-        RunsCommand::Finding { finding_id } => findings::finding(&finding_id),
+        RunsCommand::Findings(args) => findings::findings(&store, args),
+        RunsCommand::Finding { finding_id } => findings::finding(&store, &finding_id),
         RunsCommand::LatestFinding(args) => findings::latest_finding(args),
-        RunsCommand::Export(args) => super::bundle::export_runs(args),
-        RunsCommand::Import(args) => super::bundle::import_runs(args),
-        RunsCommand::Query(args) => query::runs_query(args),
-        RunsCommand::Refs(args) => refs::runs_refs(args),
+        RunsCommand::Export(args) => super::bundle::export_runs(&store, args),
+        RunsCommand::Import(args) => super::bundle::import_runs(&store, args),
+        RunsCommand::Query(args) => query::runs_query(&store, args),
+        RunsCommand::Refs(args) => refs::runs_refs(&store, args),
         RunsCommand::Resources(args) => resources::runs_resources(args),
-        RunsCommand::Drift(args) => drift::runs_drift(args),
+        RunsCommand::Drift(args) => drift::runs_drift(&store, args),
         RunsCommand::LoopSync(args) => loop_sync::loop_sync(args),
         RunsCommand::Report(args) => {
             report::run(args).map(|(output, exit_code)| (RunsOutput::Report(output), exit_code))
@@ -252,8 +258,10 @@ pub(crate) fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
 }
 
 pub(crate) fn run_markdown(args: RunsArgs) -> CmdResult<String> {
+    // Same boundary rule as `run`: one invocation, one store (#7505).
+    let store = ObservationStore::open_initialized()?;
     match args.command {
-        RunsCommand::Compare(args) => compare::run_markdown(args),
+        RunsCommand::Compare(args) => compare::run_markdown(&store, args),
         RunsCommand::Report(args) => report::run_markdown(args),
         _ => Err(Error::validation_invalid_argument(
             "output_mode",

@@ -1,5 +1,13 @@
 //! Tests for the `runs` command dispatch, handlers, and output shaping.
 
+/// The observation store the enclosing isolated home installs.
+///
+/// A test is the entry point for its own unit of work, so opening once here
+/// is a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
 mod export_import;
 
 use super::bench::bench_compare;
@@ -100,6 +108,7 @@ fn run_list_filters_kind_component_rig_and_status() {
             .expect("finish trace");
 
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 active: false,
                 task_url: None,
@@ -143,6 +152,7 @@ fn run_list_reads_durable_record_without_reconciliation() {
             .expect("import stale fixture");
 
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 active: false,
                 task_url: None,
@@ -223,7 +233,7 @@ fn run_list_does_not_classify_terminal_runs_as_stale() {
             store.finish_run(&run.id, status, None).expect("finish run");
         }
 
-        let (output, _) = list_runs(list_args(), "runs.list").expect("list");
+        let (output, _) = list_runs(&test_store(), list_args(), "runs.list").expect("list");
         let RunsOutput::List(output) = output else {
             panic!("expected list output");
         };
@@ -242,6 +252,7 @@ fn active_list_uses_the_unified_activity_projection_without_changing_runs_list()
             .expect("active run");
 
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 active: true,
                 limit: 20,
@@ -258,7 +269,8 @@ fn active_list_uses_the_unified_activity_projection_without_changing_runs_list()
         assert_eq!(report.command, "runs.list_active");
         assert!(report.items.iter().any(|item| item.id == active.id));
 
-        let (ordinary, _) = list_runs(list_args(), "runs.list").expect("ordinary list");
+        let (ordinary, _) =
+            list_runs(&test_store(), list_args(), "runs.list").expect("ordinary list");
         assert!(matches!(ordinary, RunsOutput::List(_)));
     });
 }
@@ -285,7 +297,7 @@ fn active_list_identity_filters_parse_and_reject_observation_only_combinations()
 #[test]
 fn ordinary_runs_list_stays_in_its_existing_serialized_variant() {
     with_isolated_home(|_| {
-        let output = list_runs(list_args(), "runs.list")
+        let output = list_runs(&test_store(), list_args(), "runs.list")
             .expect("ordinary list")
             .0;
         let value = serde_json::to_value(output).expect("serialize ordinary list");
@@ -351,7 +363,7 @@ fn run_list_collapses_runner_execution_mirrors_by_default() {
             .finish_run(&caller.id, RunStatus::Pass, None)
             .expect("finish caller");
 
-        let (output, _) = list_runs(list_args(), "runs.list").expect("list");
+        let (output, _) = list_runs(&test_store(), list_args(), "runs.list").expect("list");
         let RunsOutput::List(output) = output else {
             panic!("expected list output");
         };
@@ -365,6 +377,7 @@ fn run_list_collapses_runner_execution_mirrors_by_default() {
         assert_eq!(output.hidden_mirrors, 2);
 
         let (all, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 include_mirrors: true,
                 ..list_args()
@@ -409,6 +422,7 @@ fn run_list_applies_command_and_id_filters() {
             .expect("finish other");
 
         let (by_command, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 command_contains: Some("gutenberg".to_string()),
                 ..list_args()
@@ -423,6 +437,7 @@ fn run_list_applies_command_and_id_filters() {
         assert_eq!(by_command.runs[0].id, keep.id);
 
         let (by_id, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 id: Some("cook-79020".to_string()),
                 ..list_args()
@@ -511,7 +526,7 @@ fn run_list_rediscovers_lab_agent_task_lineage_from_canonical_metadata() {
                 ..list_args()
             },
         ] {
-            let (output, _) = list_runs(args, "runs.list").expect("rediscover run");
+            let (output, _) = list_runs(&test_store(), args, "runs.list").expect("rediscover run");
             let RunsOutput::List(output) = output else {
                 panic!("expected list output");
             };
@@ -557,6 +572,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
             .expect("run");
 
         let (workspace, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 workspace: Some("/work/wp-build".to_string()),
                 ..list_args()
@@ -587,6 +603,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
             .expect("boundary run");
 
         let (path_boundary, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 workspace: Some("wp-build".to_string()),
                 ..list_args()
@@ -606,6 +623,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
         );
 
         let (secret, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 command_contains: Some("super-secret-value".to_string()),
                 ..list_args()
@@ -619,6 +637,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
         assert!(secret.runs.is_empty());
 
         let (provider, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 correlation: Some("provider-session-11958".to_string()),
                 ..list_args()
@@ -664,6 +683,7 @@ fn run_discovery_walks_beyond_legacy_prefetch_prefix() {
                 .expect("run");
         }
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 command_contains: Some("target-command".to_string()),
                 limit: 1,
@@ -691,10 +711,13 @@ fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
             .import_run(&dead_owned_run("dead-owned-run"))
             .expect("import stale fixture");
 
-        let (output, _) = reconcile_runs(RunsReconcileArgs {
-            dry_run: false,
-            limit: 20,
-        })
+        let (output, _) = reconcile_runs(
+            &test_store(),
+            RunsReconcileArgs {
+                dry_run: false,
+                limit: 20,
+            },
+        )
         .expect("reconcile");
 
         let RunsOutput::Reconcile(output) = output else {
@@ -751,10 +774,13 @@ fn runs_reconcile_immediately_terminalizes_dead_deploy_observation_owner() {
             .expect("record child owner");
         child.wait().expect("child exits");
 
-        let (output, _) = reconcile_runs(RunsReconcileArgs {
-            dry_run: false,
-            limit: 20,
-        })
+        let (output, _) = reconcile_runs(
+            &test_store(),
+            RunsReconcileArgs {
+                dry_run: false,
+                limit: 20,
+            },
+        )
         .expect("reconcile");
         let RunsOutput::Reconcile(output) = output else {
             panic!("expected reconcile output");
@@ -1951,14 +1977,17 @@ fn findings_commands_list_and_show_records() {
             })
             .expect("finding");
 
-        let (output, _) = findings::findings(findings::RunsFindingsArgs {
-            command: None,
-            run_id: Some(run.id),
-            tool: Some("lint".to_string()),
-            file: Some("src/foo.php".to_string()),
-            fingerprint: None,
-            limit: 20,
-        })
+        let (output, _) = findings::findings(
+            &test_store(),
+            findings::RunsFindingsArgs {
+                command: None,
+                run_id: Some(run.id),
+                tool: Some("lint".to_string()),
+                file: Some("src/foo.php".to_string()),
+                fingerprint: None,
+                limit: 20,
+            },
+        )
         .expect("list findings");
         let RunsOutput::Findings(output) = output else {
             panic!("expected findings output");
@@ -1967,7 +1996,7 @@ fn findings_commands_list_and_show_records() {
         assert_eq!(output.findings[0].id, recorded.id);
         assert_eq!(output.findings[0].finding.message, "Missing escaping");
 
-        let (output, _) = findings::finding(&recorded.id).expect("show finding");
+        let (output, _) = findings::finding(&test_store(), &recorded.id).expect("show finding");
         let RunsOutput::Finding(output) = output else {
             panic!("expected finding output");
         };
@@ -2109,6 +2138,7 @@ fn bench_history_orders_and_filters_by_scenario() {
             .expect("finish new");
 
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 active: false,
                 task_url: None,

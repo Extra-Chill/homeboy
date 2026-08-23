@@ -72,7 +72,7 @@ pub struct RunsFindingOutput {
     pub finding: RecordedHomeboyFinding,
 }
 
-pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
+pub fn findings(store: &ObservationStore, args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     if let Some(command) = args.command {
         let (output, exit_code) = issues::run(issues::IssuesArgs { command })?;
         return Ok((RunsOutput::FindingsReconcile(output), exit_code));
@@ -81,7 +81,6 @@ pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     let run_id = args
         .run_id
         .ok_or_else(|| Error::validation_missing_argument(vec!["run_id".to_string()]))?;
-    let store = ObservationStore::open_initialized()?;
     // Route run lookup through the observation facade so `runs findings` shares
     // the one activity-aware surface: durable label aliases, Lab mirror
     // resolution, and the stable missing-run error with runner guidance (#6768).
@@ -110,8 +109,7 @@ pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
-pub fn finding(finding_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub fn finding(store: &ObservationStore, finding_id: &str) -> CmdResult<RunsOutput> {
     let finding = store.get_finding(finding_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "finding_id",
@@ -169,6 +167,14 @@ pub fn latest_finding(args: RunsLatestFindingArgs) -> CmdResult<RunsOutput> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use homeboy::core::observation::{NewFindingRecord, NewRunRecord, ObservationStore};
     use homeboy::test_support::with_isolated_home;
     use serde_json::json;
@@ -240,11 +246,14 @@ mod tests {
             let run_id = labeled_run(&store, "findings-label");
             record_finding(&store, &run_id);
 
-            let (output, exit) = findings(RunsFindingsArgs {
-                run_id: Some("findings-label".to_string()),
-                limit: 100,
-                ..Default::default()
-            })
+            let (output, exit) = findings(
+                &test_store(),
+                RunsFindingsArgs {
+                    run_id: Some("findings-label".to_string()),
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
             .expect("durable run label resolves through runs_service::require_run");
 
             assert_eq!(exit, 0);
@@ -266,11 +275,14 @@ mod tests {
             let run_id = labeled_run(&store, "findings-exact");
             record_finding(&store, &run_id);
 
-            let (output, _) = findings(RunsFindingsArgs {
-                run_id: Some(run_id.clone()),
-                limit: 100,
-                ..Default::default()
-            })
+            let (output, _) = findings(
+                &test_store(),
+                RunsFindingsArgs {
+                    run_id: Some(run_id.clone()),
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
             .expect("record id resolves");
 
             let RunsOutput::Findings(output) = output else {
@@ -287,11 +299,14 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let _store = ObservationStore::open_initialized().expect("store");
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
-            let error = match findings(RunsFindingsArgs {
-                run_id: Some("definitely-missing-run".to_string()),
-                limit: 100,
-                ..Default::default()
-            }) {
+            let error = match findings(
+                &test_store(),
+                RunsFindingsArgs {
+                    run_id: Some("definitely-missing-run".to_string()),
+                    limit: 100,
+                    ..Default::default()
+                },
+            ) {
                 Ok(_) => panic!("expected a missing-run error"),
                 Err(error) => error,
             };

@@ -111,8 +111,7 @@ pub struct RunsRefsArtifactRef {
     pub get_command: String,
 }
 
-pub(crate) fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub(crate) fn runs_refs(store: &ObservationStore, args: RunsRefsArgs) -> CmdResult<RunsOutput> {
     let filter = RunListFilter {
         kind: args.kind.clone(),
         component_id: args.component_id.clone(),
@@ -254,6 +253,14 @@ fn shell_arg(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use super::*;
     use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
@@ -280,16 +287,19 @@ mod tests {
                 .record_artifact(&run.id, "trace_aggregate", &aggregate_path)
                 .expect("record artifact");
 
-            let (output, _) = runs_refs(RunsRefsArgs {
-                component_id: Some("homeboy".to_string()),
-                kind: Some("bench".to_string()),
-                rig: Some("matrix-rig".to_string()),
-                status: Some("pass".to_string()),
-                since: None,
-                limit: 20,
-                artifact_kinds: Vec::new(),
-                aggregate_artifact_kinds: Vec::new(),
-            })
+            let (output, _) = runs_refs(
+                &test_store(),
+                RunsRefsArgs {
+                    component_id: Some("homeboy".to_string()),
+                    kind: Some("bench".to_string()),
+                    rig: Some("matrix-rig".to_string()),
+                    status: Some("pass".to_string()),
+                    since: None,
+                    limit: 20,
+                    artifact_kinds: Vec::new(),
+                    aggregate_artifact_kinds: Vec::new(),
+                },
+            )
             .expect("refs");
 
             let RunsOutput::Refs(output) = output else {

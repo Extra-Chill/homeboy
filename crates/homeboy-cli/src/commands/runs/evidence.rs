@@ -88,11 +88,14 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
 
 /// Render the full core report or a bounded CLI projection without changing the
 /// reusable report schema used by non-CLI consumers.
-pub(crate) fn evidence_projection(run_id: &str, full: bool) -> CmdResult<RunsOutput> {
+pub(crate) fn evidence_projection(
+    store: &ObservationStore,
+    run_id: &str,
+    full: bool,
+) -> CmdResult<RunsOutput> {
     if full {
         return evidence(run_id);
     }
-    let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
     let mut run_ids = vec![run.id.clone()];
     run_ids.extend(runs_service::related_lab_run_ids(&store, &run)?);
@@ -264,6 +267,14 @@ fn bounded_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use homeboy::core::artifact_address::ArtifactAddressKind;
     use homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV;
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
@@ -784,7 +795,8 @@ mod tests {
                 .expect("omitted artifact");
             std::fs::remove_file(&omitted.path).expect("remove omitted artifact bytes");
 
-            let (output, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let (output, _) =
+                evidence_projection(&test_store(), &run.id, false).expect("bounded evidence");
             let RunsOutput::EvidenceSummary(summary) = output else {
                 panic!("expected bounded evidence summary");
             };
@@ -867,7 +879,8 @@ mod tests {
                 "the bounded output must not leak omitted artifact IDs"
             );
 
-            let (full, _) = evidence_projection(&run.id, true).expect("full evidence");
+            let (full, _) =
+                evidence_projection(&test_store(), &run.id, true).expect("full evidence");
             let RunsOutput::Evidence(full) = full else {
                 panic!("expected full evidence report");
             };
@@ -919,7 +932,8 @@ mod tests {
                 )
                 .expect("directory artifact");
 
-            let (output, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let (output, _) =
+                evidence_projection(&test_store(), &run.id, false).expect("bounded evidence");
             let RunsOutput::EvidenceSummary(summary) = output else {
                 panic!("expected bounded evidence summary");
             };
@@ -1365,7 +1379,8 @@ mod tests {
             assert_eq!(output.failure.status, "running");
             assert!(!output.failure.failed);
 
-            let (bounded, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let (bounded, _) =
+                evidence_projection(&test_store(), &run.id, false).expect("bounded evidence");
             let RunsOutput::EvidenceSummary(bounded) = bounded else {
                 panic!("expected bounded evidence");
             };
