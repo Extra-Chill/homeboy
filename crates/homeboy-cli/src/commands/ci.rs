@@ -1,3 +1,4 @@
+mod external_check_detail_resolver;
 mod failure_log_triage;
 mod gate;
 mod plan;

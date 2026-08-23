@@ -538,31 +538,45 @@ pub fn sync_workspace_in_roots(
 /// Cache only a source that has completed dependency hydration. The cache lives
 /// outside `_lab_workspaces`, is never handed to a job, and has no terminal-job
 /// cleanup owner. A private job view is copied from it on a same-commit hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedSourceCacheLifecycle {
+    pub observations: Vec<String>,
+}
+
 pub(crate) fn save_prepared_source_cache(
     runner_id: &str,
     local_path: &str,
     remote_path: &str,
-) -> Result<()> {
+) -> Result<PreparedSourceCacheLifecycle> {
     let runner = load(runner_id)?;
     // The cache is a pure optimization: a hit lets the next same-commit job skip
     // dependency hydration. A runner with no configured `workspace_root` has
     // nowhere to keep it, which is a reason to skip caching — not to fail an
     // otherwise-successful offload that has already hydrated its workspace.
     let Some(workspace_root) = runner.workspace_root.as_deref() else {
-        return Ok(());
+        return Ok(PreparedSourceCacheLifecycle {
+            observations: vec![
+                "homeboy_prepared_source_cache event=skipped reason=no_workspace_root".to_string(),
+            ],
+        });
     };
     let local_path = canonical_workspace_path(local_path)?;
     let commit = git_output(&local_path, &["rev-parse", "HEAD"])?;
     let cache = prepared_source_cache_path(workspace_root, &local_path, &commit);
     let cache_root = prepared_source_cache_root(workspace_root);
-    let command = format!(
-        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; mkdir -p \"$cache_root\"; test -f \"$cache/.homeboy/prepared-source-ready\" || {{ mkdir \"$lock\" 2>/dev/null || exit 0; trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\"; mkdir -p \"$tmp/.homeboy\"; : > \"$tmp/.homeboy/prepared-source-ready\"; chmod -R a-w \"$tmp\"; mv \"$tmp\" \"$cache\"; }}; kept=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; test -e \"$candidate.lock\" && continue; ls \"$candidate\".lease.* >/dev/null 2>&1 && continue; chmod -R u+w \"$candidate\" && rm -rf \"$candidate\"; done",
-        cache = shell::quote_arg(&cache),
-        cache_root = shell::quote_arg(&cache_root),
-        source = shell::quote_arg(remote_path),
-        max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES,
-    );
-    run_workspace_shell_command(&runner, &command, "save prepared Lab source cache")
+    let output = run_workspace_shell_command(
+        &runner,
+        &prepared_source_cache_command(&cache, &cache_root, remote_path),
+        "save prepared Lab source cache",
+    )?;
+    Ok(prepared_source_cache_lifecycle(&output))
+}
+
+pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, source: &str) -> String {
+    format!(
+        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\" && mkdir -p \"$tmp/.homeboy\" && : > \"$tmp/.homeboy/prepared-source-ready\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f \"$candidate/.homeboy/prepared-source-ready\"; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
+        cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source), capture_owner = super::util::owner_capture_shell("$cache_root"), restore_owner = super::util::owner_restore_path_shell("$cache_root"), max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES, max_failures = 8,
+    )
 }
 
 fn prepared_source_cache_path(workspace_root: &str, local_path: &Path, commit: &str) -> String {
@@ -586,28 +600,61 @@ fn materialize_prepared_source_view(
     cache: &str,
     remote_path: &str,
 ) -> Result<bool> {
-    let command = format!(
-        "cache={cache}; destination={destination}; test -f \"$cache/.homeboy/prepared-source-ready\" && test ! -e \"$destination\" || exit 1; lease=\"$cache.lease.$$\"; : > \"$lease\" || exit 1; trap 'rm -f \"$lease\"' EXIT HUP INT TERM; test -f \"$cache/.homeboy/prepared-source-ready\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" || {{ rm -rf \"$destination\"; exit 1; }}",
-        cache = shell::quote_arg(cache),
-        destination = shell::quote_arg(remote_path),
-    );
+    let command = prepared_source_view_command(cache, remote_path);
     run_workspace_shell_success(runner, &command, "materialize prepared Lab source view")
+        .map(|output| output.success)
+}
+
+pub(super) fn prepared_source_view_command(cache: &str, destination: &str) -> String {
+    format!(
+        "cache={cache}; destination={destination}; lock=\"$cache.lock\"; test -f \"$cache/.homeboy/prepared-source-ready\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\"' EXIT HUP INT TERM; test -f \"$cache/.homeboy/prepared-source-ready\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" || {{ rm -rf \"$destination\"; exit 1; }}",
+        cache = shell::quote_arg(cache), destination = shell::quote_arg(destination),
+    )
+}
+
+struct WorkspaceShellOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+fn prepared_source_cache_lifecycle(output: &WorkspaceShellOutput) -> PreparedSourceCacheLifecycle {
+    PreparedSourceCacheLifecycle {
+        observations: output
+            .stdout
+            .lines()
+            .chain(output.stderr.lines())
+            .filter(|line| line.starts_with("homeboy_prepared_source_cache "))
+            .take(32)
+            .map(str::to_string)
+            .collect(),
+    }
 }
 
 fn run_workspace_shell_success(
     runner: &super::super::Runner,
     command: &str,
     action: &str,
-) -> Result<bool> {
+) -> Result<WorkspaceShellOutput> {
     match runner.kind {
-        RunnerKind::Local => Ok(std::process::Command::new("sh")
-            .args(["-c", command])
-            .status()
-            .map_err(|error| Error::internal_io(error.to_string(), Some(action.to_string())))?
-            .success()),
+        RunnerKind::Local => {
+            let output = std::process::Command::new("sh")
+                .args(["-c", command])
+                .output()
+                .map_err(|error| Error::internal_io(error.to_string(), Some(action.to_string())))?;
+            Ok(WorkspaceShellOutput {
+                success: output.status.success(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
-            Ok(client.execute(command).success)
+            let output = client.execute(command);
+            Ok(WorkspaceShellOutput {
+                success: output.success,
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
         }
     }
 }
@@ -616,11 +663,15 @@ fn run_workspace_shell_command(
     runner: &super::super::Runner,
     command: &str,
     action: &str,
-) -> Result<()> {
-    if run_workspace_shell_success(runner, command, action)? {
-        Ok(())
+) -> Result<WorkspaceShellOutput> {
+    let output = run_workspace_shell_success(runner, command, action)?;
+    if output.success {
+        Ok(output)
     } else {
-        Err(Error::internal_unexpected(format!("{action} failed")))
+        Err(Error::internal_unexpected(format!(
+            "{action} failed: {}",
+            output.stderr.trim()
+        )))
     }
 }
 

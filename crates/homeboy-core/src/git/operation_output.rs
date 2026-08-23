@@ -3,6 +3,8 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::output::{BulkResult, BulkResultBuilder};
 
+const FAILURE_STREAM_LIMIT: usize = 4 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GitOutput {
     pub component_id: String,
@@ -31,6 +33,35 @@ impl GitOutput {
             stderr: scrub_git_secrets(&String::from_utf8_lossy(&output.stderr)),
         }
     }
+
+    /// Convert a failed Git operation into the generic, safe command evidence
+    /// carried by structured errors and durable recovery records.
+    pub fn failure_command_evidence(&self) -> homeboy_error::CommandEvidence {
+        let policy = crate::redaction::RedactionPolicy::default();
+        let (stdout, stdout_truncated) = bounded_stream(&policy.redact_string(&self.stdout));
+        let (stderr, stderr_truncated) = bounded_stream(&policy.redact_string(&self.stderr));
+        homeboy_error::CommandEvidence {
+            command: format!("git {}", self.action),
+            // Local worktree paths are not operator-facing failure evidence.
+            cwd: None,
+            location: Some("local".to_string()),
+            exit_code: self.exit_code,
+            stdout,
+            stderr,
+            truncated: stdout_truncated || stderr_truncated,
+        }
+    }
+}
+
+fn bounded_stream(value: &str) -> (String, bool) {
+    if value.len() <= FAILURE_STREAM_LIMIT {
+        return (value.to_string(), false);
+    }
+    let mut end = FAILURE_STREAM_LIMIT;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 fn scrub_git_secrets(value: &str) -> String {
@@ -91,5 +122,59 @@ mod tests {
 
         assert!(!output.contains("ghs_secret123"));
         assert!(output.contains("https://x-access-token:[REDACTED]@github.com/owner/repo.git"));
+    }
+
+    #[test]
+    fn add_failure_evidence_keeps_stdout_and_does_not_expose_the_worktree_path() {
+        let output = GitOutput {
+            component_id: "local".to_string(),
+            path: "/private/worktree".to_string(),
+            action: "add".to_string(),
+            success: false,
+            exit_code: 17,
+            stdout: "x".repeat(FAILURE_STREAM_LIMIT + 1),
+            stderr: String::new(),
+        };
+
+        let evidence = output.failure_command_evidence();
+        assert_eq!(evidence.command, "git add");
+        assert_eq!(evidence.exit_code, 17);
+        assert_eq!(evidence.stdout.len(), FAILURE_STREAM_LIMIT);
+        assert!(evidence.truncated);
+        assert!(evidence.cwd.is_none());
+    }
+
+    #[test]
+    fn commit_failure_evidence_keeps_stderr() {
+        let output = GitOutput {
+            component_id: "local".to_string(),
+            path: "/private/worktree".to_string(),
+            action: "commit".to_string(),
+            success: false,
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "author identity unknown".to_string(),
+        };
+
+        let evidence = output.failure_command_evidence();
+        assert_eq!(evidence.command, "git commit");
+        assert_eq!(evidence.stderr, "author identity unknown");
+        assert!(evidence.stdout.is_empty());
+    }
+
+    #[test]
+    fn failure_evidence_uses_the_shared_redaction_policy() {
+        let output = GitOutput {
+            component_id: "local".to_string(),
+            path: "/private/worktree".to_string(),
+            action: "commit".to_string(),
+            success: false,
+            exit_code: 1,
+            stdout: "token=super-secret-value".to_string(),
+            stderr: String::new(),
+        };
+
+        let evidence = output.failure_command_evidence();
+        assert!(!evidence.stdout.contains("super-secret-value"));
     }
 }

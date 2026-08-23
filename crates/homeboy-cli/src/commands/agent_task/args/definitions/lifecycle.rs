@@ -222,25 +222,79 @@ mod tests {
     }
 
     #[test]
-    fn adoption_parses_external_candidate_model() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "adopt",
-            "cook-a",
-            "--candidate-ref",
-            "0123456789abcdef0123456789abcdef01234567",
-            "--ai-model",
-            "openai/gpt-5.6-sol",
-        ])
-        .expect("adoption model parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Adopt(args) = agent_task.command else {
-            panic!("expected adoption command");
-        };
-        assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+    fn model_parses_canonically_for_adoption_and_ai_model_remains_compatible() {
+        for flag in ["--model", "--ai-model"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "adopt",
+                "cook-a",
+                "--candidate-ref",
+                "0123456789abcdef0123456789abcdef01234567",
+                flag,
+                "openai/gpt-5.6-sol",
+            ])
+            .expect("adoption model parses");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("expected agent-task command");
+            };
+            let AgentTaskCommand::Adopt(args) = agent_task.command else {
+                panic!("expected adoption command");
+            };
+            assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+        }
+    }
+
+    #[test]
+    fn model_parses_canonically_for_manual_finalization_and_ai_model_remains_compatible() {
+        for flag in ["--model", "--ai-model"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-model",
+                "--path",
+                "/tmp/manual-model",
+                "--title",
+                "Manual model",
+                "--commit-message",
+                "record model",
+                flag,
+                "openai/gpt-5.6-sol",
+            ])
+            .expect("manual finalization model parses");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("expected agent-task command");
+            };
+            let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+                panic!("expected finalize-pr command");
+            };
+            assert_eq!(
+                args.evidence.ai_model.as_deref(),
+                Some("openai/gpt-5.6-sol")
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_model_overrides_so_durable_provenance_wins() {
+        for flag in ["--model", "--ai-model"] {
+            assert!(
+                Cli::try_parse_from([
+                    "homeboy",
+                    "agent-task",
+                    "finalize-pr",
+                    "--recover",
+                    "cook-a",
+                    flag,
+                    "openai/gpt-5.6-sol",
+                ])
+                .is_err(),
+                "recovery must reject {flag} instead of silently discarding it"
+            );
+        }
     }
 
     #[test]
@@ -263,6 +317,27 @@ mod tests {
             "--bridge",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn bridge_status_accepts_a_positional_attempt_without_exact() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "cook-attempt-2",
+            "--bridge",
+        ])
+        .expect("bridge status with positional attempt parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert_eq!(args.run_id, "cook-attempt-2");
+        assert!(args.bridge);
+        assert!(!args.exact);
     }
 
     #[test]
@@ -508,8 +583,10 @@ pub struct AdoptArgs {
     /// Immutable commit revision in the recorded source worktree.
     #[arg(long, value_name = "SHA")]
     pub candidate_ref: String,
-    /// Concrete model that prepared the externally supplied candidate.
-    #[arg(long, value_name = "MODEL")]
+    /// Concrete model that prepared the externally supplied candidate. Use
+    /// `--model`; `--ai-model` is a deprecated compatibility alias and will be
+    /// removed in the next minor release.
+    #[arg(long = "model", alias = "ai-model", value_name = "MODEL")]
     pub ai_model: Option<String>,
     /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
     #[arg(long)]
@@ -554,6 +631,9 @@ pub struct FinalizePrArgs {
     pub evidence: review::FinalizePrEvidenceArgs,
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
     pub gate_results: Vec<String>,
+    /// Execute one deterministic verification command against the committed manual candidate.
+    #[arg(long, value_name = "COMMAND")]
+    pub verify: Option<String>,
     #[arg(long = "changed-file", value_name = "PATH")]
     pub changed_files: Vec<String>,
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]

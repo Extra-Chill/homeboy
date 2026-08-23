@@ -119,7 +119,7 @@ pub fn commit_at(
                 let add_output = execute_git(&path, &args)
                     .map_err(|e| Error::git_command_failed(e.to_string()))?;
                 if !add_output.status.success() {
-                    return Ok(GitOutput::from_output(id, path, "commit", add_output));
+                    return Ok(GitOutput::from_output(id, path, "add", add_output));
                 }
             }
             // Exclude specific files: stage all, then unstage excluded
@@ -127,7 +127,7 @@ pub fn commit_at(
                 let add_output = execute_git(&path, &["add", "."])
                     .map_err(|e| Error::git_command_failed(e.to_string()))?;
                 if !add_output.status.success() {
-                    return Ok(GitOutput::from_output(id, path, "commit", add_output));
+                    return Ok(GitOutput::from_output(id, path, "add", add_output));
                 }
                 // Unstage excluded files (git reset -- file1 file2)
                 // Note: git reset without --hard only unstages, does not discard changes
@@ -136,7 +136,7 @@ pub fn commit_at(
                 let reset_output = execute_git(&path, &reset_args)
                     .map_err(|e| Error::git_command_failed(e.to_string()))?;
                 if !reset_output.status.success() {
-                    return Ok(GitOutput::from_output(id, path, "commit", reset_output));
+                    return Ok(GitOutput::from_output(id, path, "reset", reset_output));
                 }
             }
             // Default: stage all
@@ -144,7 +144,7 @@ pub fn commit_at(
                 let add_output = execute_git(&path, &["add", "."])
                     .map_err(|e| Error::git_command_failed(e.to_string()))?;
                 if !add_output.status.success() {
-                    return Ok(GitOutput::from_output(id, path, "commit", add_output));
+                    return Ok(GitOutput::from_output(id, path, "add", add_output));
                 }
             }
         }
