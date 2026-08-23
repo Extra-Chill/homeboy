@@ -58,8 +58,6 @@ use super::cook_promotion::{
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
-#[cfg(test)]
-use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
 use super::AgentTaskRunResult;
 
@@ -877,36 +875,6 @@ impl CookSideEffectService for DefaultCookSideEffects<'_> {
             },
         )
     }
-}
-
-/// Test cook side-effect boundary with injectable `finalize` and
-/// `recover_moving_base` closures, so recovery/finalization control flow can be
-/// exercised without real Git/GitHub mutations. `promote` delegates to the real
-/// promotion path (tests that need to intercept promotion persist a promotion
-/// first, exactly as before).
-#[cfg(test)]
-pub(crate) type TestCookFinalizeFn<'a> = Box<
-    dyn FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a,
->;
-
-#[cfg(test)]
-pub(crate) type TestCookRecoverFn<'a> = Box<
-    dyn FnMut(
-            &AgentTaskCookServiceOptions,
-            &MovingBaseCookRecovery,
-        ) -> Result<AgentTaskPromotionReport>
-        + 'a,
->;
-
-/// The promotion checkpoint captures this before gates run, when it is the only
-/// complete authorization for reusing the dirty managed destination.
-pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
-    promotion
-        .provenance
-        .pointer("/gate_feedback_baseline/current_diff")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// Parse the AI-authored review form off the terminal attempt outcome.
@@ -8261,4 +8229,15 @@ mod cook_deadline_tests {
         not_found.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
         assert!(!provider_resolve_timeout(&not_found));
     }
+}
+
+/// The promotion checkpoint captures this before gates run, when it is the only
+/// complete authorization for reusing the dirty managed destination.
+pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
+    promotion
+        .provenance
+        .pointer("/gate_feedback_baseline/current_diff")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }

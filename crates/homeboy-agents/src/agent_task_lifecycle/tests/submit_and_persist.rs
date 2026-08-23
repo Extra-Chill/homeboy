@@ -3,27 +3,19 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskLimits, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::with_isolated_home;
-use sha2::{Digest, Sha256};
-use std::process::Command;
+use sha2::Digest;
 use std::sync::{Arc, Mutex};
-
-/// The tests below drive the store-rooted entry points. Resolving the store
-/// once here keeps the ambient lookup in one place and lets the ambient
-/// wrappers be deleted (#7505).
-fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
-}
 
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
     store
@@ -43,116 +35,6 @@ fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id
             true
         })
         .expect("seed admission parent");
-}
-
-#[test]
-fn pending_local_retry_launcher_claim_converges_live_owner_then_reclaims_dead_owner() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "pending-local-retry";
-    let cook_id = "pending-local-retry-cook";
-    store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit pending retry");
-    let mut owner = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn distinct launcher owner");
-    let owner_identity = homeboy_core::process::process_start_identity(owner.id())
-        .expect("inspect launcher owner")
-        .expect("launcher owner identity");
-    store
-        .mutate_record(run_id, |record| {
-            record.metadata["cook_id"] = json!(cook_id);
-            record.metadata["local_cook_supervisor"] = json!({
-                "state": "pending",
-                "pinned_run_id": run_id,
-                "lease_started_at": chrono::Utc::now().to_rfc3339(),
-                "lease_expires_at": (chrono::Utc::now()
-                    + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS))
-                    .to_rfc3339(),
-                "launcher_pid": owner.id(),
-                "launcher_process_start_identity": owner_identity,
-            });
-            true
-        })
-        .expect("persist pending launcher");
-
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id).expect("live owner claim"),
-        LocalCookRetryLaunchClaim::OwnedElsewhere,
-        "a live launcher remains the sole process allowed to spawn"
-    );
-    owner.kill().expect("kill initial launcher");
-    owner.wait().expect("reap initial launcher");
-
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("dead owner takeover"),
-        LocalCookRetryLaunchClaim::Acquired,
-        "a dead launcher is atomically replaced by this caller"
-    );
-    let record = store.read_record(run_id).expect("read reclaimed retry");
-    assert_eq!(
-        record.metadata["local_cook_supervisor"]["launcher_pid"].as_u64(),
-        Some(u64::from(std::process::id()))
-    );
-    assert!(
-        !record.metadata["local_cook_supervisor"]["launcher_reclaimed_at"].is_null(),
-        "takeover remains durable evidence"
-    );
-}
-
-#[test]
-fn spawned_local_retry_child_is_reclaimed_without_a_second_spawn() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "spawned-local-retry";
-    let cook_id = "spawned-local-retry-cook";
-    store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit pending retry");
-    store
-        .mutate_record(run_id, |record| {
-            record.metadata["cook_id"] = json!(cook_id);
-            record.metadata["local_cook_supervisor"] = json!({
-                "state": "pending",
-                "pinned_run_id": run_id,
-            });
-            true
-        })
-        .expect("seed pending retry");
-    let mut child = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn retry child");
-    let identity = homeboy_core::process::process_start_identity(child.id())
-        .expect("inspect retry child")
-        .expect("retry child identity");
-    record_local_cook_retry_child_in_store(
-        &store,
-        run_id,
-        cook_id,
-        child.id(),
-        identity.clone(),
-        "one-child-token",
-        "/tmp/one-child-token",
-    )
-    .expect("persist retry child before submission");
-
-    assert!(matches!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("recover spawned child"),
-        LocalCookRetryLaunchClaim::ChildSpawned { pid, start_identity, .. }
-            if pid == child.id() && start_identity == identity
-    ));
-    child.kill().expect("kill retry child");
-    child.wait().expect("reap retry child");
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("observe dead child"),
-        LocalCookRetryLaunchClaim::ChildExited,
-    );
 }
 
 #[test]
@@ -4565,9 +4447,7 @@ fn record_health_recovers_after_interrupted_migration_without_changing_terminal_
         store::fail_next_record_write_for_test();
         assert!(reconcile_record_health_in_store(&test_lifecycle_store(), false).is_err());
         assert_eq!(
-            record_health_summary_in_store(&test_lifecycle_store(),)
-                .expect("still malformed")
-                .malformed,
+            record_health_summary().expect("still malformed").malformed,
             1
         );
         let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)

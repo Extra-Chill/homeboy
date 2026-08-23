@@ -1,12 +1,6 @@
 use super::common::{request, script};
 use super::*;
-use crate::agent_task::AgentTaskArtifactDeclaration;
-use crate::agent_task_scheduler::{
-    AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
-};
 use std::sync::{Arc, Mutex};
-
-static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn git(cwd: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")

@@ -16,8 +16,7 @@ use super::super::cook_promotion::{
     moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
     persist_manual_finalization_receipt, persisted_promotion_for_attempt,
     persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    record_replacement_gate_proof, recover_cook_pr_with_backend, refreshed_moving_base_recovery,
     selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
     MovingBaseCookRecovery,
 };
@@ -886,76 +885,6 @@ fn seed_patch_alias_aggregate_with_metadata(
                     typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics,
-                    outputs: test_review_form_outputs(),
-                    workflow: None,
-                    follow_up: None,
-                    metadata: serde_json::json!({ "model": task.executor.model() }),
-                }],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .expect("persist candidate aggregate");
-}
-
-fn seed_patch_alias_aggregate_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    patches: &[(&str, &std::path::Path, &str)],
-) {
-    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
-
-    let task = plan.tasks.first().expect("candidate plan has one task");
-    let artifacts = patches
-        .iter()
-        .map(|(id, path, patch)| {
-            std::fs::write(path, patch).expect("write candidate patch");
-            AgentTaskArtifact {
-                id: (*id).to_string(),
-                kind: "patch".to_string(),
-                path: Some(path.display().to_string()),
-                size_bytes: Some(patch.len() as u64),
-                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-                    patch.as_bytes(),
-                )),
-                metadata: serde_json::json!({
-                    "producer_attempt": 2,
-                    "base_ref": "main",
-                    "provider_backend": "fixture",
-                }),
-                ..Default::default()
-            }
-        })
-        .collect();
-    lifecycle_store
-        .record_run_aggregate(
-            run_id,
-            plan,
-            &AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
-                totals: AgentTaskAggregateTotals {
-                    succeeded: 1,
-                    ..Default::default()
-                },
-                outcomes: vec![AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                    task_id: task.task_id.clone(),
-                    status: AgentTaskOutcomeStatus::Succeeded,
-                    summary: None,
-                    failure_classification: None,
-                    artifacts,
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
                     outputs: test_review_form_outputs(),
                     workflow: None,
                     follow_up: None,

@@ -7,7 +7,6 @@
 //! opaquely) into the agents crate.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;

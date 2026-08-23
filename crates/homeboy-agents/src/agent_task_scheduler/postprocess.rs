@@ -1,7 +1,6 @@
 //! Plan-native execution of generic artifact postprocess actions.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -224,7 +223,7 @@ fn start_or_reconcile_worker_with_retry(
     #[cfg(not(test))]
     let worker = postprocess_worker_executable();
     #[cfg(not(test))]
-    let child = Command::new(worker)
+    let child = std::process::Command::new(worker)
         .args(["self", "postprocess-worker", "--request"])
         .arg(&request_path)
         .spawn()

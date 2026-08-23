@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -120,13 +120,11 @@ pub use homeboy_lab_runner_contract::AgentTaskProviderRunnerSource;
 
 #[cfg(test)]
 use catalog::{
-    component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
-    validate_provider_runner_readiness_for_backend_with_providers,
+    component_default_backend, validate_provider_runner_readiness_for_backend_with_providers,
 };
 #[cfg(test)]
 use command_runner::{
-    immediate_provider_failure, is_transient_provider_error, provider_command_env,
-    render_provider_command_display, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    provider_command_env, render_provider_command_display, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;
@@ -138,4 +136,4 @@ use outcome_normalization::{
 #[cfg(test)]
 use resolution::select_provider_by_backend;
 #[cfg(test)]
-use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};
+use secrets::apply_provider_runner_secret_env_contracts_with_providers;
