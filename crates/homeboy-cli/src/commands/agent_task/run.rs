@@ -3425,11 +3425,17 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
-    validate_provider_evidence_inputs(
-        &args.provider_evidence_inputs,
-        args.dispatch.prompt.as_deref(),
-    )?;
-    let dispatch = dispatch_args_for_cook(args);
+    // Resolve @file input before scanning its provider-visible content. The
+    // host path is an ingestion detail, not evidence. Stdin remains unread
+    // until execution so this preflight cannot consume its prompt bytes.
+    let mut dispatch = dispatch_args_for_cook(args);
+    if dispatch.prompt.as_deref().is_some_and(|spec| {
+        spec.starts_with('@')
+            && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(spec).is_none()
+    }) {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
@@ -3989,6 +3995,26 @@ mod prompt_input_tests {
         resolve_dispatch_prompt(&mut args).expect("resolve @file prompt");
 
         assert_eq!(args.prompt.as_deref(), Some(body));
+    }
+
+    #[test]
+    fn relative_and_absolute_at_file_prompts_resolve_to_equivalent_bytes() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let file = tempfile::NamedTempFile::new_in(&cwd).expect("prompt file");
+        let body = "Preserve these prompt bytes.\n\n";
+        std::fs::write(file.path(), body).expect("write prompt");
+        let relative = file
+            .path()
+            .strip_prefix(&cwd)
+            .expect("prompt file is in the current directory");
+
+        let mut relative_args = dispatch_with_prompt(Some(&format!("@{}", relative.display())));
+        let mut absolute_args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
+        resolve_dispatch_prompt(&mut relative_args).expect("resolve relative @file prompt");
+        resolve_dispatch_prompt(&mut absolute_args).expect("resolve absolute @file prompt");
+
+        assert_eq!(relative_args.prompt, absolute_args.prompt);
+        assert_eq!(absolute_args.prompt.as_deref(), Some(body));
     }
 
     #[test]

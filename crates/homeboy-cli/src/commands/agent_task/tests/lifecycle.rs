@@ -385,6 +385,33 @@ fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
 }
 
 #[test]
+fn cook_preflight_scans_at_file_content_not_its_absolute_source_path() {
+    let file = tempfile::NamedTempFile::new().expect("prompt file");
+    std::fs::write(file.path(), "Implement the outcome.\n").expect("write prompt");
+    let args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        format!("@{}", file.path().display()),
+        "--to-worktree".to_string(),
+        "sample-plugin@fix-issue".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+
+    validate_cook_request(&args).expect("absolute @file source is not provider evidence");
+
+    std::fs::write(file.path(), "Read /private/evidence.json before editing.\n")
+        .expect("rewrite prompt");
+    let error =
+        validate_cook_request(&args).expect_err("absolute path in prompt content is evidence");
+    assert_eq!(error.details["field"], "prompt");
+    assert!(error.message.contains("undeclared absolute evidence path"));
+}
+
+#[test]
 fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
     let args = cook_args_from_cli(vec![
         "homeboy".to_string(),
