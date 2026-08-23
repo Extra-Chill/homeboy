@@ -2527,6 +2527,67 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     );
 }
 
+#[test]
+fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "local-cook-cancelled-with-output";
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, &plan.tasks[0], 1)
+        .expect("reserved provider execution");
+
+    // This simulates a provider that emitted output before controller cancellation.
+    let stdout = context
+        .path_roots()
+        .artifacts()
+        .join("provider-runtime-stdout-1.log");
+    std::fs::write(&stdout, "provider emitted diagnostic output\n").expect("provider output");
+    record_provider_execution_runtime_evidence_in_store(
+        &lifecycle_store,
+        run_id,
+        &plan.tasks[0].task_id,
+        1,
+        Some(format!("file://{}", stdout.display())),
+        None,
+    )
+    .expect("runtime evidence recorded before cancellation");
+
+    super::super::cancellation::cancel_run_in_store(
+        &lifecycle_store,
+        run_id,
+        Some("deterministic test cancellation"),
+    )
+    .expect("cancelled");
+
+    let log = logs_in_store(&lifecycle_store, run_id).expect("terminal logs");
+    let terminal = log
+        .events
+        .iter()
+        .find(|event| {
+            event.status == AgentTaskState::Cancelled
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("provider execution cancelled"))
+        })
+        .expect("cancelled provider event");
+    let stdout_ref = terminal
+        .artifact_refs
+        .iter()
+        .find(|reference| reference.kind == "provider-runtime-stdout")
+        .expect("bounded stdout reference");
+    assert_eq!(stdout_ref.uri, format!("file://{}", stdout.display()));
+    assert_eq!(
+        std::fs::read_to_string(stdout_ref.uri.strip_prefix("file://").expect("file uri"))
+            .expect("retained provider output"),
+        "provider emitted diagnostic output\n"
+    );
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The liveness predicate is a read of the same durable provider
 /// execution the reservation and terminalization wrote, so answering it from an

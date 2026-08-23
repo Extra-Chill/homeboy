@@ -870,12 +870,25 @@ fn run_materialized_provider_command_once_contained(
     // adjustment must never turn a stale provider into a live one.
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
+    let (stdout_capture, stderr_capture) = runtime_output_captures(request, run_id, attempt);
+    if let Some(run_id) = run_id {
+        // The files exist before any output arrives, so a controller-side
+        // cancellation retains resolvable diagnostics even if it interrupts us.
+        let _ = crate::agent_task_lifecycle::record_provider_execution_runtime_evidence(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            stdout_capture.as_ref().map(|capture| capture.uri.clone()),
+            stderr_capture.as_ref().map(|capture| capture.uri.clone()),
+        );
+    }
     let stdout_reader = child.stdout.take().map(|stdout| {
         spawn_output_reader(
             stdout,
             Arc::clone(&stdout_buffer),
             Arc::clone(&last_progress_ms),
             started,
+            stdout_capture.map(|capture| capture.file),
         )
     });
     let stderr_reader = child.stderr.take().map(|stderr| {
@@ -884,6 +897,7 @@ fn run_materialized_provider_command_once_contained(
             Arc::clone(&stderr_buffer),
             Arc::clone(&last_progress_ms),
             started,
+            stderr_capture.map(|capture| capture.file),
         )
     });
 
@@ -1449,23 +1463,61 @@ fn spawn_output_reader<R>(
     buffer: Arc<Mutex<Vec<u8>>>,
     last_progress_ms: Arc<AtomicU64>,
     started: Instant,
+    capture: Option<std::fs::File>,
 ) -> std::thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
 {
     std::thread::spawn(move || {
+        let mut capture = capture;
+        let mut captured = 0;
         let mut chunk = [0; 4096];
         while let Ok(read) = reader.read(&mut chunk) {
             if read == 0 {
                 break;
             }
             buffer.lock().expect("output buffer").extend(&chunk[..read]);
+            if let Some(file) = capture.as_mut() {
+                let remaining = EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES.saturating_sub(captured);
+                let written = remaining.min(read);
+                if written > 0 && file.write_all(&chunk[..written]).is_ok() {
+                    captured += written;
+                }
+            }
             last_progress_ms.store(
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 Ordering::SeqCst,
             );
         }
     })
+}
+
+struct RuntimeOutputCapture {
+    uri: String,
+    file: std::fs::File,
+}
+
+fn runtime_output_captures(
+    request: &AgentTaskExecutorRequest,
+    run_id: Option<&str>,
+    attempt: u32,
+) -> (Option<RuntimeOutputCapture>, Option<RuntimeOutputCapture>) {
+    if run_id.is_none() || std::fs::create_dir_all(&request.artifacts_path).is_err() {
+        return (None, None);
+    }
+    let capture = |name: &str| {
+        let path = request.artifacts_path.join(name);
+        std::fs::File::create(&path)
+            .ok()
+            .map(|file| RuntimeOutputCapture {
+                uri: format!("file://{}", path.display()),
+                file,
+            })
+    };
+    (
+        capture(&format!("provider-runtime-stdout-{attempt}.log")),
+        capture(&format!("provider-runtime-stderr-{attempt}.log")),
+    )
 }
 
 fn classify_stall_or_rate_limit(
@@ -2097,7 +2149,13 @@ pub fn run_provider_readiness_invocation(
     let last_progress = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
     let stdout_reader = child.stdout.take().map(|stdout| {
-        spawn_output_reader(stdout, Arc::clone(&stdout_buffer), last_progress, started)
+        spawn_output_reader(
+            stdout,
+            Arc::clone(&stdout_buffer),
+            last_progress,
+            started,
+            None,
+        )
     });
     let status = loop {
         match child.try_wait() {

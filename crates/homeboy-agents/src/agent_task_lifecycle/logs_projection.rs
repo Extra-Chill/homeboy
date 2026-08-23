@@ -60,7 +60,9 @@ pub fn logs_with_raw_in_store(
                 events.extend(local_provider_execution_events(&record));
                 events
             });
-            (progress, record.artifact_refs.clone(), raw_events)
+            let mut artifact_refs = record.artifact_refs.clone();
+            artifact_refs.extend(local_provider_execution_artifact_refs(&record));
+            (progress, artifact_refs, raw_events)
         }
     };
     let events = if raw_events.is_empty() {
@@ -80,12 +82,49 @@ pub fn logs_with_raw_in_store(
     })
 }
 
-/// Synthesize progress events from the durable running provider executions of a
-/// local (in-process) cook. `reserve_provider_execution` records each attempt
+fn local_provider_execution_artifact_refs(
+    record: &AgentTaskRunRecord,
+) -> Vec<AgentTaskArtifactRef> {
+    record.metadata["provider_executions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|execution| {
+            let task_id = execution
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| record.tasks.first().map(|task| task.task_id.clone()))
+                .unwrap_or_else(|| record.run_id.clone());
+            [
+                ("provider-runtime-stdout", "stdout"),
+                ("provider-runtime-stderr", "stderr"),
+            ]
+            .into_iter()
+            .filter_map(move |(kind, stream)| {
+                execution
+                    .pointer(&format!("/runtime_evidence/{stream}"))
+                    .and_then(Value::as_str)
+                    .filter(|uri| !uri.trim().is_empty())
+                    .map(|uri| AgentTaskArtifactRef {
+                        task_id: task_id.clone(),
+                        kind: kind.to_string(),
+                        uri: uri.to_string(),
+                        role: None,
+                        label: Some(format!("provider {stream} (bounded capture)")),
+                        semantic_key: None,
+                        size_bytes: None,
+                    })
+            })
+        })
+        .collect()
+}
+
+/// Synthesize progress events from durable local provider executions. `reserve_provider_execution` records each attempt
 /// (backend, model, started_at, `state:"running"`) before the scheduler blocks
 /// on the backend, but until an aggregate exists `agent-task logs` shows only
-/// "task submitted". Surface the running executions so logs reflect active
-/// provider work rather than a stalled preflight (#8396).
+/// "task submitted". Terminal reservations are also projected because a
+/// cancellation can complete before an aggregate imports the provider outcome.
 pub(super) fn local_provider_execution_events(
     record: &AgentTaskRunRecord,
 ) -> Vec<AgentTaskProgressEvent> {
@@ -98,8 +137,14 @@ pub(super) fn local_provider_execution_events(
     };
     executions
         .iter()
-        .filter(|execution| execution.get("state").and_then(Value::as_str) == Some("running"))
-        .map(|execution| {
+        .filter_map(|execution| {
+            let state = match execution.get("state").and_then(Value::as_str) {
+                Some("running") => AgentTaskState::Running,
+                Some("cancelled") => AgentTaskState::Cancelled,
+                Some("timed_out") => AgentTaskState::TimedOut,
+                Some("failed") => AgentTaskState::Failed,
+                _ => return None,
+            };
             let task_id = execution
                 .get("task_id")
                 .and_then(Value::as_str)
@@ -110,7 +155,10 @@ pub(super) fn local_provider_execution_events(
                 .get("backend")
                 .and_then(Value::as_str)
                 .unwrap_or("provider");
-            let mut message = format!("provider execution running: {backend}");
+            let mut message = format!(
+                "provider execution {}: {backend}",
+                execution["state"].as_str().unwrap_or("unknown")
+            );
             if let Some(model) = execution.get("model").and_then(Value::as_str) {
                 if !model.is_empty() {
                     message.push_str(&format!(" ({model})"));
@@ -119,15 +167,15 @@ pub(super) fn local_provider_execution_events(
             if let Some(started_at) = execution.get("started_at").and_then(Value::as_str) {
                 message.push_str(&format!("; started {started_at}"));
             }
-            AgentTaskProgressEvent {
+            Some(AgentTaskProgressEvent {
                 task_id,
-                state: AgentTaskState::Running,
+                state,
                 attempt: execution
                     .get("attempt")
                     .and_then(Value::as_u64)
                     .unwrap_or(1) as u32,
                 message: Some(message),
-            }
+            })
         })
         .collect()
 }
