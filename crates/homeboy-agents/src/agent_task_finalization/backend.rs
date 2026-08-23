@@ -333,10 +333,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
         let output = commit_at(None, Some(message), CommitOptions::default(), Some(path))?;
         if !output.success {
-            return Err(Error::git_command_failed(format!(
-                "git commit failed: {}",
-                output.stderr
-            )));
+            return Err(Error::validation_invalid_argument_with_evidence(
+                "publication",
+                format!("git {} failed", output.action),
+                None,
+                None,
+                Some(output.failure_command_evidence()),
+            ));
         }
         Ok(())
     }
