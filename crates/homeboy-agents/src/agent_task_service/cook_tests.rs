@@ -14672,6 +14672,243 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
 }
 
 #[test]
+fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers_once() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-13060";
+        let run_id = "cook-13060-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].task_id = "task".to_string();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.ai_model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link Cook attempt");
+
+        let mut aggregate = review_form_aggregate(&options.initial_plan);
+        aggregate.status =
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable;
+        aggregate.totals = crate::agent_task_scheduler::AgentTaskAggregateTotals {
+            recoverable_candidates: 1,
+            ..Default::default()
+        };
+        aggregate.outcomes[0].status =
+            crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+        let candidate_patch = target.path().join("candidate.patch");
+        let candidate_bytes = b"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        std::fs::write(&candidate_patch, candidate_bytes).expect("write candidate patch");
+        aggregate.outcomes[0].artifacts = vec![crate::agent_task::AgentTaskArtifact {
+            id: "candidate".to_string(),
+            kind: "patch".to_string(),
+            path: Some(candidate_patch.display().to_string()),
+            size_bytes: Some(candidate_bytes.len() as u64),
+            sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                candidate_bytes,
+            )),
+            ..Default::default()
+        }];
+        agent_task_lifecycle::record_run_aggregate(run_id, &options.initial_plan, &aggregate)
+            .expect("persist candidate-recoverable aggregate");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record
+                .lifecycle
+                .provider_runtime
+                .push(ProviderRuntimeLifecycle {
+                    task_id: "task".to_string(),
+                    backend: "fixture".to_string(),
+                    state: ProviderRuntimeState::Succeeded,
+                    stream_uri: None,
+                    external_runtime_ids: Vec::new(),
+                    metadata: serde_json::json!({ "model": "fixture-model" }),
+                });
+        })
+        .expect("persist provider model provenance");
+        assert_eq!(
+            agent_task_lifecycle::status(run_id)
+                .expect("candidate status")
+                .state,
+            AgentTaskRunState::CandidateRecoverable
+        );
+
+        let mut promotion = promotion_with_existing_path(run_id, target.path());
+        promotion.provenance["candidate"] = serde_json::json!({
+            "kind": "git",
+            "fingerprint": {
+                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                "target_path": target.path(),
+                "head": "candidate-sha",
+                "base": "main",
+                "tree": "candidate-tree",
+                "sha256": "candidate-sha",
+                "changed_files": ["src/lib.rs"]
+            }
+        });
+        promotion.provenance["replacement_gate_proof"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-proof/v1",
+            "status": "passed"
+        });
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .expect("persist promotion evidence");
+        promotion = persisted_promotion_for_attempt(run_id)
+            .expect("read persisted promotion")
+            .expect("persisted promotion");
+        let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
+            .expect("select canonical candidate");
+        assert_eq!(selection.selected_task_id.as_deref(), Some("task"));
+        assert_eq!(selection.selected_artifact_id.as_deref(), Some("candidate"));
+        assert!(promotion.finalization_eligible(false));
+
+        assert_eq!(
+            prepare_manual_finalization_identity(cook_id).expect("Cook selects candidate"),
+            run_id
+        );
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(
+                    crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+                        changed_files: vec!["src/lib.rs".to_string()],
+                        push_required: false,
+                    },
+                ),
+                committed_sha: Some("candidate-sha".to_string()),
+                hydrate_run_id: Some(run_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        assert_eq!(
+            preflight.evidence.ai_model.as_deref(),
+            Some("fixture-model")
+        );
+        assert_eq!(
+            preflight.review_dossier.ai_assistance.model,
+            "fixture-model"
+        );
+        assert_eq!(preflight.normalized_gate_results, promotion.gate_results);
+        assert_eq!(promotion.source.run_id.as_deref(), Some(run_id));
+        assert_eq!(promotion.source.task_id, "task");
+        assert!(promotion.provenance.get("replacement_gate_proof").is_some());
+        let candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate =
+            serde_json::from_value(promotion.provenance["candidate"].clone())
+                .expect("parse promotion candidate");
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+            candidate
+        else {
+            panic!("fixture promotion has a Git candidate");
+        };
+        assert_eq!(fingerprint.head, "candidate-sha");
+        assert_eq!(fingerprint.changed_files, preflight.changed_files);
+        assert_eq!(
+            preflight
+                .publication_proof
+                .git_identity
+                .as_ref()
+                .and_then(|identity| identity.commit_sha.as_deref()),
+            Some("candidate-sha")
+        );
+        assert_eq!(
+            agent_task_lifecycle::status(run_id)
+                .expect("read provider provenance")
+                .lifecycle
+                .provider_runtime
+                .last()
+                .and_then(|runtime| runtime.metadata["model"].as_str()),
+            Some("fixture-model")
+        );
+        persist_manual_finalization_intent(run_id, &preflight).expect("persist bound intent");
+        let intent = agent_task_lifecycle::status(run_id)
+            .expect("read bound intent")
+            .metadata["manual_finalization_intent"]
+            .clone();
+        assert_eq!(
+            intent["manual_candidate_binding"]["schema"],
+            crate::agent_task_finalization::AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA
+        );
+        assert_eq!(
+            intent["manual_candidate_binding"]["selection"]["run_id"],
+            run_id
+        );
+        assert_eq!(
+            intent["manual_candidate_binding"]["selection"]["selected_task_id"],
+            "task"
+        );
+        assert_eq!(
+            intent["manual_candidate_binding"]["selection"]["selected_artifact_id"],
+            "candidate"
+        );
+        assert_eq!(
+            intent["manual_candidate_binding"]["candidate"]["head"],
+            "candidate-sha"
+        );
+        assert_eq!(
+            intent["manual_candidate_binding"]["source"]["run_id"],
+            run_id
+        );
+        assert_eq!(intent["manual_candidate_binding"]["model"], "fixture-model");
+        assert_eq!(
+            intent["manual_candidate_binding"]["gates"],
+            serde_json::to_value(&promotion.gate_results).unwrap()
+        );
+
+        let mut tampered = promotion.clone();
+        tampered.provenance["candidate"]["fingerprint"]["head"] =
+            serde_json::json!("tampered-candidate-sha");
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&tampered).unwrap())
+            .expect("persist candidate tampering");
+        let error = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("candidate tampering fails closed");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .expect("restore promotion evidence");
+
+        let mut publish_backend = CaptureBackend {
+            candidate_state: Some(
+                crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+                    changed_files: vec!["src/lib.rs".to_string()],
+                    push_required: false,
+                },
+            ),
+            committed_sha: Some("candidate-sha".to_string()),
+            hydrate_run_id: Some(run_id.to_string()),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut publish_backend)
+                .expect("recover bound candidate through fake publication");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+        let receipt = agent_task_lifecycle::status(run_id).expect("read receipt");
+        assert_eq!(
+            receipt.metadata["cook_finalization"]["manual_finalization"],
+            true
+        );
+
+        let mut repeated_backend = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut repeated_backend)
+                .expect("recovery receipt is idempotent"),
+            published
+        );
+        assert!(!repeated_backend.created);
+    });
+}
+
+#[test]
 fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980";
