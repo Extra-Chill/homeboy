@@ -125,8 +125,9 @@ pub use external_check_detail_resolver::{
 };
 pub use external_storage_retention::{
     ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
-    ExternalStorageReclaimResult, ExternalStorageRequest, ExternalStorageResourceClass,
-    ExternalStorageRetentionConfig, ExternalStorageRetentionProviderConfig,
+    ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
+    ExternalStorageResourceClass, ExternalStorageRetentionConfig,
+    ExternalStorageRetentionProviderConfig, ExternalStorageRoot,
     DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS, EXTERNAL_STORAGE_RETENTION_SCHEMA,
 };
 pub use manifest::ExtensionManifest;

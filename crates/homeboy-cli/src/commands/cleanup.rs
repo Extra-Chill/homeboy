@@ -2201,13 +2201,16 @@ fn cleanup_inventory_with_deadline(
                 let output = cleanup::cleanup_external_storage_from_extensions(
                     cleanup::ExternalStorageCleanupOptions {
                         apply,
-                        min_age_days: policy.terminal_run_days.max(0) as u64,
+                        min_age_days: config.retention.external_storage_days,
+                        max_bytes: config.retention.external_storage_max_bytes,
+                        reserve_bytes: config.retention.external_storage_reserve_bytes,
                         limit: policy.scan_limit(),
                         evidence_limit: if args.full {
                             policy.scan_limit()
                         } else {
                             OutputBudget::COLLECTION.max_items
                         },
+                        deadline,
                     },
                 )?;
                 category_from_output(

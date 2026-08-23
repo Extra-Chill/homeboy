@@ -51,6 +51,7 @@ pub enum ExternalStorageResourceClass {
 #[serde(deny_unknown_fields)]
 pub struct ExternalStorageItem {
     pub id: String,
+    pub root_id: String,
     pub class: ExternalStorageResourceClass,
     pub bytes: u64,
     /// A provider-local, non-secret locator for bounded operator evidence.
@@ -67,6 +68,17 @@ pub struct ExternalStorageItem {
     pub ownership_known: bool,
     /// Whole days since the provider's terminal lifecycle transition.
     pub age_days: u64,
+    /// Provider-issued conditional capability valid only for this inventory
+    /// generation. A provider rejects it after liveness or references change.
+    pub reclaim_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalStorageRoot {
+    pub id: String,
+    /// Core reads capacity from this path but never deletes it directly.
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +87,11 @@ pub struct ExternalStorageInventory {
     #[serde(default = "default_external_storage_schema")]
     pub schema: String,
     pub provider_id: String,
+    /// Opaque snapshot/lease identity that binds a reclaim request to this
+    /// inventory. Providers must reject stale generations.
+    pub generation: String,
+    #[serde(default)]
+    pub roots: Vec<ExternalStorageRoot>,
     #[serde(default)]
     pub items: Vec<ExternalStorageItem>,
     /// Bytes the provider can account for but cannot safely classify. They are
@@ -92,8 +109,17 @@ fn default_external_storage_schema() -> String {
 pub struct ExternalStorageRequest {
     pub schema: String,
     pub operation: ExternalStorageOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub item_ids: Vec<String>,
+    pub reclaim_targets: Vec<ExternalStorageReclaimTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalStorageReclaimTarget {
+    pub id: String,
+    pub reclaim_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +137,7 @@ pub enum ExternalStorageOperation {
 pub struct ExternalStorageReclaimResult {
     pub schema: String,
     pub provider_id: String,
+    pub generation: String,
     #[serde(default)]
     pub reclaimed_item_ids: Vec<String>,
     #[serde(default)]
@@ -125,11 +152,13 @@ mod tests {
     fn inventory_contract_round_trips_liveness_and_unknown_bytes() {
         let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
             "provider_id": "fixture-runtime",
+            "generation": "generation-1",
             "unknown_bytes": 9,
             "items": [{
-                "id": "scratch-1", "class": "scratch", "bytes": 4,
+                "id": "scratch-1", "root_id": "temp", "class": "scratch", "bytes": 4,
                 "locator": "tmp/scratch-1", "reconstructable": true,
-                "active": false, "referenced": false, "ownership_known": true, "age_days": 7
+                "active": false, "referenced": false, "ownership_known": true, "age_days": 7,
+                "reclaim_token": "opaque"
             }]
         }))
         .expect("inventory parses");
