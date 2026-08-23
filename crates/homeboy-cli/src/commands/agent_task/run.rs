@@ -8,7 +8,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
@@ -43,6 +46,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// This ceiling bounds both controller disk use and Lab transport without putting
 /// fixture bytes in Cook command state or JSON output.
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
@@ -249,13 +253,24 @@ pub(crate) fn preview_cook(
     mut args: AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
+    let mut progress = Vec::new();
+    record_preview_phase(&mut progress, "prompt_input");
+    if args.dispatch.prompt.as_deref() == Some("-") {
+        // Preview owns stdin exactly once. Capturing it before preflight keeps
+        // every later validation and projection byte-for-byte aligned with live
+        // Cook without allowing an open pipe to wait forever for EOF.
+        args.dispatch.prompt = Some(read_preview_stdin(PREVIEW_STDIN_TIMEOUT)?);
+    }
+    record_preview_phase(&mut progress, "input_validation");
     args.gates.snapshot_file_inputs()?;
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
+    record_preview_phase(&mut progress, "destination_resolution");
     let (args, provision) = resolve_cook_preview_destination(args)?;
     let replay = cook_preview_replay_argv(&args);
-    let placement = preview_placement_policy_with_admission();
+    record_preview_phase(&mut progress, "placement_projection");
+    let placement = preview_placement_policy_with_admission(&replay.argv);
     let notification_resolution = homeboy::core::notification_route::current_resolution();
     if matches!(
         provision["action"].as_str(),
@@ -275,6 +290,7 @@ pub(crate) fn preview_cook(
                     "workspace": provision,
                     "notification_resolution": notification_resolution,
                 },
+                "progress": progress,
                 "replay_argv": replay.argv,
                 "replay_requires": replay.requires,
             }),
@@ -287,6 +303,7 @@ pub(crate) fn preview_cook(
             .map(Path::new)
             .filter(|path| path.is_dir())
     });
+    record_preview_phase(&mut progress, "gate_contract_validation");
     let gate_contract_validation = validate_gate_contracts(
         args.gates
             .verify
@@ -296,6 +313,7 @@ pub(crate) fn preview_cook(
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
     )?;
+    record_preview_phase(&mut progress, "provider_preflight");
     preflight_cook_provider_credentials(&args)?;
 
     // Preview binds evidence to the same resolved workspace, but only projects
@@ -303,6 +321,7 @@ pub(crate) fn preview_cook(
     let mut compile_args = args.clone();
     compile_args.provider_evidence_inputs.clear();
     let (evidence, evidence_provenance) = if !args.provider_evidence_inputs.is_empty() {
+        record_preview_phase(&mut progress, "provider_evidence_projection");
         let workspace = provision["path"].as_str().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "provider-evidence",
@@ -335,6 +354,7 @@ pub(crate) fn preview_cook(
     } else {
         (None, None)
     };
+    record_preview_phase(&mut progress, "plan_compilation");
     let mut plan = compile_cook_plan(&compile_args, provision.clone())?;
     if let Some(evidence) = evidence {
         for task in &mut plan.tasks {
@@ -382,11 +402,107 @@ pub(crate) fn preview_cook(
                 },
                 "notification_resolution": notification_resolution,
             },
+            "progress": progress,
             "replay_argv": replay.argv,
             "replay_requires": replay.requires,
         }),
         0,
     ))
+}
+
+fn record_preview_phase(progress: &mut Vec<Value>, phase: &'static str) {
+    let event = serde_json::json!({
+        "event": "cook_preview_progress",
+        "phase": phase,
+    });
+    eprintln!("{event}");
+    progress.push(event);
+}
+
+fn preview_stdin_timeout_error(timeout: Duration) -> homeboy::core::Error {
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "prompt",
+        "Cook preview stdin prompt did not reach EOF before its deadline",
+        Some("-".to_string()),
+        Some(vec![
+            "Use --prompt @file for an open-ended input stream, then rerun preview.".to_string(),
+        ]),
+    );
+    error.details["reason"] = serde_json::json!("preview_stdin_timeout");
+    error.details["preview_phase"] = serde_json::json!("prompt_input");
+    error.details["preview_timeout_ms"] = serde_json::json!(timeout.as_millis());
+    error
+}
+
+#[cfg(unix)]
+fn read_preview_stdin(timeout: Duration) -> homeboy::core::Result<String> {
+    use std::os::fd::AsRawFd;
+
+    read_preview_stdin_from_fd(std::io::stdin().as_raw_fd(), timeout)
+}
+
+#[cfg(not(unix))]
+fn read_preview_stdin(timeout: Duration) -> homeboy::core::Result<String> {
+    Err(preview_stdin_timeout_error(timeout))
+}
+
+#[cfg(unix)]
+fn read_preview_stdin_from_fd(fd: RawFd, timeout: Duration) -> homeboy::core::Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(preview_stdin_timeout_error(timeout));
+        }
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+        if ready == 0 {
+            return Err(preview_stdin_timeout_error(timeout));
+        }
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("read preview stdin".to_string()),
+            ));
+        }
+        let read = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if read == 0 {
+            break;
+        }
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("read preview stdin".to_string()),
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..read as usize]);
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            format!("stdin prompt is not valid UTF-8: {error}"),
+            Some("-".to_string()),
+            None,
+        )
+    })
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -584,13 +700,8 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
     (replay, Some(format!("{flag} was redacted; replace its parseable placeholder with the original value before replaying")))
 }
 
-fn preview_placement_policy() -> Value {
-    let argv = std::env::args().collect::<Vec<_>>();
-    preview_placement_policy_from_argv(&argv)
-}
-
-fn preview_placement_policy_with_admission() -> Value {
-    let mut policy = preview_placement_policy();
+fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
+    let mut policy = preview_placement_policy_from_argv(replay_args);
     // Resource and Lab inventory are live execution inputs. Reading either here
     // made a read-only preview wait on the same unavailable control plane it was
     // intended to diagnose. Execution revalidates this admission after preview.
@@ -1298,32 +1409,81 @@ mod preview_tests {
             let source = tempfile::NamedTempFile::new().expect("evidence source");
             std::fs::write(source.path(), "Read this task evidence before editing.\n")
                 .expect("write prompt");
-            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()
-                .expect("workspace root");
-            let (preview, exit_code) = preview_cook(
-                cook(&[
-                    "homeboy",
-                    "agent-task",
-                    "cook",
-                    "--preview",
-                    "--backend",
-                    "fixture",
-                    "--prompt",
-                    &format!("@{}", source.path().display()),
-                    "--to-worktree",
+            let repository = tempfile::tempdir().expect("repository");
+            let primary = repository.path().join("primary");
+            let workspace = repository.path().join("task-worktree");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+                .status()
+                .expect("initialize workspace")
+                .success());
+            for (key, value) in [
+                ("user.email", "fixture@example.test"),
+                ("user.name", "Fixture"),
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        primary.to_str().expect("UTF-8 primary"),
+                        "config",
+                        key,
+                        value
+                    ])
+                    .status()
+                    .expect("configure fixture repository")
+                    .success());
+            }
+            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+            assert!(std::process::Command::new("git")
+                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .expect("commit fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "task",
                     workspace.to_str().expect("UTF-8 workspace"),
-                    "--no-finalize",
-                    "--provider-evidence",
-                    &format!(
-                        r#"{{"id":"prompt","source":"{}"}}"#,
-                        source.path().display()
-                    ),
-                ]),
-                None,
-            )
-            .expect("local preview");
+                ])
+                .status()
+                .expect("create linked workspace")
+                .success());
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                &format!("@{}", source.path().display()),
+                "--to-worktree",
+                workspace.to_str().expect("UTF-8 workspace"),
+                "--no-finalize",
+                "--provider-evidence",
+                &format!(
+                    r#"{{"id":"prompt","source":"{}"}}"#,
+                    source.path().display()
+                ),
+            ]);
+            let (preview, exit_code) = preview_cook(args.clone(), None).expect("local preview");
 
             assert_eq!(exit_code, 0);
             assert_eq!(preview["resolved"]["workspace"]["action"], "planned_reuse");
@@ -1337,7 +1497,77 @@ mod preview_tests {
                 .expect("projected evidence path");
             assert!(evidence_path.starts_with(workspace.to_str().expect("UTF-8 workspace")));
             assert!(!evidence_path.contains(&source.path().display().to_string()));
+            let phases = preview["progress"].as_array().expect("preview phases");
+            assert!(phases.iter().any(|phase| phase["phase"] == "prompt_input"));
+            assert!(phases
+                .iter()
+                .any(|phase| phase["phase"] == "provider_evidence_projection"));
+            assert!(phases
+                .iter()
+                .any(|phase| phase["phase"] == "plan_compilation"));
+
+            let args = resolve_cook_destination(args).expect("resolve live destination");
+            let live = compile_cook_plan(
+                &args,
+                serde_json::json!({
+                    "action": "existing",
+                    "path": workspace,
+                }),
+            )
+            .expect("compile live Cook");
+            assert_eq!(
+                live.tasks[0].executor.config["evidence_inputs"][0]["path"], evidence_path,
+                "preview and live Cook must project the same provider evidence path"
+            );
         });
+    }
+
+    #[test]
+    fn preview_defers_lab_placement_admission_with_a_structured_phase() {
+        let policy = preview_placement_policy_with_admission(&[
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ]);
+        assert_eq!(policy["requested"], "lab");
+        assert_eq!(policy["route_executed"], false);
+        assert_eq!(
+            policy["admission"]["deferred_to"],
+            "execution_placement_admission"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_stdin_reads_exact_bytes_and_times_out_when_the_writer_stays_open() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let mut closed = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(closed.as_mut_ptr()) }, 0, "create pipe");
+        let mut writer = unsafe { std::fs::File::from_raw_fd(closed[1]) };
+        writer
+            .write_all(b"exact\nstdin bytes\n")
+            .expect("write stdin");
+        drop(writer);
+        let reader = unsafe { std::fs::File::from_raw_fd(closed[0]) };
+        assert_eq!(
+            read_preview_stdin_from_fd(reader.as_raw_fd(), Duration::from_secs(1))
+                .expect("closed stdin is read"),
+            "exact\nstdin bytes\n"
+        );
+
+        let mut open = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(open.as_mut_ptr()) }, 0, "create pipe");
+        let _writer = unsafe { std::fs::File::from_raw_fd(open[1]) };
+        let reader = unsafe { std::fs::File::from_raw_fd(open[0]) };
+        let timeout = Duration::from_millis(20);
+        let error = read_preview_stdin_from_fd(reader.as_raw_fd(), timeout)
+            .expect_err("open stdin must not block preview");
+        assert_eq!(error.details["reason"], "preview_stdin_timeout");
+        assert_eq!(error.details["preview_phase"], "prompt_input");
+        assert_eq!(error.details["preview_timeout_ms"], 20);
     }
 
     #[test]
