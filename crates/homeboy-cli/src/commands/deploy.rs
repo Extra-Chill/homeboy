@@ -1,11 +1,32 @@
-use clap::Args;
+use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
 use homeboy_deploy::{
-    self as deploy, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
-    ProjectDeployResult,
+    self as deploy, ComponentDeployResult, DeployConfig, DeploySummary, DeployTarget,
+    MultiDeploySummary, ProjectDeployResult,
 };
+
+/// Operator-facing spelling of `homeboy_deploy::DeployTarget`.
+///
+/// The deploy crate owns the concept and carries no CLI dependency, so the
+/// clap surface lives here and maps onto it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DeployTargetArg {
+    /// Deploy the build artifact to the project's remote path.
+    Server,
+    /// Deploy through the component's declared deployment provider.
+    Provider,
+}
+
+impl From<DeployTargetArg> for DeployTarget {
+    fn from(value: DeployTargetArg) -> Self {
+        match value {
+            DeployTargetArg::Server => DeployTarget::Server,
+            DeployTargetArg::Provider => DeployTarget::Provider,
+        }
+    }
+}
 
 use super::utils::resolve::{infer_project_for_components, resolve_project_components};
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
@@ -114,6 +135,16 @@ pub struct DeployArgs {
     /// Force local tag-based build/deploy, ignoring reusable release assets
     #[arg(long)]
     pub tagged: bool,
+    /// Select which deliverable a dual-deliverable component deploys
+    ///
+    /// A component can build a server-installed artifact *and* declare a
+    /// deployment provider for a provider-owned runtime. The provider is not
+    /// the exclusive owner: without this flag the route is inferred from
+    /// project target configuration (`components[].deployment_provider_input`),
+    /// so an optional provider never makes the server deliverable undeployable.
+    /// Pass this when you want to say which target you mean (#12853).
+    #[arg(long, value_enum, value_name = "TARGET")]
+    pub target: Option<DeployTargetArg>,
     /// Resume a prior multi-project deploy run after exact identity validation
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
@@ -586,6 +617,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         prepared_artifact: None,
         prepared_projection: None,
         resume_run_id: args.resume.clone(),
+        target: args.target.map(DeployTarget::from),
     }
 }
 

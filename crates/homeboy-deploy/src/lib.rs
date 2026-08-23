@@ -28,6 +28,7 @@ pub(crate) mod provenance;
 mod provider;
 pub mod provider_impl;
 mod receipt;
+mod route;
 mod safety_and_artifact;
 mod smoke;
 mod transfer;
@@ -39,6 +40,8 @@ pub use planning::{
     bucket_release_states, calculate_release_state, calculate_release_state_from_baseline,
     classify_release_state,
 };
+// The CLI selects a deployment target explicitly, so this crosses the boundary.
+pub use route::DeployTarget;
 // `homeboy-release` reads artifact digests through this when projecting a
 // release deployment, so it crosses the crate boundary now.
 pub use types::sha256_file;
@@ -199,6 +202,7 @@ fn run_with_release_artifacts(
         observation.as_mut(),
     )
     .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
+    disclose_server_routes(&project, config, &mut result);
     if let Some(observation) = observation.as_mut() {
         observation.finish(
             if result.summary.failed == 0 {
@@ -212,6 +216,40 @@ fn run_with_release_artifacts(
         result.deploy_run_id = Some(observation.run_id().to_string());
     }
     Ok(result)
+}
+
+/// Record which deliverable each dual-deliverable component actually deployed.
+///
+/// Everything reaching here took the server route; the provider route returns
+/// from `provider::run_if_configured` above and labels itself. A component with
+/// one deliverable had no choice to report, so only a component that also
+/// declares a deployment provider is annotated (#12853). Resolution failures
+/// are skipped: this is disclosure on a completed deploy, never a new gate.
+fn disclose_server_routes(
+    project: &project::Project,
+    config: &DeployConfig,
+    result: &mut DeployOrchestrationResult,
+) {
+    for row in &mut result.results {
+        if row
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("deployment route:"))
+        {
+            continue;
+        }
+        let Ok(component) = planning::resolve_project_component(
+            project,
+            &row.id,
+            None,
+            config.prepared_projection.as_ref(),
+        ) else {
+            continue;
+        };
+        if let Some(disclosure) = route::server_route_disclosure(&component, project, config) {
+            row.warnings.push(disclosure);
+        }
+    }
 }
 
 fn attach_admitted_run_id(mut error: Error, run_id: Option<&str>) -> Error {
@@ -795,6 +833,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 
