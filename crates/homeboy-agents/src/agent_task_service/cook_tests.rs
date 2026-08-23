@@ -14491,6 +14491,93 @@ fn verified_existing_candidate_no_change_recovery_finalizes_once() {
 }
 
 #[test]
+fn empty_intentional_no_change_remediation_preserves_applied_candidate_recovery() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-8307-preserve-applied";
+        let source_run_id = "cook-8307-preserve-applied-attempt-1";
+        let remediation_run_id = "cook-8307-preserve-applied-attempt-2";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = source_run_id.to_string();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        super::super::record_recipe_attempt(cook_id, 2, remediation_run_id, &options.initial_plan)
+            .expect("persist remediation recipe attempt");
+        for (attempt, run_id) in [(1, source_run_id), (2, remediation_run_id)] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("submit attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                .expect("record Cook attempt");
+        }
+        seed_substantive_candidate_aggregate(
+            source_run_id,
+            &options.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mut source_aggregate = agent_task_lifecycle::read_attempt_aggregate(source_run_id)
+            .expect("read source aggregate");
+        source_aggregate.outcomes[0].outputs = serde_json::json!({
+            "review_form": test_review_form(),
+        });
+        agent_task_lifecycle::record_run_aggregate(
+            source_run_id,
+            &options.initial_plan,
+            &source_aggregate,
+        )
+        .expect("persist source review form");
+        let source_promotion = promotion_with_existing_path(source_run_id, target.path());
+        agent_task_lifecycle::record_promotion(
+            source_run_id,
+            serde_json::to_value(&source_promotion).unwrap(),
+        )
+        .expect("persist applied source promotion");
+
+        seed_review_form_aggregate(remediation_run_id, &options.initial_plan);
+        let mut remediation_promotion =
+            promotion_with_existing_path(remediation_run_id, target.path());
+        remediation_promotion.status = AgentTaskPromotionStatus::VerifiedNoChanges;
+        remediation_promotion.changed_files.clear();
+        remediation_promotion.provenance["cook_follow_up"] = serde_json::json!({
+            "kind": "gate_remediation",
+            "source_run_id": source_run_id,
+        });
+        agent_task_lifecycle::record_promotion(
+            remediation_run_id,
+            serde_json::to_value(remediation_promotion).unwrap(),
+        )
+        .expect("persist empty intentional no-change remediation");
+
+        let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
+            .expect("select substantive source candidate");
+        assert_eq!(selection.run_id, source_run_id);
+        assert_eq!(
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(source_run_id),
+            "empty remediation cannot replace the source promotion recovery owner"
+        );
+
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(source_promotion),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(remediation_run_id, Vec::new(), false, &mut backend)
+                .expect("exact remediation recovery uses the preserved applied promotion");
+        assert_eq!(published["status"], "review_ready");
+        assert!(backend.created);
+
+        let mut repeated = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut repeated)
+                .expect("Cook alias recovery remains idempotent"),
+            published
+        );
+        assert!(!repeated.created);
+    });
+}
+
+#[test]
 fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980-normal";
