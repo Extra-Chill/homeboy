@@ -1637,7 +1637,7 @@ mod tests {
         assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
         assert!(!output.success);
         assert!(output.timed_out);
-        assert!(output.stderr.contains("containment cleanup was incomplete"));
+        assert!(output.stderr.contains("containment cleanup diagnostic"));
         assert!(output.stderr.contains("output pipes remained open"));
         assert!(
             homeboy_core::process::pid_is_running(pid as u32),
