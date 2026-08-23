@@ -163,6 +163,10 @@ pub struct ProcessContainment {
 pub struct ProcessContainmentCleanup {
     pub forced: bool,
     pub complete: bool,
+    /// Non-fatal evidence collected while confirming cleanup. This is separate
+    /// from `detail` so unrelated host-process metadata cannot turn a verified
+    /// run-owned scope cleanup into a producer failure.
+    pub diagnostic: Option<String>,
     pub detail: Option<String>,
 }
 
@@ -269,6 +273,7 @@ impl ProcessContainment {
                 Ok(ProcessContainmentCleanup {
                     forced: true,
                     complete: true,
+                    diagnostic: None,
                     detail: None,
                 })
             } else {
@@ -298,6 +303,7 @@ impl ProcessContainment {
             return Ok(ProcessContainmentCleanup {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
+                diagnostic: cleanup.diagnostic,
                 detail: cleanup.detail,
             });
         }
@@ -311,6 +317,7 @@ impl ProcessContainment {
                     ProcessContainmentCleanup {
                         forced: termination.signal == "SIGKILL",
                         complete: true,
+                        diagnostic: None,
                         detail: None,
                     }
                 });
@@ -322,6 +329,7 @@ impl ProcessContainment {
                 ProcessContainmentCleanup {
                     forced,
                     complete: true,
+                    diagnostic: None,
                     detail: None,
                 }
             })
@@ -1265,11 +1273,12 @@ fn scope_cleanup_report(
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    let complete = !targets.pids.is_empty() && unreadable == 0;
+    let complete = !targets.pids.is_empty() && survivors.pids.is_empty();
     let detail = (!complete).then(|| {
-        if unreadable > 0 {
+        if !survivors.pids.is_empty() {
             format!(
-                "process-scope discovery was incomplete: {unreadable} /proc environment entries could not be read"
+                "process-scope cleanup confirmed run-owned survivors: {}",
+                join_pids(&survivors.pids)
             )
         } else {
             "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
@@ -1278,6 +1287,11 @@ fn scope_cleanup_report(
     ProcessContainmentCleanup {
         forced,
         complete,
+        diagnostic: (unreadable > 0).then(|| {
+            format!(
+                "process-scope discovery could not read {unreadable} unrelated /proc environment entries"
+            )
+        }),
         detail,
     }
 }
@@ -1772,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_cleanup_reports_omitted_or_unreadable_marker_discovery() {
+    fn scope_cleanup_keeps_unreadable_unrelated_environments_as_diagnostics() {
         let omitted = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: Vec::new(),
@@ -1801,12 +1815,36 @@ mod tests {
             },
             true,
         );
-        assert!(!unreadable.complete);
+        assert!(unreadable.complete);
         assert!(unreadable.forced);
+        assert_eq!(unreadable.detail, None);
         assert!(unreadable
+            .diagnostic
+            .as_deref()
+            .is_some_and(|detail| detail.contains("unrelated /proc environment entries")));
+    }
+
+    #[test]
+    fn scope_cleanup_fails_closed_for_confirmed_run_owned_survivors() {
+        let cleanup = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: vec![43],
+                unreadable_environments: 1,
+            },
+            true,
+        );
+
+        assert!(!cleanup.complete);
+        assert!(cleanup.forced);
+        assert!(cleanup
             .detail
             .as_deref()
-            .is_some_and(|detail| detail.contains("could not be read")));
+            .is_some_and(|detail| detail.contains("run-owned survivors: 43")));
+        assert!(cleanup.diagnostic.is_some());
     }
 
     #[test]
