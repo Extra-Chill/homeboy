@@ -34,7 +34,7 @@ contracts + primitives
         ^
 homeboy-core (generic execution, persistence, extension dispatch)
         ^
-capability crates (agent task, runner, audit, fuzz, release, ...)
+capability crates (`homeboy-agents`, runner, audit, fuzz, release, ...)
         ^
 homeboy-cli command composition + installed extension commands
         ^
@@ -105,7 +105,7 @@ workflows succeeded, but do not report a capability-isolated build delta.
 
 | Capability | Decision | Boundary and compatibility evidence |
 | --- | --- | --- |
-| Agent Task | Retain kernel service and contract; keep controller capability above it | extensions consume `homeboy/agent-task-*/v1` schemas in `homeboy-extensions/agent-runtimes/fixtures/homeboy-agent-task-core-contract.json:1-84`; no shell-only replacement is acceptable |
+| Agent Task | Retain generic contracts and dispatch/lifecycle ports in core; keep `homeboy-agents` controller and capability implementation above core | extensions consume `homeboy/agent-task-*/v1` schemas in `homeboy-extensions/agent-runtimes/fixtures/homeboy-agent-task-core-contract.json:1-84`; no shell-only replacement is acceptable |
 | Lab Runner | Retain placement, job handoff, and evidence ports; runner implementation remains a capability | CLI route and runner commands use `homeboy-lab-runner-contract` (`commands/infra/route.rs:653-3326`); runner adapters already register through seams at `cli_runtime.rs:210-227` |
 | Audit / Refactor | Extract adapters and language/domain implementations outward | core directly imports Audit; its provider registrations are explicit at `cli_runtime.rs:170-209`; existing [#2240](https://github.com/Extra-Chill/homeboy/issues/2240) and [#6855](https://github.com/Extra-Chill/homeboy/issues/6855) track ecosystem removal |
 | Rig | Retain generic materialization contract; no package extraction now | Runner, Lab, and agent-task consume rig data. `cli_runtime.rs:197-200` shows a provider seam, but a separate package would not reduce the default graph until CLI composition changes |
@@ -172,8 +172,8 @@ to a package-location move without rollback-compatible readers.
   [#8010](https://github.com/Extra-Chill/homeboy/issues/8010),
   [#8015](https://github.com/Extra-Chill/homeboy/issues/8015), and
   [#11143](https://github.com/Extra-Chill/homeboy/issues/11143).
-- New: descriptor-driven optional capability composition (to be filed from this
-  investigation before its summary is posted).
+- New: [#13141: Optionalize Fuzz, Issues/Triage, and Tunnel through
+  descriptor-driven CLI composition](https://github.com/Extra-Chill/homeboy/issues/13141).
 
 ## Residual Risks
 
