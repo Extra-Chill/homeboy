@@ -129,12 +129,13 @@ try {
 		wpCodeboxBin({
 			env: {
 				HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed'),
-				HOMEBOY_WP_CODEBOX_BIN: '/stale/env/wp-codebox',
+				HOMEBOY_WP_CODEBOX_BIN: '/configured/env/wp-codebox',
+				WP_CODEBOX_BIN: '/configured/legacy/wp-codebox',
 			},
-			settings: { wp_codebox_bin: '/stale/settings/wp-codebox' },
+			settings: { wp_codebox_bin: '/configured/settings/wp-codebox' },
 			executable: '',
 		}),
-		managedCli
+		'/configured/env/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, runtime_bin: '/fresh/runtime/wp-codebox', executable: '' }),

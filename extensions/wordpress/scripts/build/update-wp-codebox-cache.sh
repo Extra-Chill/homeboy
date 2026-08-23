@@ -137,7 +137,10 @@ echo "Building WP Codebox packages..."
 "$NPM_BIN" --prefix "$CACHE_DIR" run build || fail "npm run build failed in $CACHE_DIR"
 
 SHA="$(git -C "$CACHE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
-printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CACHE_DIR/.homeboy-runtime-identity.json"
+CLI="$CACHE_DIR/packages/cli/dist/index.js"
+[ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
+CLI_SHA256="$(shasum -a 256 "$CLI" | awk '{print $1}')" || fail "failed to hash built WP Codebox CLI"
+printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CACHE_DIR/.homeboy-runtime-identity.json"
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
 }

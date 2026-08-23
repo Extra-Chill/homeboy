@@ -423,10 +423,6 @@ EOF
     npm --prefix "${repo_dir}" ci --quiet --no-fund --no-audit --include=optional
     npm --prefix "${repo_dir}" run build --silent
 
-    # Bind the built CLI to this exact checkout and the public preview contract.
-    # Runner readiness verifies this record against git before it accepts cache.
-    printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"${source_sha}\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "${repo_dir}/.homeboy-runtime-identity.json"
-
     resolve_core_module_from_known_locations || {
         echo "Built WP Codebox source did not contain the @automattic/wp-codebox-core package entrypoint" >&2
         exit 1
@@ -438,6 +434,12 @@ EOF
         echo "Built WP Codebox source did not contain an executable CLI at ${source_bin_path}" >&2
         exit 1
     fi
+
+    # Bind the built CLI bytes and checkout revision to this managed cache.
+    # Runner readiness verifies both before it accepts the cache.
+    local cli_sha256
+    cli_sha256="$(shasum -a 256 "${source_bin_path}" | awk '{print $1}')"
+    printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"${source_sha}\",\"cli_sha256\":\"${cli_sha256}\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "${repo_dir}/.homeboy-runtime-identity.json"
 
     probe_wp_codebox_runtime "${source_bin_path}" || {
         echo "Built WP Codebox source CLI runtime is not ready" >&2

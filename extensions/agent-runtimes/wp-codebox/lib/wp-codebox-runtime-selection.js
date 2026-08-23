@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require('../wp-codebox.json');
@@ -131,9 +132,15 @@ function managedIdentityMatches(bin, options = {}) {
   } catch {
     return false;
   }
-  if (identity?.schema !== MANAGED_IDENTITY_SCHEMA || identity?.source_sha?.length !== 40 || !Array.isArray(identity.required_capabilities) || !identity.required_capabilities.includes(BROWSER_PREVIEW_SCHEMA)) return false;
+  if (identity?.schema !== MANAGED_IDENTITY_SCHEMA || !/^[0-9a-f]{40}$/i.test(identity?.source_sha || '') || !/^[0-9a-f]{64}$/i.test(identity?.cli_sha256 || '') || !Array.isArray(identity.required_capabilities) || !identity.required_capabilities.includes(BROWSER_PREVIEW_SCHEMA)) return false;
   const result = (options.spawnSync || spawnSync)('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: options.timeoutMs || 5_000 });
-  return result.status === 0 && result.stdout.trim() === identity.source_sha;
+  if (result.status !== 0 || result.stdout.trim() !== identity.source_sha) return false;
+  try {
+    const executable = (options.fs || fs).readFileSync(bin);
+    return crypto.createHash('sha256').update(executable).digest('hex') === identity.cli_sha256;
+  } catch {
+    return false;
+  }
 }
 
 function failure(selection, requiredVersion, version, reason, remediation) {

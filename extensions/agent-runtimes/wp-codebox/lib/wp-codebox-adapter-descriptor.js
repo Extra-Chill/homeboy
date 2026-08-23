@@ -44,23 +44,29 @@ function wpCodeboxBin(options = {}) {
   const descriptor = wpCodeboxCliDescriptor(options.descriptor || options.cliDescriptor || {});
   const env = options.env || process.env;
   const settings = options.settings || homeboySettings(env);
-  const packagedRuntimeCandidates = [
-    wpCodeboxBinFromRuntimeComponent(env),
-    managedWpCodeboxBin(env),
-  ];
   const explicitBinCandidates = [
+    options.bin,
     options.runtimeBin,
     options.runtime_bin,
     options.wpCodeboxBin,
     options.wp_codebox_bin,
   ];
-  return firstValue(
-    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : explicitBinCandidates),
-    options.bin,
-    ...(options.preferPackagedRuntime ? explicitBinCandidates : packagedRuntimeCandidates),
+  const configuredCandidates = [
+    ...explicitBinCandidates,
     ...descriptor.env.map((key) => env[key]),
-    ...descriptor.settings.map((key) => settings[key]),
     env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
+    ...descriptor.settings.map((key) => settings[key]),
+  ];
+  // A configured value is an exact pin. Managed and PATH-like defaults only
+  // participate when no caller configuration was supplied.
+  const packagedRuntimeCandidates = [
+    wpCodeboxBinFromRuntimeComponent(env),
+    managedWpCodeboxBin(env),
+  ];
+  return firstValue(
+    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : []),
+    ...configuredCandidates,
+    ...(options.preferPackagedRuntime ? [] : packagedRuntimeCandidates),
     options.executable === undefined ? descriptor.executable : options.executable,
   );
 }

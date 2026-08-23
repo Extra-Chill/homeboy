@@ -52,29 +52,23 @@ homeboy_wp_codebox_resolve_bin() {
     local candidate=""
     local candidates=()
 
-    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
-        bin=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
+    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
+        candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
     fi
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
-    fi
-
-    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
-        bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-    fi
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
-    fi
-    bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
+    if [ -n "${WP_CODEBOX_BIN:-}" ]; then
+        candidates+=("$WP_CODEBOX_BIN")
     fi
     if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
         candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
     fi
-    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
+    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
+        bin=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
+        [ -n "$bin" ] && candidates+=("$bin")
+        bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
+        [ -n "$bin" ] && candidates+=("$bin")
     fi
+    bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
+    [ -n "$bin" ] && candidates+=("$bin")
 
     # Explicit configuration is an operator pin. Without one, a managed source
     # checkout owns resolution; an incomplete checkout is repaired, never
@@ -300,20 +294,20 @@ homeboy_wp_codebox_publish_command() {
 
 # Resolve once and export the argv contract for child processes.
 #
-# An explicit override that is present wins outright. The general resolver
-# deliberately ranks the managed cache ahead of the environment so a stale
-# exported path cannot shadow a freshly built cache, but a caller that pins a
-# binary — a test fixture, or an operator pointing at a local build — means it.
-# An override pointing at something that is not there is skipped rather than
-# trusted, so a dangling pin still falls through to full resolution and its
-# diagnostics instead of reaching the runtime.
+# Explicit configuration is resolved by homeboy_wp_codebox_resolve_bin. Every
+# configured value is an exact pin: a dangling pin fails closed rather than
+# silently selecting a managed or PATH runtime.
 homeboy_wp_codebox_export_command() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local override
 
     for override in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}"; do
         [ -n "$override" ] || continue
-        homeboy_wp_codebox_bin_is_present "$override" || continue
+        if ! homeboy_wp_codebox_bin_is_present "$override"; then
+            echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${override}." >&2
+            echo "       Re-run the WordPress extension setup or correct the explicit binary setting." >&2
+            return 1
+        fi
         homeboy_wp_codebox_set_command "$override"
         homeboy_wp_codebox_publish_command
         return 0

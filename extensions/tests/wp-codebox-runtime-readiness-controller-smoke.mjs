@@ -18,6 +18,7 @@ try {
   fs.writeFileSync(path.join(overlayRoot, 'composer.json'), '{"name":"fixture/php-ai-client"}\n');
 
   const runner = path.join(tempRoot, 'runner.cjs');
+  const runtimePreflightBin = path.join(tempRoot, 'wp-codebox-preflight.cjs');
   const capture = path.join(tempRoot, 'runner-called.json');
   fs.writeFileSync(runner, `#!/usr/bin/env node
 'use strict';
@@ -25,6 +26,12 @@ require('node:fs').writeFileSync(${JSON.stringify(capture)}, 'called');
 process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
 `);
   fs.chmodSync(runner, 0o755);
+  fs.writeFileSync(runtimePreflightBin, `#!/usr/bin/env node
+if (process.argv.includes('--version')) process.stdout.write('0.21.0');
+else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }));
+else process.exit(1);
+`);
+  fs.chmodSync(runtimePreflightBin, 0o755);
 
   const request = {
     schema: 'homeboy/agent-task-request/v1',
@@ -59,6 +66,7 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
     env: {
       ...process.env,
       HOMEBOY_WP_CODEBOX_CORE_MODULE: coreModule,
+      HOMEBOY_WP_CODEBOX_BIN: runtimePreflightBin,
     },
   });
   assert.equal(configuredReadiness.status, 0, configuredReadiness.stderr);
@@ -73,6 +81,7 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
     env: {
       ...process.env,
       HOMEBOY_WP_CODEBOX_CORE_MODULE: coreModule,
+      HOMEBOY_WP_CODEBOX_BIN: runtimePreflightBin,
     },
   });
 
