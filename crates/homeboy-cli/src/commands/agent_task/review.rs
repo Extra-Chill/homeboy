@@ -3449,7 +3449,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_preflight_rejects_dirty_candidates_and_recovers_committed_candidates_idempotently() {
+    fn manual_preflight_rejects_dirty_and_unpushed_candidates_then_recovers_idempotently() {
         homeboy::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("fixture root");
             let remote = root.path().join("origin.git");
@@ -3556,6 +3556,50 @@ mod tests {
             );
             run_git(&checkout, &["add", "."]);
             run_git(&checkout, &["commit", "-m", "feature"]);
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-cli-unpushed-13053",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Unpushed manual preflight",
+                "--commit-message",
+                "fixture",
+                "--gate-result",
+                "fixture=passed",
+                "--changed-file",
+                "feature.txt",
+                "--targeted-check-run",
+                "cargo test fixture",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI unpushed preflight coverage",
+            ]);
+            assert!(
+                error
+                    .message
+                    .contains("recoverable manual preflight requires an already-pushed candidate"),
+                "unexpected error: {error:?}"
+            );
+            assert!(error
+                .message
+                .contains("push the candidate branch and rerun preflight"));
+            assert!(agent_task_lifecycle::status("manual-cli-unpushed-13053")
+                .expect("manual identity was reserved")
+                .metadata["manual_finalization_intent"]
+                .is_null());
             run_git(&checkout, &["push", "-u", "origin", "feature"]);
             run_git(
                 &checkout,
