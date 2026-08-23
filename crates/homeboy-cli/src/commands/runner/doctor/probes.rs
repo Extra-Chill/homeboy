@@ -1877,8 +1877,7 @@ fn browser_cache_candidates() -> Vec<PathBuf> {
             candidates.push(PathBuf::from(path));
         }
     }
-    if let Ok(home) = env::var("HOME") {
-        let home = PathBuf::from(home);
+    if let Ok(home) = homeboy::core::paths::home_root() {
         candidates.push(home.join("Library").join("Caches").join("ms-playwright"));
         candidates.push(home.join(".cache").join("ms-playwright"));
     }

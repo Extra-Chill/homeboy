@@ -106,7 +106,11 @@ pub fn set_home_root_override(path: Option<PathBuf>) {
 }
 
 /// Resolved home root: the process-local override when set, else `$HOME`.
-#[cfg(not(windows))]
+///
+/// Defined on every platform so [`home_root`] is, too. On Windows `HOME` is
+/// normally unset and this returns `Err`, which is exactly what the callers
+/// that used to read the variable directly already handled — the override is
+/// consulted first either way, so a hermetic test can still repoint them.
 fn resolved_home_root() -> Result<PathBuf> {
     let override_path = {
         let guard = home_root_override()
@@ -122,6 +126,28 @@ fn resolved_home_root() -> Result<PathBuf> {
             "HOME environment variable not set on Unix-like system".to_string(),
         )
     })
+}
+
+/// The user's home directory, honouring the process-local override.
+///
+/// Production code must call this instead of reading `HOME` directly.
+///
+/// `HomeGuard` repoints the home for a test by registering an override *and*
+/// calling `set_var("HOME", ..)`, the second only for subprocesses and for
+/// readers that had not been converted yet. `setenv` is not thread-safe: a
+/// concurrent `getenv` on another thread can observe the variable mid-write, so
+/// every direct `HOME` read in production is a reader racing that write. That
+/// race is in-process and is why the Cargo test runner is still pinned to one
+/// thread (`rust_cargo_test_threads`, #7505) — unlike the shard race, it does
+/// not clear by rooting stores on disk.
+///
+/// Reading through the override closes the race for that reader: the value is
+/// behind a `Mutex`, so a concurrent repoint is ordered rather than torn.
+///
+/// Subprocesses are unaffected and should keep inheriting or being handed an
+/// explicit environment; they read their own copy after `fork`.
+pub fn home_root() -> Result<PathBuf> {
+    resolved_home_root()
 }
 
 /// Set a process-local artifact root override.

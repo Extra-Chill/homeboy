@@ -214,8 +214,8 @@ fn validate_platform(platform: AppLauncherPlatform) -> Result<()> {
 fn default_install_dir(platform: AppLauncherPlatform) -> String {
     match platform {
         AppLauncherPlatform::Macos => DEFAULT_MACOS_INSTALL_DIR.to_string(),
-        AppLauncherPlatform::Linux => std::env::var("HOME")
-            .map(|home| format!("{home}/{DEFAULT_LINUX_INSTALL_DIR_SUFFIX}"))
+        AppLauncherPlatform::Linux => homeboy_paths::home_root()
+            .map(|home| format!("{}/{DEFAULT_LINUX_INSTALL_DIR_SUFFIX}", home.display()))
             .unwrap_or_else(|_| format!("~/{DEFAULT_LINUX_INSTALL_DIR_SUFFIX}")),
     }
 }

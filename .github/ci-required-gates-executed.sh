@@ -174,6 +174,13 @@ if read_run_jobs; then
             context: $context,
             state: (
               if ($matches | length) == 0 then "not-executed"
+              # The workflow can emit a skipped planning job with the same
+              # display context as its successful aggregate job. Accept that
+              # exact duplicate shape, but retain fail-closed handling for
+              # every other non-success conclusion.
+              elif ($matches | any(.conclusion == "success"))
+                and ($matches | all(.conclusion == "success" or .conclusion == "skipped"))
+                then "success"
               elif ($matches | any(.conclusion != "success"))
                 then ($matches | map(.conclusion // "in-progress") | unique | join(","))
               else "success"

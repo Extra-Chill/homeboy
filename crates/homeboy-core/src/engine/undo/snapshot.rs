@@ -370,8 +370,8 @@ fn snapshots_dir() -> PathBuf {
     }
     // Use $HOME/.cache/homeboy/snapshots (XDG default on Linux/macOS)
     // Falls back to /tmp if $HOME is not set (unlikely in practice)
-    let cache_base = std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".cache"))
+    let cache_base = crate::paths::home_root()
+        .map(|home| home.join(".cache"))
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     cache_base.join("homeboy").join("snapshots")
 }
