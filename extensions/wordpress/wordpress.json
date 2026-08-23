@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.36.1",
+  "version": "3.37.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -1484,6 +1484,13 @@
       "type": "array",
       "default": [],
       "description": "Declared local (unpublished) workspace package dependencies to build from source, pack, and install into the consumer as a self-contained built tarball before the consumer build runs. Installing a built tarball (not a file: symlink) lets peer dependencies such as React dedupe to the consumer's single copy. Each entry is an object: name (required package name), path (required source path relative to the component, may reference sibling repos), and optional package_dir (monorepo subpackage to pack), build (explicit build command run in path; defaults to install + run build script), and package_manager (npm|pnpm|yarn, auto-detected by default)."
+    },
+    {
+      "id": "release_provenance_command",
+      "label": "WordPress release provenance command",
+      "type": "string",
+      "default": "",
+      "description": "Optional component command run after the release ZIP is staged and before it is published. The command writes a JSON object to HOMEBOY_WORDPRESS_RELEASE_SIDECAR_PATH. It receives the bounded package root, source version/tag/commit, ZIP path, and output path through HOMEBOY_WORDPRESS_RELEASE_PACKAGE_ROOT, HOMEBOY_WORDPRESS_RELEASE_SOURCE_VERSION, HOMEBOY_WORDPRESS_RELEASE_SOURCE_TAG, HOMEBOY_WORDPRESS_RELEASE_SOURCE_COMMIT, HOMEBOY_WORDPRESS_RELEASE_ZIP_PATH, and HOMEBOY_WORDPRESS_RELEASE_OUTPUT_PATH. A failing command or missing sidecar aborts release; publish verifies and uploads the resulting sidecar with the ZIP."
     }
   ],
   "release_preflights": [

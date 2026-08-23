@@ -23,7 +23,11 @@ set -euo pipefail
 SH
 chmod +x "${BIN_DIR}/gh"
 
-printf 'zip fixture\n' > "${WORK_DIR}/build/demo-plugin.zip"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('${WORK_DIR}/build/demo-plugin.zip', 'w') as z:
+    z.writestr('demo-plugin/demo-plugin.php', '<?php\n/**\n * Plugin Name: Demo Plugin\n * Version: 1.2.3\n */')
+"
 
 git -C "${WORK_DIR}" init -q
 git -C "${WORK_DIR}" remote add origin git@github.enterprise.test:owner/demo-plugin.git

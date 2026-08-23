@@ -352,6 +352,35 @@ defaults, or mandatory Homeboy safety exclusions. Use component-root rsync
 patterns such as `/playground-runtime/` to exclude a root directory. Exclude
 patterns are strings and cannot traverse outside the component.
 
+### Release provenance preparation
+
+Components that need release-specific preparation or provenance can set
+`release_provenance_command` in their WordPress extension settings. The command
+runs after `release.package` stages the ZIP. It writes a JSON object to the
+provided sidecar path; a nonzero exit or missing/invalid sidecar aborts release.
+
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "release_provenance_command": "my-provenance-tool > \"$HOMEBOY_WORDPRESS_RELEASE_SIDECAR_PATH\""
+      }
+    }
+  }
+}
+```
+
+The command receives `HOMEBOY_WORDPRESS_RELEASE_PACKAGE_ROOT`, source
+`VERSION`, `TAG`, and `COMMIT`, plus `ZIP_PATH`, `OUTPUT_PATH`, and
+`SIDECAR_PATH` (all prefixed with `HOMEBOY_WORDPRESS_RELEASE_`). The package
+root and output paths are resolved inside the component checkout. The extension
+seals the sidecar with schema version `1`, the release source coordinates, and
+the ZIP SHA-256. `release.publish` requires those exact values from its release
+payload, uploads the sidecar before the ZIP, verifies both remote asset names,
+rolls back either named asset after a failed transaction, and emits ZIP and
+sidecar digests in its receipt.
+
 ### Local workspace dependency overrides
 
 A component can depend on a sibling workspace package that is intentionally not

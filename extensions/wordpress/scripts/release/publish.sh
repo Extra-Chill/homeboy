@@ -113,6 +113,31 @@ resolve_github_token() {
   fi
 }
 
+cleanup_provenance_assets() {
+  local zip_name="$1"
+  local sidecar_name="$2"
+  local cleanup_failed=0
+
+  for asset_name in "${zip_name}" "${sidecar_name}"; do
+    if ! gh release delete-asset "${TAG}" "${asset_name}" --yes --repo "${REPO_SLUG}" >&2; then
+      echo "Error: failed to remove partial release asset ${asset_name}" >&2
+      cleanup_failed=1
+    fi
+  done
+  return "${cleanup_failed}"
+}
+
+verify_provenance_assets() {
+  local zip_name="$1"
+  local sidecar_name="$2"
+  local assets=""
+
+  assets="$(gh release view "${TAG}" --repo "${REPO_SLUG}" --json assets)" || return 1
+  printf '%s' "${assets}" | jq -e --arg zip "${zip_name}" --arg sidecar "${sidecar_name}" '
+    [.assets[]?.name] | index($zip) != null and index($sidecar) != null
+  ' >/dev/null
+}
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "Error: gh CLI is required to upload release assets" >&2
   exit 1
@@ -183,6 +208,67 @@ if [[ ! -f "${ARTIFACT_PATH}" ]]; then
   exit 1
 fi
 
+# A component that opted into package provenance must publish its sealed
+# sidecar alongside the ZIP. Resolve an explicitly recovered sidecar first;
+# otherwise use the deterministic package output name.
+RELEASE_PROVENANCE_COMMAND=""
+if [[ -f "homeboy.json" ]]; then
+  RELEASE_PROVENANCE_COMMAND="$(jq -r '.extensions.wordpress.settings.release_provenance_command // empty' homeboy.json)"
+fi
+PROVENANCE_SIDECARS="$(echo "${PAYLOAD}" | jq -c '[.release.artifacts // [] | .[]? | select(type == "object" and (.type == "wordpress-provenance" or .artifact_type == "wordpress-provenance"))]')"
+PROVENANCE_SIDECAR_COUNT="$(echo "${PROVENANCE_SIDECARS}" | jq 'length')"
+if [[ "${PROVENANCE_SIDECAR_COUNT}" -gt 1 ]]; then
+  echo "Error: release payload contains multiple WordPress provenance sidecars" >&2
+  exit 1
+fi
+if [[ "${PROVENANCE_SIDECAR_COUNT}" -eq 1 ]]; then
+  if ! echo "${PROVENANCE_SIDECARS}" | jq -e '.[0].path | type == "string" and length > 0' >/dev/null; then
+    echo "Error: WordPress provenance sidecar path must be a non-empty string" >&2
+    exit 1
+  fi
+  SIDECAR_PATH="$(echo "${PROVENANCE_SIDECARS}" | jq -r '.[0].path')"
+elif [[ -n "${RELEASE_PROVENANCE_COMMAND}" ]]; then
+  SIDECAR_PATH="${ARTIFACT_PATH%.zip}.provenance.json"
+else
+  SIDECAR_PATH=""
+fi
+
+ZIP_SHA256=""
+SIDECAR_SHA256=""
+if [[ -n "${SIDECAR_PATH}" ]]; then
+  if [[ ! -f "${SIDECAR_PATH}" ]]; then
+    echo "Error: expected release provenance sidecar at ${SIDECAR_PATH}" >&2
+    exit 1
+  fi
+  ZIP_SHA256="$(shasum -a 256 "${ARTIFACT_PATH}")"
+  ZIP_SHA256="${ZIP_SHA256%% *}"
+  SOURCE_VERSION="$(echo "${PAYLOAD}" | jq -r '.release.version // empty')"
+  SOURCE_TAG="$(echo "${PAYLOAD}" | jq -r '.release.tag // empty')"
+  SOURCE_COMMIT="$(echo "${PAYLOAD}" | jq -r '.release.commit // .release.source_commit // .release.sha // empty')"
+  if [[ -z "${SOURCE_VERSION}" || -z "${SOURCE_TAG}" || -z "${SOURCE_COMMIT}" ]]; then
+    echo "Error: provenance publish requires release.version, release.tag, and release.commit" >&2
+    exit 1
+  fi
+  if ! jq -e \
+    --arg version "${SOURCE_VERSION}" \
+    --arg tag "${SOURCE_TAG}" \
+    --arg commit "${SOURCE_COMMIT}" \
+    --arg zip_sha256 "${ZIP_SHA256}" \
+    '
+      .homeboy_wordpress_release_provenance as $provenance
+      | ($provenance | type == "object")
+      and ($provenance.version == 1)
+      and ($provenance.source | (type == "object") and (.version == $version) and (.tag == $tag) and (.commit == $commit))
+      and ($provenance.zip | (type == "object") and (.path | type == "string") and (.sha256 == $zip_sha256))
+    ' "${SIDECAR_PATH}" >/dev/null; then
+    echo "Error: release provenance sidecar schema, source, or ZIP digest does not match release payload" >&2
+    exit 1
+  fi
+  SIDECAR_SHA256="$(shasum -a 256 "${SIDECAR_PATH}")"
+  SIDECAR_SHA256="${SIDECAR_SHA256%% *}"
+  echo "Verified ${SIDECAR_PATH} binds ${ARTIFACT_PATH}" >&2
+fi
+
 # Resolve the GitHub repository slug. Prefer the env var set by GitHub Actions;
 # fall back to parsing the origin remote so local dry-runs also work.
 GITHUB_HOST="${GH_HOST:-github.com}"
@@ -221,11 +307,40 @@ EXPECTED_VERSION="${TAG##*v}"
 bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
 echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
 
-echo "Uploading ${ARTIFACT_PATH} to ${REPO_SLUG} release ${TAG}..." >&2
+echo "Uploading ${ARTIFACT_PATH}${SIDECAR_PATH:+ and ${SIDECAR_PATH}} to ${REPO_SLUG} release ${TAG}..." >&2
 
-gh release upload "${TAG}" "${ARTIFACT_PATH}" \
-  --clobber \
-  --repo "${REPO_SLUG}" >&2
+if [[ -n "${SIDECAR_PATH}" ]]; then
+  ZIP_ASSET_NAME="$(basename "${ARTIFACT_PATH}")"
+  SIDECAR_ASSET_NAME="$(basename "${SIDECAR_PATH}")"
+  # The ZIP is last so a sidecar upload failure can never create a new
+  # unprovenanced ZIP. Any failed or unverifiable transaction removes both.
+  if ! gh release upload "${TAG}" "${SIDECAR_PATH}" --clobber --repo "${REPO_SLUG}" >&2; then
+    if cleanup_provenance_assets "${ZIP_ASSET_NAME}" "${SIDECAR_ASSET_NAME}"; then
+      echo "Error: provenance sidecar upload failed; partial assets were removed" >&2
+    else
+      echo "Error: provenance sidecar upload failed and rollback was incomplete" >&2
+    fi
+    exit 1
+  fi
+  if ! gh release upload "${TAG}" "${ARTIFACT_PATH}" --clobber --repo "${REPO_SLUG}" >&2; then
+    if cleanup_provenance_assets "${ZIP_ASSET_NAME}" "${SIDECAR_ASSET_NAME}"; then
+      echo "Error: release ZIP upload failed; partial assets were removed" >&2
+    else
+      echo "Error: release ZIP upload failed and rollback was incomplete" >&2
+    fi
+    exit 1
+  fi
+  if ! verify_provenance_assets "${ZIP_ASSET_NAME}" "${SIDECAR_ASSET_NAME}"; then
+    if cleanup_provenance_assets "${ZIP_ASSET_NAME}" "${SIDECAR_ASSET_NAME}"; then
+      echo "Error: provenance release assets could not be verified; partial assets were removed" >&2
+    else
+      echo "Error: provenance release assets could not be verified and rollback was incomplete" >&2
+    fi
+    exit 1
+  fi
+else
+  gh release upload "${TAG}" "${ARTIFACT_PATH}" --clobber --repo "${REPO_SLUG}" >&2
+fi
 
 echo "Uploaded ${ARTIFACT_PATH} to ${REPO_SLUG} release ${TAG}" >&2
 
@@ -318,6 +433,9 @@ jq -cn \
   --arg host "${GITHUB_HOST}" \
   --arg repo "${REPO_SLUG}" \
   --arg path "${ARTIFACT_PATH}" \
+  --arg sidecar_path "${SIDECAR_PATH}" \
+  --arg zip_sha256 "${ZIP_SHA256}" \
+  --arg sidecar_sha256 "${SIDECAR_SHA256}" \
   --arg branch "${PUSHED_BRANCH}" \
   '{
     target: "github-release-asset",
@@ -325,6 +443,7 @@ jq -cn \
     github_host: $host,
     repository: $repo,
     artifact_path: $path,
+    provenance: (if $sidecar_path == "" then null else {sidecar_path: $sidecar_path, zip_sha256: $zip_sha256, sidecar_sha256: $sidecar_sha256} end),
     release_latest_branch: (if $branch == "" then null else $branch end),
     success: true
   }'
