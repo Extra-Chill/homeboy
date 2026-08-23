@@ -8,6 +8,13 @@ use homeboy_core::api_jobs::{
 };
 use homeboy_core::test_support::with_isolated_home;
 
+/// The tests below drive the store-rooted lifecycle entry points. Resolving the
+/// store once here keeps the ambient lookup in a single place instead of at
+/// every call site, and lets the ambient wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 #[test]
 fn runner_exec_run_id_creates_generic_run_on_demand() {
     // #8447: `runner exec --run-id <new-id>` documents an explicit persisted
@@ -420,12 +427,20 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
             let snapshot = runner_snapshot(status);
             record_runner_exec_terminal_checkpoint(run_id, &snapshot)
                 .expect("terminal snapshot checkpoint persists before promotion");
-            record_runner_exec_artifact_refs(run_id, &[])
+            record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[])
                 .expect("empty declared promotion completes before terminal projection");
-            assert!(project_terminal_runner_exec_result(run_id, &snapshot)
-                .expect("terminal daemon result projects"));
-            assert!(!project_terminal_runner_exec_result(run_id, &snapshot)
-                .expect("duplicate terminal projection is ignored"));
+            assert!(project_terminal_runner_exec_result_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &snapshot
+            )
+            .expect("terminal daemon result projects"));
+            assert!(!project_terminal_runner_exec_result_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &snapshot
+            )
+            .expect("duplicate terminal projection is ignored"));
 
             let store =
                 homeboy_core::observation::ObservationStore::open_initialized().expect("store");
@@ -499,9 +514,14 @@ fn generic_runner_exec_preserves_submission_provenance_on_failure() {
         ));
         record_runner_exec_execution_record(run_id, &record)
             .expect("submission provenance persists");
-        record_runner_exec_artifact_refs(run_id, &[]).expect("complete artifact projection");
-        project_terminal_runner_exec_result(run_id, &runner_snapshot("failed"))
-            .expect("failed terminal result projects");
+        record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[])
+            .expect("complete artifact projection");
+        project_terminal_runner_exec_result_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &runner_snapshot("failed"),
+        )
+        .expect("failed terminal result projects");
 
         let run = homeboy_core::observation::ObservationStore::open_initialized()
             .expect("store")
@@ -555,7 +575,8 @@ fn terminal_runner_exec_projects_only_complete_valid_nested_run_references() {
             &["homeboy".to_string(), "bench".to_string()],
         )
         .expect("outer run");
-        record_runner_exec_artifact_refs(run_id, &[]).expect("complete artifact projection");
+        record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[])
+            .expect("complete artifact projection");
         let mut snapshot = runner_snapshot("succeeded");
         snapshot.events[0].data = Some(serde_json::json!({
             "stdout": serde_json::json!({
@@ -571,7 +592,8 @@ fn terminal_runner_exec_projects_only_complete_valid_nested_run_references() {
                 }] }
             }).to_string()
         }));
-        project_terminal_runner_exec_result(run_id, &snapshot).expect("project outer run");
+        project_terminal_runner_exec_result_in_store(&test_lifecycle_store(), run_id, &snapshot)
+            .expect("project outer run");
 
         let outer = store
             .get_run(run_id)
@@ -701,8 +723,12 @@ fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
         let mut stale = runner_snapshot("succeeded");
         stale.job.id =
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000124").expect("stale job id");
-        let error = project_terminal_runner_exec_result("runner-projection-stale", &stale)
-            .expect_err("delayed terminal snapshot is rejected");
+        let error = project_terminal_runner_exec_result_in_store(
+            &test_lifecycle_store(),
+            "runner-projection-stale",
+            &stale,
+        )
+        .expect_err("delayed terminal snapshot is rejected");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         let run = homeboy_core::observation::ObservationStore::open_initialized()
             .expect("store")
@@ -736,8 +762,12 @@ fn generic_runner_exec_accepts_exact_direct_job_projection_binding() {
             lifecycle: None,
         });
 
-        let error = project_terminal_runner_exec_result(run_id, &snapshot)
-            .expect_err("mismatched direct runner projection is rejected");
+        let error = project_terminal_runner_exec_result_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &snapshot,
+        )
+        .expect_err("mismatched direct runner projection is rejected");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
 
         snapshot
@@ -746,7 +776,7 @@ fn generic_runner_exec_accepts_exact_direct_job_projection_binding() {
             .as_mut()
             .expect("projection")
             .runner_id = "homeboy-lab".to_string();
-        project_terminal_runner_exec_result(run_id, &snapshot)
+        project_terminal_runner_exec_result_in_store(&test_lifecycle_store(), run_id, &snapshot)
             .expect("exact direct runner projection is accepted");
         let run = homeboy_core::observation::ObservationStore::open_initialized()
             .expect("store")
@@ -824,13 +854,22 @@ fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_sa
                     serde_json::json!({ "promoted_by": "runner.exec" }),
                 )
                 .expect("artifact retained before direct terminal projection");
-            record_runner_exec_artifact_refs(run_id, &[artifact]).expect("artifact refs");
-            assert!(
-                finish_runner_exec_direct(run_id, transport, exit_code).expect("direct terminal")
-            );
-            assert!(
-                !finish_runner_exec_direct(run_id, transport, exit_code).expect("restart replay")
-            );
+            record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[artifact])
+                .expect("artifact refs");
+            assert!(finish_runner_exec_direct_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                transport,
+                exit_code
+            )
+            .expect("direct terminal"));
+            assert!(!finish_runner_exec_direct_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                transport,
+                exit_code
+            )
+            .expect("restart replay"));
             let run = store.get_run(run_id).expect("read").expect("run");
             assert_eq!(run.status, expected_status);
             assert_eq!(
@@ -860,11 +899,23 @@ fn declaration_replay_uses_literal_path_and_tilde_keys() {
         )
         .expect("declarations");
         for declaration in declarations {
-            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
-                .expect("promotion checkpoint");
+            record_runner_exec_declaration_promotion_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                "artifact",
+                declaration,
+                &[],
+            )
+            .expect("promotion checkpoint");
             // A duplicate recovery writes the same key and must remain visible.
-            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
-                .expect("duplicate checkpoint");
+            record_runner_exec_declaration_promotion_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                "artifact",
+                declaration,
+                &[],
+            )
+            .expect("duplicate checkpoint");
         }
         let run = homeboy_core::observation::ObservationStore::open_initialized()
             .expect("store")

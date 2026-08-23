@@ -18,9 +18,10 @@ use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::super::daemon_http_get::daemon_get;
+#[cfg(test)]
+use super::super::evidence::{local_job_run_id, runner_exec_run_label};
 use super::super::evidence::{
-    local_job_run_id, mirror_daemon_evidence, mirror_daemon_job_progress, runner_exec_run_label,
-    terminalize_mirrored_daemon_job,
+    mirror_daemon_evidence, mirror_daemon_job_progress, terminalize_mirrored_daemon_job,
 };
 use super::super::resource_metrics::RunnerResourceMetrics;
 use super::super::{Runner, RunnerCapabilityPreflight, RunnerJob, RunnerKind};
@@ -2057,6 +2058,10 @@ pub(super) fn daemon_identity_transition(
     })
 }
 
+/// Only the handoff tests construct this error shape. It was already reachable
+/// from nothing but tests; deleting the ambient lifecycle wrappers this file
+/// sat beside is what made the compiler say so (#7505).
+#[cfg(test)]
 pub(super) fn lab_terminal_result_transport_error(
     runner: &Runner,
     cwd: &str,

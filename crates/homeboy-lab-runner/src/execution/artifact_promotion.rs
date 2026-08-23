@@ -264,21 +264,7 @@ fn record_runner_exec_directory_child(
     store.record_artifact_with_id(run_id, &kind, path, artifact_id, metadata)
 }
 
-/// Promote declared summary outputs into observation-store artifacts.
-pub fn promote_runner_exec_summaries(
-    run_id: &str,
-    output: &RunnerExecOutput,
-    summary_outputs: &[String],
-) -> homeboy_core::Result<Vec<ArtifactRecord>> {
-    promote_runner_exec_summaries_in_store(
-        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        output,
-        summary_outputs,
-    )
-}
-
-/// The store-rooted counterpart of [`promote_runner_exec_summaries`].
+/// Store-rooted promotion entry point.
 pub fn promote_runner_exec_summaries_in_store(
     lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
