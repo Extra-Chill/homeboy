@@ -7265,8 +7265,23 @@ fn materialize_pending_cook_workspace(
                 Err(ensure_error) if provider_ensure_timeout(&ensure_error) => {
                     // Ensure is a mutation and must never be retried after its
                     // result is unknown. It may still have created the exact
-                    // destination before timing out, so reconcile once through
-                    // the read-only resolve contract.
+                    // destination before timing out. Persist the provider that
+                    // owned the lifecycle mutation before reconciling through
+                    // its read-only exact-identity contract.
+                    let Some(provider_id) = ensure_error
+                        .details
+                        .get("worktree_provider_id")
+                        .and_then(Value::as_str)
+                    else {
+                        return Err(ensure_error);
+                    };
+                    options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
+                        Value::String(provider_id.to_string());
+                    agent_task_lifecycle::persist_controller_plan_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        &options.initial_plan,
+                    )?;
                     match resolve(options) {
                         Ok(identity) => identity,
                         Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {

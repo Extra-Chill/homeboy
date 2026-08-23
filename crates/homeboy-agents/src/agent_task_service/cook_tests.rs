@@ -6432,6 +6432,152 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
 
 #[cfg(unix)]
 #[test]
+fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let ensured = provider_dir.path().join("ensured");
+        let competing_resolve = provider_dir.path().join("competing-resolve");
+        let owner = provider_dir.path().join("owner");
+        let competing = provider_dir.path().join("competing");
+        std::fs::write(
+            &owner,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nensure) touch '{}' && sleep 1 ;;\nesac\n",
+                ensured.display(),
+            ),
+        )
+        .expect("write owner provider");
+        std::fs::write(
+            &competing,
+            format!(
+                "#!/bin/sh\nif test -f '{}'; then touch '{}' && printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@owner-timeout\",\"path\":\"/unsafe-competing-destination\",\"branch\":\"owner-timeout\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\n",
+                ensured.display(),
+                competing_resolve.display(),
+            ),
+        )
+        .expect("write competing provider");
+        for provider in [&owner, &competing] {
+            let mut permissions = std::fs::metadata(provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(provider, permissions).expect("make provider executable");
+        }
+
+        let provider_config = |command: &std::path::Path, ensure: bool| {
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 100,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![command.display().to_string(), "resolve".to_string()]),
+                    ensure: ensure.then(|| {
+                        vec![
+                            command.display().to_string(),
+                            "ensure".to_string(),
+                            "{repo}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]
+                    }),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            }
+        };
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config
+            .worktree_providers
+            .insert("owner".to_string(), provider_config(&owner, true));
+        config
+            .worktree_providers
+            .insert("competing".to_string(), provider_config(&competing, false));
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+
+        let cook_id = "owner-timeout";
+        let run_id = "owner-timeout-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.to_worktree = "fixture@owner-timeout".to_string();
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": options.to_worktree,
+            "provision_intent": {
+                "repo": "fixture",
+                "base": "main",
+                "head": "owner-timeout",
+                "task_url": "https://example.test/issues/12825",
+            },
+            "lifecycle_intent": {
+                "purpose": "agent_task_cook",
+                "cleanup_policy": "remove_on_success",
+            },
+        });
+
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook reports the pinned provider timeout");
+        assert_eq!(result.value.status, "pre_execution_failure");
+        assert!(ensured.exists(), "owner ensure ran");
+        assert!(
+            !competing_resolve.exists(),
+            "post-timeout reconciliation must not query a competing provider"
+        );
+        let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
+            "ensure"
+        );
+        let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
+        assert_eq!(
+            plan.metadata["cook_provision"]["worktree_provider_id"],
+            "owner"
+        );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["provider_id"],
+            "owner"
+        );
+        assert_eq!(
+            plan.metadata["worktree_provider_resolve"]["retry_disposition"],
+            "fail_closed"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"]
+                ["provider_id"],
+            "owner"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"]
+                ["retry_disposition"],
+            "fail_closed"
+        );
+        assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn deferred_ensure_only_provider_fails_after_durable_cook_admission() {
     use std::os::unix::fs::PermissionsExt;
 
