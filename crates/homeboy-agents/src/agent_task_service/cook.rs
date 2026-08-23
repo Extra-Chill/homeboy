@@ -505,6 +505,9 @@ pub struct CookProgressEvent<'a> {
     /// This remains separate from `detail`, which is persisted as the Cook's
     /// status string for durable readers.
     pub terminal_success: Option<bool>,
+    /// Exact retry command from the durable result's legal actions. A failed
+    /// exit alone is not authority to advertise a retry.
+    pub terminal_retry_command: Option<&'a str>,
     /// What the provider is doing right now, when it is observable.
     pub activity: Option<&'a CookProviderActivity>,
 }
@@ -537,6 +540,7 @@ fn report_cook_progress(
         detail,
         None,
         None,
+        None,
     )
 }
 
@@ -550,6 +554,7 @@ fn report_cook_progress_with_activity(
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
     terminal_success: Option<bool>,
+    terminal_retry_command: Option<&str>,
 ) -> Result<()> {
     lifecycle_store.record_cook_progress_with_activity(
         run_id,
@@ -565,6 +570,7 @@ fn report_cook_progress_with_activity(
         attempt,
         detail,
         terminal_success,
+        terminal_retry_command,
         activity,
     };
     if let Some(observer) = observer {
@@ -4143,6 +4149,17 @@ fn run_cook_reported(
             Some(&result.value.status),
             None,
             (phase == "terminal").then_some(result.exit_code == 0),
+            (phase == "terminal")
+                .then(|| {
+                    result.value.failure_context.as_ref().and_then(|context| {
+                        context
+                            .legal_actions
+                            .iter()
+                            .find(|action| action.action == "retry")
+                            .map(|action| action.command.as_str())
+                    })
+                })
+                .flatten(),
         ) {
             return durable_cook_error_report_with_store(
                 store,
@@ -5185,6 +5202,7 @@ fn run_cook_spine(
                                             .unwrap_or("provider execution is still running"),
                                     ),
                                     (!activity.is_empty()).then_some(&activity),
+                                    None,
                                     None,
                                 );
                                 // Supervision evidence is written even when the
