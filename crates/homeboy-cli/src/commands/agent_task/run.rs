@@ -3561,11 +3561,16 @@ fn select_cook_repository_identity(
     candidates: &BTreeMap<String, CookRepositoryIdentity>,
 ) -> homeboy::core::Result<Option<CookRepositoryIdentity>> {
     let repository_name = normalize_repository_name(repository_name);
+    if let Some(candidate) = candidates
+        .values()
+        .find(|candidate| candidate.slug.eq_ignore_ascii_case(&repository_name))
+    {
+        return Ok(Some(candidate.clone()));
+    }
     let matches = candidates
         .values()
         .filter(|candidate| {
-            candidate.slug.eq_ignore_ascii_case(&repository_name)
-                || candidate.repository_name == repository_name
+            candidate.repository_name == repository_name
                 || candidate
                     .aliases
                     .iter()
