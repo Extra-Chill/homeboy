@@ -23,6 +23,13 @@ fn extension_runtime_home_keeps_homeboy_data_on_the_runner() {
 }
 
 #[test]
+fn runner_child_inherits_the_daemon_state_selector() {
+    assert!(
+        inherited_runner_process_env_keys().contains(&homeboy_core::paths::DAEMON_STATE_DIR_ENV)
+    );
+}
+
+#[test]
 fn explicit_job_data_directory_remains_authoritative() {
     let job_env = HashMap::from([
         ("HOME".to_string(), "/job/extension-home".to_string()),

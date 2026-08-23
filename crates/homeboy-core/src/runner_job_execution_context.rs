@@ -683,6 +683,9 @@ mod tests {
             let _job = EnvVarGuard::set(RUNNER_JOB_ID_ENV, job.id.to_string());
             let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, &reservation_id);
             let _context = EnvVarGuard::set(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV, context.id());
+            // Lab execution bundles redirect HOME for extension isolation. The
+            // daemon state selector must keep this child attached to its parent.
+            let _execution_home = EnvVarGuard::set("HOME", "/runner/job/home");
             let resolved =
                 RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id)
                     .expect("resolve accepted authority")

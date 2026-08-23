@@ -1407,7 +1407,16 @@ fn validated_runner_inherited_env(
 }
 
 pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
-    &["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP"]
+    &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+    ]
 }
 
 pub(super) fn command_output(
