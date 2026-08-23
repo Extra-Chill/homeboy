@@ -4220,13 +4220,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         // struct on, so foreground clients (TTY, machine log, `--output` file)
         // all describe a running provider with the same bounded sentence.
         let activity = event.activity_summary();
+        let terminal_outcome =
+            event
+                .terminal_success
+                .map(|succeeded| if succeeded { "succeeded" } else { "failed" });
         progress
             .map(|progress| {
                 progress(
                     event.phase,
                     Some(event.cook_id),
                     Some(event.run_id),
-                    activity.as_deref(),
+                    terminal_outcome.or(activity.as_deref()),
                 )
             })
             .unwrap_or(Ok(()))

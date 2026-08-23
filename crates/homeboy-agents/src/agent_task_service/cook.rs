@@ -500,6 +500,11 @@ pub struct CookProgressEvent<'a> {
     pub attempt: u32,
     /// Controller-owned description of the phase.
     pub detail: Option<&'a str>,
+    /// The terminal Cook result, when this is the terminal progress event.
+    ///
+    /// This remains separate from `detail`, which is persisted as the Cook's
+    /// status string for durable readers.
+    pub terminal_success: Option<bool>,
     /// What the provider is doing right now, when it is observable.
     pub activity: Option<&'a CookProviderActivity>,
 }
@@ -531,6 +536,7 @@ fn report_cook_progress(
         attempt,
         detail,
         None,
+        None,
     )
 }
 
@@ -543,6 +549,7 @@ fn report_cook_progress_with_activity(
     attempt: u32,
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
+    terminal_success: Option<bool>,
 ) -> Result<()> {
     lifecycle_store.record_cook_progress_with_activity(
         run_id,
@@ -557,6 +564,7 @@ fn report_cook_progress_with_activity(
         run_id,
         attempt,
         detail,
+        terminal_success,
         activity,
     };
     if let Some(observer) = observer {
@@ -4088,7 +4096,7 @@ fn run_cook_reported(
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
         let phase = result.value.disposition.phase();
-        if let Err(error) = report_cook_progress(
+        if let Err(error) = report_cook_progress_with_activity(
             lifecycle_store,
             durable_observer,
             &result.value.cook_id,
@@ -4096,6 +4104,8 @@ fn run_cook_reported(
             phase,
             attempt,
             Some(&result.value.status),
+            None,
+            (phase == "terminal").then_some(result.exit_code == 0),
         ) {
             return durable_cook_error_report_with_store(
                 store,
@@ -5096,6 +5106,7 @@ fn run_cook_spine(
                                             .unwrap_or("provider execution is still running"),
                                     ),
                                     (!activity.is_empty()).then_some(&activity),
+                                    None,
                                 );
                                 // Supervision evidence is written even when the
                                 // policy is undeclared: the resource timeline is

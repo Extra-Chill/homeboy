@@ -14672,6 +14672,7 @@ fn cook_observer_failures_write_only_to_the_explicit_lifecycle_store() {
         1,
         None,
         None,
+        None,
     )
     .expect("observer failure remains non-authoritative");
 
@@ -17801,6 +17802,7 @@ fn a_progress_event_carries_provider_activity_to_the_observer() {
         run_id: "cook-1-attempt-1",
         attempt: 1,
         detail: Some("provider execution is still running"),
+        terminal_success: None,
         activity: Some(&activity),
     };
 
@@ -17821,6 +17823,7 @@ fn a_progress_event_without_a_sample_renders_no_activity() {
         run_id: "cook-1-attempt-1",
         attempt: 1,
         detail: None,
+        terminal_success: None,
         activity: None,
     };
 

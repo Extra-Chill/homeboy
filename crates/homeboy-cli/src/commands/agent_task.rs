@@ -104,6 +104,19 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     }
 }
 
+fn cook_terminal_progress_message(run_id: &str, outcome: Option<&str>) -> String {
+    let mut message = format!(
+        "Cook terminal: durable run `{run_id}`. Phase: terminal. Outcome: {}. Next: `homeboy agent-task status {run_id}`.",
+        outcome.unwrap_or("terminal")
+    );
+    if outcome == Some("failed") {
+        message.push_str(&format!(
+            " Diagnose: `homeboy agent-task diagnose {run_id} --full`. Retry: `homeboy agent-task retry {run_id} --run`."
+        ));
+    }
+    message
+}
+
 const MAX_MACHINE_PROGRESS_LINES: usize = 12;
 
 #[derive(Debug, Default)]
@@ -146,6 +159,14 @@ impl CookProgressReporter {
             return;
         }
         if crate::commands::utils::tty::is_stdout_tty() {
+            if phase == "terminal" {
+                if let Some(run_id) = run_id {
+                    crate::commands::utils::tty::status(&cook_terminal_progress_message(
+                        run_id, activity,
+                    ));
+                    return;
+                }
+            }
             crate::commands::utils::tty::status(&format!(
                 "cook: {phase}{}{}",
                 run_id
@@ -214,7 +235,9 @@ fn next_machine_progress_message(
         ));
     }
     state.heartbeat_count = 0;
-    let message = if !state.pointer_emitted && run_id.is_some() {
+    let message = if terminal {
+        run_id.map(|run_id| cook_terminal_progress_message(run_id, activity))?
+    } else if !state.pointer_emitted && run_id.is_some() {
         state.pointer_emitted = true;
         cook_progress_message(phase, cook_id, run_id)
     } else if state.last_phase.as_deref() != Some(phase) {
@@ -506,8 +529,10 @@ mod progress_tests {
         )
         .expect("terminal outcome remains visible");
 
-        assert!(terminal.contains("Cook terminal: durable run `run-123`"));
-        assert!(terminal.contains("homeboy agent-task status run-123"));
+        assert_eq!(
+            terminal,
+            "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: failed. Next: `homeboy agent-task status run-123`. Diagnose: `homeboy agent-task diagnose run-123 --full`. Retry: `homeboy agent-task retry run-123 --run`."
+        );
         assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
         assert!(next_machine_progress_message(
             &mut state,
@@ -541,6 +566,24 @@ mod progress_tests {
         )
         .is_none());
         assert_eq!(state.emitted_lines, 1);
+    }
+
+    #[test]
+    fn terminal_machine_progress_names_a_successful_outcome() {
+        let mut state = CookProgressState::default();
+        let terminal = next_machine_progress_message(
+            &mut state,
+            "terminal",
+            None,
+            Some("run-123"),
+            Some("succeeded"),
+        )
+        .expect("terminal outcome remains visible");
+
+        assert_eq!(
+            terminal,
+            "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: succeeded. Next: `homeboy agent-task status run-123`."
+        );
     }
 }
 
