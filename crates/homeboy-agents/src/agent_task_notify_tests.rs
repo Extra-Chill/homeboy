@@ -8,6 +8,14 @@
 use super::*;
 use crate::agent_task_service::{AgentTaskCookFailureContext, AgentTaskCookRecoveryAction};
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
+
 fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCookReport {
     AgentTaskCookReport {
         schema: "homeboy/agent-task-cook/v1",
@@ -258,8 +266,12 @@ fn terminal_delivery_records_success_and_confirms_the_once_marker() {
         assert_eq!(delivery["transport"], "test.cook");
         assert_eq!(delivery["route_classification"], "default");
         assert!(
-            !crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
-                .unwrap()
+            !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-abc",
+                "test"
+            )
+            .unwrap()
         );
     });
 }
@@ -272,10 +284,18 @@ fn non_delivery_is_recorded_and_leaves_terminal_delivery_eligible() {
         assert_eq!(delivery["status"], "not_configured");
         assert_eq!(delivery["error_class"], "not_configured");
         assert!(
-            crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
-                .unwrap()
+            crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-abc",
+                "test"
+            )
+            .unwrap()
         );
-        crate::agent_task_lifecycle::release_cook_terminal_notification_claim("cook-abc").unwrap();
+        crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
+            &test_lifecycle_store(),
+            "cook-abc",
+        )
+        .unwrap();
     });
 }
 
@@ -325,8 +345,12 @@ fn rejected_before_attempt_records_safe_context_and_remains_resendable() {
         assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
         assert_eq!(homeboy_core::notify_outbox::dead_letter_entries().len(), 1);
         assert!(
-            crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
-                .unwrap()
+            crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-abc",
+                "test"
+            )
+            .unwrap()
         );
     });
 }
@@ -372,8 +396,12 @@ fn a_queued_terminal_event_consumes_its_once_claim() {
         set_default_transport("test.hold");
         cook_terminal(&report("succeeded", None), None, 0);
         assert!(
-            !crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
-                .unwrap(),
+            !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-abc",
+                "test"
+            )
+            .unwrap(),
             "a queued terminal event must not stay re-claimable",
         );
     });
@@ -449,8 +477,12 @@ fn the_terminal_event_is_claimed_once_per_cook_not_once_per_attempt() {
     // so the claim has to be keyed the way the event is.
     homeboy_core::test_support::with_isolated_home(|_| {
         let claim = |cook_id: &str| {
-            crate::agent_task_lifecycle::claim_cook_terminal_notification(cook_id, "test")
-                .expect("claim")
+            crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                "test",
+            )
+            .expect("claim")
         };
 
         assert!(claim("cook-once"));
@@ -574,8 +606,12 @@ fn the_wave_terminal_event_is_claimed_once_per_wave() {
 
         assert_eq!(latest_delivery("fanout-once")["status"], "delivered");
         assert!(
-            !crate::agent_task_lifecycle::claim_cook_terminal_notification("fanout-once", "test")
-                .unwrap()
+            !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "fanout-once",
+                "test"
+            )
+            .unwrap()
         );
     });
 }

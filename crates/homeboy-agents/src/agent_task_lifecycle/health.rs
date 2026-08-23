@@ -104,12 +104,7 @@ pub(crate) fn record_health_item(
     }
 }
 
-pub fn record_health_summary() -> Result<AgentTaskRecordHealthSummary> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_health_summary_in_store(&lifecycle_store)
-}
-
-/// [`record_health_summary`] against explicitly injected durable lifecycle
+/// `record_health_summary` against explicitly injected durable lifecycle
 /// roots.
 ///
 /// This one really is a read — the summary is the health half of the bounded

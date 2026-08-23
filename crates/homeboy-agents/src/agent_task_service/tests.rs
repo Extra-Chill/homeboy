@@ -24,6 +24,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
+
 #[test]
 fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -2667,7 +2675,8 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
 
         let repaired = agent_task_lifecycle::reconcile_record_health(false).expect("apply repair");
         assert_eq!(repaired.quarantined, 1);
-        let health = agent_task_lifecycle::record_health_summary().expect("quarantine health");
+        let health = agent_task_lifecycle::record_health_summary_in_store(&test_lifecycle_store())
+            .expect("quarantine health");
         assert_eq!(health.fixture, 1);
         assert_eq!(health.quarantined, 1);
     });
@@ -2739,7 +2748,7 @@ fn verified_target_bootstrap_recovers_only_fixture_residue_and_keeps_live_or_unk
                 && blocker.recovery_command == "homeboy runner reconcile unknown-runner"
         }));
         assert_eq!(
-            agent_task_lifecycle::record_health_summary()
+            agent_task_lifecycle::record_health_summary_in_store(&test_lifecycle_store(),)
                 .expect("health")
                 .quarantined,
             1

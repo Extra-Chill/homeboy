@@ -18,6 +18,13 @@ use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
     store
         .submit_plan_with_runtime_admission(&test_plan(), cook_id, |_| Ok(json!({})))
@@ -4584,7 +4591,9 @@ fn record_health_recovers_after_interrupted_migration_without_changing_terminal_
         store::fail_next_record_write_for_test();
         assert!(reconcile_record_health(false).is_err());
         assert_eq!(
-            record_health_summary().expect("still malformed").malformed,
+            record_health_summary_in_store(&test_lifecycle_store(),)
+                .expect("still malformed")
+                .malformed,
             1
         );
         let applied = reconcile_record_health(false).expect("retry migration");
