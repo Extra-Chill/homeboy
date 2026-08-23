@@ -8,10 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::fd::RawFd;
+use std::time::Duration;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
@@ -255,11 +252,20 @@ pub(crate) fn preview_cook(
 ) -> CmdResult<Value> {
     let mut progress = Vec::new();
     record_preview_phase(&mut progress, "prompt_input");
-    if args.dispatch.prompt.as_deref() == Some("-") {
+    if args.dispatch.prompt.as_deref().is_some_and(|prompt| {
+        prompt == "-"
+            || (prompt.starts_with('@')
+                && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(prompt).is_none())
+    }) {
         // Preview owns stdin exactly once. Capturing it before preflight keeps
         // every later validation and projection byte-for-byte aligned with live
         // Cook without allowing an open pipe to wait forever for EOF.
-        args.dispatch.prompt = Some(read_preview_stdin(PREVIEW_STDIN_TIMEOUT)?);
+        args.dispatch.prompt = Some(
+            homeboy::agents::agent_task_prompts::read_prompt_input_bounded(
+                args.dispatch.prompt.as_deref().expect("prompt source"),
+                PREVIEW_STDIN_TIMEOUT,
+            )?,
+        );
     }
     record_preview_phase(&mut progress, "input_validation");
     args.gates.snapshot_file_inputs()?;
@@ -417,92 +423,6 @@ fn record_preview_phase(progress: &mut Vec<Value>, phase: &'static str) {
     });
     eprintln!("{event}");
     progress.push(event);
-}
-
-fn preview_stdin_timeout_error(timeout: Duration) -> homeboy::core::Error {
-    let mut error = homeboy::core::Error::validation_invalid_argument(
-        "prompt",
-        "Cook preview stdin prompt did not reach EOF before its deadline",
-        Some("-".to_string()),
-        Some(vec![
-            "Use --prompt @file for an open-ended input stream, then rerun preview.".to_string(),
-        ]),
-    );
-    error.details["reason"] = serde_json::json!("preview_stdin_timeout");
-    error.details["preview_phase"] = serde_json::json!("prompt_input");
-    error.details["preview_timeout_ms"] = serde_json::json!(timeout.as_millis());
-    error
-}
-
-#[cfg(unix)]
-fn read_preview_stdin(timeout: Duration) -> homeboy::core::Result<String> {
-    use std::os::fd::AsRawFd;
-
-    read_preview_stdin_from_fd(std::io::stdin().as_raw_fd(), timeout)
-}
-
-#[cfg(not(unix))]
-fn read_preview_stdin(timeout: Duration) -> homeboy::core::Result<String> {
-    Err(preview_stdin_timeout_error(timeout))
-}
-
-#[cfg(unix)]
-fn read_preview_stdin_from_fd(fd: RawFd, timeout: Duration) -> homeboy::core::Result<String> {
-    let deadline = Instant::now() + timeout;
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(preview_stdin_timeout_error(timeout));
-        }
-        let mut descriptor = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let wait_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
-        if ready == 0 {
-            return Err(preview_stdin_timeout_error(timeout));
-        }
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("read preview stdin".to_string()),
-            ));
-        }
-        let read = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if read == 0 {
-            break;
-        }
-        if read < 0 {
-            let error = std::io::Error::last_os_error();
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-            ) {
-                continue;
-            }
-            return Err(homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("read preview stdin".to_string()),
-            ));
-        }
-        bytes.extend_from_slice(&chunk[..read as usize]);
-    }
-    String::from_utf8(bytes).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "prompt",
-            format!("stdin prompt is not valid UTF-8: {error}"),
-            Some("-".to_string()),
-            None,
-        )
-    })
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -1537,37 +1457,6 @@ mod preview_tests {
             policy["admission"]["deferred_to"],
             "execution_placement_admission"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preview_stdin_reads_exact_bytes_and_times_out_when_the_writer_stays_open() {
-        use std::os::fd::{AsRawFd, FromRawFd};
-
-        let mut closed = [-1; 2];
-        assert_eq!(unsafe { libc::pipe(closed.as_mut_ptr()) }, 0, "create pipe");
-        let mut writer = unsafe { std::fs::File::from_raw_fd(closed[1]) };
-        writer
-            .write_all(b"exact\nstdin bytes\n")
-            .expect("write stdin");
-        drop(writer);
-        let reader = unsafe { std::fs::File::from_raw_fd(closed[0]) };
-        assert_eq!(
-            read_preview_stdin_from_fd(reader.as_raw_fd(), Duration::from_secs(1))
-                .expect("closed stdin is read"),
-            "exact\nstdin bytes\n"
-        );
-
-        let mut open = [-1; 2];
-        assert_eq!(unsafe { libc::pipe(open.as_mut_ptr()) }, 0, "create pipe");
-        let _writer = unsafe { std::fs::File::from_raw_fd(open[1]) };
-        let reader = unsafe { std::fs::File::from_raw_fd(open[0]) };
-        let timeout = Duration::from_millis(20);
-        let error = read_preview_stdin_from_fd(reader.as_raw_fd(), timeout)
-            .expect_err("open stdin must not block preview");
-        assert_eq!(error.details["reason"], "preview_stdin_timeout");
-        assert_eq!(error.details["preview_phase"], "prompt_input");
-        assert_eq!(error.details["preview_timeout_ms"], 20);
     }
 
     #[test]

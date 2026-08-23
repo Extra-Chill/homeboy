@@ -2,11 +2,14 @@ use serde::Serialize;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use homeboy_core::{paths, Error, Result};
 
 pub const PROMPT_REF_PREFIX: &str = "prompt:";
+pub const MAX_PROMPT_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskPromptRecord {
@@ -216,6 +219,109 @@ pub fn read_prompt_input(spec: &str) -> Result<String> {
     Ok(spec.to_string())
 }
 
+/// Read an external prompt source for a read-only preview. The worker owns only
+/// a cloned path or stdin handle, so returning at the deadline cannot mutate
+/// controller state even if an underlying filesystem or pipe remains blocked.
+pub fn read_prompt_input_bounded(spec: &str, timeout: Duration) -> Result<String> {
+    if spec.trim() == "-" {
+        return read_bounded("stdin", timeout, || read_limited(std::io::stdin()));
+    }
+    if let Some(prompt) = resolve_stored_prompt_ref(spec)? {
+        return Ok(prompt);
+    }
+    let Some(path) = spec.strip_prefix('@') else {
+        return Ok(spec.to_string());
+    };
+    if path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "input",
+            "Invalid prompt input '@' (missing file path)",
+            None,
+            None,
+        ));
+    }
+    let path = PathBuf::from(path);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "prompt",
+            "preview prompt files must be regular files",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    if metadata.len() > MAX_PROMPT_INPUT_BYTES {
+        return Err(prompt_size_error(&path.display().to_string()));
+    }
+    let label = path.display().to_string();
+    read_bounded(&label, timeout, move || {
+        let file = fs::File::open(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        read_limited(file)
+    })
+}
+
+fn read_limited(mut reader: impl Read) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_PROMPT_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("read prompt input".to_string()))
+        })?;
+    if bytes.len() as u64 > MAX_PROMPT_INPUT_BYTES {
+        return Err(prompt_size_error("input"));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        Error::validation_invalid_argument(
+            "prompt",
+            format!("prompt input is not valid UTF-8: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
+fn read_bounded(
+    label: &str,
+    timeout: Duration,
+    operation: impl FnOnce() -> Result<String> + Send + 'static,
+) -> Result<String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
+    receiver.recv_timeout(timeout).map_err(|_| {
+        let mut error = Error::validation_invalid_argument(
+            "prompt",
+            "preview prompt input did not complete before its deadline",
+            Some(label.to_string()),
+            Some(vec![
+                "Use a closed stdin stream or a regular --prompt @file input for preview."
+                    .to_string(),
+            ]),
+        );
+        error.details["reason"] = serde_json::json!("preview_prompt_input_timeout");
+        error.details["preview_timeout_ms"] = serde_json::json!(timeout.as_millis());
+        error
+    })?
+}
+
+fn prompt_size_error(input: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "prompt",
+        format!("preview prompt input exceeds the {MAX_PROMPT_INPUT_BYTES}-byte limit"),
+        Some(input.to_string()),
+        None,
+    );
+    error.details["reason"] = serde_json::json!("preview_prompt_input_too_large");
+    error.details["max_bytes"] = serde_json::json!(MAX_PROMPT_INPUT_BYTES);
+    error
+}
+
 fn prompt_record_for_path(id: String, path: PathBuf) -> Result<AgentTaskPromptRecord> {
     let metadata = fs::metadata(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
@@ -235,6 +341,62 @@ fn prompt_record_for_path(id: String, path: PathBuf) -> Result<AgentTaskPromptRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_prompt_file_retains_exact_bytes_and_rejects_oversized_input() {
+        let file = tempfile::NamedTempFile::new().expect("prompt file");
+        fs::write(file.path(), "exact\nprompt bytes\n").expect("write prompt");
+        assert_eq!(
+            read_prompt_input_bounded(
+                &format!("@{}", file.path().display()),
+                Duration::from_secs(1)
+            )
+            .expect("read prompt"),
+            "exact\nprompt bytes\n"
+        );
+
+        let oversized = tempfile::NamedTempFile::new().expect("oversized prompt");
+        oversized
+            .as_file()
+            .set_len(MAX_PROMPT_INPUT_BYTES + 1)
+            .expect("create sparse oversized prompt");
+        let error = read_prompt_input_bounded(
+            &format!("@{}", oversized.path().display()),
+            Duration::from_secs(1),
+        )
+        .expect_err("oversized prompt is rejected before reading");
+        assert_eq!(error.details["reason"], "preview_prompt_input_too_large");
+        assert_eq!(error.details["max_bytes"], MAX_PROMPT_INPUT_BYTES);
+    }
+
+    #[test]
+    fn bounded_reader_has_a_portable_open_stdin_timeout_contract() {
+        let error = read_bounded("stdin", Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_secs(1));
+            Ok("late".to_string())
+        })
+        .expect_err("open stdin reader must time out");
+        assert_eq!(error.details["reason"], "preview_prompt_input_timeout");
+        assert_eq!(error.details["preview_timeout_ms"], 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_prompt_file_rejects_fifo_before_reading() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let fifo = temp.path().join("prompt.fifo");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo")
+            .success());
+        let error =
+            read_prompt_input_bounded(&format!("@{}", fifo.display()), Duration::from_millis(10))
+                .expect_err("FIFO must not block preview");
+        assert_eq!(error.details["field"], "prompt");
+    }
 
     #[test]
     fn stores_markdown_prompts_under_configured_data_root() {
