@@ -3,14 +3,19 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const {
   WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 } = require('./codebox-run-agent-task-contract');
 const {
-  WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
+	WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
 } = require('./wp-codebox-adapter-contract');
+const {
+	preflightWpCodeboxCommand,
+	preflightWpCodeboxRuntime,
+	probeWpCodeboxRuntimeDescriptor,
+	wpCodeboxCommand: runtimeWpCodeboxCommand,
+} = require('./wp-codebox-runtime-selection');
 
 const WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA = 'wp-codebox/cli-descriptor/v1';
 const WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS = ['source', 'path', 'bundle_path', 'bundlePath'];
@@ -164,22 +169,12 @@ function wpCodeboxSupportsRunAgentTaskCommand(options = {}) {
 
 function wpCodeboxRuntimeDescriptor(options = {}) {
 	const env = options.env || process.env;
-	const bin = firstValue(options.bin, options.wpCodeboxBin, options.wp_codebox_bin, wpCodeboxBin({ ...options, env }));
-	if (!bin) {
-		return null;
-	}
-	const resolved = wpCodeboxResolveCommand(bin, ['runtime', 'descriptor', '--json']);
-	const spawn = options.spawnSync || spawnSync;
-	const result = spawn(resolved.command, resolved.args, {
-		encoding: 'utf8',
-		env,
-		maxBuffer: 1024 * 1024,
-		timeout: options.timeoutMs || options.timeout_ms || 5000,
-	});
-	if (result.error || result.status !== 0) {
-		return null;
-	}
-	return parseRuntimeDescriptorJson(result.stdout);
+	const runtime = preflightWpCodeboxRuntime({ ...options, env });
+	if (!runtime.ready) return null;
+	const invocation = runtimeWpCodeboxCommand(runtime.selected.path);
+	const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env });
+	if (!command.ready) return null;
+	return probeWpCodeboxRuntimeDescriptor(invocation.command, { ...options, env }, invocation.args);
 }
 
 function parseRuntimeDescriptorJson(stdout) {

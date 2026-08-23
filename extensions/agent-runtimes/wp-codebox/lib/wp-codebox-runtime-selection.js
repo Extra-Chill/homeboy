@@ -78,7 +78,7 @@ function preflightWpCodeboxRuntime(options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure(selection, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
-  const descriptor = probeRuntimeDescriptor(selection.selected.path, options);
+	const descriptor = probeWpCodeboxRuntimeDescriptor(selection.selected.path, options);
   if (!browserPreviewReady(descriptor)) {
     return failure(selection, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
@@ -111,7 +111,7 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
-  if (!browserPreviewReady(probeRuntimeDescriptor(binary, options, args))) {
+	if (!browserPreviewReady(probeWpCodeboxRuntimeDescriptor(binary, options, args))) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
   if (managed && !managedIdentityMatches(managed, options)) {
@@ -169,7 +169,9 @@ function packagedWpCodeboxBin(env, options = {}) {
   return candidates.find((entry) => executableFile(entry, options)) || '';
 }
 
-function probeRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
+// This is deliberately a low-level probe. Higher-level descriptor consumers
+// must preflight their selected runtime and exact argv before calling it.
+function probeWpCodeboxRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
   const invocation = wpCodeboxCommand(bin);
   const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, ...prefixArgs, 'runtime', 'descriptor', '--json'], {
     encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
@@ -336,8 +338,9 @@ module.exports = {
   MANAGED_IDENTITY_SCHEMA,
   compareVersions,
   parseVersion,
-  preflightWpCodeboxCommand,
-  preflightWpCodeboxRuntime,
+	preflightWpCodeboxCommand,
+	preflightWpCodeboxRuntime,
+	probeWpCodeboxRuntimeDescriptor,
   selectWpCodeboxRuntime,
   wpCodeboxCommand,
 };

@@ -22,7 +22,9 @@ const { runtimeEnvFromHost } = require('../../../runtime-agent-ci/lib/full-run-c
 
 const runtimeRoot = path.join(__dirname, '..');
 const descriptorSource = fs.readFileSync(path.join(runtimeRoot, 'lib', 'wp-codebox-adapter-descriptor.js'), 'utf8');
-assert.match(descriptorSource, /runtime', 'descriptor', '--json/);
+assert.match(descriptorSource, /preflightWpCodeboxRuntime/);
+assert.match(descriptorSource, /preflightWpCodeboxCommand/);
+assert.match(descriptorSource, /probeWpCodeboxRuntimeDescriptor/);
 assert.doesNotMatch(descriptorSource, /run-agent-task', '--help/);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'wp-codebox.json'), 'utf8'));
@@ -71,14 +73,22 @@ assert.equal(runtimeDescriptorSupportsCommand({ commands: { 'run-agent-task': tr
 assert.equal(runtimeDescriptorSupportsCommand({ runtime: { tasks: ['run-agent-task'] } }, 'run-agent-task'), true);
 assert.equal(runtimeDescriptorSupportsCommand({ capabilities: ['wp-codebox/run-agent-task'] }, 'run-agent-task'), true);
 assert.equal(wpCodeboxSupportsRunAgentTaskCommand({
-	bin: '/tmp/wp-codebox',
+	bin: process.execPath,
 	env: {},
 	spawnSync(command, args) {
-		assert.equal(command, '/tmp/wp-codebox');
+		assert.equal(command, process.execPath);
+		if (args.includes('--version')) {
+			return { status: 0, stdout: '0.21.0' };
+		}
 		assert.deepEqual(args, ['runtime', 'descriptor', '--json']);
 		return {
 			status: 0,
-			stdout: JSON.stringify({ commands: [{ command: 'run-agent-task' }] }),
+			stdout: JSON.stringify({
+				schema: 'wp-codebox/runtime-descriptor/v1',
+				readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+				contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+				commands: [{ command: 'run-agent-task' }],
+			}),
 		};
 	},
 }), true);

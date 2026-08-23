@@ -76,6 +76,38 @@ try {
 	assert.equal(cliResult.status, 0);
 	assert.deepEqual(JSON.parse(fs.readFileSync(capture, 'utf8')).argv, ['run-fuzz-suite', '--help']);
 
+	const missingVersion = path.join(root, 'missing-version.cjs');
+	fs.writeFileSync(missingVersion, 'process.stdout.write("not-a-version");\n');
+	fs.chmodSync(missingVersion, 0o755);
+	assert.throws(
+		() => createCodeboxClient({ wp_codebox_bin: missingVersion, env: {} }).runPublicCliCommand(['run-fuzz-suite']),
+		/wp_codebox_version_probe_failed/
+	);
+
+	const missingDescriptor = path.join(root, 'missing-descriptor.cjs');
+	fs.writeFileSync(missingDescriptor, 'if (process.argv.includes("--version")) process.stdout.write("0.21.0");\n');
+	fs.chmodSync(missingDescriptor, 0o755);
+	assert.throws(
+		() => createCodeboxClient({ wp_codebox_bin: missingDescriptor, env: {} }).runPublicCliCommand(['run-fuzz-suite']),
+		/wp_codebox_browser_preview_capability_missing/
+	);
+
+	const managedInstall = path.join(root, 'managed');
+	const managedBin = path.join(managedInstall, 'source', 'packages', 'cli', 'dist', 'index.js');
+	fs.mkdirSync(path.dirname(managedBin), { recursive: true });
+	fs.writeFileSync(managedBin, fs.readFileSync(bin));
+	fs.mkdirSync(path.join(managedInstall, 'source', '.git'), { recursive: true });
+	fs.writeFileSync(path.join(managedInstall, 'source', '.homeboy-runtime-identity.json'), JSON.stringify({
+		schema: 'homeboy/wp-codebox-managed-runtime-identity/v1',
+		source_sha: '0000000000000000000000000000000000000000',
+		cli_sha256: '0'.repeat(64),
+		required_capabilities: ['wp-codebox/browser-contained-site-open/v1'],
+	}));
+	assert.throws(
+		() => createCodeboxClient({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall } }).runPublicCliCommand(['run-fuzz-suite']),
+		/wp_codebox_managed_source_identity_invalid/
+	);
+
 	const stalePath = path.join(root, 'stale-path');
 	const staleBin = path.join(stalePath, 'wp-codebox');
 	const staleMarker = path.join(root, 'stale-path-ran');

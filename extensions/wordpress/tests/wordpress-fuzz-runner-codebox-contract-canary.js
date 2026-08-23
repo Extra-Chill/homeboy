@@ -91,6 +91,18 @@ const fs = require('node:fs');
 
 const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
+if (process.argv.includes('--version')) {
+  process.stdout.write('0.21.0');
+  process.exit(0);
+}
+if (command === 'runtime' && process.argv[3] === 'descriptor' && process.argv.includes('--json')) {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+  }));
+  process.exit(0);
+}
 if (command === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includes('--format=json')) {
   process.stderr.write('production dispatch must not probe fuzz readiness');
   process.exit(2);
