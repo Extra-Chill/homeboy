@@ -1637,7 +1637,12 @@ mod tests {
         assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
         assert!(!output.success);
         assert!(output.timed_out);
-        assert!(output.stderr.contains("containment cleanup diagnostic"));
+        // The escapee unset HOMEBOY_PROCESS_SCOPE, so marker discovery is blind
+        // to it by construction. What it cannot hide is the stdout/stderr it
+        // inherited: the pipes stay open past teardown, and that is what fails
+        // this command. Asserting on a marker-discovery message instead would
+        // pass for the wrong reason, because a clean run produced the identical
+        // message (#13128).
         assert!(output.stderr.contains("output pipes remained open"));
         assert!(
             homeboy_core::process::pid_is_running(pid as u32),
@@ -1645,6 +1650,35 @@ mod tests {
         );
 
         unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_teardown_stays_silent_for_a_clean_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = execute_capability_script(
+            dir.path(),
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some("printf '{\"status\":\"passed\"}\\n'"),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_secs(5)),
+            },
+        )
+        .expect("script should run");
+
+        assert!(output.success);
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        // Every process this command owned has exited, which is precisely what
+        // containment teardown exists to achieve. An empty scope is success, so
+        // teardown has nothing to say. Before #13128 this path accused a clean
+        // run of leaking an escaped descendant on every invocation.
+        assert_eq!(output.stderr, "");
     }
 
     fn lint_execution_context() -> crate::ExtensionExecutionContext {
