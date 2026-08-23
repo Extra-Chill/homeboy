@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn ruleset() -> &'static str {
     include_str!("fixtures/required-gates-execution-policy.json")
@@ -37,9 +40,10 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Self {
+        let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "homeboy-required-gates-{}-{name}",
-            std::process::id()
+            "homeboy-required-gates-{}-{sequence}-{name}",
+            std::process::id(),
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch directory");
