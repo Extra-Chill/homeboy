@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
@@ -120,14 +121,61 @@ pub struct SharedPathState {
     pub created_at: String,
 }
 
-impl RigState {
+/// Storage for rig runtime state, bound to one Homeboy home.
+///
+/// `RigState::load`/`save` previously resolved the config root on every call,
+/// which made the resolution invisible at the call site and let a single rig run
+/// read state from one home and persist it into another. Every one of those
+/// call sites is a read-modify-write against the same file, so the root belongs
+/// on the store rather than on seventeen free functions (#7505).
+///
+/// Service logs live beneath the same per-rig state directory, so the store owns
+/// those paths too.
+#[derive(Debug, Clone)]
+pub struct RigStateStore {
+    config_root: PathBuf,
+}
+
+impl RigStateStore {
+    /// Bind the store to an already-resolved config root.
+    pub fn in_root(config_root: impl Into<PathBuf>) -> Self {
+        Self {
+            config_root: config_root.into(),
+        }
+    }
+
+    /// Bind the store to the config root of an already-resolved [`PathRoots`].
+    pub fn in_roots(roots: &paths::PathRoots) -> Self {
+        Self::in_root(roots.config())
+    }
+
+    /// The config root this store reads and writes beneath.
+    pub fn config_root(&self) -> &Path {
+        &self.config_root
+    }
+
+    /// Per-rig state directory (`<config_root>/rigs/{id}.state/`).
+    pub fn state_dir(&self, rig_id: &str) -> PathBuf {
+        paths::rig_state_dir_in_root(&self.config_root, rig_id)
+    }
+
+    /// Per-rig service log directory.
+    pub fn logs_dir(&self, rig_id: &str) -> PathBuf {
+        paths::rig_logs_dir_in_root(&self.config_root, rig_id)
+    }
+
+    /// Log file for one supervised service.
+    pub fn log_file(&self, rig_id: &str, service_id: &str) -> PathBuf {
+        self.logs_dir(rig_id).join(format!("{}.log", service_id))
+    }
+
     /// Load state for a rig, returning a default (empty) state if the file
     /// doesn't exist. Missing state is not an error — it just means the rig
     /// hasn't been brought up yet on this machine.
-    pub fn load(rig_id: &str) -> Result<Self> {
-        let path = paths::rig_state_file(rig_id)?;
+    pub fn load(&self, rig_id: &str) -> Result<RigState> {
+        let path = paths::rig_state_file_in_root(&self.config_root, rig_id);
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(RigState::default());
         }
         let content = fs::read_to_string(&path).map_err(|e| {
             Error::internal_unexpected(format!(
@@ -137,7 +185,7 @@ impl RigState {
             ))
         })?;
         if content.trim().is_empty() {
-            return Ok(Self::default());
+            return Ok(RigState::default());
         }
         serde_json::from_str(&content).map_err(|e| {
             Error::validation_invalid_json(
@@ -149,8 +197,8 @@ impl RigState {
     }
 
     /// Persist state to disk. Creates the state directory if needed.
-    pub fn save(&self, rig_id: &str) -> Result<()> {
-        let dir = paths::rig_state_dir(rig_id)?;
+    pub fn save(&self, rig_id: &str, state: &RigState) -> Result<()> {
+        let dir = self.state_dir(rig_id);
         fs::create_dir_all(&dir).map_err(|e| {
             Error::internal_unexpected(format!(
                 "Failed to create rig state dir {}: {}",
@@ -158,8 +206,8 @@ impl RigState {
                 e
             ))
         })?;
-        let path = paths::rig_state_file(rig_id)?;
-        let json = serde_json::to_string_pretty(self).map_err(|e| {
+        let path = paths::rig_state_file_in_root(&self.config_root, rig_id);
+        let json = serde_json::to_string_pretty(state).map_err(|e| {
             Error::internal_unexpected(format!("Failed to serialize rig state: {}", e))
         })?;
         fs::write(&path, json).map_err(|e| {
@@ -171,6 +219,17 @@ impl RigState {
         })?;
         Ok(())
     }
+}
+
+/// A [`RigStateStore`] bound to the isolated home a test installs.
+///
+/// A test is the entry point for its own unit of work, so resolving once here
+/// is a boundary resolution. What matters is that the production path beneath
+/// it resolves nothing (#7505). Lives here rather than in each test file so
+/// nested test modules can reach it by path.
+#[cfg(test)]
+pub(crate) fn test_state_store() -> RigStateStore {
+    RigStateStore::in_roots(&paths::PathRoots::from_environment().expect("path roots"))
 }
 
 /// RFC3339 timestamp for state fields.

@@ -9,7 +9,7 @@ use crate::spec::{
     DependencyMaterializationSafety, DependencyMaterializationStepSpec, PipelineStep,
     RigRequirementsSpec, RigResourcesSpec, RigSpec,
 };
-use crate::{RigSourceMetadata, RigState};
+use crate::RigSourceMetadata;
 use homeboy_core::observation::{ObservationStore, RunListFilter};
 use homeboy_core::paths;
 use homeboy_core::resource_lifecycle_index::{
@@ -399,7 +399,8 @@ fn test_observation_store_failure_does_not_fail_rig_check() {
 
         assert!(report.success);
         assert_eq!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state still writes")
                 .last_check_result
                 .as_deref(),

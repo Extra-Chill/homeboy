@@ -125,7 +125,8 @@ mod lifecycle {
                 },
             );
 
-            let pid = service::start(&rig, "svc").expect("start http-static service");
+            let pid = service::start(&crate::state::test_state_store(), &rig, "svc")
+                .expect("start http-static service");
             assert!(
                 wait_until(Duration::from_secs(5), || std::net::TcpStream::connect((
                     "127.0.0.1",
@@ -135,13 +136,15 @@ mod lifecycle {
                 "http-static listener should accept connections"
             );
             assert_eq!(
-                service::status(&rig.id, "svc").expect("status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "svc").expect("status"),
                 ServiceStatus::Running(pid)
             );
 
-            service::stop(&rig, "svc").expect("stop http-static service");
+            service::stop(&crate::state::test_state_store(), &rig, "svc")
+                .expect("stop http-static service");
             assert_eq!(
-                service::status(&rig.id, "svc").expect("status after stop"),
+                service::status(&crate::state::test_state_store(), &rig.id, "svc")
+                    .expect("status after stop"),
                 ServiceStatus::Stopped
             );
         });
@@ -166,15 +169,17 @@ mod lifecycle {
                 },
             );
 
-            let err = service::start(&rig, "svc").expect_err("external start rejected");
+            let err = service::start(&crate::state::test_state_store(), &rig, "svc")
+                .expect_err("external start rejected");
             assert!(
                 err.message.contains("adopted, not spawned"),
                 "unexpected error: {}",
                 err.message
             );
-            service::stop(&rig, "svc").expect("external stop with no match is idempotent");
+            service::stop(&crate::state::test_state_store(), &rig, "svc")
+                .expect("external stop with no match is idempotent");
             assert_eq!(
-                service::status(&rig.id, "svc").expect("status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "svc").expect("status"),
                 ServiceStatus::Stopped
             );
         });
@@ -244,16 +249,19 @@ mod lifecycle {
     fn test_command_service_start_status_stop_lifecycle() {
         with_isolated_home(|_home| {
             let rig = command_rig("service-lifecycle", "sleep 30", None);
-            let pid = service::start(&rig, "cmd").expect("start command service");
+            let pid = service::start(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("start command service");
 
             assert_eq!(
-                service::status(&rig.id, "cmd").expect("status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd").expect("status"),
                 ServiceStatus::Running(pid)
             );
 
-            service::stop(&rig, "cmd").expect("stop command service");
+            service::stop(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("stop command service");
             assert_eq!(
-                service::status(&rig.id, "cmd").expect("status after stop"),
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd")
+                    .expect("status after stop"),
                 ServiceStatus::Stopped
             );
         });
@@ -263,7 +271,8 @@ mod lifecycle {
     fn test_command_service_stop_kills_process_group_children() {
         with_isolated_home(|_home| {
             let rig = command_rig("service-process-group", "sleep 30 & wait", None);
-            let pid = service::start(&rig, "cmd").expect("start command service");
+            let pid = service::start(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("start command service");
             assert!(
                 wait_until(Duration::from_secs(2), || unsafe {
                     libc::kill(-(pid as libc::pid_t), 0) == 0
@@ -271,7 +280,8 @@ mod lifecycle {
                 "process group should exist after start"
             );
 
-            service::stop(&rig, "cmd").expect("stop command service");
+            service::stop(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("stop command service");
             assert!(
                 !wait_until(Duration::from_secs(2), || {
                     homeboy_core::process::process_group_is_running(pid as i32)
@@ -294,20 +304,25 @@ mod lifecycle {
                     status: "running".to_string(),
                 },
             );
-            state.save(&rig.id).expect("save stale state");
+            crate::state::test_state_store()
+                .save(&rig.id, &state)
+                .expect("save stale state");
 
             assert_eq!(
-                service::status(&rig.id, "cmd").expect("stale status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd")
+                    .expect("stale status"),
                 ServiceStatus::Stale(999_999)
             );
-            let pid = service::start(&rig, "cmd").expect("start replaces stale pid");
+            let pid = service::start(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("start replaces stale pid");
             assert_ne!(pid, 999_999);
             assert_eq!(
-                service::status(&rig.id, "cmd").expect("fresh status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd")
+                    .expect("fresh status"),
                 ServiceStatus::Running(pid)
             );
 
-            service::stop(&rig, "cmd").expect("cleanup");
+            service::stop(&crate::state::test_state_store(), &rig, "cmd").expect("cleanup");
         });
     }
 
@@ -320,8 +335,10 @@ mod lifecycle {
                 "printf supervisor-log-marker; sleep 30",
                 Some(tmp.path().to_string_lossy().into_owned()),
             );
-            let pid = service::start(&rig, "cmd").expect("start command service");
-            let log_path = service::log_path(&rig.id, "cmd").expect("log path");
+            let pid = service::start(&crate::state::test_state_store(), &rig, "cmd")
+                .expect("start command service");
+            let log_path = service::log_path(&crate::state::test_state_store(), &rig.id, "cmd")
+                .expect("log path");
             assert!(
                 wait_until(Duration::from_secs(2), || std::fs::read_to_string(
                     &log_path
@@ -333,10 +350,10 @@ mod lifecycle {
             );
 
             assert_eq!(
-                service::status(&rig.id, "cmd").expect("status"),
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd").expect("status"),
                 ServiceStatus::Running(pid)
             );
-            service::stop(&rig, "cmd").expect("cleanup");
+            service::stop(&crate::state::test_state_store(), &rig, "cmd").expect("cleanup");
         });
     }
 }

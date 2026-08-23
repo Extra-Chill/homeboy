@@ -120,7 +120,7 @@ pub use stack::{
 };
 pub use state::{
     ComponentSnapshot, LifecycleSnapshotState, MaterializedRigState, RigState, RigStateSnapshot,
-    ServiceState,
+    RigStateStore, ServiceState,
 };
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,
