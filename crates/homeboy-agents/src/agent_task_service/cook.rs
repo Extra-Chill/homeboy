@@ -898,62 +898,6 @@ pub(crate) type TestCookRecoverFn<'a> = Box<
         + 'a,
 >;
 
-#[cfg(test)]
-pub(crate) struct TestCookSideEffects<'a> {
-    finalize: TestCookFinalizeFn<'a>,
-    recover: TestCookRecoverFn<'a>,
-}
-
-#[cfg(test)]
-impl<'a> TestCookSideEffects<'a> {
-    pub(crate) fn new<F, R>(finalize: F, recover: R) -> Self
-    where
-        F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>
-            + 'a,
-        R: FnMut(
-                &AgentTaskCookServiceOptions,
-                &MovingBaseCookRecovery,
-            ) -> Result<AgentTaskPromotionReport>
-            + 'a,
-    {
-        Self {
-            finalize: Box::new(finalize),
-            recover: Box::new(recover),
-        }
-    }
-}
-
-#[cfg(test)]
-impl CookSideEffectService for TestCookSideEffects<'_> {
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &AgentTaskCookServiceOptions,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &AgentTaskCookServiceOptions,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        (self.recover)(options, recovery)
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &AgentTaskCookServiceOptions,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        (self.finalize)(options, run_id, promotion)
-    }
-}
-
 /// The promotion checkpoint captures this before gates run, when it is the only
 /// complete authorization for reusing the dirty managed destination.
 pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {

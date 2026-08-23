@@ -1496,25 +1496,6 @@ fn execution_deadline_outcome(
     )
 }
 
-#[cfg(test)]
-pub(super) fn run_provider_command(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-) -> AgentTaskOutcome {
-    let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id, 1)
-}
-
-#[cfg(test)]
-pub(super) fn run_provider_command_once(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-) -> AgentTaskOutcome {
-    let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider, None, 1)
-}
-
 fn spawn_output_reader<R>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,
