@@ -652,6 +652,30 @@ fn terminal_execution_verdict_does_not_require_its_own_in_progress_conclusion() 
 }
 
 #[test]
+fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("skipped-planning-duplicate");
+    let mut jobs: Vec<serde_json::Value> =
+        serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
+    jobs.push(serde_json::json!({
+        "name": "homeboy / Test",
+        "conclusion": "skipped",
+    }));
+    let jobs = scratch.write(
+        "jobs.json",
+        &serde_json::to_string(&jobs).expect("duplicate jobs"),
+    );
+
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+    assert!(
+        output.status.success(),
+        "a successful canonical Test context remains valid when its planning duplicate is skipped: {}\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+}
+
+#[test]
 fn github_mode_fails_closed_when_the_live_ruleset_has_bypass_actors() {
     let scratch = Scratch::new("github-bypassable");
     let rules = scratch.write("rules.json", &live_rules(&declared_contexts(), true));
