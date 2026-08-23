@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.0] - 2026-08-23
+
+### Added
+- attest release package provenance
+
+### Fixed
+- route declared standalone PHP tests
+
 ## [3.36.1] - 2026-08-23
 
 ### Fixed
