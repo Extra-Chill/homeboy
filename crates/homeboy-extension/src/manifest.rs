@@ -23,7 +23,8 @@ pub use super::manifest_config::{
 };
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 pub use homeboy_extension_contract::ci_config::{
-    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+    CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
+    CiJobSpec, CiLocalContext, CiProfileSpec,
 };
 pub use homeboy_extension_contract::fuzz_config::FuzzConfig;
 pub use homeboy_extension_contract::manifest_action_config::{
