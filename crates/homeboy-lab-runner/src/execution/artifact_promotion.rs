@@ -24,21 +24,7 @@ use homeboy_fuzz::{
     FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 
-/// Promote declared file outputs into observation-store artifacts.
-pub fn promote_runner_exec_artifacts(
-    run_id: &str,
-    output: &RunnerExecOutput,
-    artifact_outputs: &[String],
-) -> homeboy_core::Result<Vec<ArtifactRecord>> {
-    promote_runner_exec_artifacts_in_store(
-        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        output,
-        artifact_outputs,
-    )
-}
-
-/// The store-rooted counterpart of [`promote_runner_exec_artifacts`].
+/// The store-rooted counterpart of `promote_runner_exec_artifacts`.
 pub fn promote_runner_exec_artifacts_in_store(
     lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,

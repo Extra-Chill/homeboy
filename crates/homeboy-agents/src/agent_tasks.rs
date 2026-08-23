@@ -321,7 +321,7 @@ pub mod lifecycle {
         record_cook_force_with_lease_receipt_in_store, record_detached_cook_handoff_child,
         record_detached_cook_handoff_child_in_store, record_detached_cook_handoff_parent,
         record_detached_cook_handoff_parent_in_store, record_detached_cook_supervisor,
-        record_detached_cook_supervisor_in_store, record_detached_lab_run, record_health_summary,
+        record_detached_cook_supervisor_in_store, record_detached_lab_run,
         record_lab_offload_phase, record_lab_offload_planned,
         record_local_cook_retry_child_in_store, record_local_cook_retry_supervisor_in_store,
         record_manual_finalization_failure, record_manual_finalization_retry,

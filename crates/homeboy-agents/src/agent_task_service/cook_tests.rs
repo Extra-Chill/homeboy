@@ -4,15 +4,15 @@
 
 use super::super::cook_adoption::{
     adopt_cook_candidate, adopt_cook_candidate_with_dispatcher_and_backend,
-    candidate_adoption_source, concrete_adoption_ai_model, resolve_adoption_target,
+    candidate_adoption_source_in_store, concrete_adoption_ai_model, resolve_adoption_target,
     resolve_adoption_target_with_attempt_in_stores,
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
-    canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
-    cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
-    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
+    canonical_cook_patch_artifact_id_in_store, canonical_cook_recovery_run_id,
+    cook_finalization_options, cook_finalization_options_with_stores, cook_promotion_argv,
+    cook_report, finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
     finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
     mark_replacement_gate_execution_started, moving_base_recovery_for_run,
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
@@ -47,6 +47,13 @@ use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, LazyLock, Mutex};
+
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
 
 const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1001,7 +1008,12 @@ fn cook_selects_successful_rotated_patch_and_collapses_equivalent_aliases() {
         );
 
         assert_eq!(
-            canonical_cook_patch_artifact_id(&options, successful).unwrap(),
+            canonical_cook_patch_artifact_id_in_store(
+                &test_lifecycle_store(),
+                &options,
+                successful
+            )
+            .unwrap(),
             Some("patch".to_string())
         );
     });
@@ -1033,8 +1045,12 @@ fn cook_requires_selection_for_distinct_canonical_patches_before_promotion() {
                 ),
             ],
         );
-        let error = canonical_cook_patch_artifact_id(&options, &options.initial_run_id)
-            .expect_err("distinct candidates require a choice");
+        let error = canonical_cook_patch_artifact_id_in_store(
+            &test_lifecycle_store(),
+            &options,
+            &options.initial_run_id,
+        )
+        .expect_err("distinct candidates require a choice");
         assert_eq!(error.details["state"], "selection_required");
         assert_eq!(error.details["choices"].as_array().unwrap().len(), 2);
         assert!(error.details["choices"][0]["command"]
@@ -1076,8 +1092,12 @@ fn cook_selection_comparison_projects_three_distinct_candidates_from_patch_artif
             ],
         );
 
-        let error = canonical_cook_patch_artifact_id(&options, &options.initial_run_id)
-            .expect_err("distinct candidates require a choice");
+        let error = canonical_cook_patch_artifact_id_in_store(
+            &test_lifecycle_store(),
+            &options,
+            &options.initial_run_id,
+        )
+        .expect_err("distinct candidates require a choice");
         let choices = error.details["choices"]
             .as_array()
             .expect("comparison choices");
@@ -1166,8 +1186,12 @@ fn cook_selection_risks_use_files_beyond_the_preview_limit() {
                 ("late-risk", &temp.path().join("late-risk"), &late_security),
             ],
         );
-        let error =
-            canonical_cook_patch_artifact_id(&options, &options.initial_run_id).unwrap_err();
+        let error = canonical_cook_patch_artifact_id_in_store(
+            &test_lifecycle_store(),
+            &options,
+            &options.initial_run_id,
+        )
+        .unwrap_err();
         let candidate = error.details["choices"]
             .as_array()
             .unwrap()
@@ -1218,8 +1242,12 @@ fn cook_selection_candidate_evidence_does_not_bless_other_candidates() {
             ],
             Vec::new(),
         );
-        let error =
-            canonical_cook_patch_artifact_id(&options, &options.initial_run_id).unwrap_err();
+        let error = canonical_cook_patch_artifact_id_in_store(
+            &test_lifecycle_store(),
+            &options,
+            &options.initial_run_id,
+        )
+        .unwrap_err();
         let choices = error.details["choices"].as_array().unwrap();
         let a = choices
             .iter()
@@ -1282,8 +1310,12 @@ fn cook_selection_bounds_candidate_inventory_and_oversized_diagnostics() {
                 data: Value::Null,
             }],
         );
-        let error =
-            canonical_cook_patch_artifact_id(&options, &options.initial_run_id).unwrap_err();
+        let error = canonical_cook_patch_artifact_id_in_store(
+            &test_lifecycle_store(),
+            &options,
+            &options.initial_run_id,
+        )
+        .unwrap_err();
         assert_eq!(error.details["choices"].as_array().unwrap().len(), 16);
         assert_eq!(error.details["comparison"]["omitted_candidate_count"], 2);
         assert_eq!(
@@ -1392,7 +1424,8 @@ impl CookSideEffectService for CanonicalSelectionSideEffects {
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
         self.promotions.fetch_add(1, Ordering::SeqCst);
-        let artifact = canonical_cook_patch_artifact_id(options, run_id)?;
+        let artifact =
+            canonical_cook_patch_artifact_id_in_store(&test_lifecycle_store(), options, run_id)?;
         *self.selected_artifact.lock().unwrap() = artifact;
         Ok(promotion(run_id))
     }
@@ -4962,7 +4995,12 @@ impl CandidateAdoptionFixture {
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Failed
         );
-        assert!(candidate_adoption_source(&record, &self.options.initial_plan.tasks[0]).is_ok());
+        assert!(candidate_adoption_source_in_store(
+            &test_lifecycle_store(),
+            &record,
+            &self.options.initial_plan.tasks[0]
+        )
+        .is_ok());
     }
 
     fn append_adoptable_attempt(&mut self, attempt: u32) {
@@ -9805,7 +9843,8 @@ fn adoption_prefers_authenticated_preacceptance_recovery_over_failure_aggregate(
         assert!(record.aggregate_path.is_some());
 
         let (_source, source_path, recovery) =
-            candidate_adoption_source(&record, &plan.tasks[0]).expect("recovery source");
+            candidate_adoption_source_in_store(&test_lifecycle_store(), &record, &plan.tasks[0])
+                .expect("recovery source");
 
         assert!(source_path.is_none());
         assert_eq!(

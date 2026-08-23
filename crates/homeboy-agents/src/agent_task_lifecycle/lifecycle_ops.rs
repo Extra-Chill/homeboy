@@ -2906,24 +2906,6 @@ pub fn durable_notification_route(
     homeboy_core::notification_route::NotificationRoute::from_metadata(&record.metadata)
 }
 
-/// Claim the single terminal notification a Cook is allowed to deliver.
-///
-/// Returns `Ok(true)` for the caller that won the claim and `Ok(false)` for
-/// every later one, mirroring `ObservationStore::mark_notification_delivered`
-/// — same `{at, by}` marker, same only-if-absent semantics, same
-/// "the winner dispatches" contract. It differs only in its key: that marker
-/// is a column on one `runs` row, and a Cook spans many runs
-/// (`{cook_id}-attempt-{n}-{suffix}`), so a per-run marker cannot dedupe a
-/// per-cook event. Durable route rehydration (#11115) lets a second process
-/// reach the same cook's terminal boundary, so the cook needs its own claim.
-pub fn claim_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Result<bool> {
-    if cook_id.trim().is_empty() {
-        return Ok(false);
-    }
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    claim_cook_terminal_notification_in_store(&lifecycle_store, cook_id, delivered_by)
-}
-
 /// Claim a Cook's single terminal notification within an explicitly rooted
 /// store. The `O_EXCL` marker is created beside that store's own Cook index, so
 /// two stores are two independent claims and neither consumes the other's
@@ -2982,18 +2964,14 @@ pub fn confirm_cook_terminal_notification_in_store(
 
 /// Allow a later terminal observer to retry a notification that did not reach
 /// its transport. Notification delivery remains non-fatal to Cook execution.
-pub fn release_cook_terminal_notification_claim(cook_id: &str) -> Result<()> {
-    store::release_cook_notification_claim(cook_id)
-}
-
 /// Release a provisional terminal-notification claim inside an explicitly
 /// rooted store.
 ///
 /// This is the third step of the same exactly-once protocol as
 /// [`claim_cook_terminal_notification_in_store`] and
 /// [`confirm_cook_terminal_notification_in_store`], and it is the step that
-/// previously had no rooted form at all: the ambient shim above reaches
-/// `store::`, which resolves a root of its own. A claim taken in an injected
+/// previously had no rooted form at all. The ambient shim that used to sit
+/// above it reached `store::`, which resolved a root of its own: a claim taken in an injected
 /// store and released against the ambient one leaves the real claim standing
 /// until its lease expires, which is the duplicate-notification outcome the
 /// claim exists to prevent.
