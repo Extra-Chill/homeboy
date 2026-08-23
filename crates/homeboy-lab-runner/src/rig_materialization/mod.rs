@@ -130,8 +130,9 @@ fn remove_partial_lab_stack(runner: &super::Runner, destination: &str) {
 
 mod rig_source_install;
 use rig_source_install::{
-    remote_package_path, remove_runner_installed_rig_source, rig_install_capability_preflight,
-    rig_registry_env, runner_rig_install_command, validate_installed_rig_source,
+    remote_package_path, remove_runner_installed_rig_source, resolve_installed_rig_source,
+    rig_install_capability_preflight, rig_registry_env, runner_rig_install_command,
+    validate_installed_rig_source,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,11 +287,13 @@ pub(super) fn sync_lab_offload_rigs(
                         ]),
                     )
                 })?;
-                let source_root = metadata
-                    .source_root
-                    .clone()
-                    .unwrap_or_else(|| metadata.package_path.clone());
-                validate_installed_rig_source(rig_id, &source_root, &metadata.package_path)?;
+                let (source_root, package_path) = resolve_installed_rig_source(
+                    rig_id,
+                    metadata.source_root.as_deref(),
+                    &metadata.package_path,
+                    primary.local_path,
+                )?;
+                validate_installed_rig_source(rig_id, &source_root, &package_path)?;
                 let synced = sync_workspace(
                     runner_id,
                     RunnerWorkspaceSyncOptions {
@@ -306,7 +309,7 @@ pub(super) fn sync_lab_offload_rigs(
                 )?
                 .0;
                 let install_source =
-                    remote_package_path(&source_root, &metadata.package_path, &synced.remote_path);
+                    remote_package_path(&source_root, &package_path, &synced.remote_path);
                 let source_snapshot = homeboy_core::source_snapshot::collect_local(
                     runner_id,
                     Path::new(&synced.local_path),
@@ -316,7 +319,7 @@ pub(super) fn sync_lab_offload_rigs(
                 let package_source = LabOffloadRigPackageSource {
                     source: metadata.source,
                     source_root,
-                    package_path: metadata.package_path,
+                    package_path,
                     install_source: install_source.clone(),
                     rig_path: Some(metadata.rig_path),
                     discovery_path: metadata.discovery_path,

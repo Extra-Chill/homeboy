@@ -6,7 +6,7 @@
 //! the root stays under the structural item-count threshold (#5241).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::shell_quote::shell_arg;
 use homeboy_core::{Error, Result};
@@ -49,6 +49,142 @@ pub(super) fn remote_package_path(
             .to_string(),
         _ => remote_source_root.to_string(),
     }
+}
+
+/// Resolve installed local-source metadata before staging it for Lab.
+///
+/// Relative paths are meaningful only below the repository or worktree chosen
+/// for this dispatch. Absolute paths preserve the installed package behavior.
+pub(super) fn resolve_installed_rig_source(
+    rig_id: &str,
+    source_root: Option<&str>,
+    package_path: &str,
+    declared_source_root: &str,
+) -> Result<(String, String)> {
+    let source_root = source_root.unwrap_or(package_path);
+    let source_is_relative = Path::new(source_root).is_relative();
+    let package_is_relative = Path::new(package_path).is_relative();
+    let declared_root = if source_is_relative || package_is_relative {
+        Some(resolve_declared_source_root(rig_id, declared_source_root)?)
+    } else {
+        None
+    };
+
+    let source_root = if source_is_relative {
+        // Materialize the declared worktree so package dependencies and
+        // templates outside a nested rig directory remain available.
+        declared_root
+            .as_ref()
+            .expect("relative source requires declared root")
+            .clone()
+    } else {
+        canonical_source_path(rig_id, "source root", source_root, None)?
+    };
+    let source_root = source_directory(source_root);
+    let package_path = canonical_source_path(
+        rig_id,
+        "package path",
+        package_path,
+        declared_root.as_deref(),
+    )?;
+    let package_path = package_directory(rig_id, package_path)?;
+
+    if !package_path.starts_with(&source_root) {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its installed package path is outside the declared source root"
+            ),
+            Some(package_path.display().to_string()),
+            Some(vec![format!("declared source root: {}", source_root.display())]),
+        ));
+    }
+
+    Ok((
+        source_root.display().to_string(),
+        package_path.display().to_string(),
+    ))
+}
+
+fn source_directory(path: PathBuf) -> PathBuf {
+    if path.is_file() {
+        path.parent().expect("source file has parent").to_path_buf()
+    } else {
+        path
+    }
+}
+
+fn package_directory(rig_id: &str, path: PathBuf) -> Result<PathBuf> {
+    if !path.is_file() {
+        return Ok(path);
+    }
+    if path.file_name().is_none_or(|name| name != "rig.json") {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its installed package path is a file other than rig.json"
+            ),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(path.parent().expect("rig file has parent").to_path_buf())
+}
+
+fn resolve_declared_source_root(rig_id: &str, declared_source_root: &str) -> Result<PathBuf> {
+    if declared_source_root.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize relative rig source metadata for `{rig_id}` without a declared repository or worktree context"
+            ),
+            None,
+            Some(vec![
+                "Run the command from the source checkout or pass --path <source-worktree>.".to_string(),
+            ]),
+        ));
+    }
+    canonical_source_path(rig_id, "declared source root", declared_source_root, None)
+}
+
+fn canonical_source_path(
+    rig_id: &str,
+    label: &str,
+    path: &str,
+    relative_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let path = Path::new(path);
+    if path.is_relative()
+        && path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its relative {label} escapes the declared source root"
+            ),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let candidate = match relative_root {
+        Some(root) if path.is_relative() => root.join(path),
+        _ => path.to_path_buf(),
+    };
+    candidate.canonicalize().map_err(|error| {
+        Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its installed {label} does not exist"
+            ),
+            Some(candidate.display().to_string()),
+            Some(vec![error.to_string()]),
+        )
+    })
 }
 
 /// Run a runner-side `rig sources <args...>` command, returning its captured
@@ -337,5 +473,109 @@ mod tests {
         assert!(hints.contains("homeboy rig install"));
         assert!(hints.contains("--id woocommerce-performance --reinstall"));
         assert!(hints.contains("homeboy rig sources list"));
+    }
+
+    #[test]
+    fn relative_rig_source_resolves_from_declared_worktree_for_lab_materialization() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let rig_file = worktree.path().join("rigs/fixture-matrix/rig.json");
+        std::fs::create_dir_all(rig_file.parent().expect("rig parent")).expect("rig parent");
+        std::fs::write(&rig_file, "{}").expect("rig file");
+
+        let (source_root, package_path) = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/fixture-matrix/rig.json"),
+            "rigs/fixture-matrix/rig.json",
+            &worktree.path().display().to_string(),
+        )
+        .expect("relative source resolves from declared worktree");
+
+        assert_eq!(
+            source_root,
+            worktree
+                .path()
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            package_path,
+            rig_file
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            remote_package_path(&source_root, &package_path, "/runner/worktree"),
+            "/runner/worktree/rigs/fixture-matrix"
+        );
+    }
+
+    #[test]
+    fn relative_rig_source_requires_declared_worktree_context() {
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/fixture-matrix"),
+            "rigs/fixture-matrix",
+            "",
+        )
+        .expect_err("relative source without context rejects");
+
+        assert!(error
+            .message
+            .contains("declared repository or worktree context"));
+    }
+
+    #[test]
+    fn relative_rig_source_rejects_missing_package_file() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/fixture-matrix"),
+            "rigs/fixture-matrix/rig.json",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("missing package file rejects");
+
+        assert!(error.message.contains("package path does not exist"));
+    }
+
+    #[test]
+    fn relative_rig_source_rejects_worktree_traversal() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("../outside"),
+            "../outside",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("traversal rejects");
+
+        assert!(error.message.contains("escapes the declared source root"));
+    }
+
+    #[test]
+    fn absolute_local_rig_source_keeps_existing_package_boundary() {
+        let package = tempfile::tempdir().expect("package");
+        let rig_file = package.path().join("rig.json");
+        std::fs::write(&rig_file, "{}").expect("rig file");
+
+        let (source_root, package_path) = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some(&package.path().display().to_string()),
+            &rig_file.display().to_string(),
+            "",
+        )
+        .expect("absolute source preserves existing behavior");
+
+        assert_eq!(
+            source_root,
+            package.path().canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(package_path, source_root);
     }
 }
