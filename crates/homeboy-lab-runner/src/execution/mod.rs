@@ -121,9 +121,8 @@ pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 // pre-split `pub` items so external callers keep referencing them unchanged.
 pub use artifact_promotion::{
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
-    promote_runner_exec_artifacts, promote_runner_exec_artifacts_in_store,
-    promote_runner_exec_summaries, promote_runner_exec_summaries_in_store, promoted_output,
-    runner_exec_structured_summary,
+    promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
+    promoted_output, runner_exec_structured_summary,
 };
 pub use daemon_api::daemon_api_post;
 pub(crate) use daemon_api::daemon_api_post_for_session;

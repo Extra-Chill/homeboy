@@ -564,21 +564,6 @@ pub fn record_runner_exec_projection_failure(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
-/// Retain controller-owned artifact IDs alongside the original declarations.
-/// These IDs remain usable after the daemon evicts its job/event retention.
-pub fn record_runner_exec_artifact_refs(
-    run_id: &str,
-    artifacts: &[homeboy_core::observation::ArtifactRecord],
-) -> Result<()> {
-    record_runner_exec_artifact_refs_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        artifacts,
-    )
-}
-
-/// The store-rooted counterpart of [`record_runner_exec_artifact_refs`].
-///
 /// This is a read-modify-write of one observation row: the row is read,
 /// its `kind` is checked, its metadata is mutated, and it is written back.
 /// Read and write are the same row, so they have to be the same
@@ -631,26 +616,6 @@ pub fn record_runner_exec_artifact_refs_in_store(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
-/// Persist one declaration's completed promotion immediately. The artifact IDs
-/// and content hashes make a replay skip that declaration after a crash while
-/// allowing later declarations to resume independently.
-pub fn record_runner_exec_declaration_promotion(
-    run_id: &str,
-    role: &str,
-    declaration: &str,
-    artifacts: &[homeboy_core::observation::ArtifactRecord],
-) -> Result<()> {
-    record_runner_exec_declaration_promotion_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        role,
-        declaration,
-        artifacts,
-    )
-}
-
-/// The store-rooted counterpart of [`record_runner_exec_declaration_promotion`].
-///
 /// This is a read-modify-write of one observation row: the row is read,
 /// its `kind` is checked, its metadata is mutated, and it is written back.
 /// Read and write are the same row, so they have to be the same
@@ -782,21 +747,6 @@ pub fn checkpoint_runner_exec_directory_tree_in_store(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
-pub fn runner_exec_directory_child_is_promoted(
-    run_id: &str,
-    declaration: &str,
-    relative_child: &str,
-) -> Result<bool> {
-    runner_exec_directory_child_is_promoted_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        declaration,
-        relative_child,
-    )
-}
-
-/// The store-rooted counterpart of [`runner_exec_directory_child_is_promoted`].
-///
 /// This is the idempotence guard for directory-child promotion: it decides
 /// whether a child is skipped or promoted again. Reading it from a different
 /// installation than the one the promotion is written to makes the guard
@@ -839,7 +789,7 @@ pub fn record_runner_exec_directory_child_promotion(
 
 /// The store-rooted counterpart of [`record_runner_exec_directory_child_promotion`].
 ///
-/// The write half of the guard in [`runner_exec_directory_child_is_promoted`].
+/// The write half of the guard in `runner_exec_directory_child_is_promoted`.
 /// Guard and write are the same metadata object, so they share a store (#7505).
 pub fn record_runner_exec_directory_child_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -885,22 +835,6 @@ pub fn record_runner_exec_directory_child_promotion_in_store(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
-/// Finalize a generic runner-exec observation from a daemon-owned terminal
-/// snapshot. Agent-task projections intentionally remain separate: this record
-/// has no task aggregate to parse, so the daemon result itself is authoritative.
-pub fn project_terminal_runner_exec_result(
-    run_id: &str,
-    snapshot: &RunnerJobLogSnapshot,
-) -> Result<bool> {
-    project_terminal_runner_exec_result_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        snapshot,
-    )
-}
-
-/// The store-rooted counterpart of [`project_terminal_runner_exec_result`].
-///
 /// This finalizes an observation run: it reads the row, decides from that row's
 /// own `kind`, terminal status, and artifact-promotion checkpoint whether to
 /// project at all, and then commits the result with `finish_run`. The decision
@@ -1139,19 +1073,6 @@ fn bounded_required_string<'a>(value: &'a Value, field: &str, limit: usize) -> O
         .then_some(value)
 }
 
-/// Finish a synchronous transport that has no daemon job identity (diagnostic
-/// SSH/local execution) after its declared evidence is safely retained.
-pub fn finish_runner_exec_direct(run_id: &str, transport: &str, exit_code: i32) -> Result<bool> {
-    finish_runner_exec_direct_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        transport,
-        exit_code,
-    )
-}
-
-/// The store-rooted counterpart of [`finish_runner_exec_direct`].
-///
 /// This is the run's terminal commit. It reads the row, refuses if already
 /// terminal, and finishes it — the guard and the write are the same row, so a
 /// split root could finish a run the guard never inspected (#7505).
@@ -1258,27 +1179,7 @@ fn validate_runner_exec_snapshot_binding(
     Ok(runner_id)
 }
 
-/// Persist redacted submission ownership before a reverse-broker POST. The
-/// command itself is canonical controller provenance; secret values are never
-/// copied here, only the names the runner must hydrate at dispatch.
-pub fn record_lab_offload_submission_intent(
-    run_id: &str,
-    runner_id: &str,
-    remote_workspace: &str,
-    remote_command: &[String],
-    secret_env_names: &[String],
-) -> Result<AgentTaskRunRecord> {
-    record_lab_offload_submission_intent_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        runner_id,
-        remote_workspace,
-        remote_command,
-        secret_env_names,
-    )
-}
-
-/// [`record_lab_offload_submission_intent`] against an explicitly injected root.
+/// Record the submission intent against an explicitly injected root.
 ///
 /// The body already took one store for the advisory lock and every record touch
 /// under it; this lets a caller that owns roots supply that store instead of

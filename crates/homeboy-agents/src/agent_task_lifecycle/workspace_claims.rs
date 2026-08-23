@@ -1334,10 +1334,6 @@ pub(crate) fn renew_record_workspace_owner_in_store(
     Ok(())
 }
 
-pub(crate) fn ensure_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
-    ensure_record_workspace_owner_in_store(&store()?, record)
-}
-
 /// The store-rooted counterpart of [`ensure_record_workspace_owner`].
 ///
 /// Validating an existing lease and registering its replacement are one

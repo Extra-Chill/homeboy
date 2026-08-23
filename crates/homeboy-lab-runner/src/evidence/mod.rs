@@ -30,4 +30,5 @@ pub(crate) use mirror::{
     ReverseBrokerEvidenceContext,
 };
 pub use mirror::{runner_job_log_snapshot_for_session, runner_job_log_snapshot_for_session_until};
+#[cfg(test)]
 pub(crate) use util::{local_job_run_id, runner_exec_run_label};

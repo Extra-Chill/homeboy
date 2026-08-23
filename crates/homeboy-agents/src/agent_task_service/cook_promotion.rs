@@ -185,18 +185,6 @@ pub(crate) fn promote_attempt_in_store(
     )
 }
 
-/// Cook owns selection across provider rotations. Collapse equivalent artifact
-/// aliases before promotion, but require an explicit operator choice for patches
-/// that remain distinct after normalized content and provenance comparison.
-pub(crate) fn canonical_cook_patch_artifact_id(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    canonical_cook_patch_artifact_id_in_store(&lifecycle_store, options, run_id)
-}
-
 pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,

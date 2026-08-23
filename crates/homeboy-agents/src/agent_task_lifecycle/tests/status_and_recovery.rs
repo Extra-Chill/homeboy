@@ -22,6 +22,13 @@ use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+/// The tests below drive the store-rooted lifecycle entry points. Resolving the
+/// store once here keeps the ambient lookup in a single place instead of at
+/// every call site, and lets the ambient wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 #[test]
 fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
     assert_eq!(
@@ -1102,7 +1109,8 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
                 durable_plan: None,
             })
             .expect("record Lab admission");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1115,12 +1123,22 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
 
             if post_accept_fault {
                 *fail_after_accept_once.lock().expect("fault flag") = true;
-                assert!(
-                    !reconcile_pending_runner_submission_intent(run_id).expect("fault is retained")
-                );
+                assert!(!reconcile_pending_runner_submission_intent_in_store(
+                    &test_lifecycle_store(),
+                    run_id
+                )
+                .expect("fault is retained"));
             }
-            assert!(reconcile_pending_runner_submission_intent(run_id).expect("replay intent"));
-            assert!(!reconcile_pending_runner_submission_intent(run_id).expect("duplicate wake"));
+            assert!(reconcile_pending_runner_submission_intent_in_store(
+                &test_lifecycle_store(),
+                run_id
+            )
+            .expect("replay intent"));
+            assert!(!reconcile_pending_runner_submission_intent_in_store(
+                &test_lifecycle_store(),
+                run_id
+            )
+            .expect("duplicate wake"));
             let record = status(run_id).expect("accepted lifecycle");
             assert_eq!(
                 record.metadata["runner_submission_intent"]["state"],
@@ -1290,7 +1308,8 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
                 durable_plan: None,
             })
             .expect("record Lab admission");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1316,14 +1335,16 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
         })
         .expect("expire handoff");
 
-        assert!(
-            !reconcile_pending_runner_submission_intent("cancel-before-admission")
-                .expect("cancelled handoff is not submitted")
-        );
-        assert!(
-            !reconcile_pending_runner_submission_intent("expire-before-admission")
-                .expect("expired handoff is not submitted")
-        );
+        assert!(!reconcile_pending_runner_submission_intent_in_store(
+            &test_lifecycle_store(),
+            "cancel-before-admission"
+        )
+        .expect("cancelled handoff is not submitted"));
+        assert!(!reconcile_pending_runner_submission_intent_in_store(
+            &test_lifecycle_store(),
+            "expire-before-admission"
+        )
+        .expect("expired handoff is not submitted"));
         assert!(submitted.lock().expect("submission log").is_empty());
         assert!(lookups.lock().expect("lookup log").is_empty());
     });
@@ -1353,7 +1374,8 @@ fn preparing_crash_never_submits_or_queries_the_runner() {
             durable_plan: None,
         })
         .expect("planned handoff");
-        record_lab_offload_submission_intent(
+        record_lab_offload_submission_intent_in_store(
+            &test_lifecycle_store(),
             "preparing-crash",
             "homeboy-lab",
             "/runner/workspace/homeboy",
@@ -1362,7 +1384,11 @@ fn preparing_crash_never_submits_or_queries_the_runner() {
         )
         .expect("preparing intent");
 
-        assert!(!reconcile_pending_runner_submission_intent("preparing-crash").expect("no replay"));
+        assert!(!reconcile_pending_runner_submission_intent_in_store(
+            &test_lifecycle_store(),
+            "preparing-crash"
+        )
+        .expect("no replay"));
         assert_eq!(
             status("preparing-crash").expect("status").state,
             AgentTaskRunState::Queued
@@ -1399,7 +1425,8 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                 durable_plan: None,
             })
             .expect("planned handoff");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1466,7 +1493,8 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             durable_plan: None,
         })
         .expect("planned absent handoff");
-        record_lab_offload_submission_intent(
+        record_lab_offload_submission_intent_in_store(
+            &test_lifecycle_store(),
             "absent-after-deadline",
             "homeboy-lab",
             "/runner/workspace/homeboy",
@@ -2284,8 +2312,10 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
             record.metadata["artifact_projection"]["recovery_action"]["command"],
             format!("homeboy agent-task status {}", submitted.run_id)
         );
-        assert!(run_owes_candidate_follow_up(&submitted.run_id)
-            .expect("pending import retains the runner workspace"));
+        assert!(
+            run_owes_candidate_follow_up_in_store(&test_lifecycle_store(), &submitted.run_id)
+                .expect("pending import retains the runner workspace")
+        );
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let remote_alias = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,
@@ -2346,8 +2376,10 @@ fn duplicate_runner_artifact_ids_fail_closed_before_projection() {
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| error.contains("reuses artifact id 'patch'")));
-        assert!(run_owes_candidate_follow_up(&submitted.run_id)
-            .expect("duplicate identity retains the runner workspace"));
+        assert!(
+            run_owes_candidate_follow_up_in_store(&test_lifecycle_store(), &submitted.run_id)
+                .expect("duplicate identity retains the runner workspace")
+        );
         let artifacts = homeboy_core::observation::ObservationStore::open_initialized()
             .expect("store")
             .list_artifacts(&submitted.run_id)
@@ -2865,7 +2897,8 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
         assert_eq!(dry_run.records[0].action, "would-quarantine");
         let applied = reconcile_record_health(false).expect("conflict quarantined");
         assert_eq!(applied.quarantined, 1);
-        let health = record_health_summary().expect("quarantine health");
+        let health =
+            record_health_summary_in_store(&test_lifecycle_store()).expect("quarantine health");
         assert_eq!(health.conflicting, 1);
         assert_eq!(health.quarantined, 1);
         assert_eq!(
@@ -2913,7 +2946,8 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
         })
         .expect("raw corruption fixture stored");
 
-        let health = record_health_summary().expect("health report");
+        let health =
+            record_health_summary_in_store(&test_lifecycle_store()).expect("health report");
         assert_eq!(health.malformed, 1);
         let report = reconcile_record_health(false).expect("quarantine malformed state");
         assert_eq!(report.quarantined, 1);

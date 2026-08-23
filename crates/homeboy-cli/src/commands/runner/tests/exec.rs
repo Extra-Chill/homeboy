@@ -11,8 +11,16 @@ use super::super::exec::{
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
 use homeboy::core::server;
+
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore {
+    homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
 use homeboy::runner::runners::{
-    self as runner, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
+    self as runner, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts_in_store,
     RunnerExecMode, RunnerExecOutput,
 };
 
@@ -743,8 +751,13 @@ fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
             &workspace.path().display().to_string(),
         );
 
-        promote_runner_exec_artifacts(&run.id, &output, &["report.txt".to_string()])
-            .expect("promote offloaded artifact");
+        promote_runner_exec_artifacts_in_store(
+            &test_lifecycle_store(),
+            &run.id,
+            &output,
+            &["report.txt".to_string()],
+        )
+        .expect("promote offloaded artifact");
 
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
         assert_eq!(artifacts.len(), 1);
@@ -804,8 +817,13 @@ fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
             &workspace.path().display().to_string(),
         );
 
-        promote_runner_exec_artifacts(&run.id, &output, &["site".to_string()])
-            .expect("promote offloaded directory artifact");
+        promote_runner_exec_artifacts_in_store(
+            &test_lifecycle_store(),
+            &run.id,
+            &output,
+            &["site".to_string()],
+        )
+        .expect("promote offloaded directory artifact");
 
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
         assert_eq!(artifacts.len(), 1);
@@ -943,7 +961,8 @@ fn runner_exec_promotes_fuzz_envelope_observations_and_hotspots_as_typed_artifac
             &workspace.path().display().to_string(),
         );
 
-        let promoted = promote_runner_exec_artifacts(
+        let promoted = promote_runner_exec_artifacts_in_store(
+            &test_lifecycle_store(),
             &run.id,
             &output,
             &["fuzz-result-envelope.json".to_string()],

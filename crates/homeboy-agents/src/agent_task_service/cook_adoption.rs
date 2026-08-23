@@ -1019,15 +1019,6 @@ fn reusable_applied_adoption_promotion(
     )
 }
 
-pub(crate) fn candidate_adoption_source(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    source_request: &AgentTaskRequest,
-) -> Result<(String, Option<PathBuf>, Option<Value>)> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    candidate_adoption_source_in_store(&lifecycle_store, record, source_request)
-}
-
 pub(crate) fn candidate_adoption_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,

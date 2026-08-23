@@ -195,18 +195,6 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
         && handoff.submission_key.as_deref() == Some(submission_key)
 }
 
-/// Replay an unacknowledged durable handoff. A broker that already accepted the
-/// original POST returns the same job for its submission key, so this covers
-/// both controller crash boundaries without retaining secret values.
-pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> {
-    reconcile_pending_runner_submission_intent_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-    )
-}
-
-/// The store-rooted counterpart of [`reconcile_pending_runner_submission_intent`].
-///
 /// The replay decision and its consequence must name one installation. This
 /// body reads the intent that authorises the replay, and on acceptance commits
 /// the accepted handoff through `record_detached_lab_run_in_store` — which
@@ -423,19 +411,7 @@ pub fn has_recorded_provider_progress(run_id: &str) -> Result<bool> {
     }
 }
 
-/// Whether a run recorded a candidate-preserving post-provider transport
-/// follow-up failure (#9377). The runner uses this to keep a run-scoped
-/// workspace when a provider succeeded but its controller-side candidate
-/// projection or handoff has not — so the preserved candidate remains
-/// recoverable on the lab. Returns `false` when no record exists.
-pub fn run_owes_candidate_follow_up(run_id: &str) -> Result<bool> {
-    run_owes_candidate_follow_up_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-    )
-}
-
-/// [`run_owes_candidate_follow_up`] against an explicitly injected root.
+/// `run_owes_candidate_follow_up` against an explicitly injected root.
 ///
 /// The caller decides whether to leave a run alive for follow-up from this
 /// answer, so it has to read the same installation the run was recorded in.
