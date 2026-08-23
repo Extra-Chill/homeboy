@@ -2,14 +2,10 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    run_provider_command, AgentTaskPromotionApplyRequest, TrustedUnpushedCandidateDestination,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    run_provider_command, AgentTaskPromotionApplyRequest, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
 };
 use super::super::promote::{normalize_promotion_patch, promote, select_patch_artifact};
-use super::super::types::{
-    AgentTaskPromotionOptions, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
-    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,

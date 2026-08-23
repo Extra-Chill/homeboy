@@ -9,10 +9,7 @@ use super::super::promote::{
     normalize_promotion_patch, resume_promoted_patch, select_patch_artifact,
     validate_artifact_content,
 };
-use super::super::types::{
-    AgentTaskPromotionOptions, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
-    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA};
 use crate::agent_task_gate::{

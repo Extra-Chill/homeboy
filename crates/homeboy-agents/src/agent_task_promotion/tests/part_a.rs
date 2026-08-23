@@ -10,10 +10,7 @@ use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider_and_checkpoint_in_observation_store,
     retain_committed_changes_artifact,
 };
-use super::super::types::{
-    AgentTaskPromotionOptions, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
-    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::AgentTaskPromotionOptions;
 use super::*;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::AgentTaskAggregate;

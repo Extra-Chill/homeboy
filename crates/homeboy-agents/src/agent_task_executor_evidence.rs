@@ -462,7 +462,6 @@ fn push_unique_evidence_ref(outcome: &mut AgentTaskOutcome, evidence_ref: AgentT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::AGENT_TASK_REQUEST_SCHEMA;
     use std::sync::Mutex;
 
     static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());

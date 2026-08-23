@@ -3,10 +3,8 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskRequest,
-    AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
-    AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskSourceRef,
+    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
