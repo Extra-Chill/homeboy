@@ -5666,6 +5666,7 @@ fn run_cook_spine(
             compare_gate_failures_to_verified_base(
                 &mut promotion,
                 std::path::Path::new(&repository_root),
+                std::path::Path::new(&repository_root),
                 &base_sha,
                 options.gates.gate_timeout(),
                 |_compared, _total| Ok(()),

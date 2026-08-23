@@ -5171,6 +5171,288 @@ fn adoption_blocks_a_changed_failure_despite_inherited_failure_authorization() {
 }
 
 #[test]
+fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_workspace() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture =
+            CandidateAdoptionFixture::new("cook-13091-component-cwd", 1, 0, true, None);
+        let component = fixture.source.join("component");
+        std::fs::create_dir(&component).expect("create component workspace");
+        std::fs::write(component.join("marker"), "unchanged\n").expect("write component baseline");
+        git_output(&fixture.source, &["add", "component/marker"])
+            .expect("stage component baseline");
+        git_output(&fixture.source, &["commit", "-m", "component baseline"])
+            .expect("commit component baseline");
+        std::fs::write(fixture.source.join("candidate.txt"), "candidate\n")
+            .expect("write unrelated candidate change");
+        git_output(&fixture.source, &["add", "candidate.txt"])
+            .expect("stage unrelated candidate change");
+        git_output(&fixture.source, &["commit", "-m", "component candidate"])
+            .expect("commit component candidate");
+        fixture.candidate = git_output(&fixture.source, &["rev-parse", "HEAD"])
+            .expect("read component candidate revision");
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = fixture.target.display(),
+                candidate = fixture.candidate,
+            ),
+        )
+        .expect("update promotion provider");
+        fixture.options.initial_plan.metadata["gate_workspace"] = serde_json::json!({
+            "component_cwd": "component"
+        });
+        fixture.options.source_worktree_path = Some(fixture.source.join("component").join(".."));
+        fixture.options.gates.verify = vec!["cat marker >&2; exit 1".to_string()];
+        let mut recipe = super::super::load_recipe(&fixture.cook_id).expect("load fixture recipe");
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == fixture.run_id)
+            .expect("fixture recipe attempt");
+        attempt.plan = fixture.options.initial_plan.clone();
+        recipe.gate_policy =
+            serde_json::to_value(&fixture.options.gates).expect("serialize component gate policy");
+        recipe.finalization["source_worktree_path"] =
+            serde_json::to_value(&fixture.options.source_worktree_path)
+                .expect("serialize non-normalized source workspace");
+        let recipe_path = homeboy_core::paths::homeboy_data()
+            .expect("Homeboy data path")
+            .join("agent-task-cooks")
+            .join(&fixture.cook_id)
+            .join("recipe.json");
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec(&recipe).expect("serialize fixture recipe"),
+        )
+        .expect("persist component workspace recipe");
+
+        let mut backend = CaptureBackend::default();
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                Arc::new(UnusedExecutor),
+                &mut backend,
+            )
+            .expect("component gate comparison completes");
+
+        let gate = &result.value.attempts[0]
+            .promotion
+            .as_ref()
+            .expect("adoption promotion")
+            .deterministic_gates[0];
+        assert_eq!(gate.stderr.trim(), "unchanged");
+        assert_eq!(
+            gate.baseline_comparison
+                .as_ref()
+                .expect("baseline comparison")
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+            "candidate and baseline both execute in the component workspace"
+        );
+    });
+}
+
+#[test]
+fn component_workspace_path_rejects_escaping_persisted_paths() {
+    let source = tempfile::tempdir().expect("source workspace");
+    for component_cwd in ["../outside", "/outside"] {
+        let mut options = batch_cook_options(
+            "cook-13091-invalid-component",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.source_worktree_path = Some(source.path().to_path_buf());
+        options.initial_plan.metadata["gate_workspace"] = serde_json::json!({
+            "component_cwd": component_cwd
+        });
+
+        let error = super::super::cook_promotion::component_workspace_path(&options)
+            .expect_err("escaping component cwd must fail closed");
+        assert_eq!(error.details["field"], "component_cwd");
+    }
+}
+
+#[test]
+fn adoption_rejects_an_escaping_component_path_before_provider_or_gate_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture =
+            CandidateAdoptionFixture::new("cook-13091-escaping-component", 1, 0, true, None);
+        let provider_started = fixture.source.parent().unwrap().join("provider-started");
+        let gate_started = fixture.source.parent().unwrap().join("gate-started");
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ntouch {provider_started}\n",
+                provider_started = provider_started.display(),
+            ),
+        )
+        .expect("write provider sentinel");
+        fixture.options.initial_plan.metadata["gate_workspace"] = serde_json::json!({
+            "component_cwd": fixture.source.parent().unwrap().join("outside")
+        });
+        fixture.options.gates.verify = vec![format!("touch {}", gate_started.display())];
+        let mut recipe = super::super::load_recipe(&fixture.cook_id).expect("load fixture recipe");
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == fixture.run_id)
+            .expect("fixture recipe attempt");
+        attempt.plan = fixture.options.initial_plan.clone();
+        recipe.gate_policy =
+            serde_json::to_value(&fixture.options.gates).expect("serialize escaping gate policy");
+        let recipe_path = homeboy_core::paths::homeboy_data()
+            .expect("Homeboy data path")
+            .join("agent-task-cooks")
+            .join(&fixture.cook_id)
+            .join("recipe.json");
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec(&recipe).expect("serialize fixture recipe"),
+        )
+        .expect("persist escaping component recipe");
+
+        let mut backend = CaptureBackend::default();
+        let error = fixture
+            .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
+            .expect_err("escaping component path must reject adoption");
+        assert_eq!(error.details["field"], "component_cwd");
+        assert!(!provider_started.exists(), "provider must not execute");
+        assert!(!gate_started.exists(), "gate must not execute");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_rejects_component_symlink_escape_before_provider_or_gate_execution() {
+    use std::os::unix::fs::symlink;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture =
+            CandidateAdoptionFixture::new("cook-13091-component-symlink", 1, 0, true, None);
+        let external = tempfile::tempdir().expect("external workspace");
+        symlink(external.path(), fixture.source.join("component"))
+            .expect("create component symlink");
+        let provider_started = fixture.source.parent().unwrap().join("provider-started");
+        let gate_started = fixture.source.parent().unwrap().join("gate-started");
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ntouch {provider_started}\n",
+                provider_started = provider_started.display(),
+            ),
+        )
+        .expect("write provider sentinel");
+        fixture.options.initial_plan.metadata["gate_workspace"] = serde_json::json!({
+            "component_cwd": "component"
+        });
+        fixture.options.gates.verify = vec![format!("touch {}", gate_started.display())];
+        let mut recipe = super::super::load_recipe(&fixture.cook_id).expect("load fixture recipe");
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == fixture.run_id)
+            .expect("fixture recipe attempt");
+        attempt.plan = fixture.options.initial_plan.clone();
+        recipe.gate_policy =
+            serde_json::to_value(&fixture.options.gates).expect("serialize symlink gate policy");
+        let recipe_path = homeboy_core::paths::homeboy_data()
+            .expect("Homeboy data path")
+            .join("agent-task-cooks")
+            .join(&fixture.cook_id)
+            .join("recipe.json");
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec(&recipe).expect("serialize fixture recipe"),
+        )
+        .expect("persist symlink component recipe");
+
+        let mut backend = CaptureBackend::default();
+        let error = fixture
+            .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
+            .expect_err("symlink component path must reject adoption");
+        assert_eq!(error.details["field"], "component_cwd");
+        assert!(!provider_started.exists(), "provider must not execute");
+        assert!(!gate_started.exists(), "gate must not execute");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_rejects_a_baseline_component_symlink_escape_before_external_gate_execution() {
+    use std::os::unix::fs::symlink;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture =
+            CandidateAdoptionFixture::new("cook-13091-baseline-symlink", 1, 0, true, None);
+        let external = fixture.source.parent().unwrap().join("external");
+        std::fs::create_dir(&external).expect("create external workspace");
+        let component = fixture.source.join("component");
+        symlink(&external, &component).expect("create baseline component symlink");
+        git_output(&fixture.source, &["add", "component"]).expect("stage baseline symlink");
+        git_output(
+            &fixture.source,
+            &["commit", "-m", "baseline component symlink"],
+        )
+        .expect("commit baseline symlink");
+        let baseline = git_output(&fixture.source, &["rev-parse", "HEAD"]).expect("baseline SHA");
+        std::fs::remove_file(&component).expect("remove baseline symlink");
+        std::fs::create_dir(&component).expect("create candidate component");
+        std::fs::write(component.join("marker"), "candidate\n").expect("write candidate component");
+        git_output(&fixture.source, &["add", "-A"]).expect("stage candidate component");
+        git_output(&fixture.source, &["commit", "-m", "candidate component"])
+            .expect("commit candidate component");
+        fixture.candidate =
+            git_output(&fixture.source, &["rev-parse", "HEAD"]).expect("candidate SHA");
+        fixture.options.task_base_sha = Some(baseline.clone());
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = fixture.target.display(),
+                candidate = fixture.candidate,
+            ),
+        )
+        .expect("update promotion provider");
+        fixture.options.initial_plan.metadata["gate_workspace"] = serde_json::json!({
+            "component_cwd": "component"
+        });
+        fixture.options.gates.verify = vec!["touch \"$PWD/gate-ran\"; exit 1".to_string()];
+        let mut recipe = super::super::load_recipe(&fixture.cook_id).expect("load fixture recipe");
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == fixture.run_id)
+            .expect("fixture recipe attempt");
+        attempt.plan = fixture.options.initial_plan.clone();
+        recipe.gate_policy =
+            serde_json::to_value(&fixture.options.gates).expect("serialize baseline gate policy");
+        recipe.finalization["task_base_sha"] = serde_json::json!(baseline);
+        let recipe_path = homeboy_core::paths::homeboy_data()
+            .expect("Homeboy data path")
+            .join("agent-task-cooks")
+            .join(&fixture.cook_id)
+            .join("recipe.json");
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec(&recipe).expect("serialize fixture recipe"),
+        )
+        .expect("persist baseline symlink recipe");
+
+        let mut backend = CaptureBackend::default();
+        let error = fixture
+            .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
+            .expect_err("baseline symlink escape must reject adoption");
+        assert_eq!(error.details["field"], "gate_workspace");
+        assert!(
+            !external.join("gate-ran").exists(),
+            "external gate must not execute"
+        );
+    });
+}
+
+#[test]
 fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_from_base() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut fixture = CandidateAdoptionFixture::new("cook-11978-artifact", 1, 0, true, None);
