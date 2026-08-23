@@ -303,7 +303,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             worker.renew(&store)?;
-            let promoted = promote_runner_exec_artifacts(
+            let promoted = promote_runner_exec_artifacts_in_store(
+                &lifecycle_store,
                 &run.id,
                 &output,
                 std::slice::from_ref(&declaration),
@@ -327,7 +328,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             worker.renew(&store)?;
-            let promoted = promote_runner_exec_artifact_dirs(
+            let promoted = promote_runner_exec_artifact_dirs_in_store(
+                &lifecycle_store,
                 &run.id,
                 &output,
                 std::slice::from_ref(&declaration),
@@ -351,7 +353,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             worker.renew(&store)?;
-            let promoted = promote_runner_exec_summaries(
+            let promoted = promote_runner_exec_summaries_in_store(
+                &lifecycle_store,
                 &run.id,
                 &output,
                 std::slice::from_ref(&declaration),

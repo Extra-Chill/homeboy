@@ -230,7 +230,8 @@ pub(super) fn exec_with_hydration(
         }
         let mut artifacts = Vec::new();
         for declaration in &artifact_outputs {
-            let promoted = runner::promote_runner_exec_artifacts(
+            let promoted = runner::promote_runner_exec_artifacts_in_store(
+                lifecycle_store,
                 run_id,
                 &output,
                 std::slice::from_ref(declaration),
@@ -250,7 +251,8 @@ pub(super) fn exec_with_hydration(
             .collect::<Vec<_>>();
         let mut artifact_dir_records = Vec::new();
         for declaration in &artifact_dir_outputs {
-            let promoted = runner::promote_runner_exec_artifact_dirs(
+            let promoted = runner::promote_runner_exec_artifact_dirs_in_store(
+                lifecycle_store,
                 run_id,
                 &output,
                 std::slice::from_ref(declaration),
@@ -270,7 +272,8 @@ pub(super) fn exec_with_hydration(
             .collect::<Vec<_>>();
         let mut summaries = Vec::new();
         for declaration in &summary_outputs {
-            let promoted = runner::promote_runner_exec_summaries(
+            let promoted = runner::promote_runner_exec_summaries_in_store(
+                lifecycle_store,
                 run_id,
                 &output,
                 std::slice::from_ref(declaration),

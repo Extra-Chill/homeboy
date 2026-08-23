@@ -725,7 +725,26 @@ pub fn checkpoint_runner_exec_directory_tree(
     declaration: &str,
     tree_sha256: &str,
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    checkpoint_runner_exec_directory_tree_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        declaration,
+        tree_sha256,
+    )
+}
+
+/// The store-rooted counterpart of [`checkpoint_runner_exec_directory_tree`].
+///
+/// The directory checkpoint and the per-child promotion states it guards live
+/// in the same metadata object on the same row, so they must be the same
+/// installation (#7505).
+pub fn checkpoint_runner_exec_directory_tree_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    declaration: &str,
+    tree_sha256: &str,
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(());
     };
@@ -768,7 +787,27 @@ pub fn runner_exec_directory_child_is_promoted(
     declaration: &str,
     relative_child: &str,
 ) -> Result<bool> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    runner_exec_directory_child_is_promoted_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        declaration,
+        relative_child,
+    )
+}
+
+/// The store-rooted counterpart of [`runner_exec_directory_child_is_promoted`].
+///
+/// This is the idempotence guard for directory-child promotion: it decides
+/// whether a child is skipped or promoted again. Reading it from a different
+/// installation than the one the promotion is written to makes the guard
+/// answer about a row nobody is writing (#7505).
+pub fn runner_exec_directory_child_is_promoted_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+) -> Result<bool> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(false);
     };
@@ -789,7 +828,27 @@ pub fn record_runner_exec_directory_child_promotion(
     relative_child: &str,
     artifact: &homeboy_core::observation::ArtifactRecord,
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    record_runner_exec_directory_child_promotion_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        declaration,
+        relative_child,
+        artifact,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_directory_child_promotion`].
+///
+/// The write half of the guard in [`runner_exec_directory_child_is_promoted`].
+/// Guard and write are the same metadata object, so they share a store (#7505).
+pub fn record_runner_exec_directory_child_promotion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+    artifact: &homeboy_core::observation::ArtifactRecord,
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(());
     };
