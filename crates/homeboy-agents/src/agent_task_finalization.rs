@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
     enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
@@ -1048,17 +1049,7 @@ fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
 }
 
 fn is_concrete_model(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value == value.trim()
-        && !value.chars().any(char::is_control)
-        && !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "not recorded"
-                | "unknown"
-                | "ai-assisted"
-                | "ai assisted"
-                | "legacy caller did not record a model"
-        )
+    normalize_concrete_model_identifier(value).is_some()
 }
 
 fn is_git_commit_identity(value: &str) -> bool {

@@ -897,6 +897,9 @@ status <cook-id>` preserves it with the latest notification delivery outcome.
 accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
+The same `--model` value records adopted-candidate and manual-finalization AI
+provenance. `--ai-model` remains a deprecated compatibility alias for those
+two commands and will be removed in the next minor release.
 
 ## Fanout/Reconcile
 
