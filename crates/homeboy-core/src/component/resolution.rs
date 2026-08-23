@@ -1,5 +1,6 @@
 use crate::component::{
-    inventory, inventory_in_root, load, load_in_root, try_discover_from_portable, Component,
+    inventory, inventory_in_root, load, load_in_root, portable::read_portable_config,
+    try_discover_from_portable, Component,
 };
 use crate::error::{Error, Result};
 use crate::git::run_git;
@@ -150,8 +151,7 @@ pub enum RegisteredPrimaryPathResolution {
 ///
 /// A path must canonicalize and exactly equal a registered `local_path` to
 /// resolve as [`RegisteredPrimaryPathResolution::Primary`]. A checkout sharing
-/// a git common directory, the conventional component-worktree name, or its
-/// origin URL is related but not a primary.
+/// a git common directory or origin URL is related but not a primary.
 pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryPathResolution> {
     let expanded = shellexpand::tilde(input);
     let path = Path::new(expanded.as_ref()).canonicalize();
@@ -175,10 +175,7 @@ pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryP
 
         let remote_matches = input_remote.is_some()
             && input_remote == crate::git::remote_origin_url(&registered_path);
-        if same_git_common_dir(&registered_path, &path)
-            || is_named_component_worktree(&component.id, &registered_path, &path)
-            || remote_matches
-        {
+        if same_git_common_dir(&registered_path, &path) || remote_matches {
             related.push(component.id);
         }
     }
@@ -466,6 +463,16 @@ fn prefer_cwd_for_component(
         Err(_) => return Ok(None),
     };
 
+    // A managed worktree commonly has its own portable manifest. Resolve its
+    // repository identity before accepting that manifest directly so the
+    // canonical registered contract remains available beneath explicit local
+    // overrides.
+    if let Some(component) =
+        registered_component_for_worktree_path(config_root, &cwd, Some(component_id))?
+    {
+        return Ok(Some(component));
+    }
+
     // Check CWD directly
     if let Some(mut discovered) = try_discover_from_portable(&cwd)? {
         if discovered.id == component_id {
@@ -495,25 +502,16 @@ fn prefer_cwd_for_component(
         return Ok(None);
     };
 
-    if same_git_common_dir(&registered_path, &cwd_git_root) {
+    let remote_matches = crate::git::remote_origin_url(&cwd_git_root).is_some()
+        && crate::git::remote_origin_url(&cwd_git_root)
+            == crate::git::remote_origin_url(&registered_path);
+    if same_git_common_dir(&registered_path, &cwd_git_root) || remote_matches {
         let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
         return portable_component_for_checkout(
             config_root,
             component_id,
             &checkout_path,
             &registered,
-            &checkout_path,
-        )
-        .map(Some);
-    }
-
-    if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
-        return portable_component_for_checkout(
-            config_root,
-            component_id,
-            &cwd_git_root,
-            &registered,
-            &cwd_git_root,
         )
         .map(Some);
     }
@@ -521,23 +519,26 @@ fn prefer_cwd_for_component(
     Ok(None)
 }
 
-/// A matched worktree is a distinct checkout, so all portable component fields
-/// must come from its manifest rather than the registered primary checkout.
+/// Project a canonical component contract onto a distinct checkout.
+///
+/// The registered component owns machine-local extension, provider, and script
+/// configuration. A worktree manifest owns only the fields it explicitly
+/// declares, so it can intentionally override that contract without losing the
+/// canonical defaults required to run the checkout.
 fn portable_component_for_checkout(
     config_root: Option<&Path>,
     component_id: &str,
     checkout_path: &Path,
     registered: &Component,
-    fallback_path: &Path,
 ) -> Result<Component> {
     let manifest_path = checkout_path.join("homeboy.json");
-    let Some(mut component) = try_discover_from_portable(checkout_path)? else {
+    let Some(discovered) = try_discover_from_portable(checkout_path)? else {
         // A registration without a primary portable manifest is legacy
         // machine-local metadata, not checkout-owned configuration. Keep that
         // behavior for legacy consumers; otherwise a target manifest is required.
         if try_discover_from_portable(Path::new(&registered.local_path))?.is_none() {
             let mut component = registered.clone();
-            component.local_path = fallback_path.to_string_lossy().to_string();
+            component.local_path = checkout_path.to_string_lossy().to_string();
             resolve_remote_path_at(config_root, &mut component);
             return Ok(component);
         }
@@ -555,13 +556,13 @@ fn portable_component_for_checkout(
         ));
     };
 
-    if component.id != component_id {
+    if discovered.id != component_id {
         return Err(Error::validation_invalid_argument(
             "component_id",
             format!(
                 "Matched checkout manifest at {} declares component id '{}' instead of '{}'",
                 manifest_path.display(),
-                component.id,
+                discovered.id,
                 component_id
             ),
             Some(component_id.to_string()),
@@ -571,10 +572,79 @@ fn portable_component_for_checkout(
         ));
     }
 
+    let portable =
+        read_portable_config(checkout_path)?.expect("portable discovery read the manifest");
+    let mut component = overlay_portable_component_config(registered, portable)?;
+    component.id = component_id.to_string();
     component.local_path = checkout_path.to_string_lossy().to_string();
-    apply_standalone_fallbacks_at(config_root, &mut component);
     resolve_remote_path_at(config_root, &mut component);
     Ok(component)
+}
+
+/// Apply only manifest-declared values. Objects merge recursively so a checkout
+/// can override one extension setting without copying the entire canonical
+/// extension contract; arrays and scalars replace their canonical value.
+fn overlay_portable_component_config(
+    registered: &Component,
+    mut portable: serde_json::Value,
+) -> Result<Component> {
+    let mut effective = serde_json::to_value(registered).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("serialize registered component".to_string()),
+        )
+    })?;
+    normalize_portable_extension_settings(&mut portable);
+    merge_json_objects(&mut effective, portable);
+    serde_json::from_value(effective).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("merge worktree homeboy.json with registered component config".to_string()),
+            None,
+        )
+    })
+}
+
+/// `ScopedExtensionConfig` serializes settings as flat extension keys while
+/// portable manifests may use a nested `settings` object. Normalize the latter
+/// before overlaying while preserving the portable contract that flat keys win
+/// over duplicate nested settings.
+fn normalize_portable_extension_settings(portable: &mut serde_json::Value) {
+    let Some(extensions) = portable
+        .as_object_mut()
+        .and_then(|component| component.get_mut("extensions"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    for extension in extensions.values_mut() {
+        let Some(extension) = extension.as_object_mut() else {
+            continue;
+        };
+        let Some(serde_json::Value::Object(settings)) = extension.remove("settings") else {
+            continue;
+        };
+        for (key, value) in settings {
+            extension.entry(key).or_insert(value);
+        }
+    }
+}
+
+fn merge_json_objects(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_json_objects(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
 }
 
 fn rebase_registered_path_to_checkout(registered_path: &Path, cwd_git_root: &Path) -> PathBuf {
@@ -674,6 +744,12 @@ fn synthetic_component_for_path(path: &str) -> Component {
 }
 
 fn resolve_path_override(config_root: Option<&Path>, path: &str) -> Result<Component> {
+    if let Some(component) =
+        registered_component_for_worktree_path(config_root, Path::new(path), None)?
+    {
+        return Ok(component);
+    }
+
     if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
         validate_duplicate_portable_component_ids(
             &discovered.id,
@@ -699,16 +775,6 @@ fn resolve_path_override(config_root: Option<&Path>, path: &str) -> Result<Compo
         }
     }
 
-    // A managed task worktree of a registered component has no portable
-    // homeboy.json, so the checks above miss it. Match it to its registered
-    // component by shared git common dir or `<component>@<branch>` naming, so a
-    // bare-path resolution (e.g. top-level `homeboy status` from the worktree)
-    // resolves the same component `git status` does instead of a synthetic one
-    // (#9895).
-    if let Some(component) = registered_component_for_worktree_path(config_root, dir, None)? {
-        return Ok(component);
-    }
-
     Ok(synthetic_component_for_path(path))
 }
 
@@ -721,10 +787,9 @@ fn component_is_registered(component_id: &str) -> bool {
 }
 
 /// Resolve a bare path to the registered component whose checkout owns it as a
-/// worktree — shared git common dir, or `<component>@<branch>` named beside the
-/// registered checkout. Returns the registered component rebased onto the
-/// worktree path. `None` when the path is not a worktree of any registered
-/// component (#9895).
+/// worktree — shared git common dir or an unambiguous origin remote. Returns
+/// the canonical component projected onto the checkout path. `None` when the
+/// path is not related to a registered component (#9895).
 fn registered_component_for_worktree_path(
     config_root: Option<&Path>,
     dir: &Path,
@@ -733,11 +798,15 @@ fn registered_component_for_worktree_path(
     let Some(cwd_git_root) = detect_git_root(dir) else {
         return Ok(None);
     };
-    let components = inventory_at(config_root)?;
-    for registered in components {
-        if expected_id.is_some_and(|id| id != registered.id) {
-            continue;
-        }
+    let input_remote = crate::git::remote_origin_url(&cwd_git_root);
+    let mut candidates = Vec::new();
+    let registrations = match expected_id {
+        Some(id) => load_at(config_root, id)
+            .map(|component| vec![component])
+            .unwrap_or_default(),
+        None => inventory_at(config_root)?,
+    };
+    for registered in registrations {
         let registered_path =
             PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
         // A worktree is a *distinct* checkout of the registered component's repo:
@@ -746,22 +815,41 @@ fn registered_component_for_worktree_path(
         // monorepo root to one of its sub-directory components, which must remain
         // a monorepo root rather than a single component (#9895).
         let registered_is_contained = path_is_at_or_inside(&cwd_git_root, &registered_path);
+        let remote_matches = input_remote.is_some()
+            && input_remote == crate::git::remote_origin_url(&registered_path);
         if !registered_is_contained
-            && (same_git_common_dir(&registered_path, &cwd_git_root)
-                || is_named_component_worktree(&registered.id, &registered_path, &cwd_git_root))
+            && (same_git_common_dir(&registered_path, &cwd_git_root) || remote_matches)
         {
+            candidates.push(registered);
+        }
+    }
+    candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    candidates.dedup_by(|left, right| left.id == right.id);
+    match candidates.len() {
+        0 => Ok(None),
+        1 => {
+            let registered = candidates.pop().expect("one candidate");
+            let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
             let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
-            return portable_component_for_checkout(
+            portable_component_for_checkout(
                 config_root,
                 &registered.id,
                 &checkout_path,
                 &registered,
-                dir,
             )
-            .map(Some);
+            .map(Some)
         }
+        _ => Err(Error::validation_invalid_argument(
+            "path",
+            format!(
+                "Checkout '{}' matches multiple registered component configurations: {}",
+                cwd_git_root.display(),
+                candidates.iter().map(|component| component.id.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            Some(dir.to_string_lossy().to_string()),
+            Some(vec!["Use an explicit component ID or register one canonical component for this repository".to_string()]),
+        )),
     }
-    Ok(None)
 }
 
 fn path_has_portable_config(path: &Path) -> Result<bool> {
@@ -1011,13 +1099,8 @@ fn resolve_effective_inner(
             None => crate::project::resolve_project_component(project, id)?,
         };
         if let Some(path) = path_override {
-            let component = portable_component_for_checkout(
-                config_root,
-                id,
-                Path::new(path),
-                &component,
-                Path::new(path),
-            )?;
+            let component =
+                portable_component_for_checkout(config_root, id, Path::new(path), &component)?;
             return match config_root {
                 Some(config_root) => crate::project::bind_materialized_component_at_path_in_root(
                     config_root,
@@ -1032,6 +1115,11 @@ fn resolve_effective_inner(
 
     if let Some(id) = id {
         if let Some(path) = path_override {
+            if let Some(component) =
+                registered_component_for_worktree_path(config_root, Path::new(path), Some(id))?
+            {
+                return Ok(component);
+            }
             if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
                 if discovered.id != id {
                     return Err(Error::validation_invalid_argument(
@@ -2015,7 +2103,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_resolution_uses_each_checkout_manifest_across_all_target_forms() {
+    fn worktree_resolution_inherits_canonical_config_and_applies_portable_overrides() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
             let primary = dir.path().join("fixture");
@@ -2060,9 +2148,10 @@ mod tests {
                         .expect("canonical resolved worktree"),
                     dmc_worktree.canonicalize().expect("canonical DMC worktree")
                 );
-                assert!(
-                    !component.env.contains_key("REPO_RELATIVE_CACHE"),
-                    "DMC-style worktree must not inherit the primary manifest env"
+                assert_eq!(
+                    component.env.get("REPO_RELATIVE_CACHE").map(String::as_str),
+                    Some("cache"),
+                    "DMC-style worktrees inherit canonical configuration absent an explicit override"
                 );
             });
 
@@ -2078,7 +2167,13 @@ mod tests {
                     .canonicalize()
                     .expect("canonical task worktree")
             );
-            assert!(!task_component.env.contains_key("REPO_RELATIVE_CACHE"));
+            assert_eq!(
+                task_component
+                    .env
+                    .get("REPO_RELATIVE_CACHE")
+                    .map(String::as_str),
+                Some("cache")
+            );
 
             let path_component = resolve_effective(
                 None,
@@ -2090,7 +2185,94 @@ mod tests {
                 Path::new(&path_component.local_path),
                 dmc_worktree.canonicalize().expect("canonical DMC worktree")
             );
-            assert!(!path_component.env.contains_key("REPO_RELATIVE_CACHE"));
+            assert_eq!(
+                path_component
+                    .env
+                    .get("REPO_RELATIVE_CACHE")
+                    .map(String::as_str),
+                Some("cache")
+            );
+        });
+    }
+
+    #[test]
+    fn worktree_portable_config_overrides_canonical_extension_and_script_config() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@feature");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(
+                primary.join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"runtime":{"settings":{"canonical":true,"mode":"primary"}}},"scripts":{"test":["canonical-test"]}}"#,
+            )
+            .expect("primary manifest");
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "primary manifest"]);
+            add_worktree(&primary, &worktree, "feature");
+            fs::write(
+                worktree.join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"runtime":{"settings":{"mode":"nested"},"mode":"worktree"}},"scripts":{"test":["worktree-test"]}}"#,
+            )
+            .expect("worktree manifest");
+            git(&worktree, &["add", "homeboy.json"]);
+            git(&worktree, &["commit", "-m", "worktree manifest"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let component = resolve_effective(Some("fixture"), worktree.to_str(), None)
+                .expect("worktree resolves through canonical component");
+
+            assert_eq!(
+                component.local_path,
+                worktree.canonicalize().unwrap().to_string_lossy()
+            );
+            let settings = component
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get("runtime"))
+                .map(|extension| &extension.settings)
+                .expect("effective extension settings");
+            assert_eq!(settings.get("canonical"), Some(&serde_json::json!(true)));
+            assert_eq!(settings.get("mode"), Some(&serde_json::json!("worktree")));
+            assert_eq!(
+                component.scripts.expect("effective scripts").test,
+                vec!["worktree-test"]
+            );
+        });
+    }
+
+    #[test]
+    fn worktree_remote_identity_fails_closed_when_multiple_components_match() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary_a = dir.path().join("primary-a");
+            let primary_b = dir.path().join("primary-b");
+            let checkout = dir.path().join("fixture@branch");
+            for path in [&primary_a, &primary_b, &checkout] {
+                fs::create_dir_all(path).expect("checkout dir");
+                git(path, &["init"]);
+                git(
+                    path,
+                    &[
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.test/org/fixture.git",
+                    ],
+                );
+            }
+            write_standalone_registration(home.path(), "fixture-a", &primary_a);
+            write_standalone_registration(home.path(), "fixture-b", &primary_b);
+
+            let error = resolve_effective(None, checkout.to_str(), None)
+                .expect_err("ambiguous remote must not select a canonical component");
+            assert!(error
+                .message
+                .contains("multiple registered component configurations"));
+            assert!(error.message.contains("fixture-a, fixture-b"));
         });
     }
 
@@ -2171,7 +2353,7 @@ mod tests {
             assert_eq!(error.code.as_str(), "validation.invalid_argument");
             assert!(error
                 .message
-                .contains("does not match homeboy.json id 'other-component'"));
+                .contains("declares component id 'other-component' instead of 'fixture'"));
             assert!(error
                 .message
                 .contains(worktree.join("homeboy.json").to_string_lossy().as_ref()));
@@ -2422,7 +2604,7 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_prefers_named_sibling_worktree_for_registered_component() {
+    fn target_spec_does_not_infer_identity_from_a_worktree_like_basename() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
             let primary = dir.path().join("registered");
@@ -2436,10 +2618,10 @@ mod tests {
             with_cwd(&worktree, || {
                 let target = resolve_target(TargetSpec::new(Some("registered"), None))
                     .expect("named worktree target");
-                let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
+                let canonical_primary = primary.canonicalize().expect("canonical primary");
 
                 assert_eq!(target.component_id, "registered");
-                assert_eq!(target.source_path, canonical_worktree);
+                assert_eq!(target.source_path, canonical_primary);
                 assert_eq!(
                     target.component.local_path,
                     target.source_path.to_string_lossy()
