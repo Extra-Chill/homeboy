@@ -3848,101 +3848,175 @@ fn batch_cook_options(
 
 #[test]
 fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attributing_base_files() {
-    let remote = tempfile::tempdir().expect("bare origin");
-    let workspace = tempfile::tempdir().expect("workspace");
-    let git = |cwd: &std::path::Path, args: &[&str]| {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let remote = tempfile::tempdir().expect("bare origin");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(remote.path(), &["init", "--bare"]);
         let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
+            .args([
+                "clone",
+                remote.path().to_str().unwrap(),
+                workspace.path().to_str().unwrap(),
+            ])
             .output()
-            .expect("run git");
+            .expect("clone origin");
         assert!(
             output.status.success(),
-            "git {:?} failed: {}",
-            args,
+            "clone failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        git(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(workspace.path(), &["config", "user.name", "Test"]);
+        git(workspace.path(), &["checkout", "-b", "main"]);
+        std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
+        git(workspace.path(), &["add", "base.txt"]);
+        git(workspace.path(), &["commit", "-m", "base"]);
+        git(workspace.path(), &["push", "-u", "origin", "main"]);
+        let destination_root = tempfile::tempdir().expect("candidate worktree root");
+        let destination = destination_root.path().join("candidate");
+        git(
+            workspace.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                destination.to_str().expect("candidate path"),
+                "main",
+            ],
+        );
+        std::fs::write(workspace.path().join("newer-base.txt"), "base only\n").unwrap();
+        git(workspace.path(), &["add", "newer-base.txt"]);
+        git(workspace.path(), &["commit", "-m", "advance base"]);
+        git(workspace.path(), &["push"]);
+        // Shallow and single-branch checkouts may not retain this local ref. The
+        // admission check must still resolve the authoritative origin base.
+        git(
+            &destination,
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+
+        let behind = preflight_cook_workspace_base_ancestry(&destination, "main")
+            .expect_err("strictly behind destination is rejected before provider execution");
+        assert_eq!(
+            behind.details["workspace_base_ancestry"]["direction"],
+            "behind"
+        );
+        assert_eq!(
+            behind.details["workspace_base_ancestry"]["base_only_commits"],
+            1
+        );
+        assert_eq!(
+            behind.details["workspace_base_ancestry"]["candidate_only_commits"],
+            0
+        );
+        assert_eq!(
+            behind.details["workspace_base_ancestry"]["next_action"],
+            "converge_destination_before_provider"
+        );
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            "cook-stale-origin-base",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.to_worktree = destination.display().to_string();
+        options.source_worktree_path = Some(destination.clone());
+        options.initial_plan.tasks[0].metadata = serde_json::json!({
+            "worktree_provision": { "kind": "explicit_cwd" }
+        });
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("stale destination is a durable pre-execution failure");
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let record = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("durable stale-base failure record");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "workspace_base_ancestry_preflight"
+        );
+        assert!(record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .expect("stale-base diagnostic")
+            .contains("Cook destination is behind"));
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+
+        git(
+            &destination,
+            &[
+                "fetch",
+                "origin",
+                "refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        git(&destination, &["merge", "--ff-only", "origin/main"]);
+        preflight_cook_workspace_base_ancestry(&destination, "main")
+            .expect("clean intentional no-change destination is equivalent to its resolved base");
+        std::fs::write(destination.join("candidate.txt"), "candidate only\n").unwrap();
+        git(&destination, &["add", "candidate.txt"]);
+        git(&destination, &["commit", "-m", "candidate"]);
+        preflight_cook_workspace_base_ancestry(&destination, "main")
+            .expect("ahead destination retains a candidate relative to the resolved base");
+
+        std::fs::write(workspace.path().join("newer-base-2.txt"), "base only\n").unwrap();
+        git(workspace.path(), &["add", "newer-base-2.txt"]);
+        git(workspace.path(), &["commit", "-m", "advance base again"]);
+        git(workspace.path(), &["push"]);
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main")
+            .expect_err("diverged destination is rejected before provider execution");
+        assert_eq!(
+            diverged.details["workspace_base_ancestry"]["direction"],
+            "diverged"
+        );
+        assert_eq!(
+            diverged.details["workspace_base_ancestry"]["base_only_commits"],
+            1
+        );
+        assert_eq!(
+            diverged.details["workspace_base_ancestry"]["candidate_only_commits"],
+            1
+        );
+    });
+}
+
+#[test]
+fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets() {
+    let workspace = tempfile::tempdir().expect("provider-owned Git workspace");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {:?} failed", args);
     };
-    git(remote.path(), &["init", "--bare"]);
-    let output = Command::new("git")
-        .args([
-            "clone",
-            remote.path().to_str().unwrap(),
-            workspace.path().to_str().unwrap(),
-        ])
-        .output()
-        .expect("clone origin");
-    assert!(
-        output.status.success(),
-        "clone failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    git(
-        workspace.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(workspace.path(), &["config", "user.name", "Test"]);
-    git(workspace.path(), &["checkout", "-b", "main"]);
-    std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
-    git(workspace.path(), &["add", "base.txt"]);
-    git(workspace.path(), &["commit", "-m", "base"]);
-    git(workspace.path(), &["push", "-u", "origin", "main"]);
-    git(workspace.path(), &["checkout", "-b", "candidate"]);
-    git(workspace.path(), &["checkout", "main"]);
-    std::fs::write(workspace.path().join("newer-base.txt"), "base only\n").unwrap();
-    git(workspace.path(), &["add", "newer-base.txt"]);
-    git(workspace.path(), &["commit", "-m", "advance base"]);
-    git(workspace.path(), &["push"]);
-    git(workspace.path(), &["checkout", "candidate"]);
+    git(&["init", "--initial-branch=main"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    std::fs::write(workspace.path().join("provider.txt"), "provider owned\n").unwrap();
+    git(&["add", "provider.txt"]);
+    git(&["commit", "-m", "provider base"]);
 
-    let behind = preflight_cook_workspace_base_ancestry(workspace.path(), "main")
-        .expect_err("strictly behind destination is rejected before provider execution");
-    assert_eq!(
-        behind.details["workspace_base_ancestry"]["direction"],
-        "behind"
-    );
-    assert_eq!(
-        behind.details["workspace_base_ancestry"]["base_only_commits"],
-        1
-    );
-    assert_eq!(
-        behind.details["workspace_base_ancestry"]["candidate_only_commits"],
-        0
-    );
-    assert_eq!(
-        behind.details["workspace_base_ancestry"]["next_action"],
-        "converge_destination_before_provider"
-    );
-
-    git(workspace.path(), &["merge", "--ff-only", "origin/main"]);
     preflight_cook_workspace_base_ancestry(workspace.path(), "main")
-        .expect("clean intentional no-change destination is equivalent to its resolved base");
-    std::fs::write(workspace.path().join("candidate.txt"), "candidate only\n").unwrap();
-    git(workspace.path(), &["add", "candidate.txt"]);
-    git(workspace.path(), &["commit", "-m", "candidate"]);
-    preflight_cook_workspace_base_ancestry(workspace.path(), "main")
-        .expect("ahead destination retains a candidate relative to the resolved base");
-
-    git(workspace.path(), &["checkout", "main"]);
-    std::fs::write(workspace.path().join("newer-base-2.txt"), "base only\n").unwrap();
-    git(workspace.path(), &["add", "newer-base-2.txt"]);
-    git(workspace.path(), &["commit", "-m", "advance base again"]);
-    git(workspace.path(), &["push"]);
-    git(workspace.path(), &["checkout", "candidate"]);
-    let diverged = preflight_cook_workspace_base_ancestry(workspace.path(), "main")
-        .expect_err("diverged destination is rejected before provider execution");
-    assert_eq!(
-        diverged.details["workspace_base_ancestry"]["direction"],
-        "diverged"
-    );
-    assert_eq!(
-        diverged.details["workspace_base_ancestry"]["base_only_commits"],
-        1
-    );
-    assert_eq!(
-        diverged.details["workspace_base_ancestry"]["candidate_only_commits"],
-        1
-    );
+        .expect("a provider-owned Git workspace without origin has no remote base to converge");
 }
 
 #[cfg(unix)]

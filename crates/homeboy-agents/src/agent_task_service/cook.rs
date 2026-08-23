@@ -4085,8 +4085,7 @@ fn run_cook_reported(
                     record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
                 }
                 if error.retryable != Some(true)
-                    && record.metadata["pre_execution_failure"]["phase"].as_str()
-                        == Some("cook_pre_execution")
+                    && record.metadata.get("pre_execution_failure").is_some()
                 {
                     return Ok(pre_execution_failure_report(
                         failure_options.cook_id.clone(),
@@ -4471,6 +4470,7 @@ fn run_cook_spine(
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options).map_err(|mut error| {
+            error = with_pre_execution_phase(error, "workspace_base_ancestry_preflight");
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
@@ -6466,7 +6466,8 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
     }
-    preflight_cook_workspace_base_ancestry(&target, &options.base)?;
+    preflight_cook_workspace_base_ancestry(&target, &options.base)
+        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))?;
     Ok(())
 }
 
@@ -6478,16 +6479,15 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
     else {
         return Ok(());
     };
-    // A destination can be a valid local Git workspace without an origin base
-    // to compare. Preserve that provider-owned contract; when origin already
-    // resolves the declared base, capture its current immutable snapshot below.
-    let tracking_ref = format!("refs/remotes/origin/{base}");
-    let tracking_base = std::process::Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &tracking_ref])
+    // A provider-owned Git destination can intentionally have no origin. When
+    // origin is configured, resolve its authoritative base directly instead of
+    // trusting a potentially absent shallow or single-branch tracking ref.
+    let origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
         .current_dir(target)
-        .status()
+        .output()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !tracking_base.success() {
+    if !origin.status.success() {
         return Ok(());
     }
     let Some(resolved_base) =
