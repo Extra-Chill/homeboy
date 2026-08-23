@@ -199,9 +199,12 @@ impl AgentTaskLifecycleStore {
             plan,
             run_id,
             super::lifecycle_ops::execution_runner_id(),
-            &|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok(),
+            &crate::agent_task_service::cook_pre_execution::store_admission_status(self),
             |run_id| {
-                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                let runtime_root =
+                    homeboy_core::controller_runtime::runtime_root_in(self.roots().data())?;
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                    &runtime_root,
                     run_id,
                     || Ok(self.read_record(run_id)?.state.is_terminal()),
                 )
