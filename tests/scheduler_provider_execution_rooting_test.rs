@@ -11,7 +11,14 @@
 //!   ... the provider actually runs, for minutes ...
 //! record_provider_execution_terminal_with_model   records the outcome
 //! record_provider_execution_cleanup_elapsed       records teardown cost
+//! record_provider_execution_terminal              records a timeout instead
 //! ```
+//!
+//! The timeout leg lives in `scheduling.rs::expire_timed_out_tasks`, which
+//! received the store as an `Option` and had the same ambient `None` arm. It is
+//! the terminal record for a task holding a reservation taken through the
+//! accessor, so recording it against the environment could put the timeout in a
+//! different installation than the reservation it closes.
 //!
 //! Each wrote `match self.lifecycle_store.as_ref() { Some(store) => .., None =>
 //! <ambient> }`. The `None` arm was not defensive: `agent_task_dispatch_service`
@@ -89,4 +96,28 @@ fn the_durable_writes_do_not_reintroduce_a_fallback() {
              durable_lifecycle_store() (#7505)."
         );
     }
+}
+
+fn scheduling_source() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/homeboy-agents/src/agent_task_scheduler/scheduling.rs");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+#[test]
+fn the_timeout_terminal_record_has_no_ambient_fallback() {
+    let source = scheduling_source();
+    assert!(
+        !source.contains("agent_task_lifecycle::record_provider_execution_terminal("),
+        "expire_timed_out_tasks falls back to the free-function form, which \
+         resolves its own root. The timeout terminal closes a reservation taken \
+         through the scheduler's store, so it must use the store it was given \
+         and write nothing when there is none (#7505)."
+    );
+    assert!(
+        !source.contains("from_current_environment("),
+        "scheduling.rs resolves the environment directly; the scheduler owns \
+         that resolution and passes the store down (#7505)."
+    );
 }

@@ -788,8 +788,8 @@ impl AgentTaskScheduler {
                     _attempt_workspace: attempt_workspace.clone(),
                     run_id: self.run_id.clone(),
                     artifact_root: self
-                        .lifecycle_store
-                        .as_ref()
+                        .durable_lifecycle_store()
+                        .ok()
                         .map(|store| store.artifact_root()),
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
@@ -831,7 +831,7 @@ impl AgentTaskScheduler {
                 &mut outcomes,
                 &mut events,
                 self.executor.as_ref(),
-                self.lifecycle_store.as_ref(),
+                self.durable_lifecycle_store().ok(),
             );
 
             if running.is_empty() {
@@ -1329,7 +1329,7 @@ impl AgentTaskScheduler {
                             &mut outcomes,
                             &mut events,
                             self.executor.as_ref(),
-                            self.lifecycle_store.as_ref(),
+                            self.durable_lifecycle_store().ok(),
                         );
                         break;
                     }
