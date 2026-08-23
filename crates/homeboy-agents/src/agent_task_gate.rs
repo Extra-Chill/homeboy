@@ -619,6 +619,10 @@ pub struct AgentTaskGateReport {
     pub stderr: String,
     #[serde(default)]
     pub capture: AgentTaskGateCapture,
+    /// The workspace requested by Cook and the component workspace that
+    /// actually executed this gate. Root components retain identical paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<AgentTaskGateCwdEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +644,12 @@ pub struct AgentTaskGateReport {
     pub candidate_checkout: Option<AgentTaskGateCandidateCheckout>,
     #[serde(default, skip_serializing_if = "AgentTaskGateEnvironment::is_empty")]
     pub environment: AgentTaskGateEnvironment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateCwdEvidence {
+    pub requested: String,
+    pub effective: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1181,6 +1191,7 @@ impl AgentTaskGateReport {
             stdout: stdout.into(),
             stderr: stderr.into(),
             capture: AgentTaskGateCapture::default(),
+            cwd: None,
             failure_evidence,
             test_result: None,
             cargo_selection: None,
@@ -1234,6 +1245,7 @@ impl AgentTaskGateReport {
             stdout: String::new(),
             stderr: String::new(),
             capture: AgentTaskGateCapture::default(),
+            cwd: None,
             failure_evidence: None,
             test_result: None,
             cargo_selection: None,
