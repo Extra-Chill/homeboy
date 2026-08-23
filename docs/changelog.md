@@ -4,6 +4,45 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.356.0] - 2026-08-23
+
+### Added
+- declare CI cache contracts
+- add hash-bound stage reuse evidence
+
+### Changed
+- unify release Cargo cache
+- Isolate required-gates execution test policy
+- compose triage as CLI capability
+
+### Fixed
+- report terminal outcome in progress
+- prefer exact component slug
+- recover Git preflight transport failures
+- bind locked registry mutations to the lock's root
+- require resume for unmaterialized admissions
+- pin moving base snapshots
+- give one promotion one observation store
+- keep triage independent from CLI
+- restore the homeboy-agents test build (#13164 regression)
+- allocate attempt scratch under the durable root
+- isolate portable resolver fixture target
+- gate incompatible stable runtime
+- defer gate remediation classification
+- close the timeout leg of the provider-execution sequence
+- give the scheduler one lifecycle store per run
+- stop reporting an empty process scope as an escaped descendant
+- stop counting foreign-owned /proc denials as scope discovery gaps
+- restore bounded resolver fixture gate
+- preserve clean producers with proc diagnostics
+- restore the lab-runner non-test build (#13140 regression)
+- bind cook retry and continuation claims to one home
+- preserve terminal daemon report errors
+- pin and converge provider base
+- Fix fanout replay placement preservation
+- exclude late snapshot context
+- preserve component cwd during adoption
+
 ## [0.355.5] - 2026-08-23
 
 ### Changed
