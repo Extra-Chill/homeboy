@@ -303,11 +303,11 @@ fn invoke(
         InvocationFailure::Unavailable("Resolver stderr was unavailable.".into())
     })?;
     let (tx, rx) = mpsc::channel();
-    let stdout_reader = std::thread::spawn(move || {
+    let _stdout_reader = std::thread::spawn(move || {
         let _ = tx.send(read_bounded(stdout));
     });
     let (err_tx, err_rx) = mpsc::channel();
-    let stderr_reader = std::thread::spawn(move || {
+    let _stderr_reader = std::thread::spawn(move || {
         let _ = err_tx.send(read_bounded(stderr));
     });
     loop {
@@ -319,38 +319,12 @@ fn invoke(
                 cleanup(&containment, &mut child, true);
                 if let Err(error) = terminate_remaining_process_group(child.id()) {
                     cleanup(&containment, &mut child, true);
-                    join_readers(stdout_reader, stderr_reader);
                     return Err(InvocationFailure::Unavailable(format!(
                         "Resolver descendant cleanup failed: {error}"
                     )));
                 }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let output = match rx.recv_timeout(remaining) {
-                    Ok(output) => output,
-                    Err(_) => {
-                        // The leader is already reaped. Run full procfs and
-                        // group cleanup before joining pipe readers so a
-                        // detached session cannot keep this invocation alive.
-                        cleanup(&containment, &mut child, true);
-                        join_readers(stdout_reader, stderr_reader);
-                        return Err(InvocationFailure::Unavailable(
-                            "Resolver stdout reader did not finish within the total budget.".into(),
-                        ));
-                    }
-                };
-                let stderr = match err_rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                {
-                    Ok(stderr) => stderr,
-                    Err(_) => {
-                        cleanup(&containment, &mut child, true);
-                        join_readers(stdout_reader, stderr_reader);
-                        return Err(InvocationFailure::Unavailable(
-                            "Resolver stderr reader did not finish within the total budget.".into(),
-                        ));
-                    }
-                };
-                join_readers(stdout_reader, stderr_reader);
+                let output = receive_reader_output(&rx, "stdout", deadline)?;
+                let stderr = receive_reader_output(&err_rx, "stderr", deadline)?;
                 if output.len() > MAX_OUTPUT_BYTES || stderr.len() > MAX_OUTPUT_BYTES {
                     return Err(InvocationFailure::Unavailable(
                         "Resolver output exceeded the 64 KiB limit.".into(),
@@ -368,12 +342,12 @@ fn invoke(
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 cleanup(&containment, &mut child, false);
-                join_readers(stdout_reader, stderr_reader);
-                return Err(InvocationFailure::Unavailable("Resolver timed out.".into()));
+                return Err(InvocationFailure::Unavailable(
+                    "Resolver timed out; process cleanup started without waiting for output readers that may hold inherited pipes.".into(),
+                ));
             }
             Err(error) => {
                 cleanup(&containment, &mut child, false);
-                join_readers(stdout_reader, stderr_reader);
                 return Err(InvocationFailure::Unavailable(format!(
                     "Resolver wait failed: {error}"
                 )));
@@ -408,6 +382,20 @@ fn read_bounded(mut reader: impl Read) -> Vec<u8> {
     value
 }
 
+fn receive_reader_output(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    stream: &str,
+    deadline: Instant,
+) -> Result<Vec<u8>, InvocationFailure> {
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| {
+            InvocationFailure::Unavailable(format!(
+                "Resolver {stream} reader did not finish before the total budget after process cleanup; returning without waiting for an inherited pipe."
+            ))
+        })
+}
+
 fn cleanup(
     containment: &ProcessContainment,
     child: &mut std::process::Child,
@@ -420,11 +408,6 @@ fn cleanup(
     let _ = containment.cleanup_after_leader_exit_bounded(CLEANUP_BUDGET);
     let _ = force_terminate_process_tree_bounded(child.id(), CLEANUP_BUDGET);
     let _ = terminate_process_tree_and_reap(child);
-}
-
-fn join_readers(stdout: std::thread::JoinHandle<()>, stderr: std::thread::JoinHandle<()>) {
-    let _ = stdout.join();
-    let _ = stderr.join();
 }
 
 pub(super) fn normalize_target_url(value: &str) -> String {
@@ -450,7 +433,7 @@ fn bound(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(super) fn test_cross_platform_fixture() {
     const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
 
@@ -526,7 +509,7 @@ pub(super) fn test_cross_platform_fixture() {
     });
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     let root = homeboy::core::paths::homeboy().unwrap();
     let extension = root.join("extensions").join("fixture-external-check");
@@ -555,7 +538,7 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     std::env::set_var(fixture_mode_env, mode);
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(feature = "test-support", unix))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -572,7 +555,7 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     name.into()
 }
 
-#[cfg(all(any(test, feature = "test-support"), windows))]
+#[cfg(all(feature = "test-support", windows))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     let name = "fixture-resolver.cmd";
     let path = extension.join(name);
@@ -590,8 +573,6 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
 mod tests {
     use super::*;
 
-    const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
-
     #[test]
     fn target_url_strips_fragments_and_credentials() {
         assert_eq!(
@@ -605,6 +586,30 @@ mod tests {
         let response: ExternalCheckDetailResponse = serde_json::from_str(r#"{"schema":"homeboy/external-check-detail-response/v1","provider":"example","summary":"failed"}"#).unwrap();
         assert_eq!(response.provider, "example");
         assert!(response.actions.is_empty());
+    }
+
+    #[test]
+    fn output_reader_timeout_returns_without_waiting_for_a_stalled_reader() {
+        let (sender, receiver) = mpsc::channel();
+        let _reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(sender);
+        });
+
+        let started = Instant::now();
+        let error = receive_reader_output(
+            &receiver,
+            "stdout",
+            Instant::now() + Duration::from_millis(20),
+        )
+        .expect_err("reader must time out");
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(matches!(
+            error,
+            InvocationFailure::Unavailable(ref message)
+                if message.contains("returning without waiting for an inherited pipe")
+        ));
     }
 
     #[test]
@@ -679,7 +684,7 @@ mod tests {
         .expect_err("resolver must time out");
         assert!(matches!(
             error,
-            InvocationFailure::Unavailable(ref message) if message == "Resolver timed out."
+            InvocationFailure::Unavailable(ref message) if message.starts_with("Resolver timed out;")
         ));
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .unwrap()
