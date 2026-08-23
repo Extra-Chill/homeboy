@@ -327,4 +327,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CI_GATE_RESULTS: ${{ toJSON(needs) }}
           CI_RUN_ACTIVE: ${{ needs.pr-state.outputs.active }}
+          REQUIRED_GATES_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash .github/ci-required-gates-executed.sh
