@@ -220,6 +220,17 @@ pub(crate) fn workspace_content_hash_for_policy(
     excludes: &[String],
     policy: &str,
 ) -> Result<String> {
+    Ok(workspace_content_manifest_and_hash_for_policy(path, excludes, policy)?.1)
+}
+
+/// Collect the content manifest and digest in one traversal. Snapshot staging
+/// must never compare an inventory from one filesystem instant with a digest
+/// from another while runner-owned cleanup is active.
+pub(crate) fn workspace_content_manifest_and_hash_for_policy(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+) -> Result<(WorkspaceContentManifest, String)> {
     let (algorithm, executable_capability) =
         workspace_content_hash_contract(policy).ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -233,15 +244,19 @@ pub(crate) fn workspace_content_hash_for_policy(
     hasher.update(algorithm.as_bytes());
     hasher.update(b"\0");
     let root = content_hash_root(path)?;
+    let mut manifest = WorkspaceContentManifest {
+        entry_count: 0,
+        entries: Vec::new(),
+    };
     ContentHashTraversal {
         root: &root,
         excludes,
         hasher: &mut hasher,
         executable_capability,
-        manifest: None,
+        manifest: Some(&mut manifest),
     }
     .collect(&root, Path::new(""), &mut vec![root.clone()])?;
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok((manifest, format!("sha256:{:x}", hasher.finalize())))
 }
 
 /// A deterministic, content-free inventory of every path a snapshot materializes.
@@ -252,34 +267,7 @@ pub(crate) fn workspace_content_manifest_for_policy(
     excludes: &[String],
     policy: &str,
 ) -> Result<WorkspaceContentManifest> {
-    let executable_capability = match workspace_content_hash_contract(policy) {
-        Some((_, capability)) => capability,
-        None => {
-            return Err(Error::validation_invalid_argument(
-                "permission_policy",
-                "workspace content hash policy is unsupported on this platform",
-                Some(policy.to_string()),
-                None,
-            ));
-        }
-    };
-    let root = content_hash_root(path)?;
-    let mut manifest = WorkspaceContentManifest {
-        entry_count: 0,
-        entries: Vec::new(),
-    };
-    // Use the authoritative v2 traversal so diagnostics and the content hash
-    // have identical symlink, exclusion, and metadata behavior.
-    let mut hasher = Sha256::new();
-    ContentHashTraversal {
-        root: &root,
-        excludes,
-        hasher: &mut hasher,
-        executable_capability,
-        manifest: Some(&mut manifest),
-    }
-    .collect(&root, Path::new(""), &mut vec![root.clone()])?;
-    Ok(manifest)
+    Ok(workspace_content_manifest_and_hash_for_policy(path, excludes, policy)?.0)
 }
 
 /// Exact historical v1 algorithm for controllers that emitted
@@ -1903,13 +1891,14 @@ pub(super) fn snapshot_stable_manifest(
     path: &Path,
     excludes: &[String],
 ) -> Result<SnapshotStableManifest> {
+    let (inventory, content_identity) = workspace_content_manifest_and_hash_for_policy(
+        path,
+        excludes,
+        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    )?;
     Ok(SnapshotStableManifest {
-        inventory: workspace_content_manifest_for_policy(
-            path,
-            excludes,
-            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-        )?,
-        content_identity: workspace_content_hash(path, excludes)?,
+        inventory,
+        content_identity,
     })
 }
 
