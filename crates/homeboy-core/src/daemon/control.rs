@@ -14,6 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
@@ -2184,7 +2186,7 @@ fn legacy_review_token(candidates: &[&DaemonProcessCandidate]) -> Option<String>
             &candidate
                 .process_start_identity
                 .as_ref()
-                .map(ToString::to_string)
+                .map(|identity| format!("{identity:?}"))
                 .unwrap_or_default(),
         ] {
             hasher.update(value.as_bytes());
