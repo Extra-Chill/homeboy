@@ -132,6 +132,7 @@ pub fn cleanup_external_storage_with_providers(
             options.min_age_days,
             remaining_bytes,
             remaining_count,
+            &inventory.generation,
         );
         let estimated_bytes = candidates.iter().map(|item| item.bytes).sum();
         remaining_count = remaining_count.saturating_sub(candidates.len());
@@ -197,13 +198,11 @@ fn plan<'a>(
     min_age_days: u64,
     max_bytes: u64,
     limit: usize,
+    generation: &str,
 ) -> Vec<&'a ExternalStorageItem> {
     let mut selected = Vec::new();
     let mut selected_bytes = 0_u64;
     for item in items {
-        if selected.len() >= limit || selected_bytes.saturating_add(item.bytes) > max_bytes {
-            continue;
-        }
         if !item.ownership_known
             || !item.reconstructable
             || item.active
@@ -217,10 +216,41 @@ fn plan<'a>(
         {
             continue;
         }
+        if selected.len() >= limit.min(MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS)
+            || selected_bytes.saturating_add(item.bytes) > max_bytes
+        {
+            break;
+        }
+        if !reclaim_request_fits(
+            generation,
+            selected
+                .iter()
+                .copied()
+                .chain(std::iter::once(item))
+                .map(|item| ExternalStorageReclaimTarget {
+                    id: item.id.clone(),
+                    reclaim_token: item.reclaim_token.clone(),
+                }),
+        ) {
+            break;
+        }
         selected_bytes = selected_bytes.saturating_add(item.bytes);
         selected.push(item);
     }
     selected
+}
+
+fn reclaim_request_fits(
+    generation: &str,
+    reclaim_targets: impl Iterator<Item = ExternalStorageReclaimTarget>,
+) -> bool {
+    serde_json::to_vec(&ExternalStorageRequest {
+        schema: EXTERNAL_STORAGE_RETENTION_SCHEMA.to_string(),
+        operation: ExternalStorageOperation::Reclaim,
+        generation: Some(generation.to_string()),
+        reclaim_targets: reclaim_targets.collect(),
+    })
+    .is_ok_and(|request| request.len() <= MAX_EXTERNAL_STORAGE_REQUEST_BYTES)
 }
 
 fn pressured_roots(inventory: &ExternalStorageInventory, reserve_bytes: u64) -> HashSet<String> {
@@ -358,10 +388,13 @@ fn invoke_raw(
             None,
         ));
     }
-    let timeout = deadline
-        .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
-        .map(|remaining| remaining.min(Duration::from_secs(provider.timeout_seconds)))
-        .unwrap_or_else(|| Duration::from_secs(provider.timeout_seconds));
+    let remaining = match deadline {
+        Some(deadline) => deadline.duration_since(SystemTime::now()).map_err(|_| {
+            Error::internal_unexpected("external storage retention deadline elapsed")
+        })?,
+        None => Duration::from_secs(provider.timeout_seconds),
+    };
+    let timeout = remaining.min(Duration::from_secs(provider.timeout_seconds));
     if timeout.is_zero() {
         return Err(Error::internal_unexpected(
             "external storage retention deadline elapsed",
@@ -385,7 +418,12 @@ fn invoke_raw(
             provider.id
         ))
     })?;
-    attach_guard_or_reap(&mut child, |child| guard.attach(child)).map_err(|error| {
+    attach_guard_or_reap(
+        &mut child,
+        |child| guard.attach(child),
+        terminate_process_tree_and_reap,
+    )
+    .map_err(|error| {
         Error::internal_unexpected(format!(
             "attach external storage provider guard '{}': {error}",
             provider.id
@@ -435,12 +473,40 @@ fn invoke_raw(
 fn attach_guard_or_reap(
     child: &mut std::process::Child,
     attach: impl FnOnce(&std::process::Child) -> std::io::Result<()>,
+    reap: impl FnOnce(&mut std::process::Child) -> std::io::Result<std::process::ExitStatus>,
 ) -> std::io::Result<()> {
     if let Err(error) = attach(child) {
-        let _ = terminate_process_tree_and_reap(child);
-        return Err(error);
+        match reap(child) {
+            Ok(_) if child.try_wait()?.is_some() => return Err(error),
+            Ok(_) => {}
+            Err(cleanup_error) => {
+                return force_reap_after_attach_failure(child, error, cleanup_error);
+            }
+        }
+        return force_reap_after_attach_failure(
+            child,
+            error,
+            std::io::Error::other("guard cleanup returned without reaping the child"),
+        );
     }
     Ok(())
+}
+
+fn force_reap_after_attach_failure(
+    child: &mut std::process::Child,
+    attach_error: std::io::Error,
+    cleanup_error: std::io::Error,
+) -> std::io::Result<()> {
+    let kill_error = child.kill().err();
+    let wait_error = child.wait().err();
+    let fallback = match (kill_error, wait_error) {
+        (_, Some(error)) => format!("fallback reap failed: {error}"),
+        (Some(error), None) => format!("fallback kill failed: {error}"),
+        (None, None) => "fallback child kill and reap succeeded".to_string(),
+    };
+    Err(std::io::Error::other(format!(
+        "guard attach failed: {attach_error}; process-tree cleanup failed: {cleanup_error}; {fallback}"
+    )))
 }
 
 fn invoke_reclaim(
@@ -501,7 +567,7 @@ mod tests {
             unknown,
             item("credentials", ExternalStorageResourceClass::Credential),
         ];
-        let planned = plan(&inventory, &HashSet::new(), 0, 100, 10);
+        let planned = plan(&inventory, &HashSet::new(), 0, 100, 10, "generation");
         assert_eq!(
             planned
                 .iter()
@@ -517,7 +583,41 @@ mod tests {
             item("one", ExternalStorageResourceClass::Scratch),
             item("two", ExternalStorageResourceClass::Scratch),
         ];
-        assert_eq!(plan(&inventory, &HashSet::new(), 0, 100, 1).len(), 1);
+        assert_eq!(
+            plan(&inventory, &HashSet::new(), 0, 100, 1, "generation").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn plan_uses_the_serialized_reclaim_prefix_including_opaque_tokens() {
+        let mut inventory = (0..MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS + 1)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    ExternalStorageResourceClass::Scratch,
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &mut inventory {
+            item.reclaim_token = "x".repeat(300);
+        }
+        let planned = plan(
+            &inventory,
+            &HashSet::new(),
+            0,
+            u64::MAX,
+            usize::MAX,
+            "generation",
+        );
+        assert!(planned.len() < MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS);
+        assert!(reclaim_request_fits(
+            "generation",
+            planned.iter().map(|item| ExternalStorageReclaimTarget {
+                id: item.id.clone(),
+                reclaim_token: item.reclaim_token.clone(),
+            }),
+        ));
     }
 
     #[test]
@@ -536,7 +636,7 @@ mod tests {
         referenced.referenced = true;
         let inventory = vec![old, young, live, credential, pinned, referenced];
         assert_eq!(
-            plan(&inventory, &HashSet::new(), 7, 10, 10)
+            plan(&inventory, &HashSet::new(), 7, 10, 10, "generation")
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
@@ -544,7 +644,7 @@ mod tests {
         );
         let pressured = HashSet::from(["root".to_string()]);
         assert_eq!(
-            plan(&inventory, &pressured, 7, 20, 10)
+            plan(&inventory, &pressured, 7, 20, 10, "generation")
                 .iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
             vec!["old", "young"],
             "reserve pressure bypasses age only; live, referenced, credential, and pinned resources remain protected",
@@ -646,15 +746,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn expired_aggregate_deadline_does_not_spawn_a_provider() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let marker = directory.path().join("spawned");
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "expired".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("touch '{}'", marker.display()),
+            ],
+            timeout_seconds: 30,
+        };
+        let error = invoke_raw(
+            &provider,
+            ExternalStorageOperation::Inventory,
+            None,
+            Vec::new(),
+            Some(SystemTime::now() - Duration::from_secs(1)),
+        )
+        .expect_err("expired deadline");
+        assert!(error.message.contains("deadline elapsed"));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn guard_attach_failure_reaps_spawned_process() {
         let mut command = Command::new("sh");
         command.arg("-c").arg("sleep 5");
         let guard = ControllerChildGuard::prepare(&mut command).expect("guard");
         let mut child = command.spawn().expect("spawn");
-        let result = attach_guard_or_reap(&mut child, |_| {
-            Err(std::io::Error::other("fixture attach failure"))
-        });
+        let result = attach_guard_or_reap(
+            &mut child,
+            |_| Err(std::io::Error::other("fixture attach failure")),
+            |_| Err(std::io::Error::other("fixture cleanup failure")),
+        );
         assert!(result.is_err());
+        assert!(result
+            .expect_err("failure")
+            .to_string()
+            .contains("fixture cleanup failure"));
         assert!(child.try_wait().expect("poll").is_some());
         drop(guard);
     }
