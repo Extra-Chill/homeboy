@@ -27,6 +27,7 @@
     ],
     "test": [
       "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
+      "node tests/wp-codebox-phpunit-bounded-output-smoke.mjs",
       "bash scripts/build/setup-wp-codebox-smoke.sh",
       "bash scripts/build/update-wp-codebox-cache-smoke.sh",
       "bash scripts/test/wp-codebox-doctor-smoke.sh",

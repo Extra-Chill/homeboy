@@ -145,8 +145,8 @@ try {
   if (discoveryOnly) {
     try {
       if (execution.status !== 0) {
-        const stdout = (await readBoundedText(execution.stdoutPath, 8 * 1024)).trim();
-        const stderr = (await readBoundedText(execution.stderrPath, 8 * 1024)).trim();
+        const stdout = (await readBoundedText(execution.stdoutPath, 8 * 1024)).text.trim();
+        const stderr = (await readBoundedText(execution.stderrPath, 8 * 1024)).text.trim();
         const diagnostic = [stdout, stderr].filter(Boolean).join('\n');
         throw new Error(`WP Codebox PHPUnit discovery failed with exit ${execution.status}${diagnostic ? `: ${diagnostic}` : '.'}`);
       }
