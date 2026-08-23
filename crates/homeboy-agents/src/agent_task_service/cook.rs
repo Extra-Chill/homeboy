@@ -473,7 +473,10 @@ const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250
 /// before Cook can start any provider mutation or execution.
 const COOK_PROVIDER_RESOLVE_ATTEMPTS: u32 = 2;
 const COOK_PROVIDER_RESOLVE_BACKOFF: Duration = Duration::from_millis(100);
-const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(90);
+// Leave a small, explicit grace window around a provider's maximum supported
+// lookup budget so a configured 120-second exact-handle lookup is not cut off
+// by Cook before the provider can return its authoritative answer.
+const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(121);
 const COOK_PROVIDER_RESOLVE_MIN_BUDGET: Duration = Duration::from_millis(50);
 
 /// One Cook progress event, as delivered to a foreground observer.
@@ -6794,10 +6797,7 @@ fn materialize_pending_cook_workspace(
     };
     let mut identity = match resolve(options) {
         Ok(identity) => identity,
-        Err(error)
-            if provider_id(options).is_none()
-                && error.details["worktree_provider_lookup"] == "not_found" =>
-        {
+        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
             let provision = provision_pending_cook_workspace(lifecycle_store, options, &config)?;
             // Pin the provider that performed the durable mutation. A later
             // continuation re-resolves this exact destination through its owner.
