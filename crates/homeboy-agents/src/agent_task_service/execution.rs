@@ -1111,6 +1111,54 @@ pub fn retry(
         &lifecycle_store,
         run_id,
     )?;
+    let recovered_replacement = config::with_config_lock(|| {
+        let Some(cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
+            return Ok(None);
+        };
+        if !cook_retry.recipe_replacement {
+            return Ok(None);
+        }
+        let retry_run_id = cook_retry
+            .pending_run_id
+            .as_deref()
+            .expect("recipe replacement has a run id");
+        let lifecycle_missing =
+            !agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, retry_run_id)?;
+        if lifecycle_missing {
+            let recipe_store = super::cook_recipe::default_store()?;
+            super::cook_pre_execution::materialize_cook_attempt_with_stores(
+                &recipe_store,
+                &lifecycle_store,
+                &cook_retry.cook_id,
+                retry_run_id,
+                &cook_retry.plan,
+            )?;
+            agent_task_lifecycle::record_metadata_value_in_store(
+                &lifecycle_store,
+                retry_run_id,
+                "cook_retry_recipe_recovery",
+                json!({
+                    "schema": "homeboy/cook-retry-recipe-recovery/v1",
+                    "status": "materialized_orphaned_replacement",
+                    "source_run_id": source.run_id,
+                    "recovered_run_id": retry_run_id,
+                }),
+            )?;
+        }
+        Ok(Some(
+            agent_task_lifecycle::status_in_store(
+                &lifecycle_store,
+                retry_run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record,
+        ))
+    })?;
+    if let Some(record) = recovered_replacement {
+        let run = run && !record.state.is_terminal();
+        return Ok(AgentTaskRetryServiceResult { record, run });
+    }
     let cook_retry = retryable_cook_attempt(&lifecycle_store, &source)?;
     let record = match cook_retry {
         Some(cook_retry) => {
@@ -1369,6 +1417,7 @@ fn retryable_cook_attempt(
         return Ok(None);
     }
     let mut pending_attempt = None;
+    let mut materialized_attempt_seen = false;
     for recipe_attempt in recipe
         .attempts
         .iter()
@@ -1378,6 +1427,10 @@ fn retryable_cook_attempt(
             lifecycle_store,
             &recipe_attempt.run_id,
         )? {
+            if materialized_attempt_seen {
+                pending_attempt = Some(recipe_attempt);
+                break;
+            }
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry recipe entry has no durable lifecycle reservation",
@@ -1385,9 +1438,29 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
-        let record =
+        let mut record =
             agent_task_lifecycle::exact_record_in_store(lifecycle_store, &recipe_attempt.run_id)?;
-        if record.metadata["retry_of"] != source.run_id {
+        let mut owned_replacement = materialized_attempt_seen
+            && record.metadata["cook_id"] == cook_id
+            && record.metadata["cook_attempt"] == recipe_attempt.attempt;
+        if materialized_attempt_seen
+            && !owned_replacement
+            && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        {
+            for _ in 0..100 {
+                std::thread::sleep(Duration::from_millis(10));
+                record = agent_task_lifecycle::exact_record_in_store(
+                    lifecycle_store,
+                    &recipe_attempt.run_id,
+                )?;
+                owned_replacement = record.metadata["cook_id"] == cook_id
+                    && record.metadata["cook_attempt"] == recipe_attempt.attempt;
+                if owned_replacement {
+                    break;
+                }
+            }
+        }
+        if !owned_replacement && record.metadata["retry_of"] != source.run_id {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry run is not the durable retry of its source attempt",
@@ -1413,8 +1486,10 @@ fn retryable_cook_attempt(
                     attempt: recipe_attempt.attempt,
                     pending_run_id: Some(recipe_attempt.run_id.clone()),
                     plan: recipe_attempt.plan.clone(),
+                    recipe_replacement: materialized_attempt_seen,
                 }));
             }
+            materialized_attempt_seen = true;
             // A terminal failed successor is authoritative evidence. It cannot
             // be resumed; a later attempt may be allocated below if the durable
             // retry budget permits it.
@@ -1437,6 +1512,7 @@ fn retryable_cook_attempt(
             attempt: pending_attempt.attempt,
             pending_run_id: Some(pending_attempt.run_id.clone()),
             plan: pending_attempt.plan.clone(),
+            recipe_replacement: materialized_attempt_seen,
         }));
     }
     let max_attempts = recipe
@@ -1496,6 +1572,7 @@ fn retryable_cook_attempt(
         attempt: next_attempt,
         pending_run_id: None,
         plan,
+        recipe_replacement: false,
     }))
 }
 
@@ -1554,6 +1631,7 @@ struct CookRetryAttempt {
     attempt: u32,
     pending_run_id: Option<String>,
     plan: AgentTaskPlan,
+    recipe_replacement: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -7129,6 +7129,74 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
 }
 
 #[test]
+fn retryable_pre_provider_retry_materializes_orphaned_transport_replacement() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-retry-orphaned-replacement", 2);
+        let first_retry =
+            crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+                .expect("reserve second attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &first_retry.record.run_id,
+            &options.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("snapshot failed", None).with_retryable(true),
+        )
+        .expect("terminalize the materialized second attempt");
+        let orphaned_run_id = format!("{}-transport-retry", first_retry.record.run_id);
+        super::super::cook_recipe::default_store()
+            .expect("Cook recipe store")
+            .record_recipe_attempt_replacement(
+                &options.cook_id,
+                &first_retry.record.run_id,
+                &orphaned_run_id,
+            )
+            .expect("persist replacement before interrupted lifecycle materialization");
+        assert!(!agent_task_lifecycle::run_record_exists(&orphaned_run_id)
+            .expect("probe missing lifecycle reservation"));
+
+        let barrier = Arc::new(Barrier::new(4));
+        let retries = (0..4)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let run_id = options.initial_run_id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    crate::agent_task_service::retry(&run_id, None, true, true)
+                        .expect("materialize the recipe-owned replacement")
+                })
+            })
+            .collect::<Vec<_>>();
+        let recovered = retries
+            .into_iter()
+            .map(|retry| retry.join().expect("retry thread"))
+            .collect::<Vec<_>>();
+
+        assert!(recovered
+            .iter()
+            .all(|retry| retry.record.run_id == orphaned_run_id && retry.run));
+        let recovered_record = agent_task_lifecycle::exact_record(&orphaned_run_id)
+            .expect("recovered lifecycle record");
+        assert_eq!(recovered_record.metadata["cook_id"], options.cook_id);
+        assert_eq!(recovered_record.metadata["cook_attempt"], 2);
+        assert_eq!(
+            recovered_record.metadata["cook_retry_recipe_recovery"],
+            serde_json::json!({
+                "schema": "homeboy/cook-retry-recipe-recovery/v1",
+                "status": "materialized_orphaned_replacement",
+                "source_run_id": options.initial_run_id,
+                "recovered_run_id": orphaned_run_id,
+            })
+        );
+        assert_eq!(
+            agent_task_lifecycle::cook_index(&options.cook_id)
+                .expect("recovered Cook index")
+                .latest_run_id,
+            orphaned_run_id
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-retry-concurrent", 2);

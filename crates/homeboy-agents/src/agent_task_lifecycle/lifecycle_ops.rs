@@ -6275,7 +6275,10 @@ pub(crate) fn record_cook_attempt_locked_in_store(
     if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         let handoff = &parent.metadata["detached_cook_handoff"];
         let reserved_child = handoff["materializing_attempt_run_id"] == run_id;
-        if handoff["cook_id"] == cook_id
+        // An existing index proves this is later-attempt materialization; a
+        // terminal first-handoff placeholder no longer owns that boundary.
+        if !lifecycle_store.cook_index_exists(&cook_id)
+            && handoff["cook_id"] == cook_id
             && (((parent.state.is_terminal() && handoff["state"] != "redirected")
                 || handoff["cancellation_fence"]["state"] == "cancelled")
                 && !reserved_child
