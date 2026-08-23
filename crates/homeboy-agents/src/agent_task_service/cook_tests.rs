@@ -5798,8 +5798,21 @@ fn cook_persists_initial_base_transport_failure_before_provider_execution() {
         let persisted = record.metadata.to_string();
         assert!(!persisted.contains("git-secret"), "{persisted}");
         assert!(!persisted.contains("git-user"), "{persisted}");
+        let logs = agent_task_lifecycle::logs(&options.initial_run_id)
+            .expect("initial base transport failure has durable evidence");
+        let logs_evidence = format!("{logs:#?}");
+        assert!(!logs_evidence.contains("git-secret"), "{logs_evidence}");
+        assert!(!logs_evidence.contains("git-user"), "{logs_evidence}");
         let report_evidence = format!("{report:#?}");
         assert!(!report_evidence.contains("git-secret"), "{report_evidence}");
+        assert!(!report_evidence.contains("git-user"), "{report_evidence}");
+        let replayed = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("durable initial base transport failure replays");
+        assert_eq!(replayed.value.status, "pre_execution_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let replayed_record = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("replayed initial base transport failure remains status-addressable");
+        assert_eq!(replayed_record.state, AgentTaskRunState::Failed);
         let retry = agent_task_lifecycle::retry(
             &options.initial_run_id,
             Some("cook-initial-base-transport-failure-retry"),

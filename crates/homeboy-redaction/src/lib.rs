@@ -183,7 +183,7 @@ impl RedactionPolicy {
     /// Redact URLs wherever they occur in diagnostic prose. URL punctuation is
     /// kept outside the match so Markdown and sentence delimiters survive.
     pub fn redact_embedded_urls(&self, value: &str) -> String {
-        let urls = Regex::new(r#"(?i)https?://[^\s<>'"]+"#)
+        let urls = Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'"]+"#)
             .expect("embedded URL redaction regex is valid");
         let value = urls
             .replace_all(value, |captures: &Captures<'_>| {
@@ -731,6 +731,18 @@ mod tests {
         assert_eq!(
             policy.redact_embedded_urls(value),
             "see (https://[REDACTED]@example.test/log?token=[REDACTED]), then continue"
+        );
+    }
+
+    #[test]
+    fn redacts_embedded_proxy_urls_with_credentials() {
+        let policy = RedactionPolicy::default();
+
+        assert_eq!(
+            policy.redact_embedded_urls(
+                "fatal: proxy socks5://proxy-user:proxy-secret@proxy.example.test:1080 failed"
+            ),
+            "fatal: proxy socks5://[REDACTED]@proxy.example.test:1080 failed"
         );
     }
 
