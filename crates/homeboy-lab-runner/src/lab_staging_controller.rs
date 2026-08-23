@@ -424,7 +424,7 @@ fn runtime_major_minor(identity: &str) -> Option<(u64, u64)> {
 
 fn runtime_set_admission(
     controller: &str,
-    latest_allowed_stable: Option<&str>,
+    latest_allowed_stable: Option<&homeboy_upgrade::update_check::AllowedStableRuntime>,
     requested: &str,
     configured: Option<&str>,
     daemon: Option<&str>,
@@ -434,7 +434,14 @@ fn runtime_set_admission(
     // revision, not a registry's latest stable release.
     if policy.enforce_latest_stable
         && !policy.controller_is_source_build
-        && latest_allowed_stable.is_some_and(|latest| runtime_version_is_newer(latest, controller))
+        && latest_allowed_stable.is_some_and(|latest| {
+            runtime_version_is_newer(&latest.version, controller)
+                && latest.compatibility.as_ref().is_some_and(|required| {
+                    !required.compatible_with(
+                        &homeboy_upgrade::update_check::current_runtime_compatibility(),
+                    )
+                })
+        })
     {
         return RuntimeSetAdmission::RefuseControllerUpgrade;
     }
@@ -746,7 +753,7 @@ pub(crate) fn converge_lab_handoff_runtime(
     });
     match runtime_set_admission(
         &controller.display,
-        latest_allowed_stable.as_deref(),
+        latest_allowed_stable.as_ref(),
         requested,
         None,
         None,
@@ -760,7 +767,10 @@ pub(crate) fn converge_lab_handoff_runtime(
             return Err(controller_runtime_set_error(
                 runner_id,
                 &controller.display,
-                latest_allowed_stable.as_deref().expect("checked stable"),
+                &latest_allowed_stable
+                    .as_ref()
+                    .expect("checked stable")
+                    .version,
             ))
         }
         RuntimeSetAdmission::RefuseControllerRuntime => {
@@ -2622,7 +2632,8 @@ impl ProductionLabStagingOperations {
         let compatibility = runtime_set_compatibility(requested, daemon.as_deref());
         Ok(Some(LabHandoffHomeboyIdentity {
             controller_build_identity: Some(homeboy_product_identity::build_identity().display),
-            latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable(),
+            latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable()
+                .map(|stable| stable.version),
             requested_build_identity: requested.to_string(),
             configured_command_build_identity: configured
                 .clone()
@@ -5513,7 +5524,7 @@ mod tests {
     fn two_stable_releases_behind_refuses_before_dispatch() {
         let admission = runtime_set_admission(
             "homeboy 1.2.0",
-            Some("1.2.2"),
+            Some(&stable_runtime("1.2.2", [("wire", 2)])),
             "homeboy 1.2.0",
             Some("homeboy 1.2.1+daemon"),
             Some("homeboy 1.2.1+daemon"),
@@ -5527,6 +5538,67 @@ mod tests {
             admission,
             RuntimeSetAdmission::RefuseControllerUpgrade
         ));
+    }
+
+    #[test]
+    fn one_minor_behind_with_compatible_release_contracts_is_admitted() {
+        let admission = runtime_set_admission(
+            "homeboy 1.1.9",
+            Some(&stable_runtime("1.2.0", [("provider", 1), ("snapshot", 1)])),
+            "homeboy 1.1.9",
+            Some("homeboy 1.1.9"),
+            Some("homeboy 1.1.9"),
+            RuntimeSetPolicy {
+                enforce_latest_stable: true,
+                controller_is_source_build: false,
+                allow_convergence: true,
+            },
+        );
+
+        assert!(matches!(
+            admission,
+            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
+        ));
+    }
+
+    #[test]
+    fn incompatible_stable_admission_preserves_the_immutable_cook_recipe() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "stale-runtime-recipe";
+            submit_recipe_run(run_id);
+            let recipe = persist_lab_staging_recipe(
+                run_id,
+                "lab-1",
+                &recipe_request(
+                    Some(recipe_command()),
+                    &["agent-task".to_string(), "cook".to_string()],
+                    HashMap::new(),
+                ),
+            )
+            .expect("persist immutable recipe");
+
+            let admission = runtime_set_admission(
+                "homeboy 1.1.9",
+                Some(&stable_runtime("1.2.0", [("snapshot", 2)])),
+                "homeboy 1.1.9",
+                Some("homeboy 1.1.9"),
+                Some("homeboy 1.1.9"),
+                RuntimeSetPolicy {
+                    enforce_latest_stable: true,
+                    controller_is_source_build: false,
+                    allow_convergence: true,
+                },
+            );
+
+            assert!(matches!(
+                admission,
+                RuntimeSetAdmission::RefuseControllerUpgrade
+            ));
+            assert_eq!(
+                load_lab_staging_recipe(run_id).expect("load recipe").recipe,
+                recipe
+            );
+        });
     }
 
     #[test]
@@ -5594,7 +5666,7 @@ mod tests {
     fn compatible_patch_daemon_is_admitted_without_dispatch_mutation() {
         let admission = runtime_set_admission(
             "homeboy 1.2.2",
-            Some("1.2.2"),
+            Some(&stable_runtime("1.2.2", [])),
             "homeboy 1.2.2",
             Some("homeboy 1.2.1"),
             Some("homeboy 1.2.1"),
@@ -5620,7 +5692,7 @@ mod tests {
         assert!(matches!(
             runtime_set_admission(
                 "homeboy 1.2.2+requested",
-                Some("1.2.2"),
+                Some(&stable_runtime("1.2.2", [])),
                 "homeboy 1.2.2+requested",
                 Some("homeboy 1.1.9+runner"),
                 Some("homeboy 1.1.9+daemon"),
@@ -5631,7 +5703,7 @@ mod tests {
         assert!(matches!(
             runtime_set_admission(
                 "homeboy 1.2.2+requested",
-                Some("1.2.2"),
+                Some(&stable_runtime("1.2.2", [])),
                 "homeboy 1.2.2+requested",
                 Some("homeboy 1.1.9+runner"),
                 Some("homeboy 1.1.9+daemon"),
@@ -5650,6 +5722,22 @@ mod tests {
             "policy": { "allow_homeboy_convergence": allowed },
         }))
         .expect("runner")
+    }
+
+    fn stable_runtime(
+        version: &str,
+        contracts: impl IntoIterator<Item = (&'static str, u32)>,
+    ) -> homeboy_upgrade::update_check::AllowedStableRuntime {
+        homeboy_upgrade::update_check::AllowedStableRuntime {
+            version: version.to_string(),
+            compatibility: Some(homeboy_upgrade::update_check::RuntimeCompatibility {
+                schema: "homeboy/runtime-compatibility/v1".to_string(),
+                required_contracts: contracts
+                    .into_iter()
+                    .map(|(id, version)| (id.to_string(), version))
+                    .collect(),
+            }),
+        }
     }
 
     fn convergence_status(daemon_identity: &str) -> crate::RunnerStatusReport {

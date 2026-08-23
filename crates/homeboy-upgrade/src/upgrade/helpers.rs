@@ -14,6 +14,7 @@ use super::execution::{
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
 use super::types::*;
+use super::update_check::RuntimeCompatibility;
 use super::validation::check_for_updates;
 
 pub fn current_version() -> &'static str {
@@ -55,6 +56,52 @@ pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
     fetch_latest_github_version_at(latest_version_endpoint(method))
 }
 
+/// Read release-declared durable compatibility from the same daily update
+/// source. This is deliberately not called by Cook admission: the cache is the
+/// only runtime input there, so a durable command never adds a network edge.
+pub fn fetch_latest_runtime_compatibility(
+    expected_version: &str,
+) -> Result<Option<RuntimeCompatibility>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("homeboy/{}", VERSION))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
+    let release: GitHubRelease = client
+        .get(GITHUB_RELEASES_API)
+        .send()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("query GitHub releases".to_string())))?
+        .json()
+        .map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("parse GitHub release response".to_string()),
+            )
+        })?;
+    if release.tag_name.trim_start_matches('v') != expected_version.trim_start_matches('v') {
+        return Ok(None);
+    }
+    runtime_compatibility_from_release_notes(&release.body)
+}
+
+const RUNTIME_COMPATIBILITY_MARKER: &str = "<!-- homeboy-runtime-compatibility: ";
+
+fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<RuntimeCompatibility>> {
+    let Some(start) = body.find(RUNTIME_COMPATIBILITY_MARKER) else {
+        return Ok(None);
+    };
+    let value = &body[start + RUNTIME_COMPATIBILITY_MARKER.len()..];
+    let Some(json) = value.split_once(" -->").map(|(json, _)| json) else {
+        return Ok(None);
+    };
+    serde_json::from_str(json).map(Some).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse release runtime compatibility".to_string()),
+        )
+    })
+}
+
 fn latest_version_endpoint(_method: InstallMethod) -> &'static str {
     GITHUB_RELEASES_API
 }
@@ -89,6 +136,7 @@ where
             return InstallMethod::Homebrew;
         }
     }
+
     for pattern in &defaults.install_methods.secondary.path_patterns {
         if exe_path.contains(pattern) {
             return InstallMethod::Secondary;
@@ -116,6 +164,20 @@ where
     }
 
     InstallMethod::Unknown
+}
+
+#[cfg(test)]
+#[test]
+fn release_notes_runtime_compatibility_is_explicit_and_versioned() {
+    let compatibility = runtime_compatibility_from_release_notes(
+        "release\n<!-- homeboy-runtime-compatibility: {\"schema\":\"homeboy/runtime-compatibility/v1\",\"required_contracts\":{\"snapshot\":2}} -->",
+    )
+    .expect("parse declaration")
+    .expect("declaration");
+    assert_eq!(compatibility.required_contracts["snapshot"], 2);
+    assert!(runtime_compatibility_from_release_notes("release")
+        .unwrap()
+        .is_none());
 }
 
 pub fn version_is_newer(latest: &str, current: &str) -> bool {
