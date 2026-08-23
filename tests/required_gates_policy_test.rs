@@ -195,6 +195,11 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
         rule["type"] == "required_status_checks"
             && rule["parameters"]["strict_required_status_checks_policy"] == true
     }));
+    assert_eq!(
+        policy["reconcile_preflight"]["required_context"],
+        "homeboy / Test",
+        "the reconcile preflight must derive its canonical API check name and app id from a declared required context"
+    );
 
     for context in &contexts {
         let matrix_title = context.trim_start_matches("homeboy / ");
