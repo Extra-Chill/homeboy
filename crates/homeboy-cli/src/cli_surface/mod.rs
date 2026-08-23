@@ -993,6 +993,40 @@ mod tests {
     }
 
     #[test]
+    fn registered_cook_parse_preserves_placement_from_compact_help_position() {
+        for args in [
+            [
+                "homeboy",
+                "--placement",
+                "lab",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "repo@slug",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--placement",
+                "lab",
+                "--to-worktree",
+                "repo@slug",
+            ]
+            .as_slice(),
+        ] {
+            let matches = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(args)
+                .expect("Cook placement parses from its documented positions");
+            let (cli, _) = Cli::from_registered_arg_matches(&matches)
+                .expect("registered Cook parse retains placement");
+
+            assert_eq!(cli.placement, Placement::Lab);
+        }
+    }
+
+    #[test]
     fn placement_exposes_explicit_lab_or_local_fallback() {
         let cli =
             Cli::try_parse_from(["homeboy", "bench", "example", "--placement", "lab-or-local"])

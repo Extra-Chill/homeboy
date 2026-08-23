@@ -3368,6 +3368,31 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
 }
 
 #[test]
+fn replay_intent_preserves_explicit_lab_placement_without_a_runner_pin() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "--run-id".to_string(),
+            "explicit-lab-replay".to_string(),
+            "--to-worktree".to_string(),
+            "repo@explicit-lab".to_string(),
+            "--prompt".to_string(),
+            "preserve the explicit placement".to_string(),
+        ];
+        let intent = build_unmaterialized_cook_replay_intent(&args, "explicit-lab-replay", None)
+            .expect("replay intent");
+        let replay = Cli::try_parse_from(&intent.argv).expect("intent parses as Cook");
+
+        assert_eq!(replay.placement, crate::cli_surface::Placement::Lab);
+        assert_eq!(replay.runner, None);
+    });
+}
+
+#[test]
 fn replay_intent_snapshots_all_arbitrary_text_and_rejects_credential_urls() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let content = [
