@@ -4,6 +4,43 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.4] - 2026-08-23
+
+### Changed
+- unify daemon and broker job flow
+- centralize vacuous test ownership
+- Hydrate external CI failure diagnostics
+- Separate attempt and Cook status scope
+- Report effective transfer recursion
+- format artifact promotion rooting test
+- stop required status checks from blocking merges
+- resolve HOME through the process-local override
+- Supervise local Cook retries durably
+
+### Fixed
+- preserve substantive promotion recovery
+- support reporting-only rulesets
+- bound single preview admission
+- validate replacement proof finalization
+- execute manual finalization gates
+- recover manual publication failures
+- unify agent task model options
+- preserve repository identity for providers
+- aggregate duplicate required gate contexts
+- quarantine publication drift
+- preserve prepared cache ownership
+- preserve recoverable candidate lineage
+- preserve zero-execution retry budget
+- reject unpushed manual preflight
+- validate PR base branches early
+- preserve explicit Lab placement
+- distinguish missing selection from readiness
+- preserve replacement candidate scope
+- synchronize tunnel durability failure
+- converge unleased recovery
+- surface provider failure evidence
+- report unresolved preview planning
+
 ## [0.355.3] - 2026-08-23
 
 ### Fixed
