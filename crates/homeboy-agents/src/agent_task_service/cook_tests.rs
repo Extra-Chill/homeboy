@@ -17717,7 +17717,8 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
             std::time::Duration::from_secs(60),
         )
         .expect("claim promotion");
-        agent_task_lifecycle::fail_cook_operation_in_store(&test_lifecycle_store(), 
+        agent_task_lifecycle::fail_cook_operation_in_store(
+            &test_lifecycle_store(),
             &options.initial_run_id,
             &operation_key,
             serde_json::json!({
