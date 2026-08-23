@@ -689,6 +689,16 @@ impl CliRuntime {
             }
         }
 
+        if let Err(err) = guard_cook_runtime_compatibility(&cli, &normalized) {
+            output_runtime::emit_json_result_for_identity(
+                Err(err),
+                output_file.as_deref(),
+                2,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(2);
+        }
+
         match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
@@ -913,6 +923,50 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+/// Durable Cook must not create a recipe under a runtime that the existing
+/// update policy has already proven incompatible with the allowed stable.
+/// Preview stays read-only and deliberately does not acquire this admission.
+fn guard_cook_runtime_compatibility(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<()> {
+    let is_durable_cook = matches!(
+        &cli.command,
+        Commands::AgentTask(agent_task)
+            if matches!(
+                &agent_task.command,
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) if !cook.preview
+            )
+    );
+    if !is_durable_cook {
+        return Ok(());
+    }
+    let controller = homeboy_product_identity::build_identity();
+    let Some(stable) =
+        homeboy_upgrade::upgrade::update_check::incompatible_allowed_stable(&controller.display)
+    else {
+        return Ok(());
+    };
+    let replay = homeboy_core::engine::shell::quote_args(normalized_args);
+    let recovery = format!("homeboy upgrade && {replay}");
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "runtime_set",
+        format!(
+            "Durable Cook refused before preview or materialization because installed controller `{}` cannot satisfy the declared runtime contracts for latest allowed stable `{}`",
+            controller.display, stable.version
+        ),
+        Some(controller.display),
+        Some(vec![recovery.clone()]),
+    );
+    error.details["runtime_set"] = serde_json::json!({
+        "latest_allowed_stable": stable.version,
+        "required_contracts": stable.compatibility.map(|compatibility| compatibility.required_contracts),
+        "recovery_command": recovery,
+        "preserved_invocation": replay,
+    });
+    Err(error)
 }
 
 fn schedule_runner_exec_recovery() {

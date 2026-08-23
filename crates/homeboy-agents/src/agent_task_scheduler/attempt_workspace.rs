@@ -3,6 +3,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_FENCE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_snapshot_fence_test_hook(hook: impl FnOnce() + 'static) {
+    SNAPSHOT_FENCE_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_snapshot_fence_test_hook() {
+    SNAPSHOT_FENCE_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 use super::harvest::{
     git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_runner_metadata,
     RUNNER_METADATA_EXCLUDE_PATHSPECS,
@@ -350,11 +369,62 @@ pub(super) fn prepare_committed_harvest(
                 .unwrap_or_else(|| verified_gate_feedback_baseline(root, request, &status))?,
         )
     };
+    #[cfg(test)]
+    run_snapshot_fence_test_hook();
+    // The fence deliberately reads after the hook/boundary: an earlier source
+    // observation is only a candidate baseline, never authorization to create
+    // the provider attempt worktree.
+    let source_head = git_output(root, &["rev-parse", "HEAD"])?;
+    let snapshot_status = git_status_ignoring_runner_metadata(root)?;
+    let base_sha =
+        pinned_cook_workspace_base_snapshot(request, root, &source_head, &snapshot_status)?
+            .unwrap_or(source_head);
     Ok(HarvestPreflight {
-        base_sha: Some(git_output(root, &["rev-parse", "HEAD"])?),
+        base_sha: Some(base_sha),
         source_provenance,
         candidate_baseline,
     })
+}
+
+/// Revalidate a Cook admission pin immediately before the scheduler creates its
+/// lease-backed detached worktree. The source remains provider-owned and
+/// untouched; the pin only selects the immutable commit given to the provider.
+fn pinned_cook_workspace_base_snapshot(
+    request: &AgentTaskRequest,
+    root: &Path,
+    source_head: &str,
+    status: &str,
+) -> Result<Option<String>, HarvestError> {
+    let Some(snapshot) = request.metadata.get("cook_workspace_base_snapshot") else {
+        return Ok(None);
+    };
+    let base = snapshot
+        .get("resolved_base")
+        .and_then(serde_json::Value::as_str)
+        .filter(|base| !base.trim().is_empty())
+        .ok_or_else(|| HarvestError::Git {
+            command: "validate Cook workspace base snapshot".to_string(),
+            cwd: root.to_path_buf(),
+            message: "Cook workspace base snapshot has no resolved base commit".to_string(),
+        })?;
+    let expected_head = snapshot
+        .get("destination_head")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HarvestError::Git {
+            command: "validate Cook workspace base snapshot".to_string(),
+            cwd: root.to_path_buf(),
+            message: "Cook workspace base snapshot has no destination HEAD".to_string(),
+        })?;
+    if source_head != expected_head || !status.trim().is_empty() {
+        return Err(HarvestError::SnapshotInvalidated {
+            message: "Cook workspace changed after base snapshot admission".to_string(),
+        });
+    }
+    git_output(
+        root,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )?;
+    Ok(Some(base.to_string()))
 }
 
 fn verified_initial_cook_candidate_baseline(

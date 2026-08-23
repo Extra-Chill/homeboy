@@ -1257,6 +1257,14 @@ impl AgentTaskGateReport {
     }
 
     pub(crate) fn accept_inherited_failure(&mut self) {
+        // Only a candidate-code failure can be explained by an identical base
+        // replay. Gate declarations and invalid focused selections are intrinsic
+        // policy failures, even when the base has the same bad configuration.
+        if !self.failure_evidence.as_ref().is_some_and(|evidence| {
+            evidence.classification == AgentTaskGateFailureClassification::CandidateCode
+        }) {
+            return;
+        }
         self.status = AgentTaskGateStatus::AcceptedInheritedFailure;
         let gate_result = HomeboyGateResult::new(
             self.id.clone(),

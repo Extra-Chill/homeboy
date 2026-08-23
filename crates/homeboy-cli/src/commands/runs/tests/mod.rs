@@ -1023,7 +1023,7 @@ fn runs_env_explains_redacted_lab_env_resolution() {
             ))
             .expect("run");
 
-        let (output, _) = env(&run.id).expect("runs env");
+        let (output, _) = env(&test_store(), &run.id).expect("runs env");
         let RunsOutput::Env(output) = output else {
             panic!("expected env output");
         };
@@ -1074,7 +1074,7 @@ fn runs_env_refuses_unredacted_env_resolution() {
             ))
             .expect("run");
 
-        let error = match env(&run.id) {
+        let error = match env(&test_store(), &run.id) {
             Ok(_) => panic!("unredacted env must fail"),
             Err(error) => error,
         };

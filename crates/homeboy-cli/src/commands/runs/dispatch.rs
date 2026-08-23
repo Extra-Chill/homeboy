@@ -220,7 +220,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             json: _,
             presentation: _,
         } => dossier::runs_dossier(&run_id),
-        RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
+        RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&store, &run_id),
         RunsCommand::Evidence {
             run_id,
             full,
@@ -233,8 +233,8 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
                 handlers::apply_field_selection(output, &field)
             }
         }
-        RunsCommand::Env { run_id } => handlers::env(&run_id),
-        RunsCommand::Artifacts(args) => handlers::artifacts_from_args(args),
+        RunsCommand::Env { run_id } => handlers::env(&store, &run_id),
+        RunsCommand::Artifacts(args) => handlers::artifacts_from_args(&store, args),
         RunsCommand::Artifact(args) => handlers::artifact_command(args),
         RunsCommand::Findings(args) => findings::findings(&store, args),
         RunsCommand::Finding { finding_id } => findings::finding(&store, &finding_id),

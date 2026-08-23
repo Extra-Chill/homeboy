@@ -728,10 +728,9 @@ pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     ))
 }
 
-pub(crate) fn resume_plan(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    let run = runs_service::require_run(&store, run_id)?;
+pub(crate) fn resume_plan(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
+    reconcile::reconcile_owned_stale_running_runs(store, 1000)?;
+    let run = runs_service::require_run(store, run_id)?;
     let Some(ledger) = validation_progress_ledger_for_run(&run) else {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -775,29 +774,35 @@ fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgr
 
 #[cfg(test)]
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
-    artifacts_from_args(RunsArtifactsArgs {
-        run_id: run_id.to_string(),
-        runner: None,
-        pull: false,
-        pull_dir: None,
-        token: None,
-        kind: None,
-        mime: None,
-        original_path: None,
-        path_suffix: None,
-        fixture: None,
-        surface: None,
-        scenario: None,
-        name_glob: None,
-        limit: 50,
-        offset: 0,
-        // Preserve the direct test helper's historical exhaustive projection;
-        // the public CLI defaults to the bounded discovery page.
-        full: true,
-    })
+    artifacts_from_args(
+        &test_store(),
+        RunsArtifactsArgs {
+            run_id: run_id.to_string(),
+            runner: None,
+            pull: false,
+            pull_dir: None,
+            token: None,
+            kind: None,
+            mime: None,
+            original_path: None,
+            path_suffix: None,
+            fixture: None,
+            surface: None,
+            scenario: None,
+            name_glob: None,
+            limit: 50,
+            offset: 0,
+            // Preserve the direct test helper's historical exhaustive projection;
+            // the public CLI defaults to the bounded discovery page.
+            full: true,
+        },
+    )
 }
 
-pub(crate) fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn artifacts_from_args(
+    store: &ObservationStore,
+    args: RunsArtifactsArgs,
+) -> CmdResult<RunsOutput> {
     if let Some(runner_id) = args.runner.as_deref() {
         if args.pull {
             return Err(Error::validation_invalid_argument(
@@ -812,8 +817,7 @@ pub(crate) fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutp
         return remote::runner_artifacts(runner_id, &args);
     }
 
-    let store = ObservationStore::open_initialized()?;
-    let run = runs_service::require_run(&store, &args.run_id)?;
+    let run = runs_service::require_run(store, &args.run_id)?;
     let run_id = run.id;
     let filter = ArtifactListFilter {
         token: args.token.clone(),
@@ -835,7 +839,7 @@ pub(crate) fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutp
     };
     let artifacts = match page.as_ref() {
         Some(page) => page.artifacts.clone(),
-        None => runs_service::list_artifacts_for_run(&store, &run_id)?,
+        None => runs_service::list_artifacts_for_run(store, &run_id)?,
     };
     if !args.full {
         let page = page.expect("bounded artifact page is present");
@@ -1165,9 +1169,8 @@ fn sanitize_artifact_filename(artifact_id: &str) -> String {
     homeboy::core::runner_download_cache::sanitize_artifact_file_name(artifact_id)
 }
 
-pub fn env(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    let run = runs_service::require_run(&store, run_id)?;
+pub fn env(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
+    let run = runs_service::require_run(store, run_id)?;
     let Some(envelope) = run.metadata_json.get("env_resolution").cloned() else {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -1717,24 +1720,27 @@ mod pull_tests {
 
     #[test]
     fn artifacts_from_args_pull_with_runner_is_rejected() {
-        let result = artifacts_from_args(RunsArtifactsArgs {
-            run_id: "run-1".to_string(),
-            runner: Some("lab".to_string()),
-            pull: true,
-            pull_dir: None,
-            token: None,
-            kind: None,
-            mime: None,
-            original_path: None,
-            path_suffix: None,
-            fixture: None,
-            surface: None,
-            scenario: None,
-            name_glob: None,
-            limit: 50,
-            offset: 0,
-            full: false,
-        });
+        let result = artifacts_from_args(
+            &test_store(),
+            RunsArtifactsArgs {
+                run_id: "run-1".to_string(),
+                runner: Some("lab".to_string()),
+                pull: true,
+                pull_dir: None,
+                token: None,
+                kind: None,
+                mime: None,
+                original_path: None,
+                path_suffix: None,
+                fixture: None,
+                surface: None,
+                scenario: None,
+                name_glob: None,
+                limit: 50,
+                offset: 0,
+                full: false,
+            },
+        );
         let Err(err) = result else {
             panic!("--pull with --runner should fail");
         };

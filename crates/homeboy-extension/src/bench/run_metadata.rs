@@ -44,6 +44,11 @@ pub(crate) fn stamp_run_metadata(
         }),
         rig_package: args.rig_package.clone(),
         lifecycle: None,
+        stages: results
+            .run_metadata
+            .as_ref()
+            .map(|metadata| metadata.stages.clone())
+            .unwrap_or_default(),
         diagnostics: Vec::new(),
     });
 }

@@ -453,9 +453,8 @@ fn bound(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-#[cfg(test)]
-#[test]
-fn cross_platform_fixture() {
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn test_cross_platform_fixture() {
     const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
 
     for (mode, expected_detail, expected_diagnostic, budget, expected_message) in [
@@ -566,7 +565,7 @@ fn cross_platform_fixture() {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     let root = homeboy::core::paths::homeboy().unwrap();
     let extension = root.join("extensions").join("fixture-external-check");
@@ -595,7 +594,7 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     std::env::set_var(fixture_mode_env, mode);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -612,7 +611,7 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     name.into()
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(any(test, feature = "test-support"), windows))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     let name = "fixture-resolver.cmd";
     let path = extension.join(name);

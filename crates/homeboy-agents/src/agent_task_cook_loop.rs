@@ -83,6 +83,9 @@ pub enum AgentTaskCookLoopStatus {
     /// The candidate and immutable baseline failed identically. The candidate
     /// is not a regression, but required verification is still red.
     BaselineRed,
+    /// Immutable-base replay could not establish whether the candidate failed
+    /// differently, so provider remediation is intentionally withheld.
+    BaselineInconclusive,
     IntentionalNoChange,
     NoChanges,
     NoOpGateFailed,
@@ -240,6 +243,17 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                         && comparison.matches_candidate_failure
                 })
         });
+    let baseline_inconclusive = options
+        .promotion_report
+        .deterministic_gates
+        .iter()
+        .any(|gate| {
+            gate.status == AgentTaskGateStatus::Failed
+                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                    comparison.result
+                        == crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive
+                })
+        });
     let intentional_no_change = (options.promotion_report.status
         == AgentTaskPromotionStatus::VerifiedNoChanges)
         .then(|| {
@@ -256,9 +270,31 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
-        && failed_gates
+        // A candidate-code label describes the candidate-side observation; it is
+        // not remediation authority until immutable-base replay proves a delta.
+        // This prevents a shared path or environment failure from consuming a
+        // provider attempt before it can be classified as inherited.
+        && options
+            .promotion_report
+            .deterministic_gates
             .iter()
-            .all(|gate| gate.classification == AgentTaskGateFailureClassification::CandidateCode)
+            .filter(|gate| {
+                matches!(
+                    gate.status,
+                    AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure
+                )
+            })
+            .all(|gate| {
+                gate.failure_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| {
+                        evidence.classification == AgentTaskGateFailureClassification::CandidateCode
+                    })
+                    && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                        comparison.result
+                            == crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression
+                    })
+            })
         && !baseline_red
         && retry_budget_remaining > 0;
     // Deterministic gates take precedence: a red gate must be fixed before the
@@ -297,6 +333,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::NoChanges
     } else if baseline_red {
         AgentTaskCookLoopStatus::BaselineRed
+    } else if baseline_inconclusive {
+        AgentTaskCookLoopStatus::BaselineInconclusive
     } else if !failed_gates.is_empty() {
         AgentTaskCookLoopStatus::RetriesExhausted
     } else if matches!(&review_form_gap, Some(Some(_))) {
@@ -321,7 +359,12 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gate_results,
         follow_up_request,
         intentional_no_change,
-        metadata: report_metadata(options.metadata, &failure_progression, baseline_red),
+        metadata: report_metadata(
+            options.metadata,
+            &failure_progression,
+            baseline_red,
+            baseline_inconclusive,
+        ),
     }
 }
 
@@ -773,6 +816,7 @@ fn report_metadata(
     metadata: Value,
     progression: &AgentTaskCookLoopFailureProgression,
     baseline_red: bool,
+    baseline_inconclusive: bool,
 ) -> Value {
     let mut metadata = metadata.as_object().cloned().unwrap_or_default();
     metadata.insert("failure_progression".to_string(), json!(progression));
@@ -781,6 +825,19 @@ fn report_metadata(
         metadata.insert(
             "failure_origin".to_string(),
             Value::String("inherited_infrastructure".to_string()),
+        );
+    }
+    if baseline_inconclusive {
+        metadata.insert("baseline_inconclusive".to_string(), Value::Bool(true));
+        metadata.insert(
+            "failure_origin".to_string(),
+            Value::String("baseline_replay_inconclusive".to_string()),
+        );
+        metadata.insert(
+            "next_action".to_string(),
+            Value::String(
+                "repair the gate baseline setup or replay environment, then rerun Cook".to_string(),
+            ),
         );
     }
     Value::Object(metadata)
@@ -1048,6 +1105,143 @@ mod tests {
             report.failed_gates[0].classification,
             AgentTaskGateFailureClassification::GateDeclaration
         );
+    }
+
+    #[test]
+    fn unclassified_candidate_gate_failure_does_not_spend_remediation_budget() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![AgentTaskGateReport::new(
+                    "gate-1",
+                    vec![
+                        "sh".to_string(),
+                        "-lc".to_string(),
+                        "opaque-gate".to_string(),
+                    ],
+                    1,
+                    "",
+                    "candidate gate failure",
+                    Some(AgentTaskGateFailureEvidence {
+                        classification: AgentTaskGateFailureClassification::CandidateCode,
+                        summary: "candidate gate failed".to_string(),
+                        command: "opaque-gate".to_string(),
+                        exit_code: 1,
+                        stdout_tail: String::new(),
+                        stderr_tail: "candidate gate failure".to_string(),
+                        agent_feedback: "Fix the candidate gate failure.".to_string(),
+                        diagnostics: Vec::new(),
+                    }),
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    AgentTaskGateEnvironment::default(),
+                )],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-provisional".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn intrinsic_failures_cannot_be_accepted_or_finalized_from_a_red_baseline() {
+        for classification in [
+            AgentTaskGateFailureClassification::GateDeclaration,
+            AgentTaskGateFailureClassification::ZeroTestsSelected,
+        ] {
+            let mut gate = failed_gate();
+            gate.failure_evidence
+                .as_mut()
+                .expect("failure evidence")
+                .classification = classification;
+            gate.baseline_comparison
+                .as_mut()
+                .expect("comparison")
+                .result = crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed;
+            gate.baseline_comparison
+                .as_mut()
+                .expect("comparison")
+                .matches_candidate_failure = true;
+            gate.accept_inherited_failure();
+            assert_eq!(gate.status, AgentTaskGateStatus::Failed);
+
+            // Defend persisted reports too: a malformed historical status cannot
+            // make an intrinsic failure eligible for explicit acceptance.
+            gate.status = AgentTaskGateStatus::AcceptedInheritedFailure;
+            let promotion = promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]);
+            assert!(!promotion.finalization_eligible(true));
+        }
+    }
+
+    #[test]
+    fn inconclusive_baseline_replay_is_terminal_with_recovery_action() {
+        let mut gate = failed_gate();
+        gate.baseline_comparison
+            .as_mut()
+            .expect("comparison")
+            .result = crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive;
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-inconclusive".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::BaselineInconclusive);
+        assert!(report.follow_up_request.is_none());
+        assert_eq!(
+            report.metadata["failure_origin"],
+            "baseline_replay_inconclusive"
+        );
+        assert!(report.metadata["next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("replay environment")));
+    }
+
+    #[test]
+    fn ordered_fail_fast_skip_does_not_block_a_proven_candidate_regression() {
+        let skipped = AgentTaskGateReport::skipped(
+            "gate-2",
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "later-gate".to_string(),
+            ],
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            "gate-1",
+        );
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate(), skipped],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-ordered-fail-fast".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+        assert_eq!(report.failed_gates.len(), 1);
+        assert_eq!(report.failed_gates[0].gate_id, "gate-1");
     }
 
     #[test]
@@ -2090,7 +2284,7 @@ mod tests {
     }
 
     fn failed_gate() -> AgentTaskGateReport {
-        AgentTaskGateReport::new(
+        let mut gate = AgentTaskGateReport::new(
             "gate-1",
             vec![
                 "sh".to_string(),
@@ -2113,7 +2307,15 @@ mod tests {
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
             AgentTaskGateEnvironment::default(),
-        )
+        );
+        gate.baseline_comparison = Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+            base_ref: "base".to_string(),
+            exit_code: 0,
+            failure_fingerprint: String::new(),
+            matches_candidate_failure: false,
+            result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
+        });
+        gate
     }
 
     fn green_gate() -> AgentTaskGateReport {
@@ -2135,7 +2337,7 @@ mod tests {
     }
 
     fn private_failed_gate(reveal_policy: AgentTaskGateRevealPolicy) -> AgentTaskGateReport {
-        AgentTaskGateReport::new(
+        let mut gate = AgentTaskGateReport::new(
             "gate-1",
             vec![
                 "sh".to_string(),
@@ -2158,6 +2360,14 @@ mod tests {
             AgentTaskGateVisibility::Private,
             reveal_policy,
             AgentTaskGateEnvironment::default(),
-        )
+        );
+        gate.baseline_comparison = Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+            base_ref: "base".to_string(),
+            exit_code: 0,
+            failure_fingerprint: String::new(),
+            matches_candidate_failure: false,
+            result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
+        });
+        gate
     }
 }

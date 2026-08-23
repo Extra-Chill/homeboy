@@ -52,6 +52,38 @@ fn self_identity_preserves_canonical_envelopes_on_stdout_and_output_file() {
     assert_canonical_self_identity_envelope(&output.stdout);
 }
 
+#[test]
+fn composed_triage_keeps_help_and_standard_json_error_envelope() {
+    let help = Command::new(homeboy_bin())
+        .args(["triage", "--help"])
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run composed triage help");
+    assert_eq!(help.status.code(), Some(0));
+    let help = String::from_utf8(help.stdout).expect("triage help is UTF-8");
+    assert!(help.contains("Attention reports and watch utilities"));
+    assert!(help.contains("--poll-interval"));
+
+    // This reaches the composed capability runner but stops before filesystem
+    // or GitHub access, proving its typed error is emitted by the shared CLI
+    // JSON-envelope path.
+    let output = Command::new(homeboy_bin())
+        .args(["triage", "component"])
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run composed triage validation failure");
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("triage JSON envelope");
+    assert_eq!(envelope["command"], "triage");
+    assert_eq!(envelope["operation"], "component");
+    assert_eq!(envelope["success"], false);
+    assert_eq!(envelope["status"], "failed");
+    assert_eq!(
+        envelope["diagnostics"]["code"],
+        "validation.missing_argument"
+    );
+}
+
 fn assert_canonical_self_identity_envelope(bytes: &[u8]) {
     let envelope: Value = serde_json::from_slice(bytes).expect("self identity JSON envelope");
     assert_eq!(envelope["command"], "self");

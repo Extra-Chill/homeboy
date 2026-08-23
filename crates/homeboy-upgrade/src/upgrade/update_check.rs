@@ -14,10 +14,11 @@
 //! schema live here and are unchanged.
 
 use crate::upgrade;
+use crate::upgrade::helpers::fetch_latest_runtime_compatibility;
 use homeboy_core::update_check_cache;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -39,6 +40,47 @@ pub struct UpdateCheckCache {
     pub current_version: String,
     pub update_available: bool,
     pub checked_at: u64,
+    /// Release-declared protocol floors. Absence means the update checker did
+    /// not establish a compatibility verdict, so durable admission stays local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_compatibility: Option<RuntimeCompatibility>,
+}
+
+/// Versioned protocol evidence carried with an allowed stable release.
+///
+/// Contract identifiers are intentionally product-neutral. A release only
+/// blocks durable work when it declares a floor that the running runtime does
+/// not meet; semver distance alone is never compatibility evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeCompatibility {
+    pub schema: String,
+    #[serde(default)]
+    pub required_contracts: BTreeMap<String, u32>,
+}
+
+impl RuntimeCompatibility {
+    pub fn compatible_with(&self, installed: &Self) -> bool {
+        self.schema == installed.schema
+            && self.required_contracts.iter().all(|(contract, required)| {
+                installed
+                    .required_contracts
+                    .get(contract)
+                    .is_some_and(|provided| provided >= required)
+            })
+    }
+}
+
+/// The runtime contracts this binary provides to durable Cook admission.
+pub fn current_runtime_compatibility() -> RuntimeCompatibility {
+    RuntimeCompatibility {
+        schema: "homeboy/runtime-compatibility/v1".to_string(),
+        required_contracts: BTreeMap::from([
+            ("lifecycle".to_string(), 1),
+            ("wire".to_string(), 1),
+            ("provider".to_string(), 1),
+            ("snapshot".to_string(), 1),
+        ]),
+    }
 }
 
 fn read_cache() -> Option<UpdateCheckCache> {
@@ -48,13 +90,35 @@ fn read_cache() -> Option<UpdateCheckCache> {
 /// Return the latest stable version already admitted by the normal update
 /// check. Durable admission deliberately never performs network I/O: an
 /// unavailable cache is explicit offline evidence, not a reason to guess.
-pub fn latest_allowed_stable() -> Option<String> {
+pub fn latest_allowed_stable() -> Option<AllowedStableRuntime> {
     if is_disabled() {
         return None;
     }
     read_cache().and_then(|cache| {
-        (is_cache_fresh(&cache) && cache.update_available && !cache.latest_version.is_empty())
-            .then_some(cache.latest_version)
+        (is_cache_fresh(&cache) && cache.update_available && !cache.latest_version.is_empty()).then(
+            || AllowedStableRuntime {
+                version: cache.latest_version,
+                compatibility: cache.runtime_compatibility,
+            },
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedStableRuntime {
+    pub version: String,
+    pub compatibility: Option<RuntimeCompatibility>,
+}
+
+/// Return the cached stable only when its declared contracts require a newer
+/// controller. This is a pure local-cache decision for Cook pre-dispatch.
+pub fn incompatible_allowed_stable(controller_version: &str) -> Option<AllowedStableRuntime> {
+    latest_allowed_stable().filter(|stable| {
+        crate::upgrade::version_is_newer(&stable.version, controller_version)
+            && stable
+                .compatibility
+                .as_ref()
+                .is_some_and(|required| !required.compatible_with(&current_runtime_compatibility()))
     })
 }
 
@@ -300,11 +364,17 @@ pub fn run_startup_check() {
     };
 
     let checked_at = update_check_cache::now_unix();
+    let runtime_compatibility = check
+        .latest_version
+        .as_deref()
+        .and_then(|version| fetch_latest_runtime_compatibility(version).ok())
+        .flatten();
     write_cache(&UpdateCheckCache {
         latest_version: check.latest_version.clone().unwrap_or_default(),
         current_version: check.current_version.clone(),
         update_available: check.update_available,
         checked_at,
+        runtime_compatibility,
     });
 
     if !already_printed && check.update_available {
@@ -337,6 +407,7 @@ mod tests {
             current_version: upgrade::current_version().to_string(),
             update_available,
             checked_at,
+            runtime_compatibility: None,
         });
 
         assert!(path.is_file(), "cache fixture was written to {path:?}");
@@ -411,6 +482,22 @@ mod tests {
                 Some("0.329.1".to_string())
             );
         });
+    }
+
+    #[test]
+    fn declared_runtime_compatibility_requires_each_declared_contract_floor() {
+        let installed = current_runtime_compatibility();
+        let compatible = RuntimeCompatibility {
+            schema: installed.schema.clone(),
+            required_contracts: BTreeMap::from([("provider".to_string(), 1)]),
+        };
+        let incompatible = RuntimeCompatibility {
+            schema: installed.schema.clone(),
+            required_contracts: BTreeMap::from([("snapshot".to_string(), 2)]),
+        };
+
+        assert!(compatible.compatible_with(&installed));
+        assert!(!incompatible.compatible_with(&installed));
     }
 
     #[test]

@@ -3521,6 +3521,18 @@ fn materialize_agent_task_run_handoff(
     if !agent_task_lifecycle::run_record_exists(&run.run_id)? {
         return Ok(None);
     }
+    if agent_task_lifecycle::exact_record(&run.run_id)
+        .ok()
+        .is_some_and(|record| agent_task_lifecycle::is_unmaterialized_cook_admission(&record))
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "unmaterialized Cook admission must continue through its fenced resume path",
+            Some(run.run_id.clone()),
+            Some(vec![format!("homeboy agent-task resume {}", run.run_id)]),
+        )
+        .with_hint(format!("Run `homeboy agent-task resume {}`.", run.run_id)));
+    }
 
     let plan = agent_task_lifecycle::load_plan(&run.run_id)?;
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
@@ -4428,6 +4440,15 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         return Ok(false);
     };
     let run_id = match &agent_task.command {
+        AgentTaskCommand::Run(args)
+            if agent_task_lifecycle::exact_record(&args.run_id)
+                .ok()
+                .is_some_and(|record| {
+                    agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
+                }) =>
+        {
+            Some(&args.run_id)
+        }
         AgentTaskCommand::Status(args) => Some(&args.run_id),
         AgentTaskCommand::Logs(args) => Some(&args.run_id),
         AgentTaskCommand::Evidence(args) => Some(&args.run_id),
