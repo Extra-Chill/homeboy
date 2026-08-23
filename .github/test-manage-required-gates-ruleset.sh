@@ -17,11 +17,19 @@ grep -Fq 'environments/main-ruleset-administration' "${workflow}"
 grep -Fq 'required_reviewers' "${workflow}"
 grep -Fq 'can_admins_bypass == false' "${workflow}"
 grep -Fq 'commits/${head}/check-runs' "${workflow}"
+grep -Fq '.name == "homeboy / Test" and .app.id == 15368 and .conclusion == "success"' "${workflow}"
 grep -Fq 'commits/main' "${workflow}"
 grep -Fq 'test "${head}" = "${current_main}"' "${workflow}"
 grep -Fq 'bash .github/validate-required-gates.sh --github' "${workflow}"
 ! grep -Fq 'gh api --method PUT' "${root}/docs/operations/required-ci-gates.md"
 ! grep -Fq 'gh api --method PUT' "${root}/.github/validate-required-gates.sh"
+
+preflight_query='any(.check_runs[]; .name == "homeboy / Test" and .app.id == 15368 and .conclusion == "success")'
+if jq -e "${preflight_query}" <<<'{"check_runs":[{"name":"homeboy / Test","app":{"id":99999},"conclusion":"success"}]}' >/dev/null; then
+  echo 'ruleset preflight accepted a spoofed successful Test check' >&2
+  exit 1
+fi
+jq -e "${preflight_query}" <<<'{"check_runs":[{"name":"homeboy / Test","app":{"id":15368},"conclusion":"success"}]}' >/dev/null
 
 jq 'del(.rules[] | select(.type == "required_status_checks"))' \
   "${root}/.github/required-gates-ruleset.json" > "${tmp}/state.json"

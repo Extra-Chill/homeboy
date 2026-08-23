@@ -622,12 +622,15 @@ fn terminal_execution_verdict_rejects_pending_skipped_cancelled_failed_and_absen
 /// job would make every otherwise-green run fail cyclically.
 #[test]
 fn terminal_execution_verdict_does_not_require_its_own_in_progress_conclusion() {
-    let jobs: Vec<String> = declared_contexts()
-        .into_iter()
-        .filter(|context| context != "homeboy / Required Gates Executed")
-        .collect();
+    let contexts = declared_contexts();
     let scratch = Scratch::new("terminal-self-observation");
-    let jobs = scratch.write("jobs.json", &execution_jobs(&jobs, None));
+    let jobs = scratch.write(
+        "jobs.json",
+        &execution_jobs(
+            &contexts,
+            Some(("homeboy / Required Gates Executed", serde_json::Value::Null)),
+        ),
+    );
     let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
 
     assert!(

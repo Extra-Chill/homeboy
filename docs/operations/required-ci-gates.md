@@ -122,12 +122,14 @@ without wiring it into the terminal job turns `Required Gates Declaration` red.
 The GitHub ruleset is repository state, so it cannot be changed by a pull
 request. `Required Gates Ruleset` audits hourly and supports an approved manual
 reconciliation operation from `main`. It does not create another ruleset.
-Reconciliation first requires a successful
-`homeboy / Test` check on the current `main` SHA, so it cannot re-enable strict
-required checks while the main suite is red. Configure the `main-ruleset-administration`
-environment with required reviewers, administrator bypass disabled, and a
-repository-administration token named `HOMEBOY_RULESET_ADMIN_TOKEN`; only the
-approved manual reconciliation job can use that credential.
+Reconciliation first requires a successful `homeboy / Test` check from GitHub
+Actions app `15368` on the current `main` SHA, so a same-named external check
+cannot satisfy the preflight and strict required checks are not re-enabled while
+the main suite is red. Issue #12833 remains open until the
+`main-ruleset-administration` environment is provisioned with required
+reviewers and administrator bypass disabled, its scoped
+`HOMEBOY_RULESET_ADMIN_TOKEN` is available only to the approved manual job, and
+reconciliation succeeds with verified evidence.
 
 After reviewing the audit artifact, dispatch reconciliation from `main`:
 

@@ -60,7 +60,7 @@ jobs:
           current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "${head}" = "${current_main}"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs?per_page=100" \
-            --jq 'any(.check_runs[]; .name == "homeboy / Test" and .conclusion == "success")' \
+            --jq 'any(.check_runs[]; .name == "homeboy / Test" and .app.id == 15368 and .conclusion == "success")' \
             | grep -qx true
           current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "${head}" = "${current_main}"
