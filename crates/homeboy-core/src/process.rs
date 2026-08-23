@@ -164,6 +164,10 @@ pub struct ProcessContainmentCleanup {
     pub forced: bool,
     pub complete: bool,
     pub detail: Option<String>,
+    /// Discovery evidence that did not prevent cleanup from proving the owned
+    /// scope empty. Callers retain this for operator diagnosis without turning
+    /// an otherwise clean producer result into a failure.
+    pub warning: Option<String>,
 }
 
 impl ProcessContainment {
@@ -270,6 +274,7 @@ impl ProcessContainment {
                     forced: true,
                     complete: true,
                     detail: None,
+                    warning: None,
                 })
             } else {
                 Err(Error::internal_unexpected(format!(
@@ -299,6 +304,7 @@ impl ProcessContainment {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
                 detail: cleanup.detail,
+                warning: cleanup.warning,
             });
         }
         #[cfg(not(target_os = "linux"))]
@@ -312,6 +318,7 @@ impl ProcessContainment {
                         forced: termination.signal == "SIGKILL",
                         complete: true,
                         detail: None,
+                        warning: None,
                     }
                 });
             }
@@ -323,6 +330,7 @@ impl ProcessContainment {
                     forced,
                     complete: true,
                     detail: None,
+                    warning: None,
                 }
             })
         }
@@ -1265,11 +1273,21 @@ fn scope_cleanup_report(
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    let complete = !targets.pids.is_empty() && unreadable == 0;
+    // A marker-owned target gives this cleanup an explicit run scope. Once the
+    // follow-up scan proves that scope empty, unreadable environments elsewhere
+    // in /proc are diagnostic host noise, not evidence that this run survived.
+    // Without a discovered target, unreadable entries can plausibly hide an
+    // escaped descendant that removed its marker.
+    let complete = !targets.pids.is_empty() && survivors.pids.is_empty();
     let detail = (!complete).then(|| {
-        if unreadable > 0 {
+        if !survivors.pids.is_empty() {
             format!(
-                "process-scope discovery was incomplete: {unreadable} /proc environment entries could not be read"
+                "run-owned process scope still has surviving pids: {}",
+                join_pids(&survivors.pids)
+            )
+        } else if unreadable > 0 {
+            format!(
+                "process-scope discovery could not exclude run-owned escaped processes: {unreadable} /proc environment entries could not be read"
             )
         } else {
             "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
@@ -1279,6 +1297,11 @@ fn scope_cleanup_report(
         forced,
         complete,
         detail,
+        warning: (complete && unreadable > 0).then(|| {
+            format!(
+                "process-scope discovery could not read {unreadable} unrelated /proc environment entries after the run-owned scope was reaped"
+            )
+        }),
     }
 }
 
@@ -1790,7 +1813,9 @@ mod tests {
             .as_deref()
             .is_some_and(|detail| detail.contains("no marker-owned process")));
 
-        let unreadable = scope_cleanup_report(
+        // A producer that exited cleanly after a marker-owned process was
+        // observed remains clean when unrelated host environments are unreadable.
+        let clean_with_unrelated_unreadables = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: vec![42],
                 unreadable_environments: 1,
@@ -1801,12 +1826,52 @@ mod tests {
             },
             true,
         );
-        assert!(!unreadable.complete);
-        assert!(unreadable.forced);
-        assert!(unreadable
+        assert!(clean_with_unrelated_unreadables.complete);
+        assert!(clean_with_unrelated_unreadables.forced);
+        assert!(clean_with_unrelated_unreadables.detail.is_none());
+        assert!(clean_with_unrelated_unreadables
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("unrelated /proc")));
+
+        // A known run-owned survivor remains fail-closed even if the producer
+        // itself already returned a failure status.
+        let known_survivor = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 0,
+            },
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 0,
+            },
+            true,
+        );
+        assert!(!known_survivor.complete);
+        assert!(known_survivor
             .detail
             .as_deref()
-            .is_some_and(|detail| detail.contains("could not be read")));
+            .is_some_and(|detail| detail.contains("surviving pids: 42")));
+
+        // With no observed run-owned marker, unreadable environments can hide
+        // an escaped process and must retain the prior fail-closed contract.
+        let ambiguous_discovery = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            false,
+        );
+        assert!(!ambiguous_discovery.complete);
+        assert!(
+            ambiguous_discovery.detail.as_deref().is_some_and(
+                |detail| detail.contains("could not exclude run-owned escaped processes")
+            )
+        );
     }
 
     #[test]

@@ -41,6 +41,11 @@ pub(crate) struct ProcessGroupCleanupGuard {
     containment: Option<crate::process::ProcessContainment>,
 }
 
+pub(crate) struct ProcessCleanupReport {
+    pub(crate) incomplete: Option<String>,
+    pub(crate) warning: Option<String>,
+}
+
 impl ProcessGroupCleanupGuard {
     pub fn new(root_pid: u32) -> Self {
         #[cfg(unix)]
@@ -73,7 +78,7 @@ impl ProcessGroupCleanupGuard {
         }
     }
 
-    pub(crate) fn cleanup(mut self) -> Option<String> {
+    pub(crate) fn cleanup(mut self) -> Option<ProcessCleanupReport> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             let detail = cleanup_process_group(
@@ -162,15 +167,28 @@ pub(crate) fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) 
 fn cleanup_process_group(
     pgid: libc::pid_t,
     #[cfg(target_os = "linux")] containment: Option<&crate::process::ProcessContainment>,
-) -> Option<String> {
+) -> Option<ProcessCleanupReport> {
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
         match containment.cleanup_with_grace(Duration::from_millis(200), false) {
-            Ok(cleanup) if cleanup.complete => return None,
-            Ok(cleanup) => return cleanup.detail,
+            Ok(cleanup) if cleanup.complete => {
+                return cleanup.warning.map(|warning| ProcessCleanupReport {
+                    incomplete: None,
+                    warning: Some(warning),
+                });
+            }
+            Ok(cleanup) => {
+                return cleanup.detail.map(|incomplete| ProcessCleanupReport {
+                    incomplete: Some(incomplete),
+                    warning: cleanup.warning,
+                });
+            }
             Err(error) => {
                 cleanup_process_group_fallback(pgid);
-                return Some(format!("process containment cleanup failed: {error}"));
+                return Some(ProcessCleanupReport {
+                    incomplete: Some(format!("process containment cleanup failed: {error}")),
+                    warning: None,
+                });
             }
         }
     }

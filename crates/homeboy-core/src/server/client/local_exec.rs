@@ -283,7 +283,7 @@ fn run_local_command(
     let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
-    let cleanup_detail = cleanup_guard
+    let cleanup_report = cleanup_guard
         .take()
         .and_then(ProcessGroupCleanupGuard::cleanup);
     let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
@@ -295,13 +295,24 @@ fn run_local_command(
     let (stdout, stdout_stalled) = collect_output_reader(stdout_reader, reader_deadline);
     let (mut stderr, stderr_stalled) = collect_output_reader(stderr_reader, reader_deadline);
     let streams_stalled = stdout_stalled || stderr_stalled;
-    if streams_stalled || cleanup_detail.is_some() {
+    if streams_stalled || cleanup_report.is_some() {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
-        if let Some(detail) = cleanup_detail {
+        if let Some(detail) = cleanup_report
+            .as_ref()
+            .and_then(|report| report.incomplete.as_deref())
+        {
             stderr.push_str(&format!(
                 "Homeboy containment cleanup was incomplete: {detail}.\n"
+            ));
+        }
+        if let Some(warning) = cleanup_report
+            .as_ref()
+            .and_then(|report| report.warning.as_deref())
+        {
+            stderr.push_str(&format!(
+                "Homeboy containment cleanup warning: {warning}.\n"
             ));
         }
         if streams_stalled {
