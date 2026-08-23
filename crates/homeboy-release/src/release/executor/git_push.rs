@@ -42,8 +42,9 @@ pub(crate) fn run_git_push(
         );
     }
     let output = push_release_branch(component, component_id, branch)?;
-    let data = serde_json::to_value(&output)
+    let mut data = serde_json::to_value(&output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git push output".to_string())))?;
+    data["target"] = serde_json::json!(format!("origin/{branch}"));
 
     if output.success {
         return Ok(step_success("git.push", "git.push", Some(data), Vec::new()));
@@ -76,6 +77,7 @@ pub(crate) fn run_git_push(
                     "success": true,
                     "recovered": "advanced-remote-rebased",
                     "branch": branch,
+                    "target": format!("origin/{branch}"),
                     "push": recovered_data,
                 });
                 if !advance.is_noop() {

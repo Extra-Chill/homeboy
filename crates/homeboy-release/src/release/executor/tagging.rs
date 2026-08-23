@@ -133,8 +133,11 @@ pub(crate) fn run_git_tag(
         Some(&message),
         Some(&component.local_path),
     )?;
-    let data = serde_json::to_value(&output)
+    let mut data = serde_json::to_value(&output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git tag output".to_string())))?;
+    // Bind the tag operation to the exact release commit for durable operator
+    // summaries and recovery evidence; GitOutput itself only records streams.
+    data["head"] = serde_json::json!(head_commit);
 
     if !output.success {
         let mut hints = Vec::new();
