@@ -1349,8 +1349,12 @@ mod tests {
             };
             std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
                 .expect("rig sources");
-            homeboy_rig::install::write_source_metadata("fixture-matrix", &installed_source)
-                .expect("source metadata");
+            homeboy_rig::install::write_source_metadata(
+                &homeboy_core::paths::homeboy().expect("config root"),
+                "fixture-matrix",
+                &installed_source,
+            )
+            .expect("source metadata");
 
             let install_record = home.path().join("installed-source.txt");
             let command = home.path().join("fake-homeboy");
