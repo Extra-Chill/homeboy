@@ -110,6 +110,7 @@
       "bash tests/phpstan-relative-include-path-smoke.sh",
       "bash tests/phpstan-relative-dependency-path-smoke.sh",
       "bash tests/release-scripts-smoke.sh",
+      "bash tests/release-provenance-contract-smoke.sh",
       "bash tests/validation-dependencies-smoke.sh",
       "node tests/wordpress-fuzz-runtime-capabilities-smoke.js",
       "bash tests/wp-cli-auto-flags-smoke.sh",
