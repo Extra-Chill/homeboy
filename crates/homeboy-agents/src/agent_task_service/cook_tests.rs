@@ -5454,7 +5454,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
 
 #[cfg(unix)]
 #[test]
-fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postcondition() {
+fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -5513,7 +5513,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet -b durable-ensure '{}' HEAD && touch '{}'\n  ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}'\n  ;;\nesac\n",
                 created.display(),
                 workspace.display(),
                 source.display(),
@@ -5568,6 +5568,12 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
             },
         );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
+        assert!(Command::new("git")
+            .args(["branch", "durable-ensure", "HEAD"])
+            .current_dir(&source)
+            .status()
+            .expect("create unattached branch")
+            .success());
 
         let cook_id = "durable-ensure";
         let run_id = "durable-ensure-run";
@@ -5577,6 +5583,7 @@ fn deferred_provider_ensure_materializes_injected_lifecycle_plan_after_its_postc
             "action": "lookup_pending",
             "kind": "provider",
             "handle": options.to_worktree,
+            "worktree_provider_id": "fixture",
             "provision_intent": {
                 "repo": "fixture",
                 "base": "main",
