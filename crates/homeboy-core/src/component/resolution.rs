@@ -595,6 +595,16 @@ fn rebase_registered_path_to_checkout(registered_path: &Path, cwd_git_root: &Pat
     }
 }
 
+/// Project a registered component path into a checkout of its repository.
+///
+/// A component can be registered at a package below the Git root while Cook's
+/// managed worktree is necessarily the repository root. Keeping this mapping
+/// here makes provider, dependency, and gate callers share the same component
+/// path contract.
+pub fn rebase_component_path_to_checkout(component: &Component, checkout: &Path) -> PathBuf {
+    rebase_registered_path_to_checkout(Path::new(&component.local_path), checkout)
+}
+
 fn is_named_component_worktree(
     component_id: &str,
     registered_path: &Path,
@@ -2354,6 +2364,13 @@ mod tests {
                     crate::git::MonorepoContext::detect(&target.component.local_path, "foo")
                         .expect("package path should still be monorepo-scoped");
                 assert_eq!(monorepo.path_prefix, "packages/foo");
+                let registered = crate::component::registered_by_id("foo")
+                    .expect("registered component lookup")
+                    .expect("registered component");
+                assert_eq!(
+                    rebase_component_path_to_checkout(&registered, &repo),
+                    canonical_package
+                );
                 assert!(!target.synthetic);
             });
         });
@@ -2392,6 +2409,13 @@ mod tests {
                     crate::git::MonorepoContext::detect(&target.component.local_path, "foo")
                         .expect("package path should still be monorepo-scoped");
                 assert_eq!(monorepo.path_prefix, "packages/foo");
+                let registered = crate::component::registered_by_id("foo")
+                    .expect("registered component lookup")
+                    .expect("registered component");
+                assert_eq!(
+                    rebase_component_path_to_checkout(&registered, &worktree),
+                    canonical_package
+                );
                 assert!(!target.synthetic);
             });
         });
