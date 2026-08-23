@@ -68,6 +68,17 @@
   "env_provider": {
     "script": "scripts/env-provider.sh"
   },
+  "ci": {
+    "cache": {
+      "namespace": "cargo",
+      "key_files": ["Cargo.lock"],
+      "paths": [
+        { "root": "home", "path": ".cargo/registry" },
+        { "root": "home", "path": ".cargo/git" },
+        { "root": "component", "path": "target", "env": "CARGO_TARGET_DIR" }
+      ]
+    }
+  },
   "toolchain_readiness": [
     {
       "id": "cargo-lint-toolchain",

@@ -80,8 +80,10 @@ explicit_output="$(
     HOMEBOY_COMPONENT_PATH="$primary" \
     "$EXTENSION_DIR/scripts/env-provider.sh"
 )"
-if [ "$explicit_output" != '{}' ]; then
-    printf 'Expected explicit CARGO_TARGET_DIR to suppress provider output, got %s\n' "$explicit_output" >&2
+explicit_target="$(printf '%s' "$explicit_output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("CARGO_TARGET_DIR", ""))')"
+explicit_homeboy_target="$(printf '%s' "$explicit_output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("HOMEBOY_CARGO_TARGET_DIR", ""))')"
+if [ "$explicit_target" != "$explicit" ] || [ "$explicit_homeboy_target" != "$explicit" ]; then
+    printf 'Expected explicit CARGO_TARGET_DIR to remain the provider target, got %s\n' "$explicit_output" >&2
     exit 1
 fi
 

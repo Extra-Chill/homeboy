@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/toolchain-env.sh
 source "${SCRIPT_DIR}/lib/toolchain-env.sh"
 
-if [ -n "${CARGO_TARGET_DIR:-}" ] || [ ! -f "${project_path}/Cargo.toml" ]; then
+if [ ! -f "${project_path}/Cargo.toml" ]; then
     printf '{}\n'
     exit 0
 fi
@@ -45,7 +45,7 @@ fi
 
 hash="$(hash_identity "$identity")"
 data_dir="${HOMEBOY_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/homeboy}"
-target_dir="${data_dir}/cargo-targets/${label}-${hash:0:12}"
+target_dir="${CARGO_TARGET_DIR:-${data_dir}/cargo-targets/${label}-${hash:0:12}}"
 toolchain_env_json="$(homeboy_rust_toolchain_env_json)"
 
 python3 - "$target_dir" "$toolchain_env_json" "${CARGO_HOME:-${HOME}/.cargo}" "${RUSTUP_HOME:-${HOME}/.rustup}" <<'PY'
