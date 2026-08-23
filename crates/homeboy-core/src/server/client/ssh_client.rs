@@ -98,6 +98,15 @@ fn collect_ssh_child_output(
     let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
     if wait_failed {
         let _ = terminate_process_group_with_deadline(child, pid, deadline);
+    } else if status
+        .as_ref()
+        .and_then(|status| status.as_ref().ok())
+        .is_some_and(std::process::ExitStatus::success)
+    {
+        // A remote shell can exit successfully while a descendant still owns
+        // the SSH pipes. Reap our process group before waiting for EOF so that
+        // successful bounded commands cannot become false transport failures.
+        terminate_unreaped_process_group(pid);
     }
     let (stdout, mut stderr, streams_stalled) = collect_streams_before(stdout, stderr, deadline);
     if streams_stalled {
