@@ -118,9 +118,9 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
 
     let resolver_fixture = job_section(workflow, "external-resolver-fixtures");
     assert!(resolver_fixture.contains("os: [ubuntu-latest, macos-14, windows-latest]"));
-    assert!(resolver_fixture
-        .contains("cargo test --locked -p homeboy-cli --lib cross_platform_fixture"));
-    assert!(!resolver_fixture.contains("--test external_check_detail_resolver_fixture"));
+    assert!(resolver_fixture.contains(
+        "cargo test --locked -p homeboy-cli --features test-support --test external_check_detail_resolver_fixture"
+    ));
 }
 
 #[test]
