@@ -818,10 +818,23 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
-    let report = if args.preflight {
-        homeboy::agents::agent_tasks::finalization::preflight_pr(options)?
+    let result = if args.preflight {
+        homeboy::agents::agent_tasks::finalization::preflight_pr(options)
+    } else if args.manual_finalization {
+        let intent = homeboy::agents::agent_tasks::finalization::preflight_pr(options.clone())?;
+        agent_task_service::persist_manual_finalization_retry_intent(&handoff_run_id, &intent)?;
+        finalize_pr(options)
     } else {
-        finalize_pr(options)?
+        finalize_pr(options)
+    };
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if args.manual_finalization && !args.preflight {
+                agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
+            }
+            return Err(error);
+        }
     };
     let exit_code = if matches!(
         report.status.as_str(),
@@ -839,6 +852,14 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         report.manual_finalization,
     ) {
         agent_task_service::persist_manual_finalization_intent(&handoff_run_id, &report)?;
+    }
+    if !args.preflight && report.manual_finalization {
+        if let Err(error) =
+            agent_task_service::persist_manual_finalization_receipt(&handoff_run_id, &report)
+        {
+            agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
+            return Err(error);
+        }
     }
     value["handoff"] = finalization_handoff(
         &report.status,

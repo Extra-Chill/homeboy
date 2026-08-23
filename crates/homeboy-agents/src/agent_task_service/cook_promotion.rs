@@ -2448,11 +2448,40 @@ pub fn persist_manual_finalization_intent(
     run_id: &str,
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
-    validate_manual_preflight_report(report, run_id)?;
+    validate_manual_preflight_report(report, run_id, false)?;
     agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
         serde_json::to_value(report).expect("finalization report serializes"),
     )
+}
+
+/// Persist the validated dossier created immediately before a direct manual
+/// publication. This retry form may still need to create its candidate commit.
+pub fn persist_manual_finalization_retry_intent(
+    run_id: &str,
+    report: &AgentTaskPrFinalizationReport,
+) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
+    validate_manual_preflight_report(report, run_id, true)?;
+    let record = agent_task_lifecycle::record_manual_finalization_intent(
+        run_id,
+        serde_json::to_value(report).expect("finalization report serializes"),
+    )?;
+    agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    else {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "direct manual publication retry requires a materialized Git candidate",
+            None,
+            None,
+        ));
+    };
+    agent_task_lifecycle::record_manual_finalization_retry_candidate(
+        run_id,
+        serde_json::to_value(fingerprint).expect("candidate fingerprint serializes"),
+    )?;
+    Ok(record)
 }
 
 /// Resolve the sole durable identity contract for explicit manual publication.
@@ -2586,18 +2615,46 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        let finalization = manual_finalization_options(report)?;
-        let report = if preflight {
-            preflight_pr_with_backend(finalization, backend)?
+        let retryable = agent_task_lifecycle::status(&report.run_id)?.metadata
+            ["manual_finalization_retry"]
+            == true;
+        if retryable {
+            require_manual_retry_candidate(
+                &agent_task_lifecycle::status(&report.run_id)?,
+                &report.path,
+            )?;
+        }
+        let mut finalization = manual_finalization_options(report, retryable)?;
+        if retryable {
+            finalization.expected_candidate_sha = None;
+        }
+        let failure_run_id = finalization.run_id.clone();
+        let result = if preflight {
+            preflight_pr_with_backend(finalization, backend)
         } else {
-            finalize_pr_with_backend(finalization, backend)?
+            finalize_pr_with_backend(finalization, backend)
+        };
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                if !preflight {
+                    agent_task_lifecycle::record_manual_finalization_failure(
+                        &failure_run_id,
+                        &error,
+                    )?;
+                }
+                return Err(error);
+            }
         };
         let value = serde_json::to_value(&report).unwrap_or(Value::Null);
         if !preflight {
-            persist_manual_finalization_receipt(
+            if let Err(error) = persist_manual_finalization_receipt(
                 value["run_id"].as_str().unwrap_or_default(),
                 &report,
-            )?;
+            ) {
+                agent_task_lifecycle::record_manual_finalization_failure(&failure_run_id, &error)?;
+                return Err(error);
+            }
         }
         return Ok(value);
     }
@@ -2906,15 +2963,36 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         ));
     }
     let report = manual_finalization_intent_for_run(&record, run_id)?;
-    let finalization = manual_finalization_options(report)?;
-    let report = if preflight {
-        preflight_pr_with_backend(finalization, backend)?
+    let retryable = record.metadata["manual_finalization_retry"] == true;
+    if retryable {
+        require_manual_retry_candidate(&record, &report.path)?;
+    }
+    let mut finalization = manual_finalization_options(report, retryable)?;
+    if retryable {
+        // Direct publication first persisted this dossier before it attempted a
+        // mutation. It is safe to retry that original mutation after failure.
+        finalization.expected_candidate_sha = None;
+    }
+    let result = if preflight {
+        preflight_pr_with_backend(finalization, backend)
     } else {
-        finalize_pr_with_backend(finalization, backend)?
+        finalize_pr_with_backend(finalization, backend)
+    };
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if !preflight {
+                agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)?;
+            }
+            return Err(error);
+        }
     };
     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
     if !preflight {
-        persist_manual_finalization_receipt(run_id, &report)?;
+        if let Err(error) = persist_manual_finalization_receipt(run_id, &report) {
+            agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)?;
+            return Err(error);
+        }
     }
     Ok(value)
 }
@@ -3106,6 +3184,7 @@ fn valid_manual_finalization_receipt(
             binding,
             git_identity,
             intent_git_identity,
+            record,
         )
         && (!require_persisted_digest
             || (record.metadata["manual_finalization_receipt_digest"]
@@ -3141,8 +3220,12 @@ fn valid_manual_finalization_receipt(
         && report.finalization_outcome.publication_action == report.pr_action
         && report.finalization_outcome.publication_status == "review_ready"
         && report.finalization_outcome.published
-        && !report.finalization_outcome.committed
-        && !report.finalization_outcome.pushed
+        && (record
+            .metadata
+            .get("manual_finalization_retry_candidate")
+            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+            .is_some()
+            || (!report.finalization_outcome.committed && !report.finalization_outcome.pushed))
         && binding.candidate_sha == binding.remote_sha
         && binding.candidate_sha == binding.pr_head_sha
         && git_identity.commit_sha.as_deref() == Some(binding.candidate_sha.as_str())
@@ -3163,6 +3246,7 @@ fn receipt_matches_manual_preflight(
     binding: &crate::agent_task_finalization::AgentTaskPublicationBinding,
     git_identity: &homeboy_core::git::GitIdentityProof,
     intent_git_identity: &homeboy_core::git::GitIdentityProof,
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
     let mut receipt_dossier = receipt.review_dossier.clone();
     receipt_dossier
@@ -3189,13 +3273,77 @@ fn receipt_matches_manual_preflight(
             &receipt.publication_intent.target,
             &intent.publication_intent.target,
         )
-        && intent_git_identity.commit_sha.is_some()
-        && git_identity.commit_sha == intent_git_identity.commit_sha
-        && binding.candidate_sha
-            == intent_git_identity
-                .commit_sha
-                .as_deref()
-                .unwrap_or_default()
+        && (if let Some(candidate) = record
+            .metadata
+            .get("manual_finalization_retry_candidate")
+            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+        {
+            serde_json::from_value::<crate::agent_task_promotion::AgentTaskCandidateFingerprint>(
+                candidate.clone(),
+            )
+            .is_ok_and(|candidate| {
+                candidate.tree == binding.candidate_tree
+                    && candidate.changed_files == binding.changed_files
+            })
+        } else {
+            intent_git_identity.commit_sha.is_some()
+                && git_identity.commit_sha == intent_git_identity.commit_sha
+                && binding.candidate_sha
+                    == intent_git_identity
+                        .commit_sha
+                        .as_deref()
+                        .unwrap_or_default()
+        })
+}
+
+fn require_manual_retry_candidate(
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    path: &str,
+) -> Result<()> {
+    let expected = record
+        .metadata
+        .get("manual_finalization_retry_candidate")
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "manual_finalization_retry_candidate",
+                "retryable manual publication has no durable candidate fingerprint",
+                None,
+                None,
+            )
+        })?;
+    let expected: crate::agent_task_promotion::AgentTaskCandidateFingerprint =
+        serde_json::from_value(expected).map_err(|_| {
+            Error::validation_invalid_argument(
+                "manual_finalization_retry_candidate",
+                "retryable manual publication candidate fingerprint is invalid",
+                None,
+                None,
+            )
+        })?;
+    let actual = crate::agent_task_promotion::candidate_fingerprint(path)?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+        fingerprint: actual,
+    } = actual
+    else {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_retry_candidate",
+            "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
+            None,
+            None,
+        ));
+    };
+    // Hooks may stage the exact candidate before rejecting it. Bind semantic
+    // content and paths, not the transient staged/unstaged representation.
+    if actual.tree != expected.tree || actual.changed_files != expected.changed_files {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_retry_candidate",
+            "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn is_publication_base_observation(
@@ -3253,8 +3401,9 @@ fn same_preflight_publication_target(
 
 fn manual_finalization_options(
     report: AgentTaskPrFinalizationReport,
+    allow_uncommitted_candidate: bool,
 ) -> Result<AgentTaskPrFinalizationOptions> {
-    validate_manual_preflight_report(&report, &report.run_id)?;
+    validate_manual_preflight_report(&report, &report.run_id, allow_uncommitted_candidate)?;
     let target = &report.publication_intent.target;
     let path = target.path.clone().filter(|path| path == &report.path);
     let base = target.base.clone().filter(|base| base == &report.base);
@@ -3269,10 +3418,6 @@ fn manual_finalization_options(
         || base.is_none()
         || head.is_none()
         || verified_base_sha.as_deref().unwrap_or_default().is_empty()
-        || expected_candidate_sha
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty()
     {
         return Err(Error::validation_invalid_argument(
             "cook_finalization",
@@ -3313,6 +3458,7 @@ fn manual_finalization_options(
 fn validate_manual_preflight_report(
     report: &AgentTaskPrFinalizationReport,
     run_id: &str,
+    allow_uncommitted_candidate: bool,
 ) -> Result<()> {
     if report.run_id != run_id {
         return Err(Error::validation_invalid_argument(
@@ -3359,12 +3505,13 @@ fn validate_manual_preflight_report(
             None,
         ));
     }
-    if report
-        .publication_proof
-        .git_identity
-        .as_ref()
-        .and_then(|identity| identity.commit_sha.as_deref())
-        .is_none_or(str::is_empty)
+    if !allow_uncommitted_candidate
+        && report
+            .publication_proof
+            .git_identity
+            .as_ref()
+            .and_then(|identity| identity.commit_sha.as_deref())
+            .is_none_or(str::is_empty)
     {
         return Err(Error::validation_invalid_argument(
             "publication_proof.git_identity.commit_sha",
