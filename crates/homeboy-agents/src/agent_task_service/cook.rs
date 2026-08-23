@@ -6764,6 +6764,10 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<O
             "candidate_only_commits": ahead,
             "next_action": "clean_destination_before_provider",
         });
+        error.details["dirty_candidate_adoption"] = serde_json::json!({
+            "workspace": target,
+            "reason": "first_provider_admission",
+        });
         return Err(error);
     }
     if behind == 0 {
@@ -7014,12 +7018,17 @@ fn admit_explicit_cook_workspace_before_provider(
         .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
         .collect::<Vec<_>>();
     if !dirty_paths.is_empty() {
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "to_worktree",
             "explicit Cook checkout must be clean before its first provider execution",
             Some(options.to_worktree.clone()),
             None,
-        ));
+        );
+        error.details["dirty_candidate_adoption"] = serde_json::json!({
+            "workspace": source,
+            "reason": "first_provider_admission",
+        });
+        return Err(error);
     }
     if agent_task_lifecycle::run_record_exists(run_id)? {
         agent_task_lifecycle::record_metadata_value(
