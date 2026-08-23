@@ -4262,20 +4262,25 @@ fn validate_provider_evidence_prompt(
     projected_paths: &std::collections::BTreeSet<String>,
 ) -> homeboy::core::Result<()> {
     let Some(prompt) = prompt else { return Ok(()) };
-    let undeclared = absolute_host_paths_in_provider_prompt(prompt)?
+    let undeclared = classified_absolute_host_paths_in_provider_prompt(prompt)?
         .into_iter()
-        .filter(|path| !is_projected_provider_evidence_path(path, projected_paths))
+        .filter(|path| !is_projected_provider_evidence_path(&path.path, projected_paths))
         .collect::<Vec<_>>();
     if !undeclared.is_empty() {
         let paths = undeclared
             .iter()
-            .map(|path| format!("`{path}`"))
+            .map(|path| format!("`{}` ({})", path.path, path.classification))
             .collect::<Vec<_>>()
             .join(", ");
+        let classification_evidence = undeclared
+            .iter()
+            .map(ClassifiedHostPath::diagnostic_evidence)
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
             format!("prompt names undeclared absolute evidence paths: {paths}"),
-            Some(undeclared.join(", ")),
+            Some(classification_evidence),
             Some(vec!["Declare each path with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()]),
         ));
     }
@@ -4284,11 +4289,39 @@ fn validate_provider_evidence_prompt(
 
 const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
 
+const MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES: usize = 160;
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ClassifiedHostPath {
+    path: String,
+    token: String,
+    classification: &'static str,
+}
+
+impl ClassifiedHostPath {
+    fn diagnostic_evidence(&self) -> String {
+        format!(
+            "path={} classification={} token={}",
+            self.path, self.classification, self.token
+        )
+    }
+}
+
 /// Extract concrete Unix absolute paths from the bounded provider prompt
-/// surface. A path must begin at a syntax boundary and contain at least two
-/// segments or resolve locally, so prose such as `core/html` and `/endpoint`
-/// is not evidence.
+/// surface. URL references and slash-separated concepts are excluded; host
+/// paths need an explicit file syntax, a recognized Unix root, or local
+/// filesystem resolution.
+#[cfg(test)]
 fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
+    Ok(classified_absolute_host_paths_in_provider_prompt(prompt)?
+        .into_iter()
+        .map(|path| path.path)
+        .collect())
+}
+
+fn classified_absolute_host_paths_in_provider_prompt(
+    prompt: &str,
+) -> homeboy::core::Result<Vec<ClassifiedHostPath>> {
     if prompt.len() > MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
@@ -4304,7 +4337,8 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
             continue;
         }
         let mut candidate = token;
-        if let Some(file) = token.find("file://") {
+        let file_url = token.find("file://");
+        if let Some(file) = file_url {
             let rest = &token[file + "file://".len()..];
             candidate = if rest.starts_with('/') {
                 rest
@@ -4336,18 +4370,101 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
                     )
             });
             let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
-            let trimmed = path.trim_start_matches('/');
-            let segments = trimmed.split('/').count();
-            if path.starts_with('/')
-                && !trimmed.is_empty()
-                && (segments >= 2 || Path::new(path).exists())
-            {
-                paths.insert(path.to_string());
+            let prefix = (start > 0)
+                .then(|| candidate[..start].chars().next_back())
+                .flatten();
+            let assignment = prefix == Some('=');
+            let quoted_or_angle_path = matches!(prefix, Some('\'' | '"' | '`' | '<'));
+            if let Some(classification) = classify_absolute_host_path(
+                path,
+                file_url.is_some(),
+                assignment,
+                quoted_or_angle_path,
+            ) {
+                paths.insert(ClassifiedHostPath {
+                    path: path.to_string(),
+                    token: bounded_prompt_path_token(token),
+                    classification,
+                });
             }
             offset = start.saturating_add(path.len()).max(start + 1);
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn classify_absolute_host_path(
+    path: &str,
+    file_url: bool,
+    assignment: bool,
+    quoted_or_angle_path: bool,
+) -> Option<&'static str> {
+    let trimmed = path.trim_start_matches('/');
+    let root = trimmed.split('/').next()?;
+    if trimmed.is_empty() || path.contains('#') {
+        return None;
+    }
+    if file_url {
+        return Some("file-uri");
+    }
+    if assignment {
+        return Some("explicit-path-assignment");
+    }
+    if quoted_or_angle_path {
+        return Some("quoted-or-angle-path");
+    }
+    if matches!(
+        root,
+        "bin"
+            | "boot"
+            | "dev"
+            | "etc"
+            | "home"
+            | "lib"
+            | "lib64"
+            | "media"
+            | "mnt"
+            | "opt"
+            | "private"
+            | "proc"
+            | "root"
+            | "run"
+            | "sbin"
+            | "srv"
+            | "sys"
+            | "tmp"
+            | "usr"
+            | "var"
+            | "Users"
+            | "Volumes"
+            | "workspace"
+    ) {
+        return Some("unix-host-root");
+    }
+    if trimmed.contains('/') && Path::new(path).exists() {
+        return Some("existing-host-path");
+    }
+    if trimmed.contains('/')
+        && trimmed
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.contains('.') && !segment.starts_with('.'))
+    {
+        return Some("file-like-absolute-path");
+    }
+    None
+}
+
+fn bounded_prompt_path_token(token: &str) -> String {
+    if token.len() <= MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES {
+        return token.to_string();
+    }
+    let end = token
+        .char_indices()
+        .take_while(|(index, _)| *index < MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    format!("{}...", &token[..end])
 }
 
 fn is_projected_provider_evidence_path(
@@ -5133,6 +5250,52 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         );
         validate_provider_evidence_inputs(&[], Some(prompt))
             .expect("slash-delimited prose is not filesystem evidence");
+    }
+
+    #[test]
+    fn prompt_path_classifier_separates_host_paths_from_urls_references_and_concepts() {
+        for prompt in [
+            "See https://example.test/report#fragment.",
+            "Follow /#fragment.",
+            "Track /blocks-engine#1032 and issue #12991.",
+            "Preserve public/plan/report compatibility.",
+            "Use /page/report as a conceptual route.",
+        ] {
+            assert_eq!(
+                absolute_host_paths_in_provider_prompt(prompt).expect("classify accepted syntax"),
+                Vec::<String>::new(),
+                "{prompt}"
+            );
+            validate_provider_evidence_inputs(&[], Some(prompt))
+                .expect("URLs, references, and concepts are not host evidence");
+        }
+
+        let classified = classified_absolute_host_paths_in_provider_prompt(
+            "Read /private/evidence.json and run cat '/tmp/command-input.json'.",
+        )
+        .expect("classify host paths");
+        assert_eq!(
+            classified
+                .iter()
+                .map(|path| (path.path.as_str(), path.classification))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/private/evidence.json", "unix-host-root"),
+                ("/tmp/command-input.json", "quoted-or-angle-path"),
+            ]
+        );
+
+        let error = validate_provider_evidence_inputs(
+            &[],
+            Some("Read /private/evidence.json and run cat '/tmp/command-input.json'."),
+        )
+        .expect_err("Unix and quoted command paths require evidence");
+        let evidence = error.details["id"]
+            .as_str()
+            .expect("classification evidence");
+        assert!(evidence.contains("classification=unix-host-root token=/private/evidence.json"));
+        assert!(evidence
+            .contains("classification=quoted-or-angle-path token='/tmp/command-input.json'."));
     }
 
     #[test]
