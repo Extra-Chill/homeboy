@@ -9,6 +9,9 @@
       "exclude": []
     }
   },
+  "reconcile_preflight": {
+    "required_context": "homeboy / Test"
+  },
   "rules": [
     { "type": "deletion" },
     { "type": "non_fast_forward" },
