@@ -303,6 +303,7 @@ impl ProcessContainment {
             return Ok(ProcessContainmentCleanup {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
+                diagnostic: cleanup.diagnostic,
                 detail: cleanup.detail,
             });
         }
