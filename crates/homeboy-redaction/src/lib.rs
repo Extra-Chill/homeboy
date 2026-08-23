@@ -180,6 +180,31 @@ impl RedactionPolicy {
         redact_inline_assignments(&value, self)
     }
 
+    /// Redact URLs wherever they occur in diagnostic prose. URL punctuation is
+    /// kept outside the match so Markdown and sentence delimiters survive.
+    pub fn redact_embedded_urls(&self, value: &str) -> String {
+        let urls = Regex::new(r#"(?i)https?://[^\s<>'"]+"#)
+            .expect("embedded URL redaction regex is valid");
+        let value = urls
+            .replace_all(value, |captures: &Captures<'_>| {
+                let token = &captures[0];
+                let url = token.trim_end_matches(|character: char| {
+                    matches!(
+                        character,
+                        '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+                    )
+                });
+                // Fragments are not useful evidence and frequently carry
+                // client-side credentials, so display-safe embedded URLs omit
+                // them entirely.
+                let redacted = self.redact_url(url);
+                let redacted = redacted.split('#').next().unwrap_or_default();
+                format!("{}{}", redacted, &token[url.len()..])
+            })
+            .into_owned();
+        self.redact_string(&value)
+    }
+
     pub fn redact_url(&self, value: &str) -> String {
         let (without_fragment, fragment) = split_once(value, '#');
         let (base, query) = split_once(without_fragment, '?');
@@ -695,6 +720,17 @@ mod tests {
         assert_eq!(
             policy.redact_url("https://example.test/path?b=2&token=abc&nonce=xyz#frag"),
             "https://example.test/path?b=2&token=[REDACTED]&nonce=[REDACTED]#frag"
+        );
+    }
+
+    #[test]
+    fn redacts_embedded_and_punctuated_urls() {
+        let policy = RedactionPolicy::default();
+        let value = "see (https://user:pass@example.test/log?token=secret#fragment), then continue";
+
+        assert_eq!(
+            policy.redact_embedded_urls(value),
+            "see (https://[REDACTED]@example.test/log?token=[REDACTED]), then continue"
         );
     }
 
