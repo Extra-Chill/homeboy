@@ -704,6 +704,8 @@ if (process.argv[2] === 'export') {
 	});
 	assert.equal(defaultModelRun.status, 0, defaultModelRun.stderr);
 	const defaultModelResult = JSON.parse(defaultModelRun.stdout);
+	assert.equal(defaultModelResult.schema, 'homeboy/agent-task-outcome/v1');
+	assert.equal(defaultModelResult.task_id, 'opencode-default-model-provenance');
 	assert.equal(defaultModelResult.status, 'succeeded', JSON.stringify(defaultModelResult.diagnostics));
 	assert.equal(defaultModelResult.metadata.model, 'openai/gpt-5.6-sol');
 	assert.deepEqual(defaultModelResult.metadata.opencode_session, {
