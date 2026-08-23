@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const wpCodeboxTaskRunner = path.join(
   __dirname,
@@ -38,6 +39,10 @@ const fs = require('node:fs');
 const capturePath = process.env.FIXTURE_WP_CODEBOX_CAPTURE;
 if (process.argv.includes('--version')) {
   process.stdout.write(${JSON.stringify(version)});
+  process.exit(0);
+}
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') {
+  process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }));
   process.exit(0);
 }
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
@@ -129,7 +134,26 @@ try {
   assert.equal(stalePayload.diagnostics[0].class, 'codebox.preflight.wp_codebox_version_too_old', stale.stdout);
   assert.equal(stalePayload.diagnostics[0].data.selected.version, '0.19.0');
   assert.equal(stalePayload.diagnostics[0].data.required_version, '0.21.0');
-  assert.equal(fs.existsSync(staleCapturePath), false, 'a rejected runtime must not start a recipe');
+   assert.equal(fs.existsSync(staleCapturePath), false, 'a rejected runtime must not start a recipe');
+
+   const managedRoot = path.join(root, 'managed-runtime', 'source');
+   const managedCli = path.join(managedRoot, 'packages', 'cli', 'dist', 'index.js');
+   fs.mkdirSync(path.dirname(managedCli), { recursive: true });
+   fs.copyFileSync(fixtureWpCodebox, managedCli);
+   spawnSync('git', ['init', '-q'], { cwd: managedRoot });
+   spawnSync('git', ['add', '.'], { cwd: managedRoot });
+   spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: managedRoot });
+   const managedSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: managedRoot, encoding: 'utf8' }).stdout.trim();
+   fs.writeFileSync(path.join(managedRoot, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: managedSha, cli_sha256: createHash('sha256').update(fs.readFileSync(managedCli)).digest('hex'), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+   fs.appendFileSync(managedCli, '\n// tampered after setup\n');
+   const managedCapturePath = path.join(root, 'managed-capture.json');
+   const managed = runTaskRunner(request, [
+     '--wp-codebox-bin', managedCli,
+     '--artifacts', path.join(root, 'managed-artifacts'),
+   ], { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.dirname(managedRoot), FIXTURE_WP_CODEBOX_CAPTURE: managedCapturePath, OPENCODE_API_KEY: 'redacted-test-key' });
+   assert.equal(managed.status, 1, managed.stderr || managed.stdout);
+   assert.equal(JSON.parse(managed.stdout).diagnostics[0].class, 'codebox.preflight.wp_codebox_managed_source_identity_invalid');
+   assert.equal(fs.existsSync(managedCapturePath), false, 'a tampered managed configured path must not start a recipe');
 
   const environmentalPrecedence = runTaskRunner(request, [
     '--artifacts', path.join(root, 'environmental-precedence-artifacts'),

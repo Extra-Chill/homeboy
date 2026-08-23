@@ -9,6 +9,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const extension = path.resolve(import.meta.dirname, '..');
 const runner = path.join(extension, 'scripts/test/test-runner-wp-codebox.sh');
@@ -28,6 +29,10 @@ import path from 'node:path';
 const args = process.argv.slice(2);
 if (args[0] === '--version') {
   process.stdout.write('0.21.0\\n');
+  process.exit(0);
+}
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') {
+  process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }));
   process.exit(0);
 }
 if (args[0] === 'recipe' && args[1] === 'build') {
@@ -65,7 +70,7 @@ process.exitCode = failed ? 2 : 0;
 `);
 await chmod(cli, 0o755);
 
-function execute(name, changed, scenario = 'passed') {
+function execute(name, changed, scenario = 'passed', env = {}) {
   const artifacts = path.join(root, `${name}-artifacts`);
   const capturedOptions = path.join(root, `${name}-options.json`);
   const run = spawnSync('bash', [runner], {
@@ -77,8 +82,9 @@ function execute(name, changed, scenario = 'passed') {
       COMPONENT_ID: 'sample-plugin',
       HOMEBOY_WP_CODEBOX_BIN: cli,
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts,
-      HOMEBOY_SETTINGS_JSON: JSON.stringify({ phpunit_no_tests: 'fail', wp_codebox_phpunit_bootstrap_mode: 'managed' }),
-      HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES: changed,
+       HOMEBOY_SETTINGS_JSON: JSON.stringify({ phpunit_no_tests: 'fail', wp_codebox_phpunit_bootstrap_mode: 'managed' }),
+       HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES: changed,
+       ...env,
     },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
@@ -119,9 +125,26 @@ try {
   assert.equal((await artifactResults(zero.artifacts)).status, 'failed');
   assert.match(zero.run.stdout, /PHPUNIT_ZERO_TESTS/);
 
-  const commandFailed = execute('command-failed', selected, 'command-failed');
-  assert.notEqual(commandFailed.run.status, 0, 'a PHPUnit command failure must remain a failure');
-  assert.equal((await artifactResults(commandFailed.artifacts)).status, 'failed');
+   const commandFailed = execute('command-failed', selected, 'command-failed');
+   assert.notEqual(commandFailed.run.status, 0, 'a PHPUnit command failure must remain a failure');
+   assert.equal((await artifactResults(commandFailed.artifacts)).status, 'failed');
+
+   const managedSource = path.join(root, 'managed-runtime', 'source');
+   const managedCli = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+   await mkdir(path.dirname(managedCli), { recursive: true });
+   await writeFile(managedCli, await readFile(cli));
+   spawnSync('git', ['init', '-q'], { cwd: managedSource });
+   spawnSync('git', ['add', '.'], { cwd: managedSource });
+   spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: managedSource });
+   const sourceSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: managedSource, encoding: 'utf8' }).stdout.trim();
+   await writeFile(path.join(managedSource, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: sourceSha, cli_sha256: createHash('sha256').update(await readFile(managedCli)).digest('hex'), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+   await writeFile(managedCli, `${await readFile(managedCli, 'utf8')}\n// tampered after setup\n`);
+   const tampered = execute('tampered-managed', selected, 'passed', {
+     HOMEBOY_WP_CODEBOX_BIN: managedCli,
+     HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.dirname(managedSource),
+   });
+   assert.notEqual(tampered.run.status, 0, 'the adapter must reject a tampered managed resolved command');
+   assert.match(`${tampered.run.stdout}${tampered.run.stderr}`, /wp_codebox_managed_source_identity_invalid/);
 } finally {
   await rm(root, { recursive: true, force: true });
 }

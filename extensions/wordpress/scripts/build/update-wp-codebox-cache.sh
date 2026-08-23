@@ -92,6 +92,16 @@ fail() {
     exit 1
 }
 
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        fail "sha256 tool is required (shasum or sha256sum)"
+    fi
+}
+
 [ -n "$CACHE_DIR" ] || CACHE_DIR="${HOME}/.cache/homeboy/wp-codebox/source"
 
 command -v git >/dev/null 2>&1 || fail "git is required to update WP Codebox cache"
@@ -127,6 +137,7 @@ fi
 echo "Fetching WP Codebox ref: $REQUESTED_REF"
 git -C "$CACHE_DIR" fetch --quiet --tags origin "$REQUESTED_REF" || fail "failed to fetch ref '$REQUESTED_REF' from $SOURCE"
 git -C "$CACHE_DIR" reset --hard --quiet FETCH_HEAD || fail "failed to reset cache checkout to FETCH_HEAD"
+git -C "$CACHE_DIR" clean -ffdx --quiet || fail "failed to clean untracked build residue from WP Codebox cache checkout"
 
 [ -f "$CACHE_DIR/package-lock.json" ] || [ -f "$CACHE_DIR/npm-shrinkwrap.json" ] || fail "WP Codebox source cache requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: $SOURCE"
 
@@ -139,7 +150,7 @@ echo "Building WP Codebox packages..."
 SHA="$(git -C "$CACHE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
 CLI="$CACHE_DIR/packages/cli/dist/index.js"
 [ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
-CLI_SHA256="$(shasum -a 256 "$CLI" | awk '{print $1}')" || fail "failed to hash built WP Codebox CLI"
+CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
 printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CACHE_DIR/.homeboy-runtime-identity.json"
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT

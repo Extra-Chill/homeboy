@@ -134,6 +134,25 @@ exit 0
 SH
 chmod +x "${OVERRIDE_BIN}"
 
+# The highest-precedence configured pin is authoritative. A dangling one must
+# not be masked by a lower-precedence valid pin.
+set +e
+env -i \
+    PATH="/usr/bin:/bin" \
+    HOME="${TMP_ROOT}/home" \
+    HOMEBOY_WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/highest" \
+    WP_CODEBOX_BIN="${OVERRIDE_BIN}" \
+    bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin ""' \
+    wp-codebox-highest-pin "${PATHS_LIB}" \
+    > "${TMP_ROOT}/highest-pin.out" 2> "${TMP_ROOT}/highest-pin.err"
+highest_pin_status=$?
+set -e
+if [ "${highest_pin_status}" -ne 0 ] && grep -q "${TMP_ROOT}/does-not-exist/highest" "${TMP_ROOT}/highest-pin.err"; then
+    pass "a dangling highest-precedence pin does not fall through"
+else
+    fail "dangling highest-precedence pin fell through: $(cat "${TMP_ROOT}/highest-pin.err")"
+fi
+
 override_json="$(env -i \
     PATH="/usr/bin:/bin" \
     HOME="${TMP_ROOT}/home" \

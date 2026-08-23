@@ -34,7 +34,7 @@ function selectWpCodeboxRuntime(options = {}) {
   const managed = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
-    configured: candidate(configured, 'configured', options),
+    configured: candidate(configured, configured && samePath(expandHome(String(configured), env), managed) ? 'managed' : 'configured', options),
     managed: candidate(managed, 'managed', options),
     path: candidate(pathCandidate, 'path', options),
   };
@@ -83,7 +83,8 @@ function preflightWpCodeboxRuntime(options = {}) {
 function preflightWpCodeboxCommand(command, options = {}) {
   const requiredVersion = options.requiredVersion || REQUIRED_WP_CODEBOX_VERSION;
   const [binary, ...args] = Array.isArray(command) ? command : [];
-  const selected = { path: binary || '', source: 'resolved-command', available: Boolean(binary) };
+  const managed = managedCommandBinary(binary, args, options);
+  const selected = { path: managed || binary || '', source: managed ? 'managed' : 'resolved-command', available: Boolean(binary) };
   if (!binary) {
     return failure({ selected, candidates: {} }, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
   }
@@ -100,7 +101,25 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (!browserPreviewReady(probeRuntimeDescriptor(binary, options, args))) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
+  if (managed && !managedIdentityMatches(managed, options)) {
+    return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_managed_source_identity_invalid', 'homeboy extension setup wordpress');
+  }
   return { ready: true, required_version: requiredVersion, selected: { ...selected, version }, candidates: {}, remediation: '' };
+}
+
+function managedCommandBinary(binary, args, options = {}) {
+  const env = options.env || process.env;
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  const managed = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
+  return [binary, ...args].some((entry) => samePath(entry, managed)) ? managed : '';
+}
+
+function samePath(left, right) {
+  try {
+    return path.resolve(left) === path.resolve(right);
+  } catch {
+    return false;
+  }
 }
 
 function probeRuntimeDescriptor(bin, options = {}, prefixArgs = []) {

@@ -5,8 +5,11 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { preflightWpCodeboxCommand } = require(path.join(root, 'agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js'));
 const readiness = path.join(root, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'agent-runtimes/wp-codebox/wp-codebox.json'), 'utf8'));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-wp-codebox-runner-readiness-'));
@@ -88,10 +91,18 @@ try {
   fs.writeFileSync(path.join(staleBuild, 'source', '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: '0'.repeat(40), cli_sha256: '0'.repeat(64), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
   assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: staleBuild, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_managed_source_identity_invalid');
 
-  const tamperedBuild = path.join(temp, 'tampered-build');
-  const tamperedCli = managedRuntime(tamperedBuild, '0.21.0');
-  fs.appendFileSync(tamperedCli, '\n// tampered after setup\n');
-  assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_managed_source_identity_invalid');
+   const tamperedBuild = path.join(temp, 'tampered-build');
+   const tamperedCli = managedRuntime(tamperedBuild, '0.21.0');
+   fs.appendFileSync(tamperedCli, '\n// tampered after setup\n');
+   assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_managed_source_identity_invalid');
+   // A caller may pass the managed path explicitly. That preserves managed
+   // provenance rather than converting the path into an unverified override.
+   const tamperedConfigured = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild, HOMEBOY_WP_CODEBOX_BIN: tamperedCli, PATH: `${stalePath}:${process.env.PATH}` });
+   assert.equal(tamperedConfigured.classification, 'wp_codebox_managed_source_identity_invalid');
+   assert.equal(tamperedConfigured.identity.source, 'managed');
+   const tamperedCommand = preflightWpCodeboxCommand([process.execPath, tamperedCli], { env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild } });
+   assert.equal(tamperedCommand.reason, 'wp_codebox_managed_source_identity_invalid');
+   assert.equal(tamperedCommand.selected.source, 'managed');
 
   const missingCapability = path.join(temp, 'missing-capability');
   managedRuntime(missingCapability, '0.21.0', false);

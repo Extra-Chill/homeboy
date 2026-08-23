@@ -50,39 +50,25 @@ homeboy_wp_codebox_resolve_bin() {
     local config_label="${2:-settings}"
     local bin=""
     local candidate=""
-    local candidates=()
 
-    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
-    fi
-    if [ -n "${WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$WP_CODEBOX_BIN")
-    fi
-    if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
-    fi
+    for candidate in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}" "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}"; do
+        [ -n "$candidate" ] && break
+    done
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
-        bin=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
-        [ -n "$bin" ] && candidates+=("$bin")
-        bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-        [ -n "$bin" ] && candidates+=("$bin")
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
     fi
-    bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
-    [ -n "$bin" ] && candidates+=("$bin")
+    [ -n "$candidate" ] || candidate="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
 
     # Explicit configuration is an operator pin. Without one, a managed source
     # checkout owns resolution; an incomplete checkout is repaired, never
     # bypassed through PATH by a possibly incompatible global installation.
-    for candidate in "${candidates[@]}"; do
-        [ -n "$candidate" ] || continue
+    if [ -n "$candidate" ]; then
         if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
             printf '%s\n' "$candidate"
             return 0
         fi
-    done
-
-    if [ "${#candidates[@]}" -gt 0 ]; then
-        echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${candidates[0]}." >&2
+        echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${candidate}." >&2
         echo "       Re-run the WordPress extension setup or correct the explicit binary setting." >&2
         return 1
     fi
@@ -98,7 +84,7 @@ homeboy_wp_codebox_resolve_bin() {
         return 1
     fi
 
-    candidates=()
+    local candidates=()
 
     while IFS= read -r candidate; do
         [ -n "$candidate" ] && candidates+=("$candidate")

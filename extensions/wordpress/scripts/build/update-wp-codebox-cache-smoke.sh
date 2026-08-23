@@ -49,8 +49,15 @@ case "${args[*]}" in
         touch "${prefix}/npm-install-ran"
         ;;
     "run build")
+        if [ -e "${prefix}/packages/cli/dist/index.js" ]; then
+            echo "stale CLI build output survived cache cleanup" >&2
+            exit 2
+        fi
         mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
+        mkdir -p "${prefix}/packages/cli/dist"
         printf '%s\n' 'built' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
+        printf '%s\n' '#!/usr/bin/env node' > "${prefix}/packages/cli/dist/index.js"
+        chmod +x "${prefix}/packages/cli/dist/index.js"
         ;;
     *)
         echo "unexpected npm args: ${args[*]}" >&2
@@ -90,6 +97,11 @@ esac
 [ -f "${CACHE_DIR}/npm-install-ran" ] || { echo "npm install marker missing" >&2; exit 1; }
 [ -f "${CACHE_DIR}/node_modules/@automattic/wp-codebox-core/dist/index.js" ] || { echo "core package artifact missing" >&2; exit 1; }
 
+# Build output is untracked and must not survive the next ref update. The fake
+# build refuses to proceed if this stale CLI is still present.
+mkdir -p "${CACHE_DIR}/packages/cli/dist"
+printf '%s\n' 'stale build output' > "${CACHE_DIR}/packages/cli/dist/index.js"
+
 OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
@@ -114,6 +126,15 @@ LOCAL_DRY_RUN_OUTPUT="$(HOMEBOY_CALLS="$HOMEBOY_CALLS" PATH="${FAKE_BIN}:$PATH" 
 if [ -e "$HOMEBOY_CALLS" ]; then
     echo "Local dry-run unexpectedly dispatched through Homeboy" >&2
     cat "$HOMEBOY_CALLS" >&2
+    exit 1
+fi
+
+# Linux runners commonly expose sha256sum instead of macOS's shasum. The
+# portable helper must retain that fallback.
+if grep -q 'command -v shasum' "${SCRIPT}" && grep -q 'command -v sha256sum' "${SCRIPT}"; then
+    :
+else
+    echo "Expected portable sha256 helper to support shasum and sha256sum" >&2
     exit 1
 fi
 case "$LOCAL_DRY_RUN_OUTPUT" in
