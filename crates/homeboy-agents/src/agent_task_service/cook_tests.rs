@@ -3966,6 +3966,126 @@ fn batch_cook_options(
     }
 }
 
+fn compile_options(cook_id: &str) -> AgentTaskCookServiceOptions {
+    batch_cook_options(
+        cook_id,
+        Arc::new(BatchAttemptDispatcher {
+            barrier: Arc::new(Barrier::new(1)),
+            entered: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }),
+    )
+}
+
+fn compile_command(
+    backend: &str,
+    model: Option<&str>,
+    workspace: Option<&str>,
+) -> AgentTaskDispatchCommand {
+    AgentTaskDispatchCommand {
+        prompt: Some("compile this Cook".to_string()),
+        backend: Some(backend.to_string()),
+        model: model.map(str::to_string),
+        workspace: workspace.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn compile_provider(
+    id: &str,
+    backend: &str,
+) -> crate::agent_task_provider::AgentTaskExecutorProvider {
+    serde_json::from_value(serde_json::json!({ "id": id, "backend": backend }))
+        .expect("provider fixture")
+}
+
+#[test]
+fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_workspace_materialization(
+) {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let missing_workspace = "/definitely-not-a-workspace";
+        let cases = vec![
+            (
+                "route",
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+                compile_command("missing", None, Some(missing_workspace)),
+                "route did not resolve",
+            ),
+            (
+                "model",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "model.provider",
+                        "backend": "model",
+                        "cli": { "profiles": [{ "name": "supported", "model": "supported" }] }
+                    })).expect("model provider")],
+                    ..Default::default()
+                },
+                compile_command("model", Some("unsupported"), Some(missing_workspace)),
+                "selected model",
+            ),
+            (
+                "credentials",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "credential.provider",
+                        "backend": "credential",
+                        "provider_defaults": { "credential": { "required_secret_env": ["HOMEBOY_TEST_MISSING_CREDENTIAL"] } }
+                    })).expect("credential provider")],
+                    ..Default::default()
+                },
+                compile_command("credential", None, Some(missing_workspace)),
+                "credentials are not configured",
+            ),
+            (
+                "runtime",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "runtime.provider",
+                        "backend": "runtime",
+                        "readiness_invocation": { "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"repair runtime\",\"reason\":\"runtime unavailable\",\"cache_key\":\"test\",\"identity\":{}}'"] }
+                    })).expect("runtime provider")],
+                    ..Default::default()
+                },
+                compile_command("runtime", None, None),
+                "runtime readiness validation failed",
+            ),
+        ];
+
+        for (dimension, catalog, command, reason) in cases {
+            let error = compile_cook_attempt_with_catalog_and_readiness_cache(
+                compile_options(&format!("{dimension}-cook")),
+                command,
+                &catalog,
+                &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            )
+            .expect_err("unavailable dimension must reject before workspace validation");
+            assert_eq!(error.details["field"], "provider_dispatchability");
+            assert!(error.message.contains(reason), "{dimension}: {error}");
+        }
+    });
+}
+
+#[test]
+fn compile_cook_with_injected_catalog_proceeds_only_when_every_check_is_ready() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider = compile_provider("ready.provider", "ready");
+        let options = compile_cook_attempt_with_catalog_and_readiness_cache(
+            compile_options("ready-cook"),
+            compile_command("ready", None, None),
+            &crate::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            },
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("all-ready provider compiles a Cook without spending an execution");
+
+        assert_eq!(options.initial_plan.tasks.len(), 1);
+        assert_eq!(options.initial_plan.tasks[0].executor.backend, "ready");
+    });
+}
+
 #[test]
 fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinned_moving_main() {
     homeboy_core::test_support::with_isolated_home(|_| {

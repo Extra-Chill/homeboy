@@ -440,9 +440,13 @@ pub mod provider {
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
-        preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
-        preflight_provider_credentials_for_backend, provider_credential_readiness,
-        AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
+        evaluate_provider_dispatchability, preflight_discovered_provider_credentials_for_backend,
+        preflight_plan_provider_dispatchability_with_providers, preflight_provider_credentials,
+        preflight_provider_credentials_for_backend, preflight_provider_dispatchability,
+        preflight_provider_dispatchability_with_config,
+        preflight_provider_dispatchability_without_runtime_with_config,
+        provider_credential_readiness, AgentTaskProviderCredentialReadiness,
+        AgentTaskProviderCredentialRequirement, AgentTaskProviderDispatchability,
         AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
     };
     pub use crate::agent_task_provider::{
@@ -494,7 +498,8 @@ pub mod service {
         adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt, aggregate_exit_code,
         artifacts, authorize_cook_continue_route, authorize_cook_continue_route_with_artifact,
         cancel, claim_continuation_for, claim_continuation_for_recovery_in_store,
-        compile_cook_attempt, compile_cook_attempt_with_readiness_cache,
+        compile_cook_attempt, compile_cook_attempt_with_catalog_and_readiness_cache,
+        compile_cook_attempt_with_readiness_cache,
         consume_claimed_terminal_with_dispatcher, consume_claimed_with_dispatcher,
         continuation_state_in_store, cook_batch_job_submission, detached_batch_coordinator_control,
         discover_runs, enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion,

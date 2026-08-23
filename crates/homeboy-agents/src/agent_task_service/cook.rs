@@ -11,7 +11,7 @@ use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
     AgentTaskIntentionalNoChange,
 };
-use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_prompt_source};
+use crate::agent_task_dispatch_plan::validate_single_cook_prompt_source;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
@@ -2541,8 +2541,25 @@ pub fn compile_cook_attempt(
 /// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
 /// share this cache so identical provider/runtime/model verdicts probe once.
 pub fn compile_cook_attempt_with_readiness_cache(
+    options: AgentTaskCookServiceOptions,
+    dispatch: AgentTaskDispatchCommand,
+    readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
+) -> Result<AgentTaskCookServiceOptions> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    compile_cook_attempt_with_catalog_and_readiness_cache(
+        options,
+        dispatch,
+        &catalog,
+        readiness_cache,
+    )
+}
+
+/// Compile a Cook against one caller-supplied provider catalog. This keeps the
+/// preflight and plan construction on the same provider snapshot.
+pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
     mut options: AgentTaskCookServiceOptions,
     dispatch: AgentTaskDispatchCommand,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
     readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
 ) -> Result<AgentTaskCookServiceOptions> {
     validate_single_cook_prompt_source(
@@ -2551,12 +2568,32 @@ pub fn compile_cook_attempt_with_readiness_cache(
         dispatch.core.tasks_json.as_deref(),
     )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
-    options.initial_plan = build_dispatch_plan(&request)?;
-    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    // Route/model/credential/immediate-failure failures are knowable before
+    // workspace preparation. The plan pass below rechecks with its effective
+    // executor config and reuses this caller-owned cache.
+    crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
+        catalog,
+        &request.backend,
+        request.selector.as_deref(),
+        request.model.as_deref(),
+        &serde_json::Value::Object(Default::default()),
+        readiness_cache,
+    )?;
+    options.initial_plan =
+        crate::agent_task_dispatch_plan::build_dispatch_plan_with_provider_requirements(
+            &request,
+            |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
+        )?;
     catalog.validate_explicit_models(&options.initial_plan)?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.initial_plan,
         catalog.providers(),
+    )?;
+    // The shared verdict uses the plan's effective executor configuration and
+    // caller-owned cache before Cook can consume a provider execution budget.
+    crate::agent_task_provider::preflight_plan_provider_dispatchability_with_providers(
+        &options.initial_plan,
+        catalog,
         readiness_cache,
     )?;
     // Finalization disclosure is derived from the compiled provider invocation,

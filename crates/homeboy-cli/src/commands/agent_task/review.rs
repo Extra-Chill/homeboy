@@ -19,9 +19,9 @@ use homeboy::agents::agent_tasks::promotion::{
     AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
+    evaluate_provider_dispatchability, preflight_provider_dispatchability,
     provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
-    AgentTaskProviderCatalog, AgentTaskProviderCredentialReadiness,
-    ExtensionProviderAgentTaskExecutor, ProviderResolution,
+    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -1585,6 +1585,33 @@ fn providers_with_catalog(
         ));
     }
     let route = resolve_provider_route(&args, &catalog);
+    // A route failure is itself a dispatchability verdict. Keep it in the
+    // machine envelope rather than making callers infer failure from null.
+    let (dispatch_backend, dispatch_selector, dispatch_model) = match route.as_ref() {
+        Some(ProviderRoute::Resolved {
+            backend,
+            provider_id,
+            model,
+            ..
+        }) => (
+            backend.as_str(),
+            Some(provider_id.as_str()),
+            model.as_deref(),
+        ),
+        Some(ProviderRoute::Ambiguous { backend, .. }) => (backend.as_str(), None, None),
+        _ => (
+            args.backend.as_deref().unwrap_or_default(),
+            args.selector.as_deref(),
+            None,
+        ),
+    };
+    let dispatchability = evaluate_provider_dispatchability(
+        &catalog,
+        dispatch_backend,
+        dispatch_selector,
+        dispatch_model,
+        args.validate_readiness,
+    );
     // An absent `--backend` sweeps every declared backend instead of inheriting
     // Cook's default-backend precondition (#12569).
     let declared_backends = (args.validate_readiness && args.backend.is_none())
@@ -1632,20 +1659,40 @@ fn providers_with_catalog(
                     .runtime
                     .as_deref()
                     .is_none_or(|runtime| provider.runtime_id.as_deref() == Some(runtime))
-                && args
-                    .status
-                    .as_deref()
-                    .is_none_or(|status| provider_status(provider).eq_ignore_ascii_case(status))
+                && args.status.as_deref().is_none_or(|status| {
+                    provider_status(
+                        provider,
+                        &evaluate_provider_dispatchability(
+                            &catalog,
+                            &provider.backend,
+                            Some(&provider.id),
+                            None,
+                            false,
+                        ),
+                    )
+                    .eq_ignore_ascii_case(status)
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
     let providers: &[AgentTaskExecutorProvider] = &filtered_providers;
     let validated_provider_identity = validated_provider.as_ref();
-    let validated_provider = validated_provider_identity.and_then(|(_, provider_id)| {
-        all_providers
-            .iter()
-            .find(|provider| &provider.id == provider_id)
-    });
+    // Keep the routed provider even when a later readiness component fails: the
+    // aggregate verdict must show the failed component, not lose its identity.
+    let validated_provider = validated_provider_identity
+        .and_then(|(_, provider_id)| {
+            all_providers
+                .iter()
+                .find(|provider| &provider.id == provider_id)
+        })
+        .or_else(|| {
+            route.as_ref().and_then(|route| match route {
+                ProviderRoute::Resolved { provider_id, .. } => all_providers
+                    .iter()
+                    .find(|provider| &provider.id == provider_id),
+                _ => None,
+            })
+        });
     let fallback_sources =
         homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
 
@@ -1697,7 +1744,7 @@ fn providers_with_catalog(
             },
             "operator_summary": {
                 "identity": "agent-task providers",
-                "state": provider_report_state(route.as_ref(), all_providers),
+                "state": provider_report_state(route.as_ref(), all_providers, Some(&dispatchability)),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
                 "next_action": route.as_ref().map(ProviderRoute::next_command).unwrap_or(full_command.clone()),
                 "selection_choices": selection_choices(route.as_ref()),
@@ -1712,11 +1759,12 @@ fn providers_with_catalog(
             // catalog look empty even while it listed selectable executors.
             "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
-            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
+            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &evaluate_provider_dispatchability(&catalog, &provider.backend, Some(&provider.id), None, false))).collect()) },
             // Availability means dispatchable. Anything that is declared but
             // not dispatchable reports the credential it is missing here so the
             // remediation survives the `--full` serde presentation too (#11479).
             "credential_readiness": credential_readiness_report(&shown_providers),
+            "dispatchability": serde_json::to_value(dispatchability).unwrap_or(Value::Null),
             "readiness_validation": readiness_validation_projection(
                 validated_provider_identity,
                 validated_provider,
@@ -1741,15 +1789,11 @@ fn providers_with_catalog(
 /// *dispatchable*: a provider whose declared credentials do not resolve here
 /// reports `unavailable`, and the compact presentation's `reason` names the
 /// credential.
-fn provider_status(provider: &AgentTaskExecutorProvider) -> &'static str {
-    provider_status_from_readiness(provider, &provider_credential_readiness(provider))
-}
-
-fn provider_status_from_readiness(
+fn provider_status(
     provider: &AgentTaskExecutorProvider,
-    readiness: &AgentTaskProviderCredentialReadiness,
+    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
 ) -> &'static str {
-    if !readiness.dispatchable {
+    if !dispatchability.ready {
         return "unavailable";
     }
     if provider.default_backend {
@@ -1785,7 +1829,10 @@ fn credential_readiness_report(providers: &[AgentTaskExecutorProvider]) -> Vec<V
         .collect()
 }
 
-fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
+fn compact_provider(
+    provider: &AgentTaskExecutorProvider,
+    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+) -> Value {
     let readiness = provider_credential_readiness(provider);
     serde_json::json!({
         "id": bounded_text(&provider.id, 160),
@@ -1793,8 +1840,9 @@ fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
         "backend": bounded_text(&provider.backend, 160),
         "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
-        "status": provider_status_from_readiness(provider, &readiness),
-        "reason": readiness.reason().map(|value| bounded_text(&value, DEFAULT_TEXT_LIMIT)),
+        "status": provider_status(provider, dispatchability),
+        "reason": readiness.reason().map(|value| bounded_text(&value, DEFAULT_TEXT_LIMIT)).or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, DEFAULT_TEXT_LIMIT))),
+        "dispatchability": dispatchability,
         "default_backend": provider.default_backend,
         "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
     })
@@ -1884,7 +1932,12 @@ fn resolve_provider_route(
     args: &ProvidersArgs,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<ProviderRoute> {
-    resolve_provider_route_for(args.backend.clone(), args.selector.clone(), catalog)
+    resolve_provider_route_for(
+        args.backend.clone(),
+        args.selector.clone(),
+        catalog,
+        args.validate_readiness,
+    )
 }
 
 /// Resolve the route one explicit backend/selector pair produces. The
@@ -1894,6 +1947,7 @@ fn resolve_provider_route_for(
     backend: Option<String>,
     selector: Option<String>,
     catalog: &AgentTaskProviderCatalog,
+    probe_runtime: bool,
 ) -> Option<ProviderRoute> {
     let backend_was_omitted = backend.is_none();
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
@@ -1906,7 +1960,7 @@ fn resolve_provider_route_for(
     ) {
         Ok(route) => route,
         Err(error) => {
-            let choices = dispatchable_backend_choices(catalog.providers());
+            let choices = dispatchable_backend_choices(catalog, probe_runtime);
             if backend_was_omitted
                 && error.details["selection_required"] == Value::Bool(true)
                 && !choices.is_empty()
@@ -1968,11 +2022,22 @@ fn selection_choices(route: Option<&ProviderRoute>) -> Vec<Value> {
 }
 
 fn dispatchable_backend_choices(
-    providers: &[AgentTaskExecutorProvider],
+    catalog: &AgentTaskProviderCatalog,
+    probe_runtime: bool,
 ) -> Vec<ProviderSelectionChoice> {
-    let mut backends = providers
+    let mut backends = catalog
+        .providers()
         .iter()
-        .filter(|provider| provider_credential_readiness(provider).dispatchable)
+        .filter(|provider| {
+            evaluate_provider_dispatchability(
+                catalog,
+                &provider.backend,
+                Some(&provider.id),
+                None,
+                probe_runtime,
+            )
+            .ready
+        })
         .map(|provider| provider.backend.trim())
         .filter(|backend| !backend.is_empty())
         .collect::<Vec<_>>();
@@ -1993,7 +2058,13 @@ fn dispatchable_backend_choices(
 fn provider_report_state(
     route: Option<&ProviderRoute>,
     providers: &[AgentTaskExecutorProvider],
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
 ) -> &'static str {
+    if let Some(verdict) = dispatchability {
+        return verdict.state;
+    }
     if !providers
         .iter()
         .any(|provider| provider_credential_readiness(provider).dispatchable)
@@ -2013,6 +2084,7 @@ fn validate_effective_provider_route(
     let ProviderRoute::Resolved {
         backend,
         provider_id,
+        model,
         ..
     } = route
     else {
@@ -2033,16 +2105,7 @@ fn validate_effective_provider_route(
             Some(vec![route.next_command()]),
         ));
     };
-    homeboy::agents::agent_tasks::provider::preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        backend,
-        Some(provider_id),
-    )?;
-    homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
-        catalog,
-        backend,
-        Some(provider_id),
-    )?;
+    preflight_provider_dispatchability(catalog, backend, Some(provider_id), model.as_deref())?;
     Ok(Some((backend.clone(), provider_id.clone())))
 }
 
@@ -2077,18 +2140,27 @@ fn declared_backend_readiness(
                         .any(|provider| provider.backend == backend && provider.id == *selector)
                 })
                 .map(str::to_string);
-            let route = resolve_provider_route_for(Some(backend.clone()), selector, catalog);
+            let route = resolve_provider_route_for(Some(backend.clone()), selector, catalog, true);
             let (identity, failure) =
                 match validate_effective_provider_route(route.as_ref(), catalog) {
                     Ok(identity) => (identity, None),
                     Err(error) => (None, Some(error.message)),
                 };
-            let provider = identity.as_ref().and_then(|(_, provider_id)| {
-                catalog
-                    .providers()
-                    .iter()
-                    .find(|provider| &provider.id == provider_id)
-            });
+            let provider = identity
+                .as_ref()
+                .and_then(|(_, provider_id)| {
+                    catalog
+                        .providers()
+                        .iter()
+                        .find(|provider| &provider.id == provider_id)
+                })
+                .or_else(|| match route.as_ref() {
+                    Some(ProviderRoute::Resolved { provider_id, .. }) => catalog
+                        .providers()
+                        .iter()
+                        .find(|provider| &provider.id == provider_id),
+                    _ => None,
+                });
             let mut value = readiness_validation_projection(
                 identity.as_ref(),
                 provider,
@@ -2781,7 +2853,17 @@ mod tests {
         }))
         .expect("provider fixture");
         let providers = std::iter::repeat_n(provider, DEFAULT_PROVIDER_LIMIT + 100)
-            .map(|provider| compact_provider(&provider))
+            .map(|provider| {
+                let catalog = provider_catalog(vec![provider.clone()]);
+                let dispatchability = evaluate_provider_dispatchability(
+                    &catalog,
+                    &provider.backend,
+                    Some(&provider.id),
+                    None,
+                    false,
+                );
+                compact_provider(&provider, &dispatchability)
+            })
             .take(DEFAULT_PROVIDER_LIMIT)
             .collect::<Vec<_>>();
         let diagnostic = compact_diagnostic(&serde_json::json!({
@@ -3278,12 +3360,30 @@ mod tests {
             let provider = credential_declaring_provider();
 
             assert_eq!(
-                provider_status(&provider),
+                provider_status(
+                    &provider,
+                    &evaluate_provider_dispatchability(
+                        &provider_catalog(vec![provider.clone()]),
+                        &provider.backend,
+                        Some(&provider.id),
+                        None,
+                        false,
+                    ),
+                ),
                 "unavailable",
                 "availability must mean dispatchable, not merely declared (#11479)"
             );
 
-            let compact = compact_provider(&provider);
+            let compact = compact_provider(
+                &provider,
+                &evaluate_provider_dispatchability(
+                    &provider_catalog(vec![provider.clone()]),
+                    &provider.backend,
+                    Some(&provider.id),
+                    None,
+                    false,
+                ),
+            );
             assert_eq!(compact["status"], "unavailable");
             assert_eq!(
                 compact["reason"], "missing credential AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
@@ -3301,9 +3401,48 @@ mod tests {
             }))
             .expect("provider fixture");
 
-            assert_eq!(provider_status(&provider), "available");
-            assert!(compact_provider(&provider)["reason"].is_null());
+            let catalog = provider_catalog(vec![provider.clone()]);
+            let dispatchability = evaluate_provider_dispatchability(
+                &catalog,
+                &provider.backend,
+                Some(&provider.id),
+                None,
+                false,
+            );
+            assert_eq!(provider_status(&provider, &dispatchability), "available");
+            assert!(compact_provider(&provider, &dispatchability)["reason"].is_null());
         });
+    }
+
+    #[test]
+    fn inventory_and_selection_choices_exclude_configuration_unavailable_providers() {
+        let invalid: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "invalid.provider",
+            "backend": "invalid",
+            "immediate_failure_patterns": [{ "id": "", "error_contains_any": [] }]
+        }))
+        .expect("invalid provider");
+        let ready = provider("ready.provider", "ready");
+        let catalog = provider_catalog(vec![invalid.clone(), ready]);
+        let verdict = evaluate_provider_dispatchability(
+            &catalog,
+            &invalid.backend,
+            Some(&invalid.id),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            compact_provider(&invalid, &verdict)["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            dispatchable_backend_choices(&catalog, false)
+                .into_iter()
+                .map(|choice| choice.backend)
+                .collect::<Vec<_>>(),
+            vec!["ready"]
+        );
     }
 
     #[test]
@@ -3352,6 +3491,46 @@ mod tests {
         assert!(projection["ready_backends"].is_null());
         assert!(projection.get("backend").is_none());
         assert!(projection.get("selector").is_none());
+    }
+
+    #[test]
+    fn providers_public_dispatchability_envelope_drives_operator_summary() {
+        crate::test_support::with_isolated_home(|_| {
+            let provider = credential_declaring_provider();
+            let mut args = providers_args();
+            args.backend = Some(provider.backend.clone());
+            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("provider envelope")
+                .0;
+
+            assert_eq!(output["dispatchability"]["state"], "credentials_missing");
+            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
+            assert_eq!(output["dispatchability"]["checks"]["route"]["ready"], true);
+            assert_eq!(
+                output["dispatchability"]["checks"]["credentials"]["ready"],
+                false
+            );
+            assert_eq!(
+                output["dispatchability"]["checks"]["credentials"]["missing"][0],
+                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+            );
+            assert!(output["readiness_validation"]
+                .get("dispatchability")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn providers_public_dispatchability_envelope_reports_all_ready() {
+        let provider = provider("ready.provider", "ready");
+        let mut args = providers_args();
+        args.backend = Some("ready".to_string());
+        let output = providers_with_catalog(args, provider_catalog(vec![provider]))
+            .expect("provider envelope")
+            .0;
+
+        assert_eq!(output["dispatchability"]["state"], "ready");
+        assert_eq!(output["operator_summary"]["state"], "ready");
     }
 
     #[test]
