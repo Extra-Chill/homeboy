@@ -59,7 +59,13 @@ fn test_list_sources() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     write_rig(package.path(), "beta", &minimal_rig("beta"));
 
-    install(package.path().to_str().unwrap(), None, true).expect("install all");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        true,
+    )
+    .expect("install all");
 
     let result = list_sources(&test_config_root()).expect("sources");
     assert_eq!(result.invalid.len(), 0);
@@ -81,8 +87,13 @@ fn linked_package_provenance_tracks_execution_time_content_and_dirty_state() {
     let rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     GitFixture::init(package.path()).commit("initial rig");
 
-    let installed = install(package.path().to_str().unwrap(), Some("alpha"), false)
-        .expect("install linked rig");
+    let installed = install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        Some("alpha"),
+        false,
+    )
+    .expect("install linked rig");
     assert!(installed.linked);
     assert!(!installed.source_dirty);
     let metadata = crate::read_source_metadata("alpha").expect("source metadata");
@@ -126,7 +137,13 @@ fn list_sources_reports_stack_specs_from_package() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     write_stack(package.path(), "alpha-combined", "alpha");
 
-    install(package.path().to_str().unwrap(), None, false).expect("install");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install");
 
     let result = list_sources(&test_config_root()).expect("sources");
     assert_eq!(result.sources.len(), 1);
@@ -192,7 +209,13 @@ fn test_remove_source() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     write_rig(package.path(), "beta", &minimal_rig("beta"));
 
-    install(package.path().to_str().unwrap(), None, true).expect("install all");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        true,
+    )
+    .expect("install all");
     let manual = homeboy_core::paths::rig_config("manual").expect("manual rig path");
     fs::write(&manual, minimal_rig("manual")).expect("manual rig");
 
@@ -219,7 +242,13 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install");
     let config = homeboy_core::paths::rig_config("alpha").expect("rig config");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_rig("replacement")).expect("replacement rig");
@@ -241,7 +270,13 @@ fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     write_stack(package.path(), "alpha-combined", "alpha");
 
-    install(package.path().to_str().unwrap(), None, false).expect("install");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install");
     let config = homeboy_core::paths::stack_config("alpha-combined").expect("stack config");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
@@ -265,7 +300,13 @@ fn remove_source_treats_copied_config_as_owned_when_contents_match() {
     let package = tempfile::tempdir().expect("package");
     let source = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install");
     let config = homeboy_core::paths::rig_config("alpha").expect("rig config");
     fs::remove_file(&config).expect("remove symlink");
     fs::copy(&source, &config).expect("copy rig config");
@@ -319,7 +360,13 @@ fn sources_list_reports_missing_linked_source_paths() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install linked");
     fs::remove_dir_all(package.path()).expect("remove linked source");
 
     let result = list_sources(&test_config_root()).expect("sources");
@@ -349,7 +396,13 @@ fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install linked");
     fs::remove_dir_all(package.path()).expect("remove linked source");
 
     let err = load("alpha").expect_err("stale source error");
@@ -413,7 +466,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     let before = crate::read_source_metadata("alpha")
         .expect("metadata")
         .source_revision;
@@ -453,9 +506,10 @@ fn update_git_source_refreshes_owned_stack_specs() {
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     let installed_metadata =
-        crate::read_stack_source_metadata("alpha-combined").expect("stack metadata");
+        crate::read_stack_source_metadata_in_root(&test_config_root(), "alpha-combined")
+            .expect("stack metadata");
     let before = installed_metadata.source_revision;
     fs::write(
         Path::new(&installed_metadata.package_path).join("local-untracked"),
@@ -480,8 +534,8 @@ fn update_git_source_refreshes_owned_stack_specs() {
         fs::read_to_string(homeboy_core::paths::stack_config("alpha-combined").unwrap())
             .expect("installed stack");
     assert!(installed.contains("updated stack"));
-    let metadata =
-        crate::read_stack_source_metadata("alpha-combined").expect("refreshed stack metadata");
+    let metadata = crate::read_stack_source_metadata_in_root(&test_config_root(), "alpha-combined")
+        .expect("refreshed stack metadata");
     assert_eq!(metadata.source_ref.as_deref(), Some("main"));
     assert!(metadata.source_dirty);
 }
@@ -494,7 +548,7 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     let mut metadata = crate::read_source_metadata("alpha").expect("metadata");
     let installed_root = metadata.source_root.clone().expect("source root");
     let installed_revision = homeboy_core::git::short_head_revision_at(Path::new(&installed_root));
@@ -537,7 +591,7 @@ fn update_all_reports_broken_sources_and_continues() {
     write_rig(broken_package.path(), "broken", &minimal_rig("broken"));
     let broken_bare = create_bare_source(broken_package.path());
     let broken_source = bare_source_path(&broken_bare).to_string_lossy().to_string();
-    install(&broken_source, None, false).expect("install broken source");
+    install(&test_config_root(), &broken_source, None, false).expect("install broken source");
     let broken_metadata = crate::read_source_metadata("broken").expect("broken metadata");
     fs::remove_dir_all(&broken_metadata.package_path).expect("remove installed package clone");
 
@@ -545,7 +599,7 @@ fn update_all_reports_broken_sources_and_continues() {
     let good_rig = write_rig(good_package.path(), "good", &minimal_rig("good"));
     let good_bare = create_bare_source(good_package.path());
     let good_source = bare_source_path(&good_bare).to_string_lossy().to_string();
-    install(&good_source, None, false).expect("install good source");
+    install(&test_config_root(), &good_source, None, false).expect("install good source");
     fs::write(
         &good_rig,
         minimal_rig("good").replace("good rig", "good rig updated"),
@@ -575,7 +629,7 @@ fn refresh_source_selector_updates_recorded_package() {
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     let before = crate::read_source_metadata("alpha")
         .expect("metadata")
         .source_revision;
@@ -619,7 +673,7 @@ fn refresh_without_selector_updates_all_sources() {
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     fs::write(
         &source_rig,
         minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed"),
@@ -645,7 +699,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     let bare = create_bare_source(package.path());
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
-    install(&source, None, false).expect("install");
+    install(&test_config_root(), &source, None, false).expect("install");
     let config = homeboy_core::paths::stack_config("alpha-combined").expect("stack config");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("manual stack");
@@ -674,7 +728,13 @@ fn update_all_skips_linked_local_sources() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install linked");
     let result = update_all_sources(&test_config_root()).expect("update all");
 
     assert!(result.updated.is_empty());
@@ -690,7 +750,13 @@ fn update_all_skips_linked_local_stack_sources() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     write_stack(package.path(), "alpha-combined", "alpha");
 
-    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install linked");
     let result = update_all_sources(&test_config_root()).expect("update all");
 
     assert!(result.updated.is_empty());
@@ -708,7 +774,13 @@ fn update_single_linked_local_source_errors() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    install(
+        &test_config_root(),
+        package.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("install linked");
     let err = update_source_for_rig(&test_config_root(), "alpha").expect_err("linked update error");
 
     assert!(err.message.contains("linked local source"));

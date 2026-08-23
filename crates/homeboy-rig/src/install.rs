@@ -114,8 +114,13 @@ struct RigPackageMetadata {
     package_dependencies: Vec<String>,
 }
 
-pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallResult> {
-    let mut prepared = prepare_source(source)?;
+pub fn install(
+    config_root: &Path,
+    source: &str,
+    id: Option<&str>,
+    all: bool,
+) -> Result<RigInstallResult> {
+    let mut prepared = prepare_source(config_root, source)?;
     let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
     let dependency_roots = package_source_roots_for_dependencies(&prepared, &selected)?;
@@ -133,32 +138,32 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
     if all {
         preflight_all_install(&selected, &prepared.package_path)?;
         for rig in &selected {
-            let target = paths::rig_config(&rig.id)?;
+            let target = paths::rig_config_in_root(config_root, &rig.id);
             if target.exists() || fs::symlink_metadata(&target).is_ok() {
                 ensure_rig_refreshable(rig, &target)?;
             }
         }
     }
 
-    fs::create_dir_all(paths::rigs()?)
+    fs::create_dir_all(paths::rigs_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rigs dir".into())))?;
-    fs::create_dir_all(paths::stacks()?)
+    fs::create_dir_all(paths::stacks_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create stacks dir".into())))?;
-    fs::create_dir_all(paths::rig_sources()?)
+    fs::create_dir_all(paths::rig_sources_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig sources dir".into())))?;
-    fs::create_dir_all(paths::stack_sources()?)
+    fs::create_dir_all(paths::stack_sources_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create stack sources dir".into())))?;
 
     for stack in &discovered_stacks {
-        let target = paths::stack_config(&stack.id)?;
+        let target = paths::stack_config_in_root(config_root, &stack.id);
         if target.exists() || fs::symlink_metadata(&target).is_ok() {
-            ensure_stack_refreshable(stack, &target)?;
+            ensure_stack_refreshable(config_root, stack, &target)?;
         }
     }
 
     let mut installed = Vec::new();
     for rig in selected {
-        let target = paths::rig_config(&rig.id)?;
+        let target = paths::rig_config_in_root(config_root, &rig.id);
         if !all {
             validate_rig_spec_file(&rig.rig_path, &prepared.package_path, &rig.id)?;
         }
@@ -183,7 +188,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             source_dirty: prepared.source_dirty,
             source_content_hash: Some(prepared.source_content_hash.clone()),
         };
-        write_source_metadata(&rig.id, &metadata)?;
+        write_source_metadata(config_root, &rig.id, &metadata)?;
 
         installed.push(InstalledRig {
             id: rig.id,
@@ -196,7 +201,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 
     let mut installed_stacks = Vec::new();
     for stack in discovered_stacks {
-        let target = paths::stack_config(&stack.id)?;
+        let target = paths::stack_config_in_root(config_root, &stack.id);
         if target.exists() || fs::symlink_metadata(&target).is_ok() {
             remove_existing_config(&target, "replace stack config link")?;
         }
@@ -214,7 +219,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             source_dirty: prepared.source_dirty,
             source_content_hash: Some(prepared.source_content_hash.clone()),
         };
-        write_stack_source_metadata(&stack.id, &metadata)?;
+        write_stack_source_metadata(config_root, &stack.id, &metadata)?;
 
         installed_stacks.push(InstalledStack {
             id: stack.id,
@@ -1013,12 +1018,16 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
     ))
 }
 
-fn ensure_stack_refreshable(stack: &DiscoveredStack, target: &Path) -> Result<()> {
+fn ensure_stack_refreshable(
+    config_root: &Path,
+    stack: &DiscoveredStack,
+    target: &Path,
+) -> Result<()> {
     if !target.exists() && fs::symlink_metadata(target).is_ok() {
         return Ok(());
     }
 
-    if read_stack_source_metadata(&stack.id)
+    if read_stack_source_metadata_in_root(config_root, &stack.id)
         .is_some_and(|metadata| config_matches_source(target, Path::new(&metadata.stack_path)))
     {
         return Ok(());
@@ -1083,27 +1092,42 @@ fn remove_existing_config(target: &Path, context: &'static str) -> Result<()> {
     fs::remove_file(target).map_err(|e| Error::internal_io(e.to_string(), Some(context.into())))
 }
 
+pub fn read_source_metadata_in_root(config_root: &Path, id: &str) -> Option<RigSourceMetadata> {
+    let path = paths::rig_source_metadata_in_root(config_root, id);
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Ambient wrapper retained deliberately.
+///
+/// The remaining readers are `expand::resolve_token` and
+/// `component_resolution::expand_component_path` — spec token expansion, several
+/// frames below anything that holds a root and with no carrier passing through.
+/// Rooting them today would relocate one resolution into many, which the
+/// PathRoots injection contract calls out as a regression rather than progress.
+/// Delete this when token expansion gains a carrier (#7505).
 pub fn read_source_metadata(id: &str) -> Option<RigSourceMetadata> {
-    let path = paths::rig_source_metadata(id).ok()?;
+    read_source_metadata_in_root(&paths::homeboy().ok()?, id)
+}
+
+pub fn read_stack_source_metadata_in_root(
+    config_root: &Path,
+    id: &str,
+) -> Option<StackSourceMetadata> {
+    let path = paths::stack_source_metadata_in_root(config_root, id);
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-pub fn read_stack_source_metadata(id: &str) -> Option<StackSourceMetadata> {
-    let path = paths::stack_source_metadata(id).ok()?;
-    let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-pub(crate) fn prepare_source(source: &str) -> Result<PreparedSource> {
+pub(crate) fn prepare_source(config_root: &Path, source: &str) -> Result<PreparedSource> {
     if extension::is_git_url(source) || source.contains(".git//") {
-        prepare_git_source(source)
+        prepare_git_source(config_root, source)
     } else {
         prepare_local_source(source)
     }
 }
 
-fn prepare_git_source(source: &str) -> Result<PreparedSource> {
+fn prepare_git_source(config_root: &Path, source: &str) -> Result<PreparedSource> {
     let (root_source, subpath) = split_git_source_subpath(source)?;
     let trimmed = root_source.trim_end_matches('/').trim_end_matches(".git");
     let parts = trimmed.rsplit(['/', ':']).take(2).collect::<Vec<_>>();
@@ -1112,7 +1136,7 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
     } else {
         extension::slugify_id(parts.first().copied().unwrap_or(trimmed))?
     };
-    let package_path = paths::rig_package(&package_id)?;
+    let package_path = paths::rig_package_in_root(config_root, &package_id);
     if package_path.exists() {
         return Err(Error::validation_invalid_argument(
             "source",
@@ -1125,7 +1149,7 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
             None,
         ));
     }
-    fs::create_dir_all(paths::rig_packages()?)
+    fs::create_dir_all(paths::rig_packages_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig packages dir".into())))?;
     git::clone_repo(root_source, &package_path)?;
     let source_revision = git::short_head_revision(&package_path);
@@ -1279,18 +1303,26 @@ fn collect_package_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>
     Ok(())
 }
 
-pub fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
-    let path = paths::rig_source_metadata(id)?;
+pub fn write_source_metadata(
+    config_root: &Path,
+    id: &str,
+    metadata: &RigSourceMetadata,
+) -> Result<()> {
+    let path = paths::rig_source_metadata_in_root(config_root, id);
     let content = serde_json::to_string_pretty(metadata)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize rig source".into())))?;
     fs::write(&path, format!("{}\n", content))
         .map_err(|e| Error::internal_io(e.to_string(), Some("write rig source".into())))
 }
 
-pub(crate) fn write_stack_source_metadata(id: &str, metadata: &StackSourceMetadata) -> Result<()> {
-    fs::create_dir_all(paths::stack_sources()?)
+pub(crate) fn write_stack_source_metadata(
+    config_root: &Path,
+    id: &str,
+    metadata: &StackSourceMetadata,
+) -> Result<()> {
+    fs::create_dir_all(paths::stack_sources_in_root(config_root))
         .map_err(|e| Error::internal_io(e.to_string(), Some("create stack sources dir".into())))?;
-    let path = paths::stack_source_metadata(id)?;
+    let path = paths::stack_source_metadata_in_root(config_root, id);
     let content = serde_json::to_string_pretty(metadata)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize stack source".into())))?;
     fs::write(&path, format!("{}\n", content))

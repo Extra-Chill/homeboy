@@ -166,7 +166,8 @@ pub(crate) fn route_after_parse_with_provenance(
                 // Lab routing resolves rig components and path inputs on the
                 // controller before dispatch, so runner-targeted installs must
                 // keep the controller registry pointed at the same source.
-                homeboy::rig::install(source, id, all)?;
+                let roots = homeboy::core::paths::PathRoots::from_environment()?;
+                homeboy::rig::install(roots.config(), source, id, all)?;
             }
             let (stdout, stderr, exit_code) =
                 run_rig_source_management_on_runner(runner_id, normalized_args, output_file)?;

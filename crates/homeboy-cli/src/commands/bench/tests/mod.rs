@@ -226,8 +226,13 @@ fn install_rig_package(
     )
     .expect("write package rig");
 
-    homeboy::rig::install(package_root.to_string_lossy().as_ref(), Some(rig_id), false)
-        .expect("install rig package");
+    homeboy::rig::install(
+        &homeboy::core::paths::homeboy().expect("config root"),
+        package_root.to_string_lossy().as_ref(),
+        Some(rig_id),
+        false,
+    )
+    .expect("install rig package");
     package_root
 }
 
@@ -265,8 +270,13 @@ fn install_git_rig_package(
     let revision = git_fixture_output(&package_root, &["rev-parse", "--short", "HEAD"]);
     fs::write(package_root.join("untracked.txt"), "dirty\n").expect("dirty package");
 
-    homeboy::rig::install(package_root.to_string_lossy().as_ref(), Some(rig_id), false)
-        .expect("install rig package");
+    homeboy::rig::install(
+        &homeboy::core::paths::homeboy().expect("config root"),
+        package_root.to_string_lossy().as_ref(),
+        Some(rig_id),
+        false,
+    )
+    .expect("install rig package");
     (package_root, revision)
 }
 

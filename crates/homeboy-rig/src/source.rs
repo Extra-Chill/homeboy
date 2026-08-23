@@ -135,14 +135,15 @@ pub fn remove_source(config_root: &Path, selector: &str) -> Result<RigSourceRemo
 }
 
 pub fn update_source_for_rig(config_root: &Path, id: &str) -> Result<RigSourceUpdateResult> {
-    let metadata = super::install::read_source_metadata(id).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "rig_id",
-            format!("Rig '{}' has no installed source metadata", id),
-            Some(id.to_string()),
-            None,
-        )
-    })?;
+    let metadata =
+        super::install::read_source_metadata_in_root(config_root, id).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "rig_id",
+                format!("Rig '{}' has no installed source metadata", id),
+                Some(id.to_string()),
+                None,
+            )
+        })?;
     if metadata.linked {
         return Err(Error::validation_invalid_argument(
             "rig_id",
@@ -359,7 +360,7 @@ fn update_group(config_root: &Path, source: RigSourceGroup) -> Result<RigSourceU
                 &source.package_path,
             ))?),
         };
-        write_source_metadata(&rig.id, &metadata)?;
+        write_source_metadata(config_root, &rig.id, &metadata)?;
 
         updated.push(RigSourceUpdatedRig {
             id: rig.id,
@@ -404,7 +405,7 @@ fn update_group(config_root: &Path, source: RigSourceGroup) -> Result<RigSourceU
             source_dirty,
             source_content_hash: Some(source_content_hash.clone()),
         };
-        write_stack_source_metadata(&stack.id, &metadata)?;
+        write_stack_source_metadata(config_root, &stack.id, &metadata)?;
 
         updated_stacks.push(RigSourceUpdatedStack {
             id: stack.id,
