@@ -88,7 +88,9 @@ fn directory_child_promotion_guard_shares_the_promotion_store() {
 fn promotion_opens_no_ambient_store() {
     let source = promotion_source();
 
-    let opens = source.matches("ObservationStore::open_initialized()").count();
+    let opens = source
+        .matches("ObservationStore::open_initialized()")
+        .count();
     assert_eq!(
         opens, 0,
         "artifact_promotion.rs opens {opens} ambient store(s). Both production \
