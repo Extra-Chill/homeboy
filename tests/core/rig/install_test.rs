@@ -403,7 +403,8 @@ mod install_flows {
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        let installed = homeboy_core::paths::stack_config("studio-combined").expect("stack path");
+        let installed =
+            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
@@ -468,7 +469,7 @@ mod install_flows {
 
             assert_eq!(result.installed_stacks.len(), 1);
             let installed =
-                homeboy_core::paths::stack_config("studio-combined").expect("stack path");
+                homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
             assert!(installed.exists());
             #[cfg(unix)]
             assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
@@ -1389,8 +1390,11 @@ mod multi_rig {
         assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
         assert!(!homeboy_core::paths::rig_config("beta").unwrap().exists());
         assert_eq!(
-            fs::read_link(homeboy_core::paths::stack_config("stale-stack").unwrap())
-                .expect("stale stack symlink remains reported by sources list"),
+            fs::read_link(homeboy_core::paths::stack_config_in_root(
+                &test_config_root(),
+                "stale-stack"
+            ))
+            .expect("stale stack symlink remains reported by sources list"),
             stale_stack
         );
     }
@@ -1595,7 +1599,7 @@ mod refresh_and_identity {
 
         fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
         fs::write(
-            homeboy_core::paths::stack_config("studio-combined").expect("stack path"),
+            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined"),
             fs::read_to_string(&stack_path).expect("package stack"),
         )
         .expect("existing stack");
@@ -1625,7 +1629,7 @@ mod refresh_and_identity {
 
         fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
         let stack_config =
-            homeboy_core::paths::stack_config("studio-combined").expect("stack path");
+            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
         fs::write(&stack_config, &manual_stack).expect("conflicting stack");
 
         let err = install(
@@ -1741,12 +1745,14 @@ mod git_url {
         assert!(!homeboy_core::paths::rig_config("other").unwrap().exists());
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        assert!(homeboy_core::paths::stack_config("studio-combined")
-            .unwrap()
-            .exists());
-        assert!(!homeboy_core::paths::stack_config("root-combined")
-            .unwrap()
-            .exists());
+        assert!(
+            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined")
+                .exists()
+        );
+        assert!(
+            !homeboy_core::paths::stack_config_in_root(&test_config_root(), "root-combined")
+                .exists()
+        );
 
         let metadata =
             read_source_metadata_in_root(&test_config_root(), "studio").expect("metadata");

@@ -4332,25 +4332,11 @@ pub struct AgentTaskQueuedRunClaim {
 /// quarantined records rather than letting stale history monopolize a worker.
 pub const MAX_QUEUE_ADMISSION_RECORDS: usize = 64;
 
-/// Claim the oldest executable queued record. Invalid provenance is retained on
-/// a nonterminal quarantine record before any running transition can occur.
-pub fn claim_next_eligible_queued_run() -> Result<AgentTaskQueuedRunClaim> {
-    claim_next_eligible_queued_run_with_preflight(|_, _| Ok(()))
-}
-
 /// Claim the oldest executable queued record from an explicitly rooted store.
 pub fn claim_next_eligible_queued_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<AgentTaskQueuedRunClaim> {
     claim_next_eligible_queued_run_with_preflight_in_store(lifecycle_store, |_, _| Ok(()))
-}
-
-/// Claim the oldest executable queued record after caller-supplied admission
-/// checks have validated its durable plan, but before the atomic Running claim.
-pub fn claim_next_eligible_queued_run_with_preflight(
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
-) -> Result<AgentTaskQueuedRunClaim> {
-    claim_next_eligible_queued_run_with_preflight_and_filter(|_| true, preflight)
 }
 
 /// Preflighted admission against an explicitly rooted store. The preflight
@@ -4499,10 +4485,6 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
         inspected,
         admission_limit_reached: false,
     })
-}
-
-pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
-    Ok(claim_next_eligible_queued_run()?.record)
 }
 
 /// Claim the oldest executable queued record from an explicitly rooted store,

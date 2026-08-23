@@ -1145,15 +1145,6 @@ pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value>
     migrate_legacy_pin_unlocked(runtime)
 }
 
-/// Publish a migrated pin and persist its durable reference while the admission
-/// lock remains held, so cleanup cannot reclaim the new identity in between.
-pub fn migrate_legacy_pin_and_persist(
-    runtime: &Value,
-    persist: impl FnOnce(&Value) -> Result<()>,
-) -> Result<Value> {
-    migrate_legacy_pin_and_persist_in_root(&runtime_root()?, runtime, persist)
-}
-
 /// [`migrate_legacy_pin_and_persist`] under an already-resolved runtime root.
 pub fn migrate_legacy_pin_and_persist_in_root(
     runtime_root: &Path,

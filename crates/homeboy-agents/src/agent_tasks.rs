@@ -304,7 +304,7 @@ pub mod lifecycle {
         aggregate_source, artifacts, cancel, cancel_run, claim_cook_operation,
         claim_local_cook_retry_launch_in_store,
         claim_next_eligible_queued_run_with_preflight_and_filter,
-        claim_next_eligible_queued_run_with_preflight_and_filter_and_limit, claim_next_queued_run,
+        claim_next_eligible_queued_run_with_preflight_and_filter_and_limit,
         complete_cook_operation, consume_unmaterialized_cook_replay_claim, cook_attempt_run_id,
         cook_index, cook_index_exists, cook_index_exists_in_store, cook_index_in_store,
         cook_terminal_notification_outcome, durable_local_read, durable_local_read_in_store,

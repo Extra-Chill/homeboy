@@ -519,7 +519,11 @@ fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
 }
 
 fn write_rig_source_metadata(rig_id: &str) {
-    let path = paths::rig_source_metadata(rig_id).expect("metadata path");
+    let config_root = paths::PathRoots::from_environment()
+        .expect("path roots")
+        .config()
+        .to_path_buf();
+    let path = paths::rig_source_metadata_in_root(&config_root, rig_id);
     std::fs::create_dir_all(path.parent().expect("metadata parent")).expect("metadata dir");
     std::fs::write(
         path,
