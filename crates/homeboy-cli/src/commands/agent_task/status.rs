@@ -8,7 +8,7 @@
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -285,9 +285,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         if !cleanup_evidence.is_empty() {
             value["cleanup_evidence"] = Value::Array(cleanup_evidence);
         }
-        if args.bounded {
-            value = bounded_full_status(value, run_id);
-        }
+        value = normalized_full_status(value, run_id, aggregate.as_ref());
         let exit_code = subject_exit_code(&value, args.strict_subject_exit);
         return Ok((value, exit_code));
     }
@@ -301,6 +299,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
     preserve_controller_owner_placement_with_prefix(&mut summary, run_id, &recovery_prefix);
+    attach_compact_causal_truth(&mut summary, &value, run_id);
     let summary = enforce_compact_status_budget(summary);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
@@ -1110,10 +1109,12 @@ fn attach_full_status_candidate(
     }
 }
 
-/// A finite presentation of the established full record. It intentionally uses
-/// only sections the agent-task evidence resolver can hydrate; raw `--full`
-/// remains the machine-readable export contract.
-fn bounded_full_status(value: Value, run_id: &str) -> Value {
+/// A finite, reference-based presentation of the full record.
+fn normalized_full_status(
+    value: Value,
+    run_id: &str,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Value {
     let run_ref = homeboy::core::execution_contract::encode_uri_component(run_id);
     let status_ref = format!("homeboy://agent-task/run/{run_ref}/status");
     let aggregate_ref = format!("homeboy://agent-task/run/{run_ref}/aggregate");
@@ -1153,8 +1154,8 @@ fn bounded_full_status(value: Value, run_id: &str) -> Value {
         })
         .unwrap_or(Value::Null);
     let output = json!({
-        "schema": "homeboy/agent-task-status-bounded/v1",
-        "presentation": "bounded_outcome_first",
+        "schema": "homeboy/agent-task-status-full/v2",
+        "presentation": "normalized_evidence_graph",
         "action_eligibility": value.get("action_eligibility").cloned().unwrap_or(Value::Null),
         "outcome": {
             "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
@@ -1169,6 +1170,7 @@ fn bounded_full_status(value: Value, run_id: &str) -> Value {
                 "label": bounded_value(action.get("label").unwrap_or(&Value::Null)),
             })),
         },
+        "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
         "details": {
             "status": { "ref": status_ref, "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)) },
             "aggregate": { "ref": aggregate_ref, "available": value.get("aggregate").is_some() },
@@ -1204,8 +1206,8 @@ fn bounded_full_status(value: Value, run_id: &str) -> Value {
         output
     } else {
         json!({
-            "schema": "homeboy/agent-task-status-bounded/v1",
-            "presentation": "bounded_outcome_first",
+            "schema": "homeboy/agent-task-status-full/v2",
+            "presentation": "normalized_evidence_graph",
             "outcome": {
                 "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
                 "terminal_status": bounded_value(value.get("terminal_status").unwrap_or(&Value::Null)),
@@ -1217,6 +1219,91 @@ fn bounded_full_status(value: Value, run_id: &str) -> Value {
             },
         })
     }
+}
+
+fn normalized_evidence_graph(
+    run_id: &str,
+    aggregate: Option<&AgentTaskAggregate>,
+    artifact_count: usize,
+    evidence_count: usize,
+) -> Value {
+    let encoded = homeboy::core::execution_contract::encode_uri_component(run_id);
+    let mut refs = BTreeMap::new();
+    let mut insert = |kind: &str, count: usize, command: String| {
+        refs.insert(
+            kind.to_string(),
+            json!({
+                "ref": format!("homeboy://agent-task/run/{encoded}/{kind}"),
+                "count": count,
+                "command": command,
+                "export_command": format!("{command} --output <path>"),
+            }),
+        );
+    };
+    insert(
+        "status",
+        1,
+        format!("homeboy agent-task status {} --full", quote_arg(run_id)),
+    );
+    insert(
+        "plan",
+        1,
+        format!(
+            "homeboy agent-task evidence {} --kind plan --full",
+            quote_arg(run_id)
+        ),
+    );
+    insert(
+        "aggregate",
+        usize::from(aggregate.is_some()),
+        format!(
+            "homeboy agent-task evidence {} --kind aggregate --full",
+            quote_arg(run_id)
+        ),
+    );
+    insert(
+        "artifacts",
+        artifact_count,
+        format!("homeboy agent-task artifacts {} --full", quote_arg(run_id)),
+    );
+    insert(
+        "evidence",
+        evidence_count,
+        format!("homeboy agent-task evidence {} --full", quote_arg(run_id)),
+    );
+    let outcomes = aggregate.map_or(0, |aggregate| aggregate.outcomes.len());
+    insert(
+        "attempts",
+        outcomes,
+        format!(
+            "homeboy agent-task evidence {} --kind attempt --full",
+            quote_arg(run_id)
+        ),
+    );
+    insert(
+        "promotion",
+        usize::from(aggregate.is_some()),
+        format!(
+            "homeboy agent-task evidence {} --kind promotion --full",
+            quote_arg(run_id)
+        ),
+    );
+    let diagnostics = aggregate.map_or(0, |aggregate| {
+        aggregate
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.diagnostics.len())
+            .sum()
+    });
+    insert(
+        "diagnostics",
+        diagnostics,
+        format!(
+            "homeboy agent-task evidence {} --kind diagnostic --full",
+            quote_arg(run_id)
+        ),
+    );
+    Value::Array(refs.into_values().collect())
 }
 
 #[cfg(test)]
@@ -1236,19 +1323,44 @@ mod bounded_full_status_tests {
             "artifact_refs": (0..100).map(|index| json!({ "id": index })).collect::<Vec<_>>(),
         });
 
-        let bounded = bounded_full_status(value, "run-1");
+        let bounded = normalized_full_status(value, "run-1", None);
 
         assert!(serialized_len(&bounded) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
         assert_eq!(bounded["outcome"]["state"], "failed");
         assert_eq!(bounded["details"]["artifacts"]["omitted_items"], 100);
 
         let oversized_id = "r".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2);
-        let bounded = bounded_full_status(
+        let bounded = normalized_full_status(
             json!({ "run_id": oversized_id, "state": "failed" }),
             &oversized_id,
+            None,
         );
         assert!(serialized_len(&bounded) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
         assert_eq!(bounded["outcome"]["state"], "failed");
+    }
+
+    #[test]
+    fn normalized_full_graph_deduplicates_a_large_recursive_payload() {
+        let duplicate = json!({
+            "plan": { "attempt": { "promotion": { "artifact": "x".repeat(1024) } } },
+            "diagnostics": [{ "class": "workspace_attestation", "message": "mismatch" }],
+        });
+        let value = json!({
+            "run_id": "run-1",
+            "state": "failed",
+            "metadata": { "duplicated": vec![duplicate; 10_000] },
+            "artifact_refs": (0..10_000).map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+        });
+
+        let full = normalized_full_status(value, "run-1", None);
+        let refs = full["evidence_graph"].as_array().expect("evidence graph");
+
+        assert!(serialized_len(&full) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(refs.len(), 8);
+        assert!(refs
+            .windows(2)
+            .all(|pair| { pair[0]["ref"].as_str().unwrap() < pair[1]["ref"].as_str().unwrap() }));
+        assert_eq!(full["details"]["artifacts"]["total_items"], 10_000);
     }
 }
 
@@ -2216,7 +2328,88 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
+    if args.full {
+        value = normalized_full_diagnosis(value, run_id, aggregate.as_ref());
+    }
     Ok((value, 0))
+}
+
+/// Keep full diagnosis causal rather than recursive: the root cause and its
+/// admission facts stay inline while durable payload families become refs.
+fn normalized_full_diagnosis(
+    value: Value,
+    run_id: &str,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Value {
+    let evidence_count = value
+        .get("hydrated_evidence_total")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    let artifact_count = aggregate
+        .map(|aggregate| {
+            aggregate
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.artifacts.len())
+                .sum()
+        })
+        .unwrap_or_default();
+    let mut output = json!({
+        "schema": "homeboy/agent-task-diagnose-full/v2",
+        "presentation": "normalized_evidence_graph",
+        "run_id": value.get("run_id"),
+        "state": value.get("state"),
+        "root_cause": value.get("root_cause"),
+        "causal_phase": value.get("causal_phase"),
+        "continuation_admission": value.get("continuation_admission"),
+        "retry_replay": value.get("retry_replay"),
+        "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")),
+        "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
+        "output_budget": {
+            "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
+            "truncated": true,
+            "lossless_command": format!("homeboy agent-task evidence {} --full --output <path>", quote_arg(run_id)),
+        },
+    });
+    if serialized_len(&output) > BOUNDED_FULL_STATUS_BYTE_LIMIT {
+        output["root_cause"] = bounded_value(value.get("root_cause").unwrap_or(&Value::Null));
+        output["retry_replay"] = bounded_value(value.get("retry_replay").unwrap_or(&Value::Null));
+    }
+    output
+}
+
+/// These fields are deliberately separate from secondary compact tables. They
+/// survive the byte-budget trim and give both JSON and human renderers the same
+/// terminal causal answer and exactly one immediately executable action.
+fn attach_compact_causal_truth(summary: &mut Value, record: &Value, run_id: &str) {
+    let action = summary
+        .pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0"))
+        .cloned()
+        .or_else(|| {
+            record
+                .pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0"))
+                .cloned()
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "kind": "show",
+                "command": format!("homeboy agent-task diagnose {}", quote_arg(run_id)),
+                "label": "inspect the terminal diagnosis",
+            })
+        });
+    let terminal_phase = record
+        .pointer("/cook/phase")
+        .or_else(|| record.pointer("/metadata/cook_progress/phase"))
+        .cloned()
+        .unwrap_or_else(|| record.get("state").cloned().unwrap_or(Value::Null));
+    summary["causal_truth"] = json!({
+        "terminal_phase": terminal_phase,
+        "root_cause": record.get("diagnostic_summary"),
+        "compared_values": record.pointer("/retry_replay/admission/compared_values"),
+        "budget": record.get("action_eligibility"),
+        "admission": record.pointer("/retry_replay/admission").or_else(|| record.pointer("/metadata/cook_continuation_admission")),
+        "next_action": action,
+    });
 }
 
 /// Add the Cook-level completion fact to record readers. Aggregate success is
@@ -6715,16 +6908,19 @@ struct RetryReplayAction {
     owner: Value,
     readiness: &'static str,
     reason: Option<String>,
+    admission: Value,
     action: Option<CommandNextAction>,
     continuation: Option<CommandNextAction>,
 }
 
 impl RetryReplayAction {
     fn unavailable(owner: Value, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
         Self {
             owner,
             readiness: "unavailable",
-            reason: Some(reason.into()),
+            admission: json!({ "admitted": false, "reason": reason }),
+            reason: Some(reason),
             action: None,
             continuation: None,
         }
@@ -6735,6 +6931,7 @@ impl RetryReplayAction {
             "owner": self.owner,
             "readiness": self.readiness,
             "reason": self.reason,
+            "admission": self.admission,
             "action": self.action.as_ref().and_then(|action| action.action.clone()),
         })
     }
@@ -6767,6 +6964,10 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
                     "the authenticated review-form continuation must resume through Cook"
                         .to_string(),
                 ),
+                admission: json!({
+                    "admitted": false,
+                    "reason": "the authenticated review-form continuation must resume through Cook",
+                }),
                 action: None,
                 continuation: Some(cook_continuation_command(&record.run_id)),
             };
@@ -6805,11 +7006,24 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             root,
         )) {
             Ok(actual_identity) if actual_identity == expected_identity => {}
-            Ok(_) => {
-                return RetryReplayAction::unavailable(
+            Ok(actual_identity) => {
+                let reason = "source workspace no longer matches the persisted Lab replay identity";
+                return RetryReplayAction {
                     owner,
-                    "source workspace no longer matches the persisted Lab replay identity",
-                );
+                    readiness: "unavailable",
+                    reason: Some(reason.to_string()),
+                    admission: json!({
+                        "admitted": false,
+                        "reason": reason,
+                        "compared_values": {
+                            "canonical_root": root,
+                            "expected_content_identity": expected_identity,
+                            "actual_content_identity": actual_identity,
+                        },
+                    }),
+                    action: None,
+                    continuation: None,
+                };
             }
             Err(error) => {
                 return RetryReplayAction::unavailable(
@@ -6827,6 +7041,7 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
         owner: owner.clone(),
         readiness: "ready",
         reason: None,
+        admission: json!({ "admitted": true }),
         action: Some(owner_bound_retry_action(&record.run_id, runner_id, owner)),
         continuation: None,
     }
@@ -7261,6 +7476,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no longer matches"));
+        assert_eq!(retry.projection()["admission"]["admitted"], false);
     }
 
     #[test]
@@ -7281,6 +7497,7 @@ mod tests {
             reason: Some(
                 "the authenticated review-form continuation must resume through Cook".to_string(),
             ),
+            admission: json!({ "admitted": false }),
             action: None,
             continuation: Some(
                 CommandNextAction::new(
