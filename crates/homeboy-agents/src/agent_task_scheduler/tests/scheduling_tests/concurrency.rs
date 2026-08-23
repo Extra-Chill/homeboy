@@ -659,9 +659,14 @@ pub(super) mod concurrency_tests {
         plan.tasks[1].workspace.root = Some(workspace.display().to_string());
         plan.tasks[2].workspace.root = Some(unrelated.display().to_string());
 
-        let started = Instant::now();
+        // No wall-clock bound here. "Without starving unrelated work" is asserted
+        // structurally further down — `task-3-started` proves the unrelated
+        // workspace ran, and the absence of `task-2-started` proves the shared
+        // workspace was quarantined. A 2s bound restated that as a claim about
+        // host load, and under eight-way contention it failed while both
+        // event assertions still held. Same reasoning as the deferred-cleanup
+        // bound below, which was already relaxed for exactly this (#7505).
         let aggregate = scheduler.run(plan);
-        assert!(started.elapsed() < Duration::from_secs(2));
         wait_until("the late-mutating executor to finish", || {
             finished.load(Ordering::SeqCst)
         });

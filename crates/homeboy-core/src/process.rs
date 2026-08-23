@@ -1649,6 +1649,26 @@ fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
         };
         let environment = match std::fs::read(entry.path().join("environ")) {
             Ok(environment) => environment,
+            // A `/proc/<pid>` that disappears between `read_dir` and this read is
+            // a process that exited, which is the state cleanup is trying to
+            // reach — not a gap in discovery. Counting it as unreadable made the
+            // report `incomplete` whenever any unrelated process on the machine
+            // happened to exit mid-scan, which is constant under load and was
+            // reproducible as soon as tests ran concurrently (#7505).
+            //
+            // Permission denied is different and still counts: another user's
+            // process is one we cannot prove is outside our scope.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    unreadable_environments += 1;
+                }
+                continue;
+            }
             Err(_) => {
                 unreadable_environments += 1;
                 continue;
