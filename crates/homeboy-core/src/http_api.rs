@@ -181,6 +181,11 @@ pub fn handle_with_jobs_and_runner<R>(
 where
     R: AnalysisJobRunner,
 {
+    // Boundary: one HTTP request is one unit of work, so the observation store
+    // is opened exactly once here. The endpoint arms and the helpers below used
+    // to open their own, which made a single request several independently
+    // resolved stores (#7505).
+    let store = ObservationStore::open_initialized()?;
     let endpoint = route(request.method, &request.path)?;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
@@ -229,15 +234,14 @@ where
         }
         HttpEndpoint::Runs => json!({
             "command": "api.runs.list",
-            "runs": list_runs(&request.path, None, job_store)?,
+            "runs": list_runs(&store, &request.path, None, job_store)?,
             "active_runner_jobs": active_runner_jobs_for_path(&request.path, job_store),
         }),
         HttpEndpoint::Run { id } => json!({
             "command": "api.runs.show",
-            "run": show_run(id, job_store)?,
+            "run": show_run(&store, id, job_store)?,
         }),
         HttpEndpoint::RunArtifacts { id } => {
-            let store = ObservationStore::open_initialized()?;
             require_run(&store, id)?;
             // This route predates pagination. Keep an absent pagination request
             // exhaustive for deployed old clients; new CLI clients opt in by
@@ -278,9 +282,10 @@ where
                 })
             }
         }
-        HttpEndpoint::RunArtifactContent { id, artifact_id } => artifact_content(id, artifact_id)?,
+        HttpEndpoint::RunArtifactContent { id, artifact_id } => {
+            artifact_content(&store, id, artifact_id)?
+        }
         HttpEndpoint::RunFindings { id } => {
-            let store = ObservationStore::open_initialized()?;
             require_run(&store, id)?;
             json!({
                 "command": "api.runs.findings",
@@ -298,11 +303,11 @@ where
         }
         HttpEndpoint::AuditRuns => json!({
             "command": "api.audit.runs",
-            "runs": list_runs(&request.path, Some("audit"), job_store)?,
+            "runs": list_runs(&store, &request.path, Some("audit"), job_store)?,
         }),
         HttpEndpoint::BenchRuns => json!({
             "command": "api.bench.runs",
-            "runs": list_runs(&request.path, Some("bench"), job_store)?,
+            "runs": list_runs(&store, &request.path, Some("bench"), job_store)?,
         }),
         // Deliberately does NOT federate runner-resident records. The daemon
         // serves this on a single-threaded accept loop, so a bounded runner
@@ -554,9 +559,8 @@ fn enqueue_sandbox_tool_job(
     Ok(response)
 }
 
-fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
-    let store = ObservationStore::open_initialized()?;
-    require_run(&store, run_id)?;
+fn artifact_content(store: &ObservationStore, run_id: &str, artifact_id: &str) -> Result<Value> {
+    require_run(store, run_id)?;
     crate::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
     let decoded_artifact_id = crate::execution_contract::decode_uri_component(artifact_id);
     let Some(artifact) = store.get_artifact_for_run_token(run_id, &decoded_artifact_id)? else {
@@ -742,12 +746,12 @@ fn path_segments(path: &str) -> Vec<String> {
 }
 
 fn list_runs(
+    store: &ObservationStore,
     path: &str,
     kind_override: Option<&str>,
     job_store: &JobStore,
 ) -> Result<Vec<RunSummary>> {
-    let store = ObservationStore::open_initialized()?;
-    reconcile_stale_running_runs_for_read(&store)?;
+    reconcile_stale_running_runs_for_read(store)?;
     let filter = RunListFilter {
         kind: kind_override
             .map(str::to_string)
@@ -819,9 +823,8 @@ fn active_runner_job_run_summary_if_durable(job: ActiveRunnerJobSummary) -> Opti
     })
 }
 
-fn show_run(run_id: &str, job_store: &JobStore) -> Result<RunDetail> {
-    let store = ObservationStore::open_initialized()?;
-    reconcile_stale_running_runs_for_read(&store)?;
+fn show_run(store: &ObservationStore, run_id: &str, job_store: &JobStore) -> Result<RunDetail> {
+    reconcile_stale_running_runs_for_read(store)?;
     if let Some(run) = store.get_run(run_id)? {
         if let Some(job) = active_runner_job_for_durable_run(job_store, run_id) {
             if run.status != RunStatus::Running.as_str() || run_claims_other_runner_job(&run, &job)
