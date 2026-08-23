@@ -222,25 +222,79 @@ mod tests {
     }
 
     #[test]
-    fn adoption_parses_external_candidate_model() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "adopt",
-            "cook-a",
-            "--candidate-ref",
-            "0123456789abcdef0123456789abcdef01234567",
-            "--ai-model",
-            "openai/gpt-5.6-sol",
-        ])
-        .expect("adoption model parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Adopt(args) = agent_task.command else {
-            panic!("expected adoption command");
-        };
-        assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+    fn model_parses_canonically_for_adoption_and_ai_model_remains_compatible() {
+        for flag in ["--model", "--ai-model"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "adopt",
+                "cook-a",
+                "--candidate-ref",
+                "0123456789abcdef0123456789abcdef01234567",
+                flag,
+                "openai/gpt-5.6-sol",
+            ])
+            .expect("adoption model parses");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("expected agent-task command");
+            };
+            let AgentTaskCommand::Adopt(args) = agent_task.command else {
+                panic!("expected adoption command");
+            };
+            assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+        }
+    }
+
+    #[test]
+    fn model_parses_canonically_for_manual_finalization_and_ai_model_remains_compatible() {
+        for flag in ["--model", "--ai-model"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-model",
+                "--path",
+                "/tmp/manual-model",
+                "--title",
+                "Manual model",
+                "--commit-message",
+                "record model",
+                flag,
+                "openai/gpt-5.6-sol",
+            ])
+            .expect("manual finalization model parses");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("expected agent-task command");
+            };
+            let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+                panic!("expected finalize-pr command");
+            };
+            assert_eq!(
+                args.evidence.ai_model.as_deref(),
+                Some("openai/gpt-5.6-sol")
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_model_overrides_so_durable_provenance_wins() {
+        for flag in ["--model", "--ai-model"] {
+            assert!(
+                Cli::try_parse_from([
+                    "homeboy",
+                    "agent-task",
+                    "finalize-pr",
+                    "--recover",
+                    "cook-a",
+                    flag,
+                    "openai/gpt-5.6-sol",
+                ])
+                .is_err(),
+                "recovery must reject {flag} instead of silently discarding it"
+            );
+        }
     }
 
     #[test]
@@ -529,8 +583,10 @@ pub struct AdoptArgs {
     /// Immutable commit revision in the recorded source worktree.
     #[arg(long, value_name = "SHA")]
     pub candidate_ref: String,
-    /// Concrete model that prepared the externally supplied candidate.
-    #[arg(long, value_name = "MODEL")]
+    /// Concrete model that prepared the externally supplied candidate. Use
+    /// `--model`; `--ai-model` is a deprecated compatibility alias and will be
+    /// removed in the next minor release.
+    #[arg(long = "model", alias = "ai-model", value_name = "MODEL")]
     pub ai_model: Option<String>,
     /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
     #[arg(long)]

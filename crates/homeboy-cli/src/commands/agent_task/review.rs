@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use homeboy::agents::agent_task_model::normalize_concrete_model_identifier;
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
@@ -67,8 +68,16 @@ pub struct FinalizePrEvidenceArgs {
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
-    /// Actual model identifier for AI disclosure. Finalization requires a recorded model.
-    #[arg(long, value_name = "MODEL")]
+    /// Actual model identifier for AI disclosure. Use `--model`; `--ai-model`
+    /// is a deprecated compatibility alias and will be removed in the next
+    /// minor release. Recovery uses durable provenance and rejects model
+    /// overrides. Finalization requires a recorded model.
+    #[arg(
+        long = "model",
+        alias = "ai-model",
+        value_name = "MODEL",
+        conflicts_with = "recover"
+    )]
     pub ai_model: Option<String>,
 
     /// Source finding id shared by sibling generated PRs.
@@ -900,6 +909,16 @@ fn should_persist_manual_preflight_intent(
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
     let mut errors = Vec::new();
+    if let Some(model) = args.evidence.ai_model.as_deref() {
+        if normalize_concrete_model_identifier(model).is_none() {
+            errors.push(homeboy::core::Error::validation_invalid_argument(
+                "model",
+                "AI disclosure requires a concrete model identifier",
+                None,
+                None,
+            ));
+        }
+    }
     if let Err(error) = validate_finalization_base(
         args.path.as_deref(),
         &args.base,
@@ -2551,6 +2570,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_manual_model_fails_before_reserving_finalization_identity() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-invalid-model",
+                "--path",
+                "/tmp/manual-invalid-model",
+                "--title",
+                "Invalid model",
+                "--commit-message",
+                "fixture",
+                "--model",
+                "unknown",
+            ]);
+
+            assert!(error.details["diagnostics"]
+                .as_array()
+                .expect("validation diagnostics")
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic["details"]["field"] == "model"
+                        && diagnostic["message"].as_str().is_some_and(|message| {
+                            message.contains("AI disclosure requires a concrete model identifier")
+                        })
+                }));
+            assert!(agent_task_lifecycle::status("manual-invalid-model").is_err());
+        });
+    }
+
+    #[test]
     fn compact_provider_bounds_extensions_and_large_diagnostics() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "provider-".to_string() + &"x".repeat(10_000),
@@ -3812,7 +3866,7 @@ mod tests {
                 "feature.txt",
                 "--targeted-check-run",
                 "cargo test fixture",
-                "--ai-model",
+                "--model",
                 "fixture-model",
                 "--ai-used-for",
                 "CLI dirty preflight coverage",
@@ -3974,12 +4028,16 @@ esac
                 "feature.txt",
                 "--targeted-check-run",
                 "cargo test fixture",
-                "--ai-model",
+                "--model",
                 "fixture-model",
                 "--ai-used-for",
                 "CLI recovery coverage",
             ]);
             assert_eq!(preflight["status"], "validated");
+            assert_eq!(
+                preflight["review_dossier"]["ai_assistance"]["model"],
+                "fixture-model"
+            );
             let continuation = preflight["handoff"]["finalize_command"]
                 .as_str()
                 .expect("emitted continuation")
