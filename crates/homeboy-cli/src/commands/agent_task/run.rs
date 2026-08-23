@@ -290,7 +290,8 @@ pub(crate) fn preview_cook(
                 "schema": "homeboy/agent-task-cook-preview/v1",
                 "mutates": false,
                 "resolved": {
-                    "repository": args.dispatch.repo,
+                    "repository": cook_provision_repository(&args),
+                    "component": args.dispatch.repo,
                     "repository_identity": args.repository_identity,
                     "worktree": args.to_worktree,
                     "base": args.base,
@@ -385,7 +386,8 @@ pub(crate) fn preview_cook(
             "schema": "homeboy/agent-task-cook-preview/v1",
             "mutates": false,
             "resolved": {
-                "repository": args.dispatch.repo,
+                "repository": cook_provision_repository(&args),
+                "component": args.dispatch.repo,
                 "repository_identity": args.repository_identity,
                 "worktree": args.to_worktree,
                 "base": args.base,
@@ -2541,7 +2543,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "kind": "provider",
             "handle": to_worktree,
             "provision_intent": {
-                "repo": args.dispatch.repo,
+                "repo": cook_provision_repository(args),
                 "base": args.base,
                 "head": args.head,
                 "task_url": args.dispatch.task_url,
@@ -2638,7 +2640,7 @@ fn cook_workspace_create_intent(
                 "--to-worktree is required to create a missing Cook destination".to_string(),
             ])
         })?,
-        repo: args.dispatch.repo.clone().ok_or_else(|| {
+        repo: cook_provision_repository(args).ok_or_else(|| {
             homeboy::core::Error::validation_missing_argument(vec![
                 "--repo <repo> is required to create a missing --to-worktree destination"
                     .to_string(),
@@ -2661,6 +2663,18 @@ fn cook_workspace_create_intent(
             ])
         })?,
     })
+}
+
+/// Provider worktrees are rooted at a canonical repository primary, while Cook
+/// executes the resolved component within that checkout.
+fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
+    args.repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("repository_name"))
+        .and_then(Value::as_str)
+        .filter(|repository| !repository.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| args.dispatch.repo.clone())
 }
 
 fn cook_workspace_plan_identity(intent: &WorktreeProviderCreateIntent) -> Value {
