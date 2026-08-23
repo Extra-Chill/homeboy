@@ -3,7 +3,6 @@
 
 use super::super::apply::{
     run_provider_command_with_timeout, AgentTaskPromotionApplyRequest,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
@@ -11,8 +10,8 @@ use super::super::promote::{
     validate_artifact_content,
 };
 use super::super::types::{
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
-    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionOptions, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA};

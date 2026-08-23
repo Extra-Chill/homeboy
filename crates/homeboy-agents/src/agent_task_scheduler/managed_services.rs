@@ -109,8 +109,6 @@ fn default_worker_ttl_ms() -> u64 {
 }
 
 const WORKER_CLEANUP_COORDINATION_MARGIN: Duration = Duration::from_secs(1);
-const WORKER_STARTUP_COORDINATION_MARGIN: Duration = Duration::from_secs(6);
-
 /// Execution-host service supervisor. It is instantiated by whichever host
 /// executes the plan (controller or Lab runner), never by a remote caller.
 pub(crate) struct AgentTaskServiceSupervisor {
@@ -564,32 +562,6 @@ impl ManagedServices {
     }
 }
 
-fn wait_for_service_worker_start(
-    specs: &[AgentTaskManagedService],
-    run_id: &str,
-) -> Result<ManagedServices, String> {
-    let deadline = Instant::now() + worker_start_wait_budget(specs);
-    while Instant::now() < deadline {
-        if let Some(state) = read_service_worker_state(run_id)? {
-            match state.state.as_str() {
-                "ready" => {
-                    return Ok(ManagedServices::Worker {
-                        run_id: run_id.to_string(),
-                    })
-                }
-                "failed" => {
-                    return Err(state
-                        .detail
-                        .unwrap_or_else(|| "managed service worker failed".to_string()))
-                }
-                _ => {}
-            }
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    Err("managed service worker did not become ready".to_string())
-}
-
 fn worker_cleanup_wait_budget(
     records: &[AgentTaskManagedServiceRecord],
 ) -> Result<Duration, String> {
@@ -601,29 +573,6 @@ fn worker_cleanup_wait_budget(
         .max()
         .unwrap_or(0);
     Ok(Duration::from_millis(cleanup_ms).saturating_add(WORKER_CLEANUP_COORDINATION_MARGIN))
-}
-
-fn worker_start_wait_budget(specs: &[AgentTaskManagedService]) -> Duration {
-    let readiness_ms = specs.iter().fold(0_u64, |total, spec| {
-        if spec.port.is_none() {
-            return total;
-        }
-        total.saturating_add(
-            spec.readiness
-                .as_ref()
-                .and_then(|readiness| readiness.timeout_ms)
-                .unwrap_or(10_000),
-        )
-    });
-    let cleanup_ms = specs
-        .iter()
-        .map(|spec| spec.cleanup_deadline_ms)
-        .max()
-        .unwrap_or(0)
-        .saturating_mul(2);
-    Duration::from_millis(readiness_ms)
-        .saturating_add(Duration::from_millis(cleanup_ms))
-        .saturating_add(WORKER_STARTUP_COORDINATION_MARGIN)
 }
 
 fn lease_port(spec: &AgentTaskManagedService) -> Result<PortLeaseAllocation, String> {
@@ -1329,25 +1278,6 @@ mod tests {
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
 
-    fn free_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
-        listener.local_addr().expect("local address").port()
-    }
-
-    fn assert_cleanup_outcome(record: &AgentTaskManagedServiceRecord, expected: &str) -> bool {
-        let outcome = record.cleanup_outcome.as_deref();
-        if outcome == Some(expected) {
-            return false;
-        }
-        assert!(
-            outcome.is_some_and(|outcome| {
-                outcome.starts_with("incomplete:process-scope discovery was incomplete:")
-            }),
-            "expected {expected} cleanup outcome or fail-closed procfs discovery, got {outcome:?}"
-        );
-        true
-    }
-
     fn worker_request(
         run_id: &str,
         operation: &str,
@@ -1483,4 +1413,55 @@ mod tests {
             );
         });
     }
+}
+
+const WORKER_STARTUP_COORDINATION_MARGIN: Duration = Duration::from_secs(6);
+
+fn wait_for_service_worker_start(
+    specs: &[AgentTaskManagedService],
+    run_id: &str,
+) -> Result<ManagedServices, String> {
+    let deadline = Instant::now() + worker_start_wait_budget(specs);
+    while Instant::now() < deadline {
+        if let Some(state) = read_service_worker_state(run_id)? {
+            match state.state.as_str() {
+                "ready" => {
+                    return Ok(ManagedServices::Worker {
+                        run_id: run_id.to_string(),
+                    })
+                }
+                "failed" => {
+                    return Err(state
+                        .detail
+                        .unwrap_or_else(|| "managed service worker failed".to_string()))
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err("managed service worker did not become ready".to_string())
+}
+
+fn worker_start_wait_budget(specs: &[AgentTaskManagedService]) -> Duration {
+    let readiness_ms = specs.iter().fold(0_u64, |total, spec| {
+        if spec.port.is_none() {
+            return total;
+        }
+        total.saturating_add(
+            spec.readiness
+                .as_ref()
+                .and_then(|readiness| readiness.timeout_ms)
+                .unwrap_or(10_000),
+        )
+    });
+    let cleanup_ms = specs
+        .iter()
+        .map(|spec| spec.cleanup_deadline_ms)
+        .max()
+        .unwrap_or(0)
+        .saturating_mul(2);
+    Duration::from_millis(readiness_ms)
+        .saturating_add(Duration::from_millis(cleanup_ms))
+        .saturating_add(WORKER_STARTUP_COORDINATION_MARGIN)
 }

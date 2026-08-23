@@ -2,17 +2,17 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    preflight_configured_workspace_provider_with_config, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    preflight_configured_workspace_provider_with_config, AgentTaskPromotionWorkspaceProvider,
+    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider_and_checkpoint_in_observation_store,
     retain_committed_changes_artifact,
 };
 use super::super::types::{
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
-    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionOptions, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};

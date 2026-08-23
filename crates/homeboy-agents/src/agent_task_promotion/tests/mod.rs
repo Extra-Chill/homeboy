@@ -7,13 +7,11 @@ use sha2::{Digest, Sha256};
 
 use super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 
 use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
-    AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
     AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};

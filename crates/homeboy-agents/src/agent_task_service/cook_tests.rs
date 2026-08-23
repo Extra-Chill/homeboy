@@ -44,7 +44,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, LazyLock, Mutex};
 
-const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn with_strict_config_lock(test: impl FnOnce()) {
@@ -148,74 +147,6 @@ fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
         "cause": r#"{"schema":"homeboy/command-result/v3","success":false,"error":{"code":"untrusted","message":"provider transcript"}}"#
     }))
     .is_none());
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixture {
-    schema: String,
-    producer: DurableCookFixtureProducer,
-    cook: DurableCookFixtureCook,
-    source_record: DurableCookFixtureSourceRecord,
-    continuation_record: DurableCookFixtureContinuationRecord,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureProducer {
-    runtime: String,
-    run_record_schema: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureCook {
-    id: String,
-    source_attempt: u32,
-    continuation_attempt: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureSourceRecord {
-    schema: String,
-    state: String,
-    latest_promotion: DurableCookFixturePromotion,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixturePromotion {
-    status: String,
-    post_apply: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureContinuationRecord {
-    schema: String,
-    state: String,
-    latest_promotion: DurableCookFixtureContinuationPromotion,
-    aggregate: DurableCookFixtureAggregate,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureContinuationPromotion {
-    follow_up_kind: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureAggregate {
-    status: String,
-    outcome_status: String,
-}
-
-fn durable_cook_0_328_fixture() -> DurableCookFixture {
-    let fixture: DurableCookFixture = serde_json::from_str(include_str!(
-        "fixtures/durable_cook_0.328_review_form_timeout.json"
-    ))
-    .expect("0.328 durable Cook fixture is valid JSON");
-    assert_eq!(fixture.schema, DURABLE_COOK_FIXTURE_SCHEMA);
-    assert_eq!(fixture.producer.runtime, "0.328.1");
-    assert_eq!(
-        fixture.producer.run_record_schema,
-        "homeboy/agent-task-run/v1"
-    );
-    fixture
 }
 
 /// Seed a terminal aggregate whose last outcome carries a valid AI-authored
@@ -662,49 +593,6 @@ fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::A
         artifact_bindings: Vec::new(),
         queue: Default::default(),
     }
-}
-
-fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
-    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
-
-    let task = plan.tasks.first().expect("review form plan has one task");
-    agent_task_lifecycle::record_run_aggregate(
-        run_id,
-        plan,
-        &AgentTaskAggregate {
-            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Failed,
-            totals: AgentTaskAggregateTotals {
-                failed: 1,
-                ..Default::default()
-            },
-            outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: task.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Timeout,
-                summary: Some("review form provider timed out".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: serde_json::json!({ "model": task.executor.model() }),
-            }],
-            events: Vec::new(),
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
-        },
-    )
-    .unwrap();
 }
 
 fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {

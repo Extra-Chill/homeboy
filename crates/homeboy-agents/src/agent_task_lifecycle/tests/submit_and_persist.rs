@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
+    AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskRequest,
+    AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
     AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     AGENT_TASK_WORKFLOW_SCHEMA,
 };

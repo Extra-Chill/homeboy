@@ -1809,7 +1809,6 @@ pub fn normalize_local_execution_placement_in_store(
 #[cfg(test)]
 mod execution_placement_tests {
     use homeboy_lab_runner_contract::{
-        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
     };
 }
