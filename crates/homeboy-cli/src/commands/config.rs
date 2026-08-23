@@ -243,6 +243,9 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
             None,
         )
     })?;
+    homeboy::core::worktree_providers::validate_active_workspace_creation_provider_contracts(
+        &config,
+    )?;
 
     // Save the config
     defaults::save_config(&config)?;
@@ -340,6 +343,9 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
             None,
         )
     })?;
+    homeboy::core::worktree_providers::validate_active_workspace_creation_provider_contracts(
+        &config,
+    )?;
 
     // Save the config
     defaults::save_config(&config)?;
@@ -552,6 +558,53 @@ mod tests {
                 show_pointer(true, "/defaults/deploy/scp_flags").expect("builtin pointer read");
             assert_eq!(builtin_only.source.as_deref(), Some("builtin"));
             assert_eq!(builtin_only.path, None);
+        });
+    }
+
+    #[test]
+    fn config_set_rejects_an_incomplete_active_worktree_provider() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let error = set(
+                "/worktree_providers/dmc",
+                r#"{"enabled":true,"apply_enabled":true,"commands":{"ensure":["provider","ensure","{handle}"]}}"#,
+                false,
+            )
+            .expect_err("an active provider needs a postcondition lookup");
+
+            assert!(error.message.contains("worktree provider `dmc`"));
+            assert_eq!(
+                error.details["worktree_provider_missing_required_capabilities"],
+                serde_json::json!(["resolve_or_list"])
+            );
+            assert!(error.hints.iter().any(|hint| hint.message.contains(
+                "/worktree_providers/dmc/commands/resolve or /worktree_providers/dmc/commands/list"
+            )));
+            assert!(
+                !defaults::config_exists(),
+                "invalid config must not persist"
+            );
+        });
+    }
+
+    #[test]
+    fn config_set_allows_a_staged_inactive_worktree_provider() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let (output, status) = set(
+                "/worktree_providers/dmc",
+                r#"{"enabled":true,"apply_enabled":false,"commands":{"ensure":["provider","ensure","{handle}"]}}"#,
+                false,
+            )
+            .expect("an inactive provider can be configured in stages");
+
+            assert_eq!(status, 0);
+            assert_eq!(
+                output
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.pointer("/worktree_providers/dmc/apply_enabled")),
+                Some(&serde_json::json!(false))
+            );
+            assert!(defaults::config_exists(), "staged config must persist");
         });
     }
 }

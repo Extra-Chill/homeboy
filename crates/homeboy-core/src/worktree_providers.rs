@@ -1318,6 +1318,39 @@ fn validate_workspace_creation_provider(provider_id: &str, config: &HomeboyConfi
     Err(error)
 }
 
+/// Reject active providers that could be selected to create a workspace but
+/// cannot prove its postcondition. Disabled providers and providers with apply
+/// disabled remain stageable while their command contract is assembled.
+pub fn validate_active_workspace_creation_provider_contracts(config: &HomeboyConfig) -> Result<()> {
+    for (provider_id, provider) in &config.worktree_providers {
+        if provider.enabled && provider.apply_enabled {
+            validate_workspace_creation_provider(provider_id, config).map_err(|error| {
+                let provider_pointer = format!(
+                    "/worktree_providers/{}",
+                    escape_json_pointer_token(provider_id)
+                );
+                let mut error = error;
+                if provider.commands.ensure.is_none() {
+                    error = error.with_hint(format!(
+                        "Configure {provider_pointer}/commands/ensure before enabling this provider."
+                    ));
+                }
+                if provider.commands.resolve.is_none() && provider.commands.list.is_none() {
+                    error = error.with_hint(format!(
+                        "Configure {provider_pointer}/commands/resolve or {provider_pointer}/commands/list before enabling this provider."
+                    ));
+                }
+                error
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
 fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     intent: &WorktreeProviderCreateIntent,
     lifecycle: Option<&WorktreeProviderLifecycleIntent>,
