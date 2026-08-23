@@ -1751,6 +1751,7 @@ fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attributi
         pid: 4242,
         process_start_identity: None,
         executable: "/tmp/homeboy".to_string(),
+        executable_digest: None,
         cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
         durable_store_path: Some("/tmp/home/.config/homeboy/daemon/jobs.json".to_string()),
