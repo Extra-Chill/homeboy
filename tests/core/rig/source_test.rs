@@ -158,7 +158,7 @@ fn list_sources_reports_stack_specs_from_package() {
 #[test]
 fn sources_list_reports_legacy_stack_without_inferring_or_mutating_provenance() {
     let _home = HomeGuard::new();
-    let config = homeboy_core::paths::stack_config("legacy").expect("stack config");
+    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "legacy");
     fs::create_dir_all(config.parent().expect("stacks dir")).expect("stacks dir");
     let content = minimal_stack("legacy", "legacy")
         .replace("${env.DEV_ROOT}/legacy", "/definitely/missing/legacy");
@@ -197,9 +197,9 @@ fn sources_list_reports_legacy_stack_without_inferring_or_mutating_provenance() 
         fs::read_to_string(&config).expect("legacy stack unchanged"),
         content
     );
-    assert!(!homeboy_core::paths::stack_source_metadata("legacy")
-        .expect("metadata path")
-        .exists());
+    assert!(
+        !homeboy_core::paths::stack_source_metadata_in_root(&test_config_root(), "legacy").exists()
+    );
 }
 
 #[test]
@@ -226,12 +226,12 @@ fn test_remove_source() {
     assert!(result.removed_package_path.is_none());
     assert!(!homeboy_core::paths::rig_config("alpha").unwrap().exists());
     assert!(!homeboy_core::paths::rig_config("beta").unwrap().exists());
-    assert!(!homeboy_core::paths::rig_source_metadata("alpha")
-        .unwrap()
-        .exists());
-    assert!(!homeboy_core::paths::rig_source_metadata("beta")
-        .unwrap()
-        .exists());
+    assert!(
+        !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha").exists()
+    );
+    assert!(
+        !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "beta").exists()
+    );
     assert!(manual.exists());
     assert!(package.path().exists());
 }
@@ -258,9 +258,9 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
     assert!(result.removed.is_empty());
     assert_eq!(result.skipped.len(), 1);
     assert!(config.exists());
-    assert!(!homeboy_core::paths::rig_source_metadata("alpha")
-        .unwrap()
-        .exists());
+    assert!(
+        !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha").exists()
+    );
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
         false,
     )
     .expect("install");
-    let config = homeboy_core::paths::stack_config("alpha-combined").expect("stack config");
+    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "alpha-combined");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
 
@@ -287,11 +287,11 @@ fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
     assert!(result.removed_stacks.is_empty());
     assert_eq!(result.skipped_stacks.len(), 1);
     assert!(config.exists());
-    assert!(
-        !homeboy_core::paths::stack_source_metadata("alpha-combined")
-            .unwrap()
-            .exists()
-    );
+    assert!(!homeboy_core::paths::stack_source_metadata_in_root(
+        &test_config_root(),
+        "alpha-combined"
+    )
+    .exists());
 }
 
 #[test]
@@ -319,9 +319,9 @@ fn remove_source_treats_copied_config_as_owned_when_contents_match() {
     assert_eq!(result.removed.len(), 1);
     assert!(result.skipped.is_empty());
     assert!(!config.exists());
-    assert!(!homeboy_core::paths::rig_source_metadata("alpha")
-        .unwrap()
-        .exists());
+    assert!(
+        !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha").exists()
+    );
 }
 
 #[test]
@@ -330,12 +330,12 @@ fn sources_list_reports_corrupt_metadata_and_missing_configs() {
     fs::create_dir_all(homeboy_core::paths::rig_sources().expect("sources dir"))
         .expect("sources dir");
     fs::write(
-        homeboy_core::paths::rig_source_metadata("broken").expect("broken metadata"),
+        homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "broken"),
         "not json",
     )
     .expect("broken metadata");
     fs::write(
-        homeboy_core::paths::rig_source_metadata("missing").expect("missing metadata"),
+        homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "missing"),
         r#"{
             "source": "/tmp/package",
             "package_path": "/tmp/package",
@@ -437,13 +437,13 @@ fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
     )
     .expect("non-json metadata");
     fs::write(
-        homeboy_core::paths::stack_source_metadata("broken-stack").expect("stack metadata"),
+        homeboy_core::paths::stack_source_metadata_in_root(&test_config_root(), "broken-stack"),
         "not json",
     )
     .expect("broken stack metadata");
     fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
     fs::write(
-        homeboy_core::paths::stack_config("broken-stack").expect("stack config"),
+        homeboy_core::paths::stack_config_in_root(&test_config_root(), "broken-stack"),
         minimal_stack("broken-stack", "broken"),
     )
     .expect("installed stack");
@@ -532,9 +532,11 @@ fn update_git_source_refreshes_owned_stack_specs() {
     assert_eq!(result.updated_stacks.len(), 1);
     assert_eq!(result.updated_stacks[0].id, "alpha-combined");
     assert_ne!(result.updated_stacks[0].source_revision, before);
-    let installed =
-        fs::read_to_string(homeboy_core::paths::stack_config("alpha-combined").unwrap())
-            .expect("installed stack");
+    let installed = fs::read_to_string(homeboy_core::paths::stack_config_in_root(
+        &test_config_root(),
+        "alpha-combined",
+    ))
+    .expect("installed stack");
     assert!(installed.contains("updated stack"));
     let metadata = crate::read_stack_source_metadata_in_root(&test_config_root(), "alpha-combined")
         .expect("refreshed stack metadata");
@@ -557,7 +559,7 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
     metadata.discovery_path = None;
     metadata.package_path = "relative-package-with-unknown-provenance".to_string();
     fs::write(
-        homeboy_core::paths::rig_source_metadata("alpha").expect("metadata path"),
+        homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha"),
         serde_json::to_vec_pretty(&metadata).expect("serialize metadata"),
     )
     .expect("write legacy metadata");
@@ -702,7 +704,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&test_config_root(), &source, None, false).expect("install");
-    let config = homeboy_core::paths::stack_config("alpha-combined").expect("stack config");
+    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "alpha-combined");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("manual stack");
     fs::write(

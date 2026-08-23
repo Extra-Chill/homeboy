@@ -566,11 +566,6 @@ pub fn agent_runtime_manifest_in_root(config_root: &Path, id: &str) -> PathBuf {
         .join(format!("{}.json", id))
 }
 
-/// Agent runtime manifest file path
-pub fn agent_runtime_manifest(id: &str) -> Result<PathBuf> {
-    Ok(agent_runtime_manifest_in_root(&homeboy()?, id))
-}
-
 /// Key file path below an already-resolved config root.
 pub fn key_in_root(config_root: &Path, server_id: &str) -> PathBuf {
     keys_in_root(config_root).join(format!("{}_id_rsa", server_id))

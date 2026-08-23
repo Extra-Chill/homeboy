@@ -688,13 +688,6 @@ fn mismatch_freeze_boundary(field: &str) -> RecipeFreezeBoundary {
     }
 }
 
-fn reached_freeze_boundary(recipe: &AgentTaskCookRecipe) -> Result<Option<RecipeFreezeBoundary>> {
-    reached_freeze_boundary_in_store(
-        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        recipe,
-    )
-}
-
 /// [`reached_freeze_boundary`] against an explicitly injected lifecycle root.
 ///
 /// The freeze boundary is decided entirely by what the attempts' own records

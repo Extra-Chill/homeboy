@@ -104,8 +104,3 @@ pub fn keys() -> Result<PathBuf> {
 pub fn backups_in_root(config_root: &Path) -> PathBuf {
     config_root.join("backups")
 }
-
-/// Backups directory
-pub fn backups() -> Result<PathBuf> {
-    Ok(backups_in_root(&homeboy()?))
-}

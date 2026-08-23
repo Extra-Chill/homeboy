@@ -266,6 +266,9 @@ fn pending_dir() -> Option<PathBuf> {
     Some(pending_dir_in_root(&ambient_config_root()?))
 }
 
+/// Only the tests below still resolve this ambiently. Production reaches the
+/// inflight directory through an injected root (#7505).
+#[cfg(test)]
 fn inflight_dir() -> Option<PathBuf> {
     Some(inflight_dir_in_root(&ambient_config_root()?))
 }
@@ -771,11 +774,6 @@ pub fn dead_letter_entries() -> Vec<NotifyOutboxEntry> {
 /// [`dead_letter_entries`] against an already-resolved config root.
 pub fn dead_letter_entries_in_root(config_root: &Path) -> Vec<NotifyOutboxEntry> {
     read_dir_entries(&dead_letter_dir_in_root(config_root))
-}
-
-/// Entries currently claimed by a drain pass.
-pub fn inflight_entries() -> Vec<NotifyOutboxEntry> {
-    read_dir_entries_opt(inflight_dir())
 }
 
 /// [`inflight_entries`] against an already-resolved config root.
