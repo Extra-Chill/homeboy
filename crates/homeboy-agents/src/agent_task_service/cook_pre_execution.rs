@@ -50,6 +50,7 @@ impl<'a> CookExecutionPreparation<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize_with_admission(
         &self,
         cook_id: &str,
@@ -109,6 +110,7 @@ impl<'a> CookExecutionPreparation<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn recover_with_admission(
         &self,
         cook_or_attempt_id: &str,

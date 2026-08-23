@@ -16,7 +16,6 @@ use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::defaults::HomeboyConfig;
-use homeboy_core::worktree::{self};
 use serde_json::Value;
 
 #[test]

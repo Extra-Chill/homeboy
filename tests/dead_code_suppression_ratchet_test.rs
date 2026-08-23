@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// This is the exact count as of the commit that introduced this ratchet, down
 /// from 40 before the sweep. It is a ceiling, not a target: lower it whenever
 /// a crate is cleared, and never raise it.
-const MODULE_SUPPRESSION_CEILING: usize = 16;
+const MODULE_SUPPRESSION_CEILING: usize = 9;
 
 /// One module-level suppression, located precisely enough to act on.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -245,10 +245,11 @@ fn the_swept_crates_stay_swept() {
     // dead code deleted. Re-adding one here would put six figures of lines back
     // in the dark in a single line, and the aggregate ceiling above would not
     // notice if another crate happened to lose one in the same PR.
-    const SWEPT: [&str; 3] = [
+    const SWEPT: [&str; 4] = [
         "crates/homeboy-lab-runner/",
         "crates/homeboy-cli/",
         "crates/homeboy-core/",
+        "crates/homeboy-agents/",
     ];
 
     let offenders: Vec<&ModuleSuppression> = module_suppressions()
