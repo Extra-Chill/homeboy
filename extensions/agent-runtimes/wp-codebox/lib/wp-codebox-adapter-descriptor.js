@@ -19,7 +19,7 @@ const DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR = {
   schema: WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
   id: 'wp-codebox',
   env: ['HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN'],
-  settings: ['wp_codebox_bin', 'wpCodeboxBin'],
+  settings: ['runtime_bin', 'wp_codebox_bin', 'wpCodeboxBin'],
   executable: 'wp-codebox',
   commands: {
     run_agent_task: WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,

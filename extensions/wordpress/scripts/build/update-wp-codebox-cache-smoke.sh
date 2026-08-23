@@ -78,7 +78,7 @@ case "${args[*]}" in
         mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
         mkdir -p "${prefix}/packages/cli/dist"
         printf '%s\n' 'built' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
-        printf '%s\n' '#!/usr/bin/env node' > "${prefix}/packages/cli/dist/index.js"
+        printf '%s\n' '#!/usr/bin/env node' "// $(git -C "$prefix" rev-parse HEAD)" > "${prefix}/packages/cli/dist/index.js"
         chmod +x "${prefix}/packages/cli/dist/index.js"
         ;;
     *)
@@ -108,6 +108,13 @@ UPDATED_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" tag fixture-ref
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main fixture-ref
 
+git -C "$SOURCE_WORK" rm --quiet incompatible
+printf '%s\n' 'compatible' > "${SOURCE_WORK}/fixture.txt"
+git -C "$SOURCE_WORK" add fixture.txt
+git -C "$SOURCE_WORK" commit --quiet -m 'compatible wp-codebox fixture'
+COMPATIBLE_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
+git -C "$SOURCE_WORK" push --quiet origin HEAD:main
+
 OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
@@ -119,11 +126,9 @@ case "$OUTPUT" in
 esac
 [ -f "${CACHE_DIR}/npm-install-ran" ] || { echo "npm install marker missing" >&2; exit 1; }
 [ -f "${CACHE_DIR}/node_modules/@automattic/wp-codebox-core/dist/index.js" ] || { echo "core package artifact missing" >&2; exit 1; }
-
-# Build output is untracked and must not survive the next ref update. The fake
-# build refuses to proceed if this stale CLI is still present.
-mkdir -p "${CACHE_DIR}/packages/cli/dist"
-printf '%s\n' 'stale build output' > "${CACHE_DIR}/packages/cli/dist/index.js"
+INITIAL_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
+[ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Initial exact SHA was not selected" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Initial managed CLI is not ready" >&2; exit 1; }
 
 IDENTITY_BEFORE_UPDATE="$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")"
 if OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" 2>&1)"; then
@@ -139,6 +144,24 @@ case "$OUTPUT" in
         ;;
 esac
 [ "$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")" = "$IDENTITY_BEFORE_UPDATE" ] || { echo "Incompatible update replaced managed runtime identity" >&2; exit 1; }
+[ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Incompatible update replaced managed runtime HEAD" >&2; exit 1; }
+[ "$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')" = "$INITIAL_CLI_SHA" ] || { echo "Incompatible update replaced managed CLI bytes" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Incompatible update left managed CLI unready" >&2; exit 1; }
+
+OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$COMPATIBLE_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+case "$OUTPUT" in
+    *"WP Codebox cache SHA: ${COMPATIBLE_SHA}"*) ;;
+    *)
+        echo "Expected successful exact-SHA update output" >&2
+        echo "$OUTPUT" >&2
+        exit 1
+        ;;
+esac
+[ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$COMPATIBLE_SHA" ] || { echo "Successful exact-SHA update did not replace managed HEAD" >&2; exit 1; }
+COMPATIBLE_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
+[ "$COMPATIBLE_CLI_SHA" != "$INITIAL_CLI_SHA" ] || { echo "Successful exact-SHA update did not replace managed CLI bytes" >&2; exit 1; }
+grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-identity.json" || { echo "Successful exact-SHA update did not replace managed identity" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" runtime descriptor --json | grep -q 'browser-contained-site-open' || { echo "Successful exact-SHA update left managed CLI unready" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash

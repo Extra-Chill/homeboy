@@ -43,6 +43,9 @@ const {
 	wpCodeboxCommand,
 	wpCodeboxRuntimePackageSourceDescriptor,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-descriptor.js'));
+const {
+	codeboxTaskRequestFromAgentTaskRequest,
+} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js'));
 
 assert.equal(WP_CODEBOX_BACKEND, 'wp-codebox');
 assert.equal(WP_CODEBOX_PROVIDER_ID, 'wordpress.codebox-agent-task-executor');
@@ -141,6 +144,25 @@ try {
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, runtime_bin: '/fresh/runtime/wp-codebox', executable: '' }),
 		'/fresh/runtime/wp-codebox'
 	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, settings: { runtime_bin: '/settings/runtime/wp-codebox' }, executable: '' }),
+		'/settings/runtime/wp-codebox'
+	);
+	const previousManagedInstallDir = process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR;
+	process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR = path.join(fixtureRoot, 'managed');
+	const taskRuntime = codeboxTaskRequestFromAgentTaskRequest({
+		schema: 'homeboy/agent-task-request/v1',
+		task_id: 'settings-runtime-bin-precedence',
+		executor: { backend: 'wp-codebox', config: {} },
+		instructions: 'Resolve the configured WP Codebox runtime.',
+		inputs: {},
+	}, { settings: { runtime_bin: '/settings/runtime/wp-codebox' } });
+	assert.equal(taskRuntime.wp_codebox_bin, '/settings/runtime/wp-codebox', 'agent-task resolution must prefer settings.runtime_bin over the managed cache');
+	if (previousManagedInstallDir === undefined) {
+		delete process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR;
+	} else {
+		process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR = previousManagedInstallDir;
+	}
 } finally {
 	rmSync(fixtureRoot, { recursive: true, force: true });
 }
