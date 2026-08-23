@@ -61,8 +61,8 @@ pub use component_resolution::{component_ref, resolve_component, resolve_compone
 pub use install::{
     default_materialize_source_root, discover_rigs, discover_stacks, install, materialize_rig_spec,
     materialize_rig_spec_with_default_source_root, package_content_hash, read_source_metadata,
-    read_stack_source_metadata, DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult,
-    RigSourceMetadata, StackSourceMetadata,
+    read_source_metadata_in_root, read_stack_source_metadata_in_root, DiscoveredRig,
+    DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata, StackSourceMetadata,
 };
 pub use lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
@@ -658,8 +658,13 @@ impl RigSourceContext {
 
         // Confirm the active checkout declares this rig before refreshing its
         // global registration. `install` then enforces existing ID ownership.
+        //
+        // Boundary: loading a rig for an invocation is one unit of work, and the
+        // refresh below writes into the registry, so it resolves once here
+        // instead of letting `install` resolve on its own (#7505).
+        let roots = homeboy_core::paths::PathRoots::from_environment()?;
         load_local_source(component_path, Some(id))?;
-        install(component_path, Some(id), false)?;
+        install(roots.config(), component_path, Some(id), false)?;
         Self::load(id)
     }
 }

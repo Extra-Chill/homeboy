@@ -201,10 +201,12 @@ pub enum SymlinkStatusState {
 /// Materialize a rig: run the `up` pipeline, stash timestamp in state.
 pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     preflight_effective_component_checkouts(rig)?;
-    let _lease = acquire_active_run_lease(rig, "up")?;
     // One rig run is one unit of work, so the entry point resolves the roots
-    // once and the observer carries them for the rest of it (#7505).
+    // once and the lease and observer both carry them for the rest of it
+    // (#7505). The lease in particular must release into the same home it
+    // acquired from, which only holds if it is handed this root.
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let _lease = acquire_active_run_lease(roots.config(), rig, "up")?;
     let observer = RigRunObserver::start(rig, "up", &roots);
 
     let execute = || {
@@ -687,7 +689,14 @@ pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
 /// Tear down a rig with invocation settings available to resource expansion and
 /// the `down` pipeline as `HOMEBOY_SETTINGS_<KEY>` env vars.
 pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> Result<DownReport> {
-    let _lease = super::lease::acquire_active_run_lease_with_settings(rig, "down", settings)?;
+    // Boundary: one rig teardown is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let _lease = super::lease::acquire_active_run_lease_with_settings(
+        roots.config(),
+        rig,
+        "down",
+        settings,
+    )?;
     let pipeline = if rig.pipeline.contains_key("down") {
         Some(run_pipeline_with_settings(rig, "down", false, settings)?)
     } else {
@@ -742,7 +751,9 @@ pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> R
 /// handle no declared step still owns is reported `blocked`, because that is
 /// drift needing manual attention, not something repair may silently discard.
 pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
-    let _lease = acquire_active_run_lease(rig, "repair")?;
+    // Boundary: one rig repair is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let _lease = acquire_active_run_lease(roots.config(), rig, "repair")?;
     let mut resources = Vec::new();
 
     for link in &rig.symlinks {

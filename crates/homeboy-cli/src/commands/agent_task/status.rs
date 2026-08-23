@@ -281,6 +281,10 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
+        let cleanup_evidence = cleanup_evidence_projection(&mut value, run_id);
+        if !cleanup_evidence.is_empty() {
+            value["cleanup_evidence"] = Value::Array(cleanup_evidence);
+        }
         if args.bounded {
             value = bounded_full_status(value, run_id);
         }
@@ -300,6 +304,39 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     let summary = enforce_compact_status_budget(summary);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
+}
+
+/// Automatic retention runs while a task completes but can inventory every
+/// workspace sharing its roots. Keep that global operational evidence durable
+/// and addressable without allowing it to obscure this run's diagnosis.
+pub(crate) fn cleanup_evidence_projection(value: &mut Value, run_id: &str) -> Vec<Value> {
+    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let run_ref = homeboy::core::execution_contract::encode_uri_component(run_id);
+    [
+        "automatic_artifact_retention",
+        "automatic_artifact_retention_inaccessible_roots",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let details = metadata.remove(key)?;
+        let count = details
+            .get("worktree_count")
+            .and_then(Value::as_u64)
+            .or_else(|| details.as_array().map(|items| items.len() as u64))
+            .or_else(|| details.get("worktrees").and_then(Value::as_array).map(|items| items.len() as u64))
+            .unwrap_or(0);
+        Some(json!({
+            "kind": key,
+            "count": count,
+            "details_omitted": true,
+            "ref": format!("homeboy://agent-task/run/{run_ref}/status#metadata.{key}"),
+            "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)),
+            "export_command": format!("homeboy agent-task status {} --full --output <path>", quote_arg(run_id)),
+        }))
+    })
+    .collect()
 }
 
 struct StatusPoller {

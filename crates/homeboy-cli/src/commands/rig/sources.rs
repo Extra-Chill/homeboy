@@ -4,6 +4,7 @@ use homeboy::rig;
 use super::output::{RigSourcesOutput, RigSourcesReport};
 use super::RigCommandOutput;
 use crate::commands::CmdResult;
+use std::path::Path;
 
 #[derive(Subcommand)]
 pub(super) enum RigSourcesCommand {
@@ -23,38 +24,41 @@ pub(super) enum RigSourcesCommand {
 }
 
 pub(super) fn run(command: Option<RigSourcesCommand>) -> CmdResult<RigCommandOutput> {
+    // Boundary: one `homeboy rig sources` invocation is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     match command {
-        None | Some(RigSourcesCommand::List) => list(),
-        Some(RigSourcesCommand::Remove { source }) => remove(&source),
-        Some(RigSourcesCommand::Refresh { source }) => refresh(source.as_deref()),
+        None | Some(RigSourcesCommand::List) => list(config_root),
+        Some(RigSourcesCommand::Remove { source }) => remove(config_root, &source),
+        Some(RigSourcesCommand::Refresh { source }) => refresh(config_root, source.as_deref()),
     }
 }
 
-fn list() -> CmdResult<RigCommandOutput> {
+fn list(config_root: &Path) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Sources(RigSourcesOutput {
             command: "rig.sources.list",
-            report: RigSourcesReport::List(rig::list_sources()?),
+            report: RigSourcesReport::List(rig::list_sources(config_root)?),
         }),
         0,
     ))
 }
 
-fn remove(source: &str) -> CmdResult<RigCommandOutput> {
+fn remove(config_root: &Path, source: &str) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Sources(RigSourcesOutput {
             command: "rig.sources.remove",
-            report: RigSourcesReport::Remove(Box::new(rig::remove_source(source)?)),
+            report: RigSourcesReport::Remove(Box::new(rig::remove_source(config_root, source)?)),
         }),
         0,
     ))
 }
 
-fn refresh(source: Option<&str>) -> CmdResult<RigCommandOutput> {
+fn refresh(config_root: &Path, source: Option<&str>) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Sources(RigSourcesOutput {
             command: "rig.sources.refresh",
-            report: RigSourcesReport::Refresh(rig::update_source(source)?),
+            report: RigSourcesReport::Refresh(rig::update_source(config_root, source)?),
         }),
         0,
     ))

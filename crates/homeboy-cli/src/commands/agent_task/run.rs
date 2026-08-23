@@ -3425,11 +3425,17 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
-    validate_provider_evidence_inputs(
-        &args.provider_evidence_inputs,
-        args.dispatch.prompt.as_deref(),
-    )?;
-    let dispatch = dispatch_args_for_cook(args);
+    // Resolve @file input before scanning its provider-visible content. The
+    // host path is an ingestion detail, not evidence. Stdin remains unread
+    // until execution so this preflight cannot consume its prompt bytes.
+    let mut dispatch = dispatch_args_for_cook(args);
+    if dispatch.prompt.as_deref().is_some_and(|spec| {
+        spec.starts_with('@')
+            && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(spec).is_none()
+    }) {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
@@ -3777,6 +3783,33 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     ))
 }
 
+fn cook_component_workspace(
+    args: &AgentTaskCookArgs,
+    workspace: &Path,
+) -> homeboy::core::Result<PathBuf> {
+    let Some(component_id) = args.dispatch.repo.as_deref() else {
+        return Ok(workspace.to_path_buf());
+    };
+    let Some(component) = homeboy::core::component::registered_by_id(component_id)? else {
+        return Ok(workspace.to_path_buf());
+    };
+    let effective = homeboy::core::component::resolution::rebase_component_path_to_checkout(
+        &component, workspace,
+    );
+    if !effective.is_dir() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "component workspace",
+            format!(
+                "resolved component `{component_id}` is not present in Cook workspace: {}",
+                effective.display()
+            ),
+            Some(effective.display().to_string()),
+            None,
+        ));
+    }
+    Ok(effective)
+}
+
 pub(crate) fn record_cook_argument_provenance(
     plan: &mut AgentTaskPlan,
     provenance: &crate::cli_surface::CommandArgumentProvenance,
@@ -3992,6 +4025,26 @@ mod prompt_input_tests {
     }
 
     #[test]
+    fn relative_and_absolute_at_file_prompts_resolve_to_equivalent_bytes() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let file = tempfile::NamedTempFile::new_in(&cwd).expect("prompt file");
+        let body = "Preserve these prompt bytes.\n\n";
+        std::fs::write(file.path(), body).expect("write prompt");
+        let relative = file
+            .path()
+            .strip_prefix(&cwd)
+            .expect("prompt file is in the current directory");
+
+        let mut relative_args = dispatch_with_prompt(Some(&format!("@{}", relative.display())));
+        let mut absolute_args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
+        resolve_dispatch_prompt(&mut relative_args).expect("resolve relative @file prompt");
+        resolve_dispatch_prompt(&mut absolute_args).expect("resolve absolute @file prompt");
+
+        assert_eq!(relative_args.prompt, absolute_args.prompt);
+        assert_eq!(absolute_args.prompt.as_deref(), Some(body));
+    }
+
+    #[test]
     fn inline_prompt_is_unchanged() {
         let mut args = dispatch_with_prompt(Some("fix the flaky test"));
         resolve_dispatch_prompt(&mut args).expect("resolve inline prompt");
@@ -4029,7 +4082,7 @@ pub(crate) fn compile_cook_plan(
         provision.get("action").and_then(Value::as_str),
         Some("lookup_pending" | "attestation_pending" | "planned_create")
     );
-    let workspace = (!pending_lookup)
+    let requested_workspace = (!pending_lookup)
         .then(|| {
             provision
                 .get("path")
@@ -4037,12 +4090,12 @@ pub(crate) fn compile_cook_plan(
                 .map(str::to_string)
         })
         .flatten();
-    if workspace.is_none() && !pending_lookup {
+    if requested_workspace.is_none() && !pending_lookup {
         return Err(homeboy::core::Error::internal_unexpected(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
-    if !args.provider_evidence_inputs.is_empty() && workspace.is_none() {
+    if !args.provider_evidence_inputs.is_empty() && requested_workspace.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence requires a bound Cook workspace",
@@ -4050,6 +4103,14 @@ pub(crate) fn compile_cook_plan(
             None,
         ));
     }
+    if let Some(workspace) = requested_workspace.as_deref() {
+        validate_cook_destination_identity(args, Path::new(workspace))?;
+    }
+    let workspace = requested_workspace
+        .as_deref()
+        .map(|workspace| cook_component_workspace(args, Path::new(workspace)))
+        .transpose()?
+        .map(|workspace| workspace.display().to_string());
     let mut dispatch = dispatch_args_for_cook(args);
     resolve_dispatch_prompt(&mut dispatch)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
@@ -4074,9 +4135,6 @@ pub(crate) fn compile_cook_plan(
         workspace.as_deref(),
         &projected_paths,
     )?;
-    if let Some(workspace) = workspace.as_deref() {
-        validate_cook_destination_identity(args, Path::new(workspace))?;
-    }
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -4096,6 +4154,15 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
+    if let (Some(requested), Some(effective)) =
+        (requested_workspace.as_deref(), workspace.as_deref())
+    {
+        plan.metadata["gate_workspace"] = serde_json::json!({
+            "requested_cwd": requested,
+            "effective_cwd": effective,
+            "component_id": args.dispatch.repo,
+        });
+    }
     if let Some(identity) = &args.repository_identity {
         plan.metadata["cook_repository_identity"] = identity.clone();
     }

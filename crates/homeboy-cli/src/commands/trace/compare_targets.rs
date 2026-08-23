@@ -35,10 +35,17 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     let baseline = required_target(args.baseline_target.as_deref(), "--baseline-target")?;
     let candidate = required_target(args.candidate.as_deref(), "--candidate")?;
     let (component_id, base_component) = compare_target_component(&args)?;
+    // Boundary: one trace compare is one unit of work, and the lease must release
+    // into the same home it acquired from (#7505).
+    let lease_roots = homeboy::core::paths::PathRoots::from_environment()?;
     let _compare_lease = if let Some(rig_id) = args.rig.as_deref() {
         load_rig_context(Some(rig_id))?
             .map(|context| {
-                homeboy::rig::lease::acquire_active_run_lease(&context.rig_spec, "trace compare")
+                homeboy::rig::lease::acquire_active_run_lease(
+                    lease_roots.config(),
+                    &context.rig_spec,
+                    "trace compare",
+                )
             })
             .transpose()?
             .flatten()
@@ -1126,9 +1133,13 @@ mod tests {
             assert_eq!(compare.proof_run_order[1].group, "candidate");
             assert_eq!(compare.proof_run_order[2].group, "baseline");
             assert_eq!(compare.proof_run_order[3].group, "candidate");
-            assert!(homeboy::rig::lease::active_run_leases()
-                .expect("active leases")
-                .is_empty());
+            assert!(homeboy::rig::lease::active_run_leases(
+                homeboy::core::paths::PathRoots::from_environment()
+                    .expect("path roots")
+                    .config()
+            )
+            .expect("active leases")
+            .is_empty());
             let store = ObservationStore::open_initialized().expect("store");
             let runs = store
                 .list_runs(homeboy::core::observation::RunListFilter {

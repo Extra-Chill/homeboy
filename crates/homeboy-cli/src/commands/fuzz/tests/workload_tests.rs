@@ -522,6 +522,7 @@ fn fuzz_list_reports_stale_installed_rig_package_provenance() {
             assert!(status.success(), "git command should succeed");
         }
         homeboy::rig::install(
+            &homeboy::core::paths::homeboy().expect("config root"),
             package.path().to_string_lossy().as_ref(),
             Some("package-fuzz"),
             false,
