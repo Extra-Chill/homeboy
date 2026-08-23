@@ -4470,7 +4470,6 @@ fn run_cook_spine(
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options).map_err(|mut error| {
-            error = with_pre_execution_phase(error, "workspace_base_ancestry_preflight");
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
@@ -4883,9 +4882,7 @@ fn run_cook_spine(
             let mut failed_dispatch_plan = None;
             let execution = (|| {
                 if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                    validate_cook_workspace(&options).map_err(|error| {
-                        with_pre_execution_phase(error, "workspace_base_ancestry_preflight")
-                    })?;
+                    validate_cook_workspace(&options)?;
                 }
                 if options.attempt_dispatcher.is_none() {
                     homeboy_core::cleanup::admit_reconstructable_artifact_work(
