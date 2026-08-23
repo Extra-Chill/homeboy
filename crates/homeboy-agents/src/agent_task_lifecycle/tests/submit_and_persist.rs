@@ -204,6 +204,9 @@ fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
     for command in ["status", "watch", "cancel", "resume"] {
         assert!(replay.metadata["unmaterialized_cook_admission"]["commands"][command].is_string());
     }
+    assert!(replay.metadata["unmaterialized_cook_admission"]["commands"]
+        .get("run")
+        .is_none());
 }
 
 #[test]

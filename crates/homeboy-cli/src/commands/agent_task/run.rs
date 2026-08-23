@@ -6707,6 +6707,18 @@ pub(super) fn run_submitted_with_executor(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    if agent_task_lifecycle::exact_record(&run_id)
+        .ok()
+        .is_some_and(|record| agent_task_lifecycle::is_unmaterialized_cook_admission(&record))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "unmaterialized Cook admission must continue through its fenced resume path",
+            Some(run_id.clone()),
+            Some(vec![format!("homeboy agent-task resume {run_id}")]),
+        )
+        .with_hint(format!("Run `homeboy agent-task resume {run_id}`.")));
+    }
     let result =
         agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
     Ok((
