@@ -156,6 +156,24 @@ fn execution_jobs(contexts: &[String], exception: Option<(&str, serde_json::Valu
     .expect("execution jobs fixture")
 }
 
+fn execution_jobs_with_duplicate(
+    contexts: &[String],
+    target: &str,
+    conclusions: &[&str],
+) -> String {
+    let mut jobs: Vec<serde_json::Value> = contexts
+        .iter()
+        .filter(|context| context.as_str() != target)
+        .map(|context| serde_json::json!({ "name": context, "conclusion": "success" }))
+        .collect();
+    jobs.extend(
+        conclusions
+            .iter()
+            .map(|conclusion| serde_json::json!({ "name": target, "conclusion": conclusion })),
+    );
+    serde_json::to_string(&jobs).expect("duplicate execution jobs fixture")
+}
+
 fn stdout_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -620,6 +638,42 @@ fn terminal_execution_verdict_rejects_pending_skipped_cancelled_failed_and_absen
         "an absent terminal context must leave the PR unmergeable: {}",
         stdout_of(&output)
     );
+}
+
+#[test]
+fn terminal_execution_verdict_selects_success_from_duplicate_current_head_contexts() {
+    let contexts = declared_contexts();
+    let target = "homeboy / Test";
+
+    for (name, conclusions) in [
+        ("skipped-success", &["skipped", "success"][..]),
+        ("failure-success", &["failure", "success"][..]),
+        ("cancelled-success", &["cancelled", "success"][..]),
+        ("duplicate-success", &["success", "success"][..]),
+    ] {
+        let scratch = Scratch::new(name);
+        let jobs = scratch.write(
+            "jobs.json",
+            &execution_jobs_with_duplicate(&contexts, target, conclusions),
+        );
+        let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+        let stdout = stdout_of(&output);
+
+        assert!(
+            output.status.success(),
+            "a successful executed instance must satisfy duplicate context {name}: {stdout}\n{}",
+            stderr_of(&output)
+        );
+        assert!(stdout.contains("required-gates-executed-status=executed"));
+        assert!(
+            stdout.contains("required-gates-executed-observations=")
+                && stdout.contains("\"state\":\"success\"")
+                && conclusions
+                    .iter()
+                    .all(|conclusion| stdout.contains(&format!("\"{conclusion}\""))),
+            "duplicate diagnostics must retain raw conclusions and the selected state: {stdout}"
+        );
+    }
 }
 
 /// The terminal job has no conclusion until this script exits. Its own required

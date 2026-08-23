@@ -159,24 +159,30 @@ read_run_jobs() {
 execution='unknown'
 not_executed=''
 not_passing=''
+head_sha="${GITHUB_SHA:-}"
 
 if read_run_jobs; then
   # A skipped matrix job is reported under its UNEXPANDED name (#12573 observed
   # `${{ matrix.title }}`), so `homeboy / Audit` is simply absent rather than
   # present-and-skipped. Absent is therefore `not-executed`, which is exactly
   # the verdict wanted: the context produced no measurement.
-  execution="$(jq -c --argjson required "${execution_contexts}" '
+  execution="$(jq -c --argjson required "${execution_contexts}" --arg head "${head_sha}" '
     . as $jobs
     | [ $required[]
         | . as $context
-        | ($jobs | map(select(.name == $context))) as $matches
+        | ($jobs | map(select(
+            .name == $context
+            and ($head == "" or (.head_sha // $head) == $head)
+          ))) as $matches
+        | ($matches | map(.conclusion // "in-progress") | unique | sort) as $observed
         | {
             context: $context,
+            head_sha: (if $head == "" then "run-scoped" else $head end),
+            observed: $observed,
             state: (
               if ($matches | length) == 0 then "not-executed"
-              elif ($matches | any(.conclusion != "success"))
-                then ($matches | map(.conclusion // "in-progress") | unique | join(","))
-              else "success"
+              elif ($matches | any(.conclusion == "success")) then "success"
+              else ($observed | join(","))
               end
             )
           }
@@ -215,6 +221,7 @@ fi
 # code — the same reason `validate-required-gates.sh` emits its enforcement basis
 # before its verdict.
 echo "::notice::required-gates-executed basis=needs-results+run-jobs run=${GITHUB_RUN_ID:-unknown} attempt=${GITHUB_RUN_ATTEMPT:-unknown} pr_state_active=${active} declared=${declared_count} executed=${executed_count} dependencies=${dependency_count} dependencies_skipped=${dependency_skipped} outcome=${outcome}"
+echo "required-gates-executed-observations=${execution}"
 
 closure_note=''
 if [ "${active}" = 'false' ]; then
