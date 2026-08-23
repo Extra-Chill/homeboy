@@ -868,6 +868,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 acceptance_policy: None,
                 repository_identity: None,
                 base_resolution: None,
+                prompt_snapshot: None,
             },
             Arc::new(ExtensionProviderAgentTaskExecutor::default()),
         )
@@ -1269,6 +1270,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 acceptance_policy: None,
                 repository_identity: None,
                 base_resolution: None,
+                prompt_snapshot: None,
             },
             executor.clone(),
             Some(Arc::new(MirroredAttemptDispatcher {

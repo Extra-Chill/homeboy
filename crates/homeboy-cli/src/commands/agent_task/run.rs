@@ -234,6 +234,7 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 }
 
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
+    snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request(&args)?;
@@ -249,6 +250,7 @@ pub(crate) fn preview_cook(
     mut args: AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
+    snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     // Authorization is a security boundary, not an unrelated task-input
     // validation, so preserve its precedence over backend guidance.
@@ -3779,6 +3781,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
+    snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -3870,6 +3873,15 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
+    }
+    if let Some(snapshot) = &args.prompt_snapshot {
+        for task in &mut initial_plan.tasks {
+            // The prompt is carried by `instructions`; metadata records the
+            // transport without duplicating private stdin content.
+            task.metadata["prompt_source"] = serde_json::json!(snapshot.source);
+        }
+        initial_plan.metadata["prompt_input"] = serde_json::to_value(snapshot)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     if args.require_acceptance {
         let authority = args.acceptance_authority.clone().ok_or_else(|| {
@@ -4109,6 +4121,34 @@ pub(super) fn resolve_dispatch_prompt(
     };
     let resolved = homeboy::agents::agent_task_prompts::read_prompt_input(spec)?;
     dispatch_args.prompt = Some(resolved);
+    Ok(())
+}
+
+/// Snapshot stdin at the Cook ingress boundary. Later compilation may happen in
+/// a detached child or retry a plan, neither of which owns the original stream.
+pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if args.prompt_snapshot.is_some() || args.dispatch.prompt.as_deref() != Some("-") {
+        return Ok(());
+    }
+
+    let content = homeboy::agents::agent_task_prompts::read_prompt_input("-")?;
+    if content.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook --prompt - received empty stdin",
+            None,
+            Some(vec!["Pipe a non-empty prompt, for example: homeboy agent-task cook --prompt - < task.md".to_string()]),
+        ));
+    }
+    args.prompt_snapshot = Some(super::args::CookPromptSnapshot {
+        source: "stdin".to_string(),
+        sha256: format!(
+            "sha256:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
+        ),
+        size_bytes: content.len(),
+    });
+    args.dispatch.prompt = Some(content);
     Ok(())
 }
 

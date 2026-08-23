@@ -1062,6 +1062,17 @@ pub struct AgentTaskCookArgs {
     /// Controller-resolved base provenance persisted with the Cook plan.
     #[arg(skip)]
     pub base_resolution: Option<serde_json::Value>,
+    /// Captured at CLI ingress when `--prompt -` is used. This survives route
+    /// handoff and plan compilation without asking a later phase to reread stdin.
+    #[arg(skip)]
+    pub prompt_snapshot: Option<CookPromptSnapshot>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct CookPromptSnapshot {
+    pub source: String,
+    pub sha256: String,
+    pub size_bytes: usize,
 }
 
 pub(crate) fn parse_provider_evidence_input(
