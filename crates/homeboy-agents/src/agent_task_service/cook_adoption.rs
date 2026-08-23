@@ -854,6 +854,20 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             }));
         }
     }
+    if feedback.status == AgentTaskCookLoopStatus::BaselineInconclusive {
+        let reason = "immutable baseline replay was inconclusive; repair the gate baseline setup or replay environment before retrying adoption";
+        lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.to_string()))?;
+        return Ok(cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "baseline_inconclusive",
+            disposition: CookDisposition::Terminal,
+            attempts: vec![attempt],
+            finalization: None,
+            stop_reason: Some(reason.to_string()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(record.run_id.as_str()),
+        }));
+    }
     if feedback.status != AgentTaskCookLoopStatus::GreenCompleted
         && !(feedback.status == AgentTaskCookLoopStatus::BaselineRed
             && options.gates.accept_inherited_failures

@@ -93,6 +93,10 @@ impl AgentTaskPromotionReport {
                 AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
                 AgentTaskGateStatus::AcceptedInheritedFailure => {
                     accept_inherited_failures
+                        && gate.failure_evidence.as_ref().is_some_and(|evidence| {
+                            evidence.classification
+                                == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
+                        })
                         && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
                             comparison.matches_candidate_failure
                                 && comparison.result

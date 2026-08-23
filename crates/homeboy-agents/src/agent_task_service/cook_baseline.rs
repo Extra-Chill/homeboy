@@ -806,7 +806,8 @@ pub(crate) fn git_output_with_env(
 mod tests {
     use super::*;
     use crate::agent_task_gate::{
-        AgentTaskGateEnvironment, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
+        AgentTaskGateEnvironment, AgentTaskGateFailureClassification, AgentTaskGateFailureEvidence,
+        AgentTaskGateRevealPolicy, AgentTaskGateStatus,
     };
     use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
@@ -921,5 +922,80 @@ mod tests {
                 crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
             );
         }
+    }
+
+    #[test]
+    fn differential_gate_comparison_accepts_an_identical_missing_monorepo_path() {
+        let temp = tempfile::tempdir().expect("repository");
+        git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+        git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+        git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
+        std::fs::write(temp.path().join("README"), "base\n").expect("base file");
+        git_output(temp.path(), &["add", "README"]).expect("add");
+        git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+        let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+
+        let command = "cd packages/missing-component && cargo test";
+        let candidate = std::process::Command::new("sh")
+            .args(["-lc", command])
+            .current_dir(temp.path())
+            .output()
+            .expect("run candidate gate");
+        assert!(!candidate.status.success());
+        let mut promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "source": {"kind": "aggregate", "task_id": "task"},
+            "to_worktree": "fixture",
+            "target": {"worktree": "fixture", "path": temp.path()},
+            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+            "deterministic_gates": [],
+            "operator_notification": {"status": "blocked", "message": "red"}
+        }))
+        .expect("promotion");
+        let stdout = String::from_utf8_lossy(&candidate.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&candidate.stderr).to_string();
+        let exit_code = candidate.status.code().unwrap_or(1);
+        let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
+            "monorepo-gate",
+            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+            exit_code,
+            &stdout,
+            &stderr,
+            None,
+            HomeboyGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+        gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+            classification: AgentTaskGateFailureClassification::CandidateCode,
+            summary: "monorepo gate failed from its requested path".to_string(),
+            command: command.to_string(),
+            exit_code,
+            stdout_tail: stdout,
+            stderr_tail: stderr,
+            agent_feedback: "Repair the candidate gate failure.".to_string(),
+            diagnostics: Vec::new(),
+        });
+        promotion.deterministic_gates.push(gate);
+
+        compare_gate_failures_to_verified_base(
+            &mut promotion,
+            temp.path(),
+            &base,
+            std::time::Duration::from_secs(1),
+            |_compared, _total| Ok(()),
+        )
+        .expect("baseline comparison");
+
+        let gate = &promotion.deterministic_gates[0];
+        assert_eq!(gate.status, AgentTaskGateStatus::AcceptedInheritedFailure);
+        assert_eq!(
+            gate.baseline_comparison
+                .as_ref()
+                .expect("comparison")
+                .result,
+            AgentTaskGateDifferentialResult::BaselineRed
+        );
     }
 }
