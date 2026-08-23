@@ -55,6 +55,16 @@ pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> O
     .map(PathBuf::from)
 }
 
+fn component_workspace_path(options: &AgentTaskCookServiceOptions) -> Option<PathBuf> {
+    let source = options.source_worktree_path.as_ref()?;
+    let component_cwd = options
+        .initial_plan
+        .metadata
+        .pointer("/gate_workspace/component_cwd")
+        .and_then(Value::as_str)?;
+    homeboy_core::resolve_contained_local_path(source, component_cwd, "component_cwd").ok()
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
@@ -117,7 +127,8 @@ pub(crate) fn promote_attempt_in_store(
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
+            source_worktree_path: component_workspace_path(options)
+                .or_else(|| options.source_worktree_path.clone()),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
             candidate_ref: None,
@@ -176,7 +187,8 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
-        source_worktree_path: options.source_worktree_path.clone(),
+        source_worktree_path: component_workspace_path(options)
+            .or_else(|| options.source_worktree_path.clone()),
         base_ref: Some(options.base.clone()),
         task_base_sha: options.task_base_sha.clone(),
         candidate_ref: None,
@@ -674,7 +686,8 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     source,
                     source_run_id: Some(run_id.to_string()),
                     source_path,
-                    source_worktree_path: options.source_worktree_path.clone(),
+                    source_worktree_path: component_workspace_path(options)
+                        .or_else(|| options.source_worktree_path.clone()),
                     base_ref: Some(options.base.clone()),
                     task_base_sha: options.task_base_sha.clone(),
                     candidate_ref: None,
@@ -1602,7 +1615,8 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             source,
             source_run_id: Some(recovery.run_id.clone()),
             source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
+            source_worktree_path: component_workspace_path(options)
+                .or_else(|| options.source_worktree_path.clone()),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
             candidate_ref: None,

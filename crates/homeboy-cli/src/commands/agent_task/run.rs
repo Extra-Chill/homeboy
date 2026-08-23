@@ -4360,19 +4360,33 @@ pub(crate) fn compile_cook_plan(
     if let Some(workspace) = requested_workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
-    let workspace = requested_workspace
+    let component_cwd = requested_workspace
         .as_deref()
         .map(|workspace| cook_component_workspace(args, Path::new(workspace)))
         .transpose()?
-        .map(|workspace| workspace.display().to_string());
+        .map(|workspace| {
+            workspace
+                .strip_prefix(
+                    requested_workspace
+                        .as_deref()
+                        .expect("component workspace has root"),
+                )
+                .map_err(|_| {
+                    homeboy::core::Error::internal_unexpected(
+                        "resolved component workspace escapes the Cook workspace".to_string(),
+                    )
+                })
+                .map(|path| path.display().to_string())
+        })
+        .transpose()?;
     let mut dispatch = dispatch_args_for_cook(args);
     resolve_dispatch_prompt(&mut dispatch)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
-    dispatch.workspace = workspace.clone();
+    dispatch.workspace = requested_workspace.clone();
     let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
-    let evidence = if let Some(workspace) = workspace.as_deref() {
+    let evidence = if let Some(workspace) = requested_workspace.as_deref() {
         project_admitted_provider_evidence_inputs(
             &args.provider_evidence_inputs,
             &admitted_evidence,
@@ -4386,7 +4400,7 @@ pub(crate) fn compile_cook_plan(
         &mut dispatch.prompt,
         &args.provider_evidence_inputs,
         &admitted_evidence,
-        workspace.as_deref(),
+        requested_workspace.as_deref(),
         &projected_paths,
     )?;
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
@@ -4408,12 +4422,13 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
-    if let (Some(requested), Some(effective)) =
-        (requested_workspace.as_deref(), workspace.as_deref())
+    if let (Some(requested), Some(component_cwd)) =
+        (requested_workspace.as_deref(), component_cwd.as_deref())
     {
         plan.metadata["gate_workspace"] = serde_json::json!({
             "requested_cwd": requested,
-            "effective_cwd": effective,
+            "effective_cwd": Path::new(requested).join(component_cwd),
+            "component_cwd": component_cwd,
             "component_id": args.dispatch.repo,
         });
     }
@@ -4436,6 +4451,12 @@ pub(crate) fn compile_cook_plan(
             )
         })?;
         task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
+        if let Some(component_cwd) = component_cwd.as_deref() {
+            if !task.executor.config.is_object() {
+                task.executor.config = serde_json::json!({});
+            }
+            task.executor.config["component_cwd"] = serde_json::json!(component_cwd);
+        }
     }
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
         .validate_explicit_models(&plan)?;
