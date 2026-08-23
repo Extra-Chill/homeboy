@@ -119,6 +119,12 @@ git -C "$SOURCE_WORK" commit --quiet -m 'compatible wp-codebox fixture'
 COMPATIBLE_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main
 
+printf '%s\n' 'final' > "${SOURCE_WORK}/fixture.txt"
+git -C "$SOURCE_WORK" add fixture.txt
+git -C "$SOURCE_WORK" commit --quiet -m 'final wp-codebox fixture'
+FINAL_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
+git -C "$SOURCE_WORK" push --quiet origin HEAD:main
+
 OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
@@ -204,6 +210,13 @@ COMPATIBLE_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | 
 grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-identity.json" || { echo "Successful exact-SHA update did not replace managed identity" >&2; exit 1; }
 [ -e "$INITIAL_RELEASE" ] || { echo "Successful update removed the release held by a pre-promotion reader" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" runtime descriptor --json | grep -q 'browser-contained-site-open' || { echo "Successful exact-SHA update left managed CLI unready" >&2; exit 1; }
+
+# A reader may still hold A after two later atomic promotions. Retaining only
+# the immediately previous release would reclaim A during this C promotion.
+PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$FINAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
+[ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$FINAL_SHA" ] || { echo "Final exact-SHA update did not replace managed HEAD" >&2; exit 1; }
+[ -e "$INITIAL_RELEASE" ] || { echo "A release was reclaimed after A-to-B-to-C promotion" >&2; exit 1; }
+"${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.21.0' || { echo "A reader could not execute after A-to-B-to-C promotion" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash

@@ -384,6 +384,7 @@ module.exports = {
   parseWpCodeboxJson,
   recipeEventName,
   runWpCodeboxRecipe,
+  canonicalWpCodeboxRuntime,
   wpCodeboxPluginStateStep,
   homeboySettings,
   wpCodeboxBin,

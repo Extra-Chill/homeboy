@@ -16,6 +16,12 @@ cat > "$FAKE_BIN" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
 case "$1" in
+    --version)
+        printf '0.21.0\n'
+        ;;
+    runtime)
+        printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+        ;;
     commands)
         printf 'doctor\ncleanup\n'
         ;;
@@ -73,6 +79,8 @@ cat > "$SETTINGS_BIN" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
 case "$1" in
+    --version) printf '0.21.0\n' ;;
+    runtime) printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}' ;;
     commands)
         printf 'doctor\ncleanup\n'
         ;;
@@ -105,6 +113,8 @@ cat > "$MANAGED_BIN" <<'NODE'
 const fs = require('node:fs');
 fs.appendFileSync(process.env.WP_CODEBOX_CALLS, `${process.argv.slice(2).join(' ')}\n`);
 switch (process.argv[2]) {
+  case '--version': console.log('0.21.0'); break;
+  case 'runtime': console.log(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); break;
   case 'commands': process.exit(0);
   case 'doctor': console.log('managed wp-codebox doctor'); break;
   default: process.exit(64);
@@ -140,6 +150,8 @@ cat > "$RUNTIME_BIN" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
 case "$1" in
+    --version) printf '0.21.0\n' ;;
+    runtime) printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}' ;;
     commands) exit 0 ;;
     doctor) printf 'runtime wp-codebox doctor\n' ;;
     *) exit 64 ;;

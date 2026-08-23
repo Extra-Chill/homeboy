@@ -55,6 +55,8 @@ try {
 	fs.writeFileSync(bin, [
 		'#!/usr/bin/env node',
 		"const fs = require('node:fs');",
+		"if (process.argv.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }",
+		"if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }",
 		`fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2) }, null, 2));`,
 		'process.stdout.write(JSON.stringify({ ok: true }));',
 		'',
@@ -73,6 +75,35 @@ try {
 	const cliResult = client.runPublicCliCommand(['run-fuzz-suite', '--help']);
 	assert.equal(cliResult.status, 0);
 	assert.deepEqual(JSON.parse(fs.readFileSync(capture, 'utf8')).argv, ['run-fuzz-suite', '--help']);
+
+	const stalePath = path.join(root, 'stale-path');
+	const staleBin = path.join(stalePath, 'wp-codebox');
+	const staleMarker = path.join(root, 'stale-path-ran');
+	fs.mkdirSync(stalePath);
+	fs.writeFileSync(staleBin, `#!/usr/bin/env node
+require('node:fs').writeFileSync(${JSON.stringify(staleMarker)}, 'ran');
+process.stdout.write('0.12.0');
+`);
+	fs.chmodSync(staleBin, 0o755);
+	const incompleteInstall = path.join(root, 'incomplete');
+	fs.mkdirSync(path.join(incompleteInstall, 'source'), { recursive: true });
+	assert.throws(
+		() => createCodeboxClient({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: incompleteInstall, PATH: `${stalePath}:${process.env.PATH}` } }).runPublicCliCommand(['run-fuzz-suite']),
+		/wp_codebox_managed_binary_missing/
+	);
+	assert.equal(fs.existsSync(staleMarker), false, 'an incomplete managed cache must not fall through to stale PATH');
+	assert.equal(
+		createCodeboxClient({ wp_codebox_bin: bin, env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: incompleteInstall, PATH: `${stalePath}:${process.env.PATH}` } }).runPublicCliCommand(['run-fuzz-suite']).status,
+		0,
+		'a configured pin wins over an incomplete managed cache'
+	);
+	const updatingInstall = path.join(root, 'updating');
+	fs.mkdirSync(path.join(updatingInstall, 'source.update-lock'), { recursive: true });
+	assert.throws(
+		() => createCodeboxClient({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: updatingInstall, PATH: `${stalePath}:${process.env.PATH}` } }).runPublicCliCommand(['run-fuzz-suite']),
+		/wp_codebox_managed_updating/
+	);
+	assert.equal(fs.existsSync(staleMarker), false, 'an update lock must not fall through to stale PATH');
 
 	const delegatedResult = createCodeboxClient({
 		wp_codebox_bin: bin,

@@ -5,14 +5,7 @@
  */
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
-
-function wpCodeboxCommand(wpCodeboxBin) {
-  return wpCodeboxBin.endsWith('.js') ? process.execPath : wpCodeboxBin;
-}
-
-function wpCodeboxCommandArgs(wpCodeboxBin, args) {
-  return wpCodeboxBin.endsWith('.js') ? [wpCodeboxBin, ...args] : args;
-}
+const { canonicalWpCodeboxRuntime } = require('./wp-codebox-recipe-helper');
 
 function addArg(args, name, value) {
   if (value !== undefined && value !== null && value !== '') {
@@ -76,13 +69,14 @@ function normalizeVisualCompareResult(parsed, artifactsDirectory) {
   };
 }
 
-function runWpCodeboxVisualCompare(options, wpCodeboxBin = 'wp-codebox') {
+function runWpCodeboxVisualCompare(options, wpCodeboxBin) {
   if (!options || !(options.artifactsDirectory || options.artifacts_directory)) {
     throw new Error('runWpCodeboxVisualCompare requires artifactsDirectory');
   }
   fs.mkdirSync(options.artifactsDirectory || options.artifacts_directory, { recursive: true });
   const args = visualCompareArgs(options);
-  const result = spawnSync(wpCodeboxCommand(wpCodeboxBin), wpCodeboxCommandArgs(wpCodeboxBin, args), {
+  const invocation = canonicalWpCodeboxRuntime(wpCodeboxBin ? { wp_codebox_bin: wpCodeboxBin } : {}).invocation;
+  const result = spawnSync(invocation.command, [...invocation.args, ...args], {
     encoding: 'utf8',
   });
   if (result.error) {

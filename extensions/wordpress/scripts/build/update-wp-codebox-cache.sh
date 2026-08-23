@@ -108,7 +108,6 @@ PARENT_DIR="$(dirname "$CACHE_DIR")"
 LOCK_DIR="${CACHE_DIR}.update-lock"
 CANDIDATE_DIR=""
 RELEASE_DIR=""
-PREVIOUS_RELEASE_DIR=""
 
 command -v git >/dev/null 2>&1 || fail "git is required to update WP Codebox cache"
 command -v "$NPM_BIN" >/dev/null 2>&1 || fail "npm executable not found on runner: $NPM_BIN"
@@ -166,22 +165,19 @@ CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
 printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CANDIDATE_DIR/.homeboy-runtime-identity.json" || fail "failed to record staged WP Codebox runtime identity"
 
 # The stable cache path is atomically replaced with a sibling symlink to an
-# immutable release. Retain the previous release: a reader can resolve it
-# before this rename and execute its CLI after the new release becomes active.
+# immutable release. Keep every verified release: a reader can resolve any
+# prior target before one or more promotions and execute it afterward.
 RELEASE_DIR="${CACHE_DIR}.releases/${SHA}.$$"
 mkdir -p "$(dirname "$RELEASE_DIR")" || fail "failed to create WP Codebox release directory"
 mv "$CANDIDATE_DIR" "$RELEASE_DIR" || fail "failed to stage immutable WP Codebox release"
 CANDIDATE_DIR=""
 NEXT_LINK="${CACHE_DIR}.next.$$"
 ln -s "$RELEASE_DIR" "$NEXT_LINK" || fail "failed to create WP Codebox cache pointer"
-if [ -L "$CACHE_DIR" ]; then
-    PREVIOUS_RELEASE_DIR="$(readlink "$CACHE_DIR" 2>/dev/null || true)"
-elif [ -e "$CACHE_DIR" ]; then
+if [ ! -L "$CACHE_DIR" ] && [ -e "$CACHE_DIR" ]; then
     # A legacy directory cannot be replaced by a symlink with rename(2). The
     # update lock makes this one-time migration fail closed for new readers.
     LEGACY_BACKUP="${CACHE_DIR}.legacy.$$"
     mv "$CACHE_DIR" "$LEGACY_BACKUP" || fail "failed to preserve legacy WP Codebox cache"
-    PREVIOUS_RELEASE_DIR="$LEGACY_BACKUP"
 fi
 # Test seam: pause after the reader can resolve the old immutable release and
 # immediately before the atomic replacement below.
@@ -192,14 +188,10 @@ fi
 # `mv` follows a destination symlink-to-directory on some platforms. Node's
 # rename maps directly to rename(2), replacing the symlink entry itself.
 node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$NEXT_LINK" "$CACHE_DIR" || fail "failed to promote WP Codebox cache pointer"
-# Cleanup runs while holding the writer lock, but deliberately excludes the
-# just-superseded release so a resolved reader retains a usable immutable path.
-for stale_release in "${CACHE_DIR}.releases"/*; do
-    [ -d "$stale_release" ] || continue
-    [ "$stale_release" = "$RELEASE_DIR" ] && continue
-    [ "$stale_release" = "$PREVIOUS_RELEASE_DIR" ] && continue
-    rm -rf "$stale_release"
-done
+# Release reclamation is deliberately deferred. A safe cleanup mechanism needs
+# reader leases (or equivalent reclamation) before it can remove immutable
+# targets that a process may have resolved before later promotions. Operators
+# may clean verified releases only with a reader-safe retention procedure.
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
 }

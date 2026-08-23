@@ -12,6 +12,7 @@ const path = require('node:path');
  * Internal dependencies
  */
 const resolver = require('./wp-codebox-resolver');
+const { canonicalWpCodeboxRuntime } = require('./wp-codebox-recipe-helper');
 
 const DEFAULT_PUBLIC_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 
@@ -46,7 +47,10 @@ class CodeboxClient {
 			return normalizeCliResult(merged.runCli({ command: this.publicCliBin(merged), args, stdin: merged.stdin }, merged));
 		}
 
-		const invocation = this.publicCliInvocation(merged);
+		const invocation = canonicalWpCodeboxRuntime({
+			...merged,
+			wp_codebox_bin: merged.wp_codebox_bin || merged.wpCodeboxBin,
+		}).invocation;
 		const result = spawnSync(invocation.command, [...invocation.args, ...args], {
 			input: merged.stdin,
 			encoding: 'utf8',

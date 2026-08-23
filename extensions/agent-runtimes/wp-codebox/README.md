@@ -20,6 +20,11 @@ Managed setup records the source Git revision and SHA-256 of the built CLI in
 `.homeboy-runtime-identity.json`. Readiness verifies both values, so rebuilding
 or modifying the executable requires setup to record a fresh identity.
 
+Managed cache promotion atomically replaces the stable `source` symlink with a
+verified immutable release. Releases are retained during updates because a
+reader may have resolved an older target before later promotions. Cleanup is a
+deferred operator concern until a reader-safe lease or reclamation design exists.
+
 `wp-codebox.json` is the declarative source for executor defaults that callers may
 override through the provider contract or task conversion options:
 

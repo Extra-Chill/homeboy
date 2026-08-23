@@ -28,6 +28,8 @@ function writeFakeWpCodebox(filePath, output) {
   fs.writeFileSync(filePath, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 fs.writeFileSync(process.env.FAKE_WP_CODEBOX_ARGS_PATH, JSON.stringify(args));
 if (args[0] !== 'artifacts' || args[1] !== 'browser-metrics' || !args.includes('--json')) {
   console.error('unexpected wp-codebox args: ' + JSON.stringify(args));

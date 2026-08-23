@@ -42,4 +42,5 @@ fi
 
 WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")"
 homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
+homeboy_wp_codebox_preflight_command
 exec "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "$MODE" "$@"
