@@ -77,7 +77,7 @@ fn test_patch_appends_when_no_anchor() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    let out = run_pipeline(&rig, "up", true).expect("pipeline");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 
     let body = fs::read_to_string(&file).expect("read");
@@ -104,7 +104,7 @@ fn test_patch_idempotent_when_marker_present() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    run_pipeline(&rig, "up", true).expect("pipeline");
+    run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
 
     let after = fs::read_to_string(&file).expect("read after");
     assert_eq!(before, after, "second apply should be a no-op");
@@ -128,7 +128,7 @@ fn test_patch_inserts_after_anchor() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    run_pipeline(&rig, "up", true).expect("pipeline");
+    run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
 
     let body = fs::read_to_string(&file).expect("read");
     // Patch goes on the line after the anchor, so the anchor's line
@@ -154,7 +154,8 @@ fn test_patch_fails_when_anchor_missing() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
     assert!(!out.is_success(), "missing anchor must fail");
     let err = out.steps[0].error.as_deref().unwrap_or("");
     assert!(err.contains("anchor"), "error must mention anchor: {}", err);
@@ -179,7 +180,8 @@ fn test_patch_rejects_content_missing_marker() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
     assert!(!out.is_success(), "must reject re-apply-forever shape");
 }
 
@@ -201,7 +203,7 @@ fn test_patch_verify_passes_when_marker_present() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    let out = run_pipeline(&rig, "up", true).expect("pipeline");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
     assert!(out.is_success());
 }
 
@@ -224,7 +226,8 @@ fn test_patch_verify_fails_when_marker_absent_and_does_not_mutate() {
         label: None,
     };
     let rig = rig_with_patch(&tmp.path().to_string_lossy(), step);
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
     assert!(!out.is_success());
 
     let after = fs::read_to_string(&file).expect("read after");

@@ -8,7 +8,6 @@ use std::fs;
 
 use crate::pipeline::{cleanup_shared_paths, run_pipeline};
 use crate::spec::{PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
-use crate::state::RigState;
 use homeboy_core::test_support::with_isolated_home;
 
 fn rig_with_shared_path(id: &str, shared: SharedPathSpec, op: SharedPathOp) -> RigSpec {
@@ -71,12 +70,15 @@ fn test_shared_path_ensure_creates_missing_symlink_and_records_state() {
             shared(&link, &target),
             SharedPathOp::Ensure,
         );
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
         assert!(link.is_symlink(), "missing path becomes symlink");
         assert_eq!(fs::read_link(&link).expect("read link"), target);
 
-        let state = RigState::load(&rig.id).expect("state");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state");
         let key = link.to_string_lossy().into_owned();
         assert_eq!(
             state.shared_paths.get(&key).unwrap().target,
@@ -96,12 +98,15 @@ fn test_shared_path_ensure_leaves_existing_local_directory_unowned() {
 
         let rig =
             rig_with_shared_path("shared-local", shared(&link, &target), SharedPathOp::Ensure);
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(out.is_success(), "existing local directory should pass");
         assert!(link.is_dir());
         assert!(!link.is_symlink());
 
-        let state = RigState::load(&rig.id).expect("state");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state");
         assert!(
             state.shared_paths.is_empty(),
             "local deps are not rig-owned"
@@ -143,20 +148,23 @@ fn test_shared_path_symlink_ownership_cases() {
             }
 
             let rig = rig_with_shared_path(id, shared(&link, &target), SharedPathOp::Ensure);
-            let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+            let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+                .expect("pipeline runs");
 
             match case {
                 Case::OwnedCleanup => {
                     assert!(out.is_success(), "outcomes: {:?}", out.steps);
                     assert!(link.is_symlink());
-                    cleanup_shared_paths(&rig).expect("cleanup");
+                    cleanup_shared_paths(&crate::state::test_state_store(), &rig).expect("cleanup");
                     assert!(!link.exists(), "owned symlink removed");
-                    let state = RigState::load(&rig.id).expect("state");
+                    let state = crate::state::test_state_store()
+                        .load(&rig.id)
+                        .expect("state");
                     assert!(state.shared_paths.is_empty(), "ownership marker cleared");
                 }
                 Case::UnownedMatchingCleanup => {
                     assert!(out.is_success(), "existing matching symlink should pass");
-                    cleanup_shared_paths(&rig).expect("cleanup");
+                    cleanup_shared_paths(&crate::state::test_state_store(), &rig).expect("cleanup");
                     assert!(link.is_symlink(), "unowned symlink is left alone");
                 }
                 Case::WrongTargetRefused => {
@@ -181,7 +189,8 @@ fn test_shared_path_ensure_rejects_broken_matching_symlink() {
             shared(&link, &target),
             SharedPathOp::Ensure,
         );
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline runs");
         assert!(!out.is_success(), "broken dependency symlink should fail");
         assert!(link.is_symlink(), "ensure must not remove broken symlink");
     });
@@ -202,7 +211,8 @@ fn test_shared_path_verify_accepts_local_directory_and_rejects_missing() {
             shared(&local, &target),
             SharedPathOp::Verify,
         );
-        let local_out = run_pipeline(&local_rig, "up", true).expect("local verify");
+        let local_out = run_pipeline(&crate::state::test_state_store(), &local_rig, "up", true)
+            .expect("local verify");
         assert!(local_out.is_success(), "local deps satisfy verify");
 
         let missing_rig = rig_with_shared_path(
@@ -210,7 +220,8 @@ fn test_shared_path_verify_accepts_local_directory_and_rejects_missing() {
             shared(&missing, &target),
             SharedPathOp::Verify,
         );
-        let missing_out = run_pipeline(&missing_rig, "up", true).expect("missing verify");
+        let missing_out = run_pipeline(&crate::state::test_state_store(), &missing_rig, "up", true)
+            .expect("missing verify");
         assert!(!missing_out.is_success(), "missing deps should fail verify");
     });
 }

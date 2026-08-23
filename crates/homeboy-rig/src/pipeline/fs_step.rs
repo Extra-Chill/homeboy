@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use super::super::expand::expand_vars;
 use super::super::spec::{RigSpec, SharedPathOp, SharedPathSpec, SymlinkOp, SymlinkSpec};
+use super::super::state::RigStateStore;
 use super::super::state::{now_rfc3339, RigState, SharedPathState};
 use homeboy_core::error::{Error, Result};
 
-pub(super) fn cleanup_shared_paths(rig: &RigSpec) -> Result<()> {
-    run_shared_path_step(rig, SharedPathOp::Cleanup)
+pub(super) fn cleanup_shared_paths(state_store: &RigStateStore, rig: &RigSpec) -> Result<()> {
+    run_shared_path_step(state_store, rig, SharedPathOp::Cleanup)
 }
 
 pub(super) fn run_symlink_step(rig: &RigSpec, op: SymlinkOp) -> Result<()> {
@@ -111,7 +112,11 @@ fn verify_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn run_shared_path_step(rig: &RigSpec, op: SharedPathOp) -> Result<()> {
+pub(super) fn run_shared_path_step(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+    op: SharedPathOp,
+) -> Result<()> {
     if rig.shared_paths.is_empty() {
         return Ok(());
     }
@@ -123,7 +128,7 @@ pub(super) fn run_shared_path_step(rig: &RigSpec, op: SharedPathOp) -> Result<()
         return Ok(());
     }
 
-    let mut state = RigState::load(&rig.id)?;
+    let mut state = state_store.load(&rig.id)?;
     let mut state_changed = false;
 
     for shared in &rig.shared_paths {
@@ -139,7 +144,7 @@ pub(super) fn run_shared_path_step(rig: &RigSpec, op: SharedPathOp) -> Result<()
     }
 
     if state_changed {
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
     }
     Ok(())
 }
@@ -363,12 +368,15 @@ pub(crate) struct SharedPathRepair {
 /// `SharedPathOp::Cleanup`: only links this rig created and still owns are
 /// removed, real files and directories are never touched, and a symlink owned
 /// by something else is reported rather than replaced.
-pub(crate) fn repair_shared_paths(rig: &RigSpec) -> Result<Vec<SharedPathRepair>> {
+pub(crate) fn repair_shared_paths(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+) -> Result<Vec<SharedPathRepair>> {
     if rig.shared_paths.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut state = RigState::load(&rig.id)?;
+    let mut state = state_store.load(&rig.id)?;
     let mut state_changed = false;
     let mut repairs = Vec::with_capacity(rig.shared_paths.len());
 
@@ -382,7 +390,7 @@ pub(crate) fn repair_shared_paths(rig: &RigSpec) -> Result<Vec<SharedPathRepair>
     }
 
     if state_changed {
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
     }
     Ok(repairs)
 }

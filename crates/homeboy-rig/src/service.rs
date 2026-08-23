@@ -18,6 +18,7 @@
 //! returns `RigServiceFailed` so the crate still builds everywhere.
 
 use super::spec::{DiscoverSpec, RigSpec};
+use super::state::RigStateStore;
 use homeboy_core::error::Result;
 
 /// Size at which a supervised service log is rotated.
@@ -134,23 +135,31 @@ pub struct DiscoveredProcess {
 /// Start a service if it isn't already running. Idempotent.
 ///
 /// Returns the PID of the running (or newly started) process.
-pub fn start(rig: &RigSpec, service_id: &str) -> Result<u32> {
-    platform::start(rig, service_id)
+pub fn start(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
+    platform::start(state_store, rig, service_id)
 }
 
 /// Stop a running service. Idempotent — if not running, returns immediately.
-pub fn stop(rig: &RigSpec, service_id: &str) -> Result<()> {
-    platform::stop(rig, service_id)
+pub fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
+    platform::stop(state_store, rig, service_id)
 }
 
 /// Report current service status, cross-referencing rig state with live PID.
-pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
-    platform::status(rig_id, service_id)
+pub fn status(
+    state_store: &RigStateStore,
+    rig_id: &str,
+    service_id: &str,
+) -> Result<ServiceStatus> {
+    platform::status(state_store, rig_id, service_id)
 }
 
 /// Log file path for a supervised service.
-pub fn log_path(rig_id: &str, service_id: &str) -> Result<std::path::PathBuf> {
-    platform::log_file_path(rig_id, service_id)
+pub fn log_path(
+    state_store: &RigStateStore,
+    rig_id: &str,
+    service_id: &str,
+) -> Result<std::path::PathBuf> {
+    Ok(state_store.log_file(rig_id, service_id))
 }
 
 /// Find the newest process whose command line contains `pattern`.
@@ -200,12 +209,11 @@ mod platform {
 
     use super::super::expand::expand_vars;
     use super::super::spec::{RigSpec, ServiceKind, ServiceSpec};
-    use super::super::state::{now_rfc3339, ServiceState};
+    use super::super::state::{now_rfc3339, RigStateStore, ServiceState};
     use super::ServiceStatus;
     use homeboy_core::error::{Error, Result};
-    use homeboy_core::paths;
 
-    pub fn start(rig: &RigSpec, service_id: &str) -> Result<u32> {
+    pub fn start(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
         let spec = rig.services.get(service_id).ok_or_else(|| {
             Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
         })?;
@@ -223,7 +231,7 @@ mod platform {
         }
 
         // Idempotency: if we have a PID and it's live, no-op.
-        let mut state = super::super::state::RigState::load(&rig.id)?;
+        let mut state = state_store.load(&rig.id)?;
         if let Some(svc_state) = state.services.get(service_id) {
             if let Some(pid) = svc_state.pid {
                 if pid_alive(pid) {
@@ -234,7 +242,7 @@ mod platform {
 
         let (program, args) = build_command(rig, service_id, spec)?;
         let cwd = resolve_cwd(rig, spec)?;
-        let log_path = log_file_for(&rig.id, service_id)?;
+        let log_path = log_file_for(state_store, &rig.id, service_id)?;
         let log_file = open_log(&log_path)?;
         let err_file = log_file
             .try_clone()
@@ -284,16 +292,16 @@ mod platform {
                 status: "running".to_string(),
             },
         );
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
 
         Ok(pid)
     }
 
-    pub fn stop(rig: &RigSpec, service_id: &str) -> Result<()> {
+    pub fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
         let spec = rig.services.get(service_id).ok_or_else(|| {
             Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
         })?;
-        let mut state = super::super::state::RigState::load(&rig.id)?;
+        let mut state = state_store.load(&rig.id)?;
 
         // For external services, the PID isn't in rig state — we discover it
         // via the configured pattern. No discovery hit ⇒ nothing to stop;
@@ -320,7 +328,7 @@ mod platform {
 
         if !pid_alive(pid) {
             state.services.remove(service_id);
-            state.save(&rig.id)?;
+            state_store.save(&rig.id, &state)?;
             return Ok(());
         }
 
@@ -346,12 +354,16 @@ mod platform {
         }
 
         state.services.remove(service_id);
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
         Ok(())
     }
 
-    pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
-        let state = super::super::state::RigState::load(rig_id)?;
+    pub fn status(
+        state_store: &RigStateStore,
+        rig_id: &str,
+        service_id: &str,
+    ) -> Result<ServiceStatus> {
+        let state = state_store.load(rig_id)?;
         let pid = match state.services.get(service_id).and_then(|s| s.pid) {
             Some(pid) => pid,
             None => return Ok(ServiceStatus::Stopped),
@@ -434,12 +446,20 @@ mod platform {
         }
     }
 
-    pub(super) fn log_file_path(rig_id: &str, service_id: &str) -> Result<PathBuf> {
-        Ok(paths::rig_logs_dir(rig_id)?.join(format!("{}.log", service_id)))
+    pub(super) fn log_file_path(
+        state_store: &RigStateStore,
+        rig_id: &str,
+        service_id: &str,
+    ) -> Result<PathBuf> {
+        Ok(state_store.log_file(rig_id, service_id))
     }
 
-    fn log_file_for(rig_id: &str, service_id: &str) -> Result<PathBuf> {
-        let dir = paths::rig_logs_dir(rig_id)?;
+    fn log_file_for(
+        state_store: &RigStateStore,
+        rig_id: &str,
+        service_id: &str,
+    ) -> Result<PathBuf> {
+        let dir = state_store.logs_dir(rig_id);
         std::fs::create_dir_all(&dir).map_err(|e| {
             Error::internal_unexpected(format!(
                 "Failed to create logs dir {}: {}",
@@ -447,7 +467,7 @@ mod platform {
                 e
             ))
         })?;
-        log_file_path(rig_id, service_id)
+        log_file_path(state_store, rig_id, service_id)
     }
 
     fn open_log(path: &PathBuf) -> Result<File> {
@@ -647,24 +667,33 @@ mod platform {
     //! `RigServiceFailed` with the same message so callers get a clear
     //! reason instead of a compile error.
     use super::super::spec::RigSpec;
+    use super::super::state::RigStateStore;
     use super::ServiceStatus;
     use homeboy_core::error::{Error, Result};
 
     const UNSUPPORTED: &str = "rig services are not supported on this platform (Unix only)";
 
-    pub fn start(rig: &RigSpec, service_id: &str) -> Result<u32> {
+    pub fn start(_state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
         Err(Error::rig_service_failed(&rig.id, service_id, UNSUPPORTED))
     }
 
-    pub fn stop(rig: &RigSpec, service_id: &str) -> Result<()> {
+    pub fn stop(_state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
         Err(Error::rig_service_failed(&rig.id, service_id, UNSUPPORTED))
     }
 
-    pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
+    pub fn status(
+        _state_store: &RigStateStore,
+        rig_id: &str,
+        service_id: &str,
+    ) -> Result<ServiceStatus> {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
     }
 
-    pub fn log_file_path(rig_id: &str, service_id: &str) -> Result<std::path::PathBuf> {
+    pub fn log_file_path(
+        _state_store: &RigStateStore,
+        rig_id: &str,
+        service_id: &str,
+    ) -> Result<std::path::PathBuf> {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
     }
 

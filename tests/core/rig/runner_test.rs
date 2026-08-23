@@ -193,7 +193,9 @@ fn test_run_up() {
         assert_eq!(report.pipeline.passed, 0);
         assert_eq!(report.pipeline.failed, 0);
 
-        let state = RigState::load(&rig.id).expect("state loads");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state loads");
         let materialized = state.materialized.expect("materialized ownership");
         assert_eq!(materialized.rig_id, "run-up-fixture");
         assert_eq!(materialized.resources.exclusive, vec!["run-up-exclusive"]);
@@ -230,7 +232,9 @@ fn test_failed_run_up_does_not_write_materialized_ownership() {
         let report = run_up(&rig).expect("run_up returns a failed report");
         assert!(!report.success, "failing step should fail up");
 
-        let state = RigState::load(&rig.id).expect("state loads");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state loads");
         assert!(
             state.materialized.is_none(),
             "failed up must not persist materialized ownership"
@@ -430,7 +434,8 @@ fn test_run_down() {
         let rig = minimal_spec("run-down-fixture");
         run_up(&rig).expect("seed materialized ownership");
         assert!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state loads")
                 .materialized
                 .is_some(),
@@ -449,7 +454,8 @@ fn test_run_down() {
         );
         assert!(report.success, "empty teardown is trivially successful");
         assert!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state loads")
                 .materialized
                 .is_none(),
@@ -705,7 +711,9 @@ fn test_run_repair_creates_missing_shared_path() {
         assert_eq!(std::fs::read_link(&link).expect("read link"), target);
 
         // Ownership is recorded, so `down` / a later repair can clean it up.
-        let state = RigState::load("repair-missing-shared-path-fixture").expect("state");
+        let state = crate::state::test_state_store()
+            .load("repair-missing-shared-path-fixture")
+            .expect("state");
         assert!(state
             .shared_paths
             .contains_key(link.to_string_lossy().as_ref()));
@@ -788,7 +796,9 @@ fn test_run_repair_removes_rig_owned_dangling_shared_path() {
         assert_eq!(resource(&report, "shared_path").status, "repaired");
         assert!(!link.is_symlink(), "dangling rig-owned link is removed");
 
-        let state = RigState::load("repair-dangling-shared-path-fixture").expect("state");
+        let state = crate::state::test_state_store()
+            .load("repair-dangling-shared-path-fixture")
+            .expect("state");
         assert!(state.shared_paths.is_empty(), "ownership record is dropped");
     });
 }
@@ -886,7 +896,9 @@ fn test_run_repair_clears_stale_service_state() {
                 status: "running".to_string(),
             },
         );
-        state.save("repair-stale-service-fixture").expect("state");
+        crate::state::test_state_store()
+            .save("repair-stale-service-fixture", &state)
+            .expect("state");
 
         let report = run_repair(&rig).expect("repair succeeds");
 
@@ -897,7 +909,9 @@ fn test_run_repair_clears_stale_service_state() {
         assert_eq!(service.path, "web");
         assert_eq!(service.previous_target.as_deref(), Some("4294967295"));
 
-        let state = RigState::load("repair-stale-service-fixture").expect("state");
+        let state = crate::state::test_state_store()
+            .load("repair-stale-service-fixture")
+            .expect("state");
         assert!(
             !state.services.contains_key("web"),
             "stale service record is cleared"
@@ -923,7 +937,9 @@ fn test_run_repair_does_not_start_stopped_services() {
             .unwrap_or_default()
             .contains("does not start services"));
 
-        let state = RigState::load("repair-stopped-service-fixture").expect("state");
+        let state = crate::state::test_state_store()
+            .load("repair-stopped-service-fixture")
+            .expect("state");
         assert!(state.services.is_empty(), "repair started nothing");
     });
 }
@@ -1053,7 +1069,8 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             toolchain: None,
         };
 
-        let up = crate::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
+        let up = crate::pipeline::run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("up pipeline");
         assert!(up.is_success());
         assert!(link.is_symlink());
 
@@ -1889,7 +1906,9 @@ fn lifecycle_snapshot_rig(id: &str, step_id: Option<&str>) -> RigSpec {
 }
 
 fn record_snapshot(rig_id: &str, snapshot_id: &str, step: &str) {
-    let mut state = RigState::load(rig_id).expect("state");
+    let mut state = crate::state::test_state_store()
+        .load(rig_id)
+        .expect("state");
     state.lifecycle_snapshots.insert(
         snapshot_id.to_string(),
         LifecycleSnapshotState {
@@ -1909,7 +1928,9 @@ fn record_snapshot(rig_id: &str, snapshot_id: &str, step: &str) {
             },
         },
     );
-    state.save(rig_id).expect("save state");
+    crate::state::test_state_store()
+        .save(rig_id, &state)
+        .expect("save state");
 }
 
 #[test]
@@ -1943,7 +1964,8 @@ fn test_run_repair_reports_owned_lifecycle_snapshot_as_skipped() {
 
         // Report-only: the record survives.
         assert_eq!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state")
                 .lifecycle_snapshots
                 .len(),
@@ -1975,7 +1997,8 @@ fn test_run_repair_blocks_on_orphaned_lifecycle_snapshot() {
             .contains("orphaned lifecycle snapshot"));
 
         assert_eq!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state")
                 .lifecycle_snapshots
                 .len(),

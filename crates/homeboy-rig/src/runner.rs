@@ -32,7 +32,7 @@ use super::spec::{
     RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS,
 };
 use super::state::{
-    now_rfc3339, ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot,
+    now_rfc3339, ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot, RigStateStore,
 };
 use homeboy_core::engine::command::run_in_optional;
 use homeboy_core::error::{Error, Result};
@@ -207,13 +207,14 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     // acquired from, which only holds if it is handed this root.
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let _lease = acquire_active_run_lease(roots.config(), rig, "up")?;
+    let state_store = RigStateStore::in_roots(&roots);
     let observer = RigRunObserver::start(rig, "up", &roots);
 
     let execute = || {
-        let outcome = run_pipeline(rig, "up", true)?;
+        let outcome = run_pipeline(&state_store, rig, "up", true)?;
 
         if outcome.is_success() {
-            let mut state = RigState::load(&rig.id)?;
+            let mut state = state_store.load(&rig.id)?;
             let materialized_at = now_rfc3339();
             let snapshot = snapshot_state(rig);
             state.last_up = Some(materialized_at.clone());
@@ -223,7 +224,7 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
                 resources: expand_resources(rig),
                 components: snapshot.components,
             });
-            state.save(&rig.id)?;
+            state_store.save(&rig.id, &state)?;
         }
 
         Ok(UpReport {
@@ -266,19 +267,21 @@ pub fn run_check_with_settings(
 ) -> Result<CheckReport> {
     preflight_effective_component_checkouts(rig)?;
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
     let observer = RigRunObserver::start(rig, "check", &roots);
 
     let execute = || {
         let requirements = evaluate_requirements(rig);
         let package_lint = run_package_lint(rig)?;
-        let check_outcome = run_pipeline_with_settings(rig, "check", false, settings)?;
+        let check_outcome =
+            run_pipeline_with_settings(&state_store, rig, "check", false, settings)?;
         let outcome = merge_check_outcomes(vec![requirements, package_lint, check_outcome]);
 
-        let mut state = RigState::load(&rig.id)?;
+        let mut state = state_store.load(&rig.id)?;
         state.last_check = Some(now_rfc3339());
         state.last_check_result =
             Some(if outcome.is_success() { "pass" } else { "fail" }.to_string());
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
 
         Ok(CheckReport {
             rig_id: rig.id.clone(),
@@ -367,7 +370,10 @@ pub fn run_check_groups_with_settings(
     settings: &[(String, String)],
 ) -> Result<CheckReport> {
     preflight_effective_component_checkouts(rig)?;
-    let outcome = run_pipeline_check_groups(rig, groups, false, settings)?;
+    // Boundary: one grouped rig check is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
+    let outcome = run_pipeline_check_groups(&state_store, rig, groups, false, settings)?;
 
     Ok(CheckReport {
         rig_id: rig.id.clone(),
@@ -387,6 +393,9 @@ pub fn run_bench_prepare(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> Result<Option<BenchPrepareReport>> {
+    // Boundary: one bench prepare is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
     let prepare_requirements = run_prepare_requirement_steps(rig, "bench_prepare", settings)?;
     if !rig.pipeline.contains_key("bench_prepare") && prepare_requirements.steps.is_empty() {
         return Ok(None);
@@ -394,7 +403,7 @@ pub fn run_bench_prepare(
 
     let pipeline_outcome =
         if prepare_requirements.is_success() && rig.pipeline.contains_key("bench_prepare") {
-            run_pipeline_with_settings(rig, "bench_prepare", true, settings)?
+            run_pipeline_with_settings(&state_store, rig, "bench_prepare", true, settings)?
         } else {
             PipelineOutcome {
                 name: "bench_prepare".to_string(),
@@ -425,6 +434,9 @@ pub fn run_fuzz_prepare(
     {
         return Ok(None);
     }
+    // Boundary: one fuzz prepare is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
 
     // Dependency-cache evidence must belong to a real, completed run rather
     // than depending on a caller to have installed a rig observer.
@@ -435,7 +447,7 @@ pub fn run_fuzz_prepare(
             run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
         let pipeline_outcome =
             if dependency_outcome.is_success() && rig.pipeline.contains_key("fuzz_prepare") {
-                run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?
+                run_pipeline_with_settings(&state_store, rig, "fuzz_prepare", true, settings)?
             } else {
                 PipelineOutcome {
                     name: "fuzz_prepare".to_string(),
@@ -691,6 +703,7 @@ pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
 pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> Result<DownReport> {
     // Boundary: one rig teardown is one unit of work (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
     let _lease = super::lease::acquire_active_run_lease_with_settings(
         roots.config(),
         rig,
@@ -698,24 +711,30 @@ pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> R
         settings,
     )?;
     let pipeline = if rig.pipeline.contains_key("down") {
-        Some(run_pipeline_with_settings(rig, "down", false, settings)?)
+        Some(run_pipeline_with_settings(
+            &state_store,
+            rig,
+            "down",
+            false,
+            settings,
+        )?)
     } else {
         None
     };
 
-    cleanup_shared_paths(rig)?;
+    cleanup_shared_paths(&state_store, rig)?;
 
     let mut stopped = Vec::new();
     for service_id in rig.services.keys() {
-        service::stop(rig, service_id)?;
+        service::stop(&state_store, rig, service_id)?;
         stopped.push(service_id.clone());
     }
     stopped.sort();
 
     let success = pipeline.as_ref().is_none_or(|p| p.is_success());
-    let mut state = RigState::load(&rig.id)?;
+    let mut state = state_store.load(&rig.id)?;
     state.materialized = None;
-    state.save(&rig.id)?;
+    state_store.save(&rig.id, &state)?;
 
     Ok(DownReport {
         rig_id: rig.id.clone(),
@@ -754,15 +773,16 @@ pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
     // Boundary: one rig repair is one unit of work (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let _lease = acquire_active_run_lease(roots.config(), rig, "repair")?;
+    let state_store = RigStateStore::in_roots(&roots);
     let mut resources = Vec::new();
 
     for link in &rig.symlinks {
         resources.push(repair_symlink(rig, link)?);
     }
-    resources.extend(repair_rig_shared_paths(rig)?);
-    resources.extend(repair_services(rig)?);
+    resources.extend(repair_rig_shared_paths(&state_store, rig)?);
+    resources.extend(repair_services(&state_store, rig)?);
     resources.extend(report_declared_resources(rig));
-    resources.extend(report_lifecycle_snapshots(rig)?);
+    resources.extend(report_lifecycle_snapshots(&state_store, rig)?);
 
     let mut repaired = 0;
     let mut unchanged = 0;
@@ -790,8 +810,11 @@ pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
 }
 
 /// Repair declared shared paths through the shared-path ops.
-fn repair_rig_shared_paths(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
-    Ok(repair_shared_paths(rig)?
+fn repair_rig_shared_paths(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+) -> Result<Vec<RepairResourceReport>> {
+    Ok(repair_shared_paths(state_store, rig)?
         .into_iter()
         .map(|repair: SharedPathRepair| RepairResourceReport {
             kind: "shared_path".to_string(),
@@ -816,7 +839,10 @@ fn repair_rig_shared_paths(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
 /// process is gone, and the record is drift. Running services are left alone,
 /// stopped services are reported (starting them is `up`'s job), and adopted
 /// `external` services are never signalled — this rig does not own them.
-fn repair_services(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
+fn repair_services(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+) -> Result<Vec<RepairResourceReport>> {
     let mut service_ids = rig.services.keys().cloned().collect::<Vec<_>>();
     service_ids.sort();
 
@@ -834,7 +860,7 @@ fn repair_services(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
             continue;
         }
 
-        match service::status(&rig.id, &service_id)? {
+        match service::status(state_store, &rig.id, &service_id)? {
             ServiceStatus::Running(pid) => reports.push(service_resource(
                 &service_id,
                 REPAIR_STATUS_UNCHANGED,
@@ -844,7 +870,7 @@ fn repair_services(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
             )),
             ServiceStatus::Stale(pid) => {
                 // `stop` on a dead PID only drops the stale state record.
-                service::stop(rig, &service_id)?;
+                service::stop(state_store, rig, &service_id)?;
                 reports.push(service_resource(
                     &service_id,
                     REPAIR_STATUS_REPAIRED,
@@ -954,8 +980,11 @@ fn report_declared_resources(rig: &RigSpec) -> Vec<RepairResourceReport> {
 ///   command that reaps it
 /// - a handle no declared step owns any more is `blocked` — the rig captured an
 ///   environment and then lost the step that could tear it down
-fn report_lifecycle_snapshots(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
-    let snapshots = RigState::load(&rig.id)?.lifecycle_snapshots;
+fn report_lifecycle_snapshots(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+) -> Result<Vec<RepairResourceReport>> {
+    let snapshots = state_store.load(&rig.id)?.lifecycle_snapshots;
     if snapshots.is_empty() {
         return Ok(Vec::new());
     }
@@ -1150,18 +1179,21 @@ fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
 
 /// Summarize current rig state (no mutations).
 pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
-    let state = RigState::load(&rig.id)?;
+    // Boundary: one rig status report is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
+    let state = state_store.load(&rig.id)?;
     let mut services = Vec::with_capacity(rig.services.len());
 
     for (id, spec) in &rig.services {
-        let live = service::status(&rig.id, id)?;
+        let live = service::status(&state_store, &rig.id, id)?;
         let (status_str, pid) = match live {
             ServiceStatus::Running(pid) => ("running", Some(pid)),
             ServiceStatus::Stopped => ("stopped", None),
             ServiceStatus::Stale(pid) => ("stale", Some(pid)),
         };
         let started_at = state.services.get(id).and_then(|s| s.started_at.clone());
-        let log_path = service::log_path(&rig.id, id)?
+        let log_path = service::log_path(&state_store, &rig.id, id)?
             .to_string_lossy()
             .into_owned();
         services.push(ServiceStatusReport {
@@ -1223,8 +1255,11 @@ pub fn preflight_effective_component_checkouts(rig: &RigSpec) -> Result<()> {
 
 /// Persist a caller-selected effective checkout for later status reporting.
 pub fn record_effective_component_path(rig_id: &str, component_id: &str, path: &str) -> Result<()> {
+    // Boundary: recording an effective checkout is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let state_store = RigStateStore::in_roots(&roots);
     let (sha, branch) = head_sha_and_branch(path);
-    let mut state = RigState::load(rig_id)?;
+    let mut state = state_store.load(rig_id)?;
     state.last_effective_components.insert(
         component_id.to_string(),
         ComponentSnapshot {
@@ -1234,7 +1269,7 @@ pub fn record_effective_component_path(rig_id: &str, component_id: &str, path: &
             branch,
         },
     );
-    state.save(rig_id)
+    state_store.save(rig_id, &state)
 }
 
 fn component_status(
@@ -1375,6 +1410,11 @@ pub fn head_sha_and_branch(path: &str) -> (Option<String>, Option<String>) {
 
 struct RigRunObserver {
     store: ObservationStore,
+    /// Rig state for this run, bound to the same home as `store`.
+    ///
+    /// The observer already spans the whole run; giving it the state store keeps
+    /// the run's observation records and its rig state in one home (#7505).
+    state_store: RigStateStore,
     run_id: String,
     command: String,
     artifact_manifest: tempfile::NamedTempFile,
@@ -1404,6 +1444,7 @@ impl RigRunObserver {
 
         Some(Self {
             store,
+            state_store: RigStateStore::in_roots(roots),
             run_id: run.id,
             command: command.to_string(),
             artifact_manifest,
@@ -1431,7 +1472,7 @@ impl RigRunObserver {
             Err(_) => RunStatus::Error,
         };
         let error = result.as_ref().err().map(ToString::to_string);
-        let state = RigState::load(&rig.id).ok();
+        let state = observer.state_store.load(&rig.id).ok();
         let metadata =
             rig_observation_metadata(rig, &observer.command, state, pipeline, error.as_deref());
         observer.record_registered_artifacts();
@@ -1489,7 +1530,9 @@ impl RigRunObserver {
             "up" if status == RunStatus::Pass => super::expand::expand_resources(rig),
             "up" => super::expand::expand_resources(rig),
             "check" | "fuzz_prepare" => super::expand::expand_resources(rig),
-            "down" => RigState::load(&rig.id)
+            "down" => self
+                .state_store
+                .load(&rig.id)
                 .ok()
                 .and_then(|state| {
                     state
@@ -1506,7 +1549,9 @@ impl RigRunObserver {
             .any(|step| !step.cache_key_inputs.is_empty() && !step.expected_outputs.is_empty());
         // Live lifecycle snapshot handles are produced at run time, not
         // declared, so they are read back from state rather than from the spec.
-        let snapshots = RigState::load(&rig.id)
+        let snapshots = self
+            .state_store
+            .load(&rig.id)
             .map(|state| state.lifecycle_snapshots)
             .unwrap_or_default();
         if resources.is_empty() && !cache_enabled && snapshots.is_empty() {

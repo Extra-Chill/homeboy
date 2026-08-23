@@ -19,7 +19,8 @@ use super::super::spec::{
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadRef,
     RigSpec,
 };
-use super::super::state::{now_rfc3339, LifecycleSnapshotState, RigState};
+use super::super::state::RigStateStore;
+use super::super::state::{now_rfc3339, LifecycleSnapshotState};
 use super::super::toolchain;
 use super::labels::serialize_lifecycle_op;
 use homeboy_core::error::{Error, Result};
@@ -38,6 +39,7 @@ const DEFAULT_SNAPSHOT_KIND: &str = "lifecycle_snapshot";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_lifecycle_step(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     step_id: Option<&str>,
     component: Option<&str>,
@@ -52,7 +54,14 @@ pub(super) fn run_lifecycle_step(
     // Persist before propagating a phase failure: a handle captured before the
     // failure is a live environment, and dropping it would leak exactly what
     // this primitive exists to make reapable.
-    persist_snapshots(rig, &step_key(step_id, component), component, op, &result)?;
+    persist_snapshots(
+        state_store,
+        rig,
+        &step_key(step_id, component),
+        component,
+        op,
+        &result,
+    )?;
 
     match failure {
         Some(error) => Err(error),
@@ -101,6 +110,7 @@ pub(crate) fn step_key(step_id: Option<&str>, component: Option<&str>) -> String
 /// Record captured handles in rig state, and reap the ones this step owns when
 /// the op is `teardown`.
 fn persist_snapshots(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     step_key: &str,
     component: Option<&str>,
@@ -112,7 +122,7 @@ fn persist_snapshots(
         return Ok(());
     }
 
-    let mut state = RigState::load(&rig.id)?;
+    let mut state = state_store.load(&rig.id)?;
     let mut changed = false;
 
     if teardown {
@@ -137,7 +147,7 @@ fn persist_snapshots(
     }
 
     if changed {
-        state.save(&rig.id)?;
+        state_store.save(&rig.id, &state)?;
     }
     Ok(())
 }
