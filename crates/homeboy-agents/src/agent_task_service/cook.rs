@@ -4536,12 +4536,27 @@ fn run_cook_spine(
                     }
                     if Instant::now() >= next_heartbeat {
                         next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                        let phase = lookup_lifecycle_store
+                            .read_record(&lookup_run_id)
+                            .ok()
+                            .and_then(|record| {
+                                record.metadata["cook_progress"]["phase"]
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                            .filter(|phase| {
+                                matches!(
+                                    phase.as_str(),
+                                    "worktree_provider_lookup" | "worktree_provider_ensure"
+                                )
+                            })
+                            .unwrap_or_else(|| "worktree_provider_lookup".to_string());
                         let _ = report_cook_progress(
                             lookup_lifecycle_store,
                             durable_observer,
                             &lookup_cook_id,
                             &lookup_run_id,
-                            "worktree_provider_lookup",
+                            &phase,
                             1,
                             Some("bounded provider workspace lookup is still running"),
                         );
@@ -6877,6 +6892,13 @@ fn materialize_pending_cook_workspace(
     let mut identity = match resolve(options) {
         Ok(identity) => identity,
         Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
+            agent_task_lifecycle::record_cook_progress_in_store(
+                lifecycle_store,
+                &options.initial_run_id,
+                "worktree_provider_ensure",
+                1,
+                Some("starting controller-owned provider workspace materialization"),
+            )?;
             let provision = provision_pending_cook_workspace(lifecycle_store, options, &config)?;
             // Pin the provider that performed the durable mutation. A later
             // continuation re-resolves this exact destination through its owner.
