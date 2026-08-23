@@ -148,6 +148,9 @@ enum DaemonCommand {
         /// unreachable endpoint were proven by this invocation.
         #[arg(long)]
         apply: bool,
+        /// Exact review token emitted by the preview for a legacy candidate.
+        #[arg(long)]
+        review_token: Option<String>,
         /// Controller-generated idempotency key for this replacement operation.
         #[arg(long)]
         replacement_operation_id: Option<String>,
@@ -399,11 +402,13 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ReconcileUnleasedCandidates {
             addr,
             apply,
+            review_token,
             replacement_operation_id,
         } => Ok((
             DaemonOutput::ReconcileUnleasedCandidates(daemon::reconcile_unleased_candidates(
                 &addr,
                 apply,
+                review_token.as_deref(),
                 replacement_operation_id.as_deref(),
             )?),
             0,
@@ -601,7 +606,28 @@ where
         return Ok((DaemonOutput::Recover(output), 1));
     }
 
-    output.applied_steps = execute(&output.plan, &lease_id, &job_ids)?;
+    output.applied_steps = match execute(&output.plan, &lease_id, &job_ids) {
+        Ok(applied_steps) => applied_steps,
+        Err(error) if error.details["classification"] == "daemon_unleased_process_conflict" => {
+            // Lease retirement can legitimately reveal a foreground daemon that
+            // was previously hidden by the lease owner. Re-enumerate before
+            // returning so the operator receives the new typed review plan,
+            // rather than an obsolete stop/start plan or a raw PID error.
+            let converged = read_postcondition()?;
+            output.fresh = converged.fresh;
+            output.stale_reason_code = converged.freshness.stale_reason_code;
+            output.lease_id = converged.freshness.lease_id.clone();
+            output.active_jobs = converged.freshness.active_jobs;
+            output.plan = actions::plan_recovery(&converged);
+            output.blocked_on = Some(
+                "lease retirement exposed unleased daemon candidates; the new plan requires explicit review before apply"
+                    .to_string(),
+            );
+            output.next_command = rendered_plan(&output.plan);
+            return Ok((DaemonOutput::Recover(output), 1));
+        }
+        Err(error) => return Err(error),
+    };
     output.executed = true;
 
     let postcondition = match read_postcondition() {
@@ -1340,6 +1366,71 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("authoritative status remains stale")));
         assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
+    }
+
+    #[test]
+    fn leased_retirement_reenumerates_an_unleased_candidate_into_a_review_plan() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_STOP,
+                    actions::stop_for_lease("lease-test"),
+                ),
+                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+            ],
+        );
+        let mut exposed = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::LeaseMissing),
+            Vec::new(),
+        );
+        exposed
+            .process_candidates
+            .push(daemon::DaemonProcessCandidate {
+                pid: 4243,
+                process_start_identity: None,
+                executable: "homeboy".to_string(),
+                executable_digest: None,
+                cmdline: "homeboy daemon serve".to_string(),
+                bind_endpoint: Some("127.0.0.1:0".to_string()),
+                durable_store_path: Some("test/jobs.json".to_string()),
+                build_identity: Some("current_executable".to_string()),
+                startup_token: None,
+                ownership: daemon::DaemonProcessOwnership::Owning,
+            });
+
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |_, _, _| {
+                let mut error = Error::internal_unexpected("replacement blocked");
+                error.details = serde_json::json!({
+                    "classification": "daemon_unleased_process_conflict"
+                });
+                Err(error)
+            },
+            || Ok(exposed),
+        )
+        .expect("the chained transition returns a typed review plan");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert_eq!(
+            output.plan.steps[0].code,
+            actions::DAEMON_RECONCILE_UNLEASED_CANDIDATES
+        );
+        assert!(!output.plan.executable);
+        assert!(output
+            .blocked_on
+            .as_deref()
+            .is_some_and(|reason| reason.contains("explicit review")));
     }
 
     #[test]
