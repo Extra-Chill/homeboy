@@ -28,6 +28,10 @@ inputs:
     description: 'Rust toolchain for source builds (default: stable).'
     required: false
     default: 'stable'
+  source-build-profile:
+    description: 'Cargo profile for source builds: release for shipped binaries or dev for read-only tooling such as planning.'
+    required: false
+    default: 'release'
 
   # ── Extension ──
   extension:
@@ -364,6 +368,7 @@ runs:
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
+        SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
       run: bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
 
     - name: Resolve Homeboy version

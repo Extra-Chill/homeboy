@@ -89,6 +89,10 @@ on:
         description: 'Rust toolchain for optional build and action source builds.'
         type: string
         default: 'stable'
+      source-build-profile:
+        description: 'Cargo profile for action source builds: release or dev.'
+        type: string
+        default: 'release'
       auto-setup:
         description: 'Whether Homeboy Action should install detected runtime dependencies.'
         type: string
@@ -271,6 +275,7 @@ jobs:
           source: ${{ inputs.source }}
           binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
+          source-build-profile: ${{ inputs.source-build-profile }}
           auto-setup: 'false'
 
       - name: Restore consumer Git exclusions
