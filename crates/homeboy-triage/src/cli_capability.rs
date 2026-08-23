@@ -1,5 +1,4 @@
 use clap::{ArgMatches, Args, FromArgMatches, Subcommand};
-use homeboy_cli::cli_runtime::CliCapability;
 use homeboy_core::Error;
 use std::path::PathBuf;
 
@@ -8,40 +7,32 @@ use crate::{
     TriageLandingOptions, TriageOptions, TriageTarget, TriageWatchOptions,
 };
 
-pub static TRIAGE_CAPABILITY: TriageCapability = TriageCapability;
+pub const COMMAND_NAME: &str = "triage";
 
-pub fn capability() -> &'static dyn CliCapability {
-    &TRIAGE_CAPABILITY
+/// The typed Triage command shape, independent of CLI composition.
+pub fn command() -> clap::Command {
+    TriageArgs::augment_args(
+        clap::Command::new(COMMAND_NAME).about(
+            "Attention reports and watch utilities for components, projects, fleets, and rigs",
+        ),
+    )
 }
 
-pub struct TriageCapability;
-
-impl CliCapability for TriageCapability {
-    fn name(&self) -> &'static str {
-        "triage"
-    }
-
-    fn command(&self) -> clap::Command {
-        TriageArgs::augment_args(clap::Command::new(self.name()).about(
-            "Attention reports and watch utilities for components, projects, fleets, and rigs",
-        ))
-    }
-
-    fn run(&self, matches: &ArgMatches) -> homeboy_core::Result<(serde_json::Value, i32)> {
-        let args = TriageArgs::from_arg_matches(matches).map_err(|error| {
-            Error::validation_invalid_argument("triage", error.to_string(), None, None)
-        })?;
-        let (output, exit_code) = run_triage(args)?;
-        Ok((
-            serde_json::to_value(output).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize triage output".to_string()),
-                )
-            })?,
-            exit_code,
-        ))
-    }
+/// Parse and execute Triage from its subcommand matches.
+pub fn run_command(matches: &ArgMatches) -> homeboy_core::Result<(serde_json::Value, i32)> {
+    let args = TriageArgs::from_arg_matches(matches).map_err(|error| {
+        Error::validation_invalid_argument(COMMAND_NAME, error.to_string(), None, None)
+    })?;
+    let (output, exit_code) = run_triage(args)?;
+    Ok((
+        serde_json::to_value(output).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize triage output".to_string()),
+            )
+        })?,
+        exit_code,
+    ))
 }
 
 #[derive(Args)]
@@ -294,11 +285,10 @@ fn parse_duration(name: &str, raw: &str) -> homeboy_core::Result<std::time::Dura
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn published_triage_spellings_stay_in_the_product_descriptor() {
-        let command = TRIAGE_CAPABILITY.command();
+        let command = command();
         for argv in [
             vec!["triage", "landing", "--workspace", "--branch", "e2e/*"],
             vec![

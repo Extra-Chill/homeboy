@@ -30,7 +30,7 @@ pub use types::{
     TriagePrItem, TriageRepo, TriageRepoRef, TriageSummary, TriageUnresolved,
 };
 
-pub use cli_capability::{capability, TRIAGE_CAPABILITY};
+pub use cli_capability::{command, run_command, COMMAND_NAME};
 pub use watch::{
     run as watch, TriageWatchEvent, TriageWatchItemState, TriageWatchOptions, TriageWatchOutput,
     TriageWatchTargetOutput,
