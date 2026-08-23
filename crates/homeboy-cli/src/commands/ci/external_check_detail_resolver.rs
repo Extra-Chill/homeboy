@@ -3,7 +3,6 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use homeboy::core::process::{force_terminate_process_tree_bounded, ProcessContainment};
@@ -13,10 +12,11 @@ use homeboy::extension::{
     ExternalCheckDetailResponse, EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA,
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };
-use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
-};
+#[cfg(not(windows))]
+use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
+use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};
 use serde::Serialize;
+use tempfile::NamedTempFile;
 
 pub(super) const MAX_RESOLVERS: usize = 8;
 pub(super) const TOTAL_BUDGET: Duration = Duration::from_secs(20);
@@ -47,6 +47,85 @@ pub struct HydratedDetail {
 enum InvocationFailure {
     MalformedResponse,
     Unavailable(String),
+}
+
+/// Secure, owned output files avoid blocking on EOF when an escaped resolver
+/// descendant retains an inherited stdout or stderr handle.
+struct ResolverCaptureFiles {
+    stdout: NamedTempFile,
+    stderr: NamedTempFile,
+}
+
+impl ResolverCaptureFiles {
+    fn create() -> Result<Self, InvocationFailure> {
+        Ok(Self {
+            stdout: NamedTempFile::new().map_err(|error| {
+                InvocationFailure::Unavailable(format!(
+                    "Resolver stdout capture file creation failed: {error}"
+                ))
+            })?,
+            stderr: NamedTempFile::new().map_err(|error| {
+                InvocationFailure::Unavailable(format!(
+                    "Resolver stderr capture file creation failed: {error}"
+                ))
+            })?,
+        })
+    }
+
+    fn stdio(&self) -> Result<(Stdio, Stdio), InvocationFailure> {
+        let stdout = self.stdout.reopen().map_err(|error| {
+            InvocationFailure::Unavailable(format!(
+                "Resolver stdout capture file setup failed: {error}"
+            ))
+        })?;
+        let stderr = self.stderr.reopen().map_err(|error| {
+            InvocationFailure::Unavailable(format!(
+                "Resolver stderr capture file setup failed: {error}"
+            ))
+        })?;
+        Ok((Stdio::from(stdout), Stdio::from(stderr)))
+    }
+
+    fn snapshot(&self, stream: &str) -> Result<Vec<u8>, InvocationFailure> {
+        let file = match stream {
+            "stdout" => &self.stdout,
+            "stderr" => &self.stderr,
+            _ => unreachable!("resolver capture stream is fixed"),
+        };
+        let length = file
+            .as_file()
+            .metadata()
+            .map_err(|error| {
+                InvocationFailure::Unavailable(format!(
+                    "Resolver {stream} capture metadata failed: {error}"
+                ))
+            })?
+            .len();
+        if length > MAX_OUTPUT_BYTES as u64 {
+            return Err(InvocationFailure::Unavailable(
+                "Resolver output exceeded the 64 KiB limit.".into(),
+            ));
+        }
+        let mut snapshot = file.reopen().map_err(|error| {
+            InvocationFailure::Unavailable(format!(
+                "Resolver {stream} capture snapshot failed: {error}"
+            ))
+        })?;
+        let mut output = Vec::with_capacity(length as usize);
+        Read::take(&mut snapshot, (MAX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut output)
+            .map_err(|error| {
+                InvocationFailure::Unavailable(format!(
+                    "Resolver {stream} capture read failed: {error}"
+                ))
+            })?;
+        if output.len() > MAX_OUTPUT_BYTES {
+            return Err(InvocationFailure::Unavailable(
+                "Resolver output exceeded the 64 KiB limit.".into(),
+            ));
+        }
+        Ok(output)
+    }
 }
 
 pub(super) fn hydrate(
@@ -242,14 +321,16 @@ fn invoke(
             "Resolver budget exhausted before spawn.".into(),
         ));
     }
+    let captures = ResolverCaptureFiles::create()?;
+    let (stdout, stderr) = captures.stdio()?;
     let mut command = Command::new(program);
     command
         .args(&resolver.command[1..])
         .current_dir(extension_path)
         .env_clear()
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(stdout)
+        .stderr(stderr);
     for name in resolver.public_env.iter().chain(&resolver.secret_env) {
         if let Ok(value) = std::env::var(name) {
             command.env(name, value);
@@ -258,104 +339,74 @@ fn invoke(
     let mut containment = ProcessContainment::prepare(&mut command).map_err(|error| {
         InvocationFailure::Unavailable(format!("Resolver containment setup failed: {error}"))
     })?;
-    let guard = ControllerChildGuard::prepare(&mut command).map_err(|error| {
-        InvocationFailure::Unavailable(format!("Resolver containment setup failed: {error}"))
-    })?;
+    let mut guard = Some(
+        ControllerChildGuard::prepare(&mut command).map_err(|error| {
+            InvocationFailure::Unavailable(format!("Resolver containment setup failed: {error}"))
+        })?,
+    );
     let mut child = command.spawn().map_err(|error| {
-        InvocationFailure::Unavailable(format!("Resolver spawn failed: {error}"))
+        InvocationFailure::Unavailable(format!(
+            "Resolver spawn failed; capture files will be removed: {error}"
+        ))
     })?;
     if let Err(error) = containment.attach(&child) {
-        cleanup(&containment, &mut child, false);
+        let cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
         return Err(InvocationFailure::Unavailable(format!(
-            "Resolver containment attach failed: {error}"
+            "Resolver containment attach failed: {error}{}",
+            cleanup_diagnostic(&cleanup_errors)
         )));
     }
-    if let Err(error) = guard.attach(&child) {
-        cleanup(&containment, &mut child, false);
+    if let Err(error) = guard.as_ref().expect("guard exists").attach(&child) {
+        let cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
         return Err(InvocationFailure::Unavailable(format!(
-            "Resolver containment attach failed: {error}"
+            "Resolver containment attach failed: {error}{}",
+            cleanup_diagnostic(&cleanup_errors)
         )));
     }
     let mut stdin = child.stdin.take().ok_or_else(|| {
-        cleanup(&containment, &mut child, false);
-        InvocationFailure::Unavailable("Resolver stdin was unavailable.".into())
+        let cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
+        InvocationFailure::Unavailable(format!(
+            "Resolver stdin was unavailable.{}",
+            cleanup_diagnostic(&cleanup_errors)
+        ))
     })?;
-    let payload = serde_json::to_vec(request).map_err(|error| {
-        InvocationFailure::Unavailable(format!("Resolver request serialization failed: {error}"))
-    })?;
+    let payload = match serde_json::to_vec(request) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
+            return Err(InvocationFailure::Unavailable(format!(
+                "Resolver request serialization failed: {error}{}",
+                cleanup_diagnostic(&cleanup_errors)
+            )));
+        }
+    };
     if stdin
         .write_all(&payload)
         .and_then(|_| stdin.write_all(b"\n"))
         .is_err()
     {
-        cleanup(&containment, &mut child, false);
-        return Err(InvocationFailure::Unavailable(
-            "Resolver stdin write failed.".into(),
-        ));
+        let cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
+        return Err(InvocationFailure::Unavailable(format!(
+            "Resolver stdin write failed.{}",
+            cleanup_diagnostic(&cleanup_errors)
+        )));
     }
     drop(stdin);
-    let stdout = child.stdout.take().ok_or_else(|| {
-        cleanup(&containment, &mut child, false);
-        InvocationFailure::Unavailable("Resolver stdout was unavailable.".into())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        cleanup(&containment, &mut child, false);
-        InvocationFailure::Unavailable("Resolver stderr was unavailable.".into())
-    })?;
-    let (tx, rx) = mpsc::channel();
-    let stdout_reader = std::thread::spawn(move || {
-        let _ = tx.send(read_bounded(stdout));
-    });
-    let (err_tx, err_rx) = mpsc::channel();
-    let stderr_reader = std::thread::spawn(move || {
-        let _ = err_tx.send(read_bounded(stderr));
-    });
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 // A resolver may exit while a descendant still owns a pipe.
-                // Its process group is ours, so close that escape before joining
-                // the supervised readers.
-                cleanup(&containment, &mut child, true);
-                if let Err(error) = terminate_remaining_process_group(child.id()) {
-                    cleanup(&containment, &mut child, true);
-                    join_readers(stdout_reader, stderr_reader);
+                // Its process group is ours, so close that escape before taking
+                // nonblocking snapshots of the owned capture files.
+                let cleanup_errors = cleanup(&containment, &mut child, &mut guard, true);
+                if !cleanup_errors.is_empty() {
                     return Err(InvocationFailure::Unavailable(format!(
-                        "Resolver descendant cleanup failed: {error}"
+                        "Resolver exited but cleanup could not be verified: {}",
+                        cleanup_errors.join("; ")
                     )));
                 }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let output = match rx.recv_timeout(remaining) {
-                    Ok(output) => output,
-                    Err(_) => {
-                        // The leader is already reaped. Run full procfs and
-                        // group cleanup before joining pipe readers so a
-                        // detached session cannot keep this invocation alive.
-                        cleanup(&containment, &mut child, true);
-                        join_readers(stdout_reader, stderr_reader);
-                        return Err(InvocationFailure::Unavailable(
-                            "Resolver stdout reader did not finish within the total budget.".into(),
-                        ));
-                    }
-                };
-                let stderr = match err_rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                {
-                    Ok(stderr) => stderr,
-                    Err(_) => {
-                        cleanup(&containment, &mut child, true);
-                        join_readers(stdout_reader, stderr_reader);
-                        return Err(InvocationFailure::Unavailable(
-                            "Resolver stderr reader did not finish within the total budget.".into(),
-                        ));
-                    }
-                };
-                join_readers(stdout_reader, stderr_reader);
-                if output.len() > MAX_OUTPUT_BYTES || stderr.len() > MAX_OUTPUT_BYTES {
-                    return Err(InvocationFailure::Unavailable(
-                        "Resolver output exceeded the 64 KiB limit.".into(),
-                    ));
-                }
+                let output = captures.snapshot("stdout")?;
+                let stderr = captures.snapshot("stderr")?;
                 if !status.success() {
                     return Err(InvocationFailure::Unavailable(format!(
                         "Resolver exited unsuccessfully: {}",
@@ -367,18 +418,19 @@ fn invoke(
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                cleanup(&containment, &mut child, false);
-                join_readers(stdout_reader, stderr_reader);
-                return Err(InvocationFailure::Unavailable(
-                    "Resolver timed out at its deadline; its process tree was terminated. Inspect the extension resolver command and its child-process cleanup."
-                        .into(),
-                ));
+                let mut cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
+                cleanup_errors.extend(capture_snapshot_errors(&captures));
+                return Err(InvocationFailure::Unavailable(format!(
+                    "Resolver timed out; capture files were snapshotted without waiting for inherited handles{}.",
+                    cleanup_diagnostic(&cleanup_errors)
+                )));
             }
             Err(error) => {
-                cleanup(&containment, &mut child, false);
-                join_readers(stdout_reader, stderr_reader);
+                let mut cleanup_errors = cleanup(&containment, &mut child, &mut guard, false);
+                cleanup_errors.extend(capture_snapshot_errors(&captures));
                 return Err(InvocationFailure::Unavailable(format!(
-                    "Resolver wait failed: {error}"
+                    "Resolver wait failed: {error}; capture files were snapshotted without waiting for inherited handles{}.",
+                    cleanup_diagnostic(&cleanup_errors)
                 )));
             }
         }
@@ -402,32 +454,88 @@ fn resolve_program(
     Ok((root, program))
 }
 
-fn read_bounded(mut reader: impl Read) -> Vec<u8> {
-    let mut value = Vec::new();
-    let _ = reader
-        .by_ref()
-        .take((MAX_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut value);
-    value
-}
-
 fn cleanup(
     containment: &ProcessContainment,
     child: &mut std::process::Child,
+    guard: &mut Option<ControllerChildGuard>,
     leader_has_exited: bool,
-) {
+) -> Vec<String> {
     // A resolver can call `setsid` and leave its inherited process group. The
     // current core primitive snapshots Linux procfs descendants before killing
     // the leader, so timeout cleanup still reaches that detached session.
-    let _ = containment.terminate_on_failure_bounded(CLEANUP_BUDGET, leader_has_exited);
-    let _ = containment.cleanup_after_leader_exit_bounded(CLEANUP_BUDGET);
-    let _ = force_terminate_process_tree_bounded(child.id(), CLEANUP_BUDGET);
-    let _ = terminate_process_tree_and_reap(child);
+    // On Windows, dropping the guard closes its kill-on-close Job; on Unix it
+    // closes the controller liveness pipe before output is inspected.
+    drop(guard.take());
+    let mut errors = Vec::new();
+    if !leader_has_exited {
+        if let Err(error) = containment.terminate_on_failure_bounded(CLEANUP_BUDGET, false) {
+            errors.push(format!("containment termination: {error}"));
+        }
+        if let Err(error) = force_terminate_process_tree_bounded(child.id(), CLEANUP_BUDGET) {
+            errors.push(format!("process-tree termination: {error}"));
+        }
+        if let Err(error) = reap_child_after_bounded_cleanup(child) {
+            errors.push(format!("child reap: {error}"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = containment.cleanup_after_leader_exit_bounded(CLEANUP_BUDGET) {
+        errors.push(format!("descendant cleanup: {error}"));
+    }
+    if let Err(error) = terminate_remaining_process_group(child.id()) {
+        errors.push(format!("remaining process-group cleanup: {error}"));
+    }
+    errors
 }
 
-fn join_readers(stdout: std::thread::JoinHandle<()>, stderr: std::thread::JoinHandle<()>) {
-    let _ = stdout.join();
-    let _ = stderr.join();
+#[cfg(not(windows))]
+fn reap_child_after_bounded_cleanup(child: &mut std::process::Child) -> std::io::Result<()> {
+    terminate_process_tree_and_reap(child).map(|_| ())
+}
+
+#[cfg(windows)]
+fn reap_child_after_bounded_cleanup(child: &mut std::process::Child) -> std::io::Result<()> {
+    let pid = child.id();
+    let deadline = Instant::now() + CLEANUP_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    child_reap_timeout_evidence(pid, CLEANUP_BUDGET),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
+fn child_reap_timeout_evidence(pid: u32, timeout: Duration) -> String {
+    format!(
+        "child {pid} remained alive after bounded cleanup for {} ms; taskkill/Job cleanup may have left a survivor",
+        timeout.as_millis()
+    )
+}
+
+fn cleanup_diagnostic(errors: &[String]) -> String {
+    (!errors.is_empty())
+        .then(|| format!("; cleanup evidence: {}", errors.join("; ")))
+        .unwrap_or_default()
+}
+
+fn capture_snapshot_errors(captures: &ResolverCaptureFiles) -> Vec<String> {
+    ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|stream| {
+            captures
+                .snapshot(stream)
+                .err()
+                .map(|error| format!("{stream} capture snapshot: {error:?}"))
+        })
+        .collect()
 }
 
 pub(super) fn normalize_target_url(value: &str) -> String {
@@ -485,7 +593,7 @@ pub(super) fn test_cross_platform_fixture() {
             false,
             Some("unavailable"),
             Duration::from_millis(200),
-            Some("process tree was terminated"),
+            Some("capture files were snapshotted"),
         ),
     ] {
         homeboy::core::test_support::with_isolated_home(|_| {
@@ -618,11 +726,63 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     std::fs::write(
         &path,
         format!(
-            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nif \"%{fixture_mode_env}%\"==\"timeout\" timeout /t 30 /nobreak >nul\r\nexit /b 24\r\n"
+            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nif \"%{fixture_mode_env}%\"==\"timeout\" goto wait_forever\r\nexit /b 24\r\n:wait_forever\r\ngoto wait_forever\r\n"
         ),
     )
     .unwrap();
     name.into()
+}
+
+#[cfg(all(feature = "test-support", target_os = "linux"))]
+pub(super) fn test_inherited_pipe_holder_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let extension = tempfile::tempdir().unwrap();
+    let pid_file = extension.path().join("descendant.pid");
+    let script = extension.path().join("resolve");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
+            homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+            homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let resolver = ExternalCheckDetailResolverConfig {
+        schema: EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA.into(),
+        provider: "fixture".into(),
+        command: vec!["resolve".into()],
+        public_env: Vec::new(),
+        secret_env: Vec::new(),
+    };
+    let request = ExternalCheckDetailRequest {
+        schema: EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA.into(),
+        provider: "fixture".into(),
+        status: "failed".into(),
+        target_url: None,
+    };
+
+    let error = invoke(
+        &resolver,
+        extension.path(),
+        &script,
+        &request,
+        &[],
+        Instant::now() + Duration::from_millis(100),
+    )
+    .expect_err("resolver with no response must fail after pipe-holder cleanup");
+    assert!(matches!(error, InvocationFailure::MalformedResponse));
+    let descendant_pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !homeboy::core::process::pid_is_running(descendant_pid),
+        "detached resolver descendant {descendant_pid} survived cleanup"
+    );
 }
 
 #[cfg(test)]
@@ -642,6 +802,73 @@ mod tests {
         let response: ExternalCheckDetailResponse = serde_json::from_str(r#"{"schema":"homeboy/external-check-detail-response/v1","provider":"example","summary":"failed"}"#).unwrap();
         assert_eq!(response.provider, "example");
         assert!(response.actions.is_empty());
+    }
+
+    #[test]
+    fn cleanup_diagnostic_includes_process_failure_evidence() {
+        assert_eq!(
+            cleanup_diagnostic(&[
+                "process-tree termination: taskkill exceeded 2000 ms".into(),
+                "remaining process-group cleanup: survivor 42".into(),
+            ]),
+            "; cleanup evidence: process-tree termination: taskkill exceeded 2000 ms; remaining process-group cleanup: survivor 42"
+        );
+    }
+
+    #[test]
+    fn bounded_reap_timeout_evidence_identifies_a_possible_windows_survivor() {
+        assert_eq!(
+            child_reap_timeout_evidence(42, Duration::from_millis(2000)),
+            "child 42 remained alive after bounded cleanup for 2000 ms; taskkill/Job cleanup may have left a survivor"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_reap_returns_when_a_stubborn_child_survives_the_cleanup_budget() {
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+
+        let error = reap_child_after_bounded_cleanup(&mut child)
+            .expect_err("live child must not reach an unbounded wait");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("may have left a survivor"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn capture_snapshot_enforces_output_limit_without_waiting_for_eof() {
+        let mut captures = ResolverCaptureFiles::create().unwrap();
+        captures
+            .stdout
+            .as_file_mut()
+            .write_all(&vec![b'x'; MAX_OUTPUT_BYTES + 1])
+            .unwrap();
+        captures.stdout.as_file_mut().flush().unwrap();
+
+        assert!(matches!(
+            captures.snapshot("stdout"),
+            Err(InvocationFailure::Unavailable(ref message))
+                if message == "Resolver output exceeded the 64 KiB limit."
+        ));
+    }
+
+    #[test]
+    fn capture_files_are_removed_when_the_owner_drops() {
+        let captures = ResolverCaptureFiles::create().unwrap();
+        let stdout = captures.stdout.path().to_path_buf();
+        let stderr = captures.stderr.path().to_path_buf();
+        assert!(stdout.is_file());
+        assert!(stderr.is_file());
+
+        drop(captures);
+
+        assert!(!stdout.exists());
+        assert!(!stderr.exists());
     }
 
     #[test]
@@ -716,7 +943,7 @@ mod tests {
         .expect_err("resolver must time out");
         assert!(matches!(
             error,
-            InvocationFailure::Unavailable(ref message) if message.contains("process tree was terminated")
+            InvocationFailure::Unavailable(ref message) if message.starts_with("Resolver timed out;")
         ));
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .unwrap()
@@ -731,7 +958,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn leader_exit_reaps_a_detached_session_pipe_holder() {
+    fn leader_exit_reaps_a_detached_session_pipe_holder_before_capture_snapshot() {
         use std::os::unix::fs::PermissionsExt;
 
         let extension = tempfile::tempdir().unwrap();
@@ -769,11 +996,8 @@ mod tests {
             &[],
             Instant::now() + Duration::from_millis(100),
         )
-        .expect_err("inherited pipes must not outlive the resolver deadline");
-        assert!(matches!(
-            error,
-            InvocationFailure::Unavailable(ref message) if message.contains("reader did not finish")
-        ));
+        .expect_err("resolver with no response must fail after pipe-holder cleanup");
+        assert!(matches!(error, InvocationFailure::MalformedResponse));
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()

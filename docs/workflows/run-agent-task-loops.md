@@ -51,6 +51,12 @@ locally or through Homeboy's active managed workspace registry to that same
 worktree; Cook does not query a provider merely to rediscover the supplied path.
 The explicit checkout must be clean when the first provider attempt is admitted;
 later retries retain the candidate changes produced by earlier attempts.
+When a preview or initial admission identifies an already-implemented dirty
+candidate, Cook keeps provider execution fail-closed and returns its durable
+Cook/run plus an executable sequence: commit the named checkout, run
+`agent-task review <run-id>`, then adopt `HEAD` with the emitted command.
+Adoption verifies that immutable commit through the recorded gates and
+finalization policy without creating or applying provider patch content.
 
 ## 3. Define A Durable Loop
 
