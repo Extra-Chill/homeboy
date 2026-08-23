@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
     deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
     release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
-    status, trace, triage, tunnel, upgrade, worktree,
+    status, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -196,8 +196,6 @@ pub enum Commands {
     Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
-    /// Attention reports and watch utilities for components, projects, fleets, and rigs
-    Triage(triage::TriageArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Recover remote component content into local Git history
