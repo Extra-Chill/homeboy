@@ -6055,6 +6055,21 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            AgentTaskCookLoopStatus::BaselineInconclusive => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "baseline_inconclusive",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "immutable baseline replay was inconclusive; repair the gate baseline setup or replay environment before rerunning Cook"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::NoChanges => {
                 return Ok(cook_report(CookReportInput {
                     cook_id,

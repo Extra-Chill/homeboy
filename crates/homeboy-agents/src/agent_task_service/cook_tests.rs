@@ -13859,7 +13859,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 }
 
 #[test]
-fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finalization() {
+fn baseline_comparison_is_persisted_before_feedback_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -13887,6 +13887,8 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
         options.to_worktree = root.display().to_string();
         options.source_worktree_path = Some(root.to_path_buf());
         options.max_attempts = 1;
+        options.initial_plan.tasks[0].executor.model = Some("test/model".to_string());
+        options.ai_model = Some("test/model".to_string());
         options.gates.accept_inherited_failures = true;
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.initial_plan.options.execution_budget =
@@ -13905,7 +13907,7 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
             record.metadata["provider_executions_consumed"] = serde_json::json!(1);
         })
         .unwrap();
-        let gate = crate::agent_task_gate::AgentTaskGateReport::new(
+        let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
             "verify-1",
             vec![
                 "sh".to_string(),
@@ -13920,6 +13922,17 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
             crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
             crate::agent_task_gate::AgentTaskGateEnvironment::default(),
         );
+        gate.failure_evidence = Some(crate::agent_task_gate::AgentTaskGateFailureEvidence {
+            classification:
+                crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode,
+            summary: "inherited gate failure".to_string(),
+            command: options.gates.verify[0].clone(),
+            exit_code: 1,
+            stdout_tail: String::new(),
+            stderr_tail: "inherited".to_string(),
+            agent_feedback: "Repair the candidate gate failure.".to_string(),
+            diagnostics: Vec::new(),
+        });
         let promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-promotion-report/v1",
             "status": "gate_failed",
@@ -13957,6 +13970,12 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
                 move |_, _, received_run, promotion| {
                     finalization_count.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(received_run, expected_run_id);
+                    let persisted = agent_task_lifecycle::status(received_run).unwrap();
+                    assert_eq!(
+                        persisted.metadata["latest_promotion"]["deterministic_gates"][0]
+                            ["baseline_comparison"]["result"],
+                        "baseline_red"
+                    );
                     assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
                     assert_eq!(
                         promotion.deterministic_gates[0]
