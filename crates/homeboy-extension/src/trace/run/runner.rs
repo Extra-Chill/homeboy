@@ -133,12 +133,13 @@ pub(super) fn trace_probes_with_fswatch_attachments(
 /// `example-org/studio`) never creates or mutates a `homeboy.json` inside that
 /// repo. See Extra-Chill/homeboy#2329.
 pub(super) fn resolve_trace_baseline_root(
+    config_root: &Path,
     component_path: &str,
     rig_id: Option<&str>,
 ) -> Result<PathBuf> {
     match rig_id {
         Some(id) => {
-            let root = paths::rig_baseline_root(id)?;
+            let root = paths::rig_baseline_root_in_root(config_root, id);
             std::fs::create_dir_all(&root).map_err(|e| {
                 Error::internal_io(
                     format!(

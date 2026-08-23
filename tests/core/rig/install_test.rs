@@ -669,7 +669,7 @@ mod install_flows {
             false,
         )
         .expect("install");
-        let rig = load("lint-fixture").expect("load rig");
+        let rig = load(&test_config_root(), "lint-fixture").expect("load rig");
         let report = run_check(&rig).expect("check report");
 
         assert!(
@@ -711,7 +711,10 @@ mod install_flows {
 
         assert!(report.success, "local package check should pass");
         assert!(read_source_metadata_in_root(&test_config_root(), "local-alpha").is_none());
-        assert!(load("local-alpha").is_err(), "rig should not be installed");
+        assert!(
+            load(&test_config_root(), "local-alpha").is_err(),
+            "rig should not be installed"
+        );
     }
 
     #[test]
@@ -818,7 +821,7 @@ mod install_flows {
         assert!(fs::read_link(&installed_path).is_err());
         let installed = fs::read_to_string(&installed_path).expect("installed rig");
         assert!(!installed.contains("extends"));
-        let rig = load("alpha").expect("load rig");
+        let rig = load(&test_config_root(), "alpha").expect("load rig");
         assert_eq!(rig.description, "alpha rig");
         assert_eq!(rig.components["app"].path, "${env.DEV_ROOT}/alpha");
         assert_eq!(rig.components["app"].branch.as_deref(), Some("main"));
@@ -859,7 +862,7 @@ mod install_flows {
         .expect("install registry-backed component rig");
 
         assert_eq!(result.installed.len(), 1);
-        let rig = load("registry-backed").expect("load registry-backed rig");
+        let rig = load(&test_config_root(), "registry-backed").expect("load registry-backed rig");
         let component = &rig.components["app"];
         assert!(component.path.is_empty());
         assert_eq!(component.component_id.as_deref(), Some("registry-app"));
@@ -957,7 +960,7 @@ mod install_flows {
             false,
         )
         .expect("install");
-        let rig = load("trace-defaults").expect("load rig");
+        let rig = load(&test_config_root(), "trace-defaults").expect("load rig");
         let workloads = rig
             .trace_workloads
             .get("trace-runner")
@@ -1007,7 +1010,7 @@ mod install_flows {
             false,
         )
         .expect("install");
-        let rig = load("lint-only").expect("load rig");
+        let rig = load(&test_config_root(), "lint-only").expect("load rig");
 
         // Full check fails: the requirement file and probe file are both absent.
         let check = run_check(&rig).expect("check report");
@@ -1050,7 +1053,7 @@ mod install_flows {
             false,
         )
         .expect("install");
-        let rig = load("lint-conflict").expect("load rig");
+        let rig = load(&test_config_root(), "lint-conflict").expect("load rig");
         let lint = run_lint(&rig).expect("lint report");
 
         assert!(!lint.success, "conflict markers should fail rig lint");
@@ -1087,7 +1090,7 @@ mod install_flows {
             false,
         )
         .expect("install");
-        let rig = load("lint-dm").expect("load rig");
+        let rig = load(&test_config_root(), "lint-dm").expect("load rig");
         let lint = run_lint(&rig).expect("lint report");
 
         assert!(
@@ -1185,7 +1188,7 @@ mod install_flows {
                 assert_eq!(build["metadata"]["timeout"], expected_timeout);
             }
 
-            load(id).expect("load materialized rig");
+            load(&test_config_root(), id).expect("load materialized rig");
         }
     }
 
@@ -1649,23 +1652,25 @@ mod refresh_and_identity {
         )
         .expect("replacement rig");
 
-        let ids = list_ids().expect("list ids");
+        let ids = list_ids(&test_config_root()).expect("list ids");
         assert_eq!(ids, vec!["replacement"]);
 
-        let rigs = list().expect("list rigs");
+        let rigs = list(&test_config_root()).expect("list rigs");
         assert_eq!(rigs.len(), 1);
         assert_eq!(rigs[0].id, "replacement");
         assert_eq!(
-            declared_id("replacement").expect("declared id"),
+            declared_id(&test_config_root(), "replacement").expect("declared id"),
             Some("alpha".to_string())
         );
 
         assert_eq!(
-            load("replacement").expect("load replacement").id,
+            load(&test_config_root(), "replacement")
+                .expect("load replacement")
+                .id,
             "replacement"
         );
 
-        let err = load("alpha").expect_err("alpha should not resolve");
+        let err = load(&test_config_root(), "alpha").expect_err("alpha should not resolve");
         assert_eq!(err.message, "Rig not found");
         assert_eq!(err.details["id"], "alpha");
         let hints = err
@@ -1695,8 +1700,11 @@ mod refresh_and_identity {
         )
         .expect("non-json rig sidecar");
 
-        assert_eq!(list_ids().expect("list ids"), vec!["alpha"]);
-        assert_eq!(list().expect("list rigs").len(), 1);
+        assert_eq!(
+            list_ids(&test_config_root()).expect("list ids"),
+            vec!["alpha"]
+        );
+        assert_eq!(list(&test_config_root()).expect("list rigs").len(), 1);
     }
 }
 

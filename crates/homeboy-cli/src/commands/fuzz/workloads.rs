@@ -25,7 +25,9 @@ pub(super) fn load_rig(
     let Some(rig_id) = rig_id else {
         return Ok(None);
     };
-    let mut context = rig::RigSourceContext::load(rig_id)?;
+    // The fuzz surface has no roots carrier either; same reasoning as
+    // `bench_config_root` (#7505).
+    let mut context = rig::RigSourceContext::load(&homeboy::core::paths::homeboy()?, rig_id)?;
     apply_fuzz_rig_setting_overrides(&mut context.spec, settings)?;
     Ok(Some(context))
 }

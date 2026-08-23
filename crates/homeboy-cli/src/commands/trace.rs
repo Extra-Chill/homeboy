@@ -1021,7 +1021,7 @@ fn resolve_trace_profile_args(args: &mut TraceArgs) -> homeboy::core::Result<()>
     }
     if args.comp.component.is_none() {
         if let Some(rig_id) = args.rig.as_deref() {
-            let rig_spec = rig::load(rig_id)?;
+            let rig_spec = rig::load(&trace_config_root()?, rig_id)?;
             if let Some(component) = rig_spec.trace.default_component.as_deref() {
                 if !rig_spec.components.contains_key(component) {
                     return Err(homeboy::core::Error::validation_invalid_argument(
@@ -1134,7 +1134,7 @@ fn resolve_trace_profile(
     rig_id: Option<&str>,
 ) -> homeboy::core::Result<ResolvedTraceProfile> {
     if let Some(rig_id) = rig_id {
-        let rig_spec = rig::load(rig_id)?;
+        let rig_spec = rig::load(&trace_config_root()?, rig_id)?;
         let profile = rig_spec.trace_profiles.get(profile_id).ok_or_else(|| {
             let available = rig_spec.trace_profiles.keys().cloned().collect::<Vec<_>>();
             homeboy::core::Error::validation_invalid_argument(
@@ -1152,7 +1152,7 @@ fn resolve_trace_profile(
         });
     }
 
-    let matches = rig::list()?
+    let matches = rig::list(&trace_config_root()?)?
         .into_iter()
         .filter_map(|rig_spec| {
             rig_spec
@@ -1225,8 +1225,8 @@ fn attach_profile_output(
 
 fn run_list_profiles(rig_id: Option<&str>) -> homeboy::core::Result<TraceCommandOutput> {
     let rigs = match rig_id {
-        Some(rig_id) => vec![rig::load(rig_id)?],
-        None => rig::list()?,
+        Some(rig_id) => vec![rig::load(&trace_config_root()?, rig_id)?],
+        None => rig::list(&trace_config_root()?)?,
     };
     let mut profiles = Vec::new();
     for rig_spec in rigs {
@@ -1250,16 +1250,28 @@ fn run_list_profiles(rig_id: Option<&str>) -> homeboy::core::Result<TraceCommand
     }))
 }
 
+/// Config root for rig-registry reads on the trace command surface.
+///
+/// Same situation as `bench_config_root`: the trace surface threads `TraceArgs`
+/// through profile resolution and rig-context loading, and none of those
+/// helpers has another reason to hold a path. Named here so the resolution is
+/// greppable rather than hidden inside `rig::load`. Delete when the trace
+/// surface gains a carrier (#7505).
+fn trace_config_root() -> homeboy::core::Result<PathBuf> {
+    homeboy::core::paths::homeboy()
+}
+
 fn load_rig_context(rig_id: Option<&str>) -> homeboy::core::Result<Option<TraceRigContext>> {
     let Some(rig_id) = rig_id else {
         return Ok(None);
     };
-    let spec = rig::load(rig_id)?;
-    let package_root =
-        rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
-    let config_root = crate::core::paths::rig_config(&spec.id)
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let registry_root = trace_config_root()?;
+    let spec = rig::load(&registry_root, rig_id)?;
+    let package_root = rig::read_source_metadata_in_root(&registry_root, &spec.id)
+        .map(|metadata| PathBuf::from(metadata.package_path));
+    let config_root = crate::core::paths::rig_config_in_root(&registry_root, &spec.id)
+        .parent()
+        .map(Path::to_path_buf);
     Ok(Some(TraceRigContext {
         rig_spec: spec,
         rig_package_root: package_root,

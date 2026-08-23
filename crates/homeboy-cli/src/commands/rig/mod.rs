@@ -370,30 +370,37 @@ struct RigRunArgs {
 }
 
 pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
+    // Boundary: one `homeboy rig` invocation is one unit of work, so the config
+    // root is resolved exactly once here and handed to the handlers that read
+    // the rig registry. Nothing under this point resolves again (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     match args.command {
-        RigCommand::List => list(),
-        RigCommand::Show { rig_id } => show(&rig_id),
+        RigCommand::List => list(config_root),
+        RigCommand::Show { rig_id } => show(config_root, &rig_id),
         RigCommand::Materialize {
             rig_path,
             source_root,
         } => materialize(&rig_path, source_root.as_deref()),
-        RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
-        RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
+        RigCommand::Up { rig_id, dry_run } => up(config_root, &rig_id, dry_run),
+        RigCommand::Check { target, id, path } => {
+            check(config_root, &target, id.as_deref(), path.as_deref())
+        }
         RigCommand::Lint {
             target,
             id,
             all,
             format,
-        } => lint(&target, id.as_deref(), all, format),
+        } => lint(config_root, &target, id.as_deref(), all, format),
         RigCommand::Package { command } => package(command),
         RigCommand::Down {
             rig_id,
             setting_args,
-        } => down(&rig_id, &setting_args),
-        RigCommand::Repair { rig_id } => repair(&rig_id),
-        RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
-        RigCommand::Run(args) => run_profile(args),
-        RigCommand::Status { rig_id } => status(&rig_id),
+        } => down(config_root, &rig_id, &setting_args),
+        RigCommand::Repair { rig_id } => repair(config_root, &rig_id),
+        RigCommand::Sync { rig_id, dry_run } => sync(config_root, &rig_id, dry_run),
+        RigCommand::Run(args) => run_profile(config_root, args),
+        RigCommand::Status { rig_id } => status(config_root, &rig_id),
         RigCommand::ReleaseLock { rig_id, force } => release_lock(&rig_id, force),
         RigCommand::Install {
             source,
@@ -403,7 +410,7 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
         } => install(&source, id.as_deref(), all, reinstall),
         RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
         RigCommand::Sources { command } => sources::run(command),
-        RigCommand::App { command } => app(command),
+        RigCommand::App { command } => app(config_root, command),
         RigCommand::Artifact { command } => artifact(command),
     }
 }
@@ -497,14 +504,14 @@ fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn list() -> CmdResult<RigCommandOutput> {
-    let rigs = rig::list()?;
+fn list(config_root: &Path) -> CmdResult<RigCommandOutput> {
+    let rigs = rig::list(config_root)?;
     let summaries = rigs
         .into_iter()
         .map(|r| {
             let mut pipelines: Vec<String> = r.pipeline.keys().cloned().collect();
             pipelines.sort();
-            let declared_id = rig::declared_id(&r.id)?;
+            let declared_id = rig::declared_id(config_root, &r.id)?;
             Ok(RigSummary {
                 source: rig::read_source_metadata(&r.id).map(|source| RigSourceSummary {
                     source: source.source,
@@ -612,8 +619,8 @@ fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn show(rig_id: &str) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn show(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let resources = rig::expand::expand_resources(&rig);
     Ok((
         RigCommandOutput::Show(Box::new(RigShowOutput {
@@ -625,8 +632,8 @@ fn show(rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn up(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn up(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     if dry_run {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "dry_run",
@@ -646,8 +653,12 @@ fn up(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-pub(crate) fn up_runner_exec_plan(rig_id: &str, runner_id: &str) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+pub(crate) fn up_runner_exec_plan(
+    config_root: &Path,
+    rig_id: &str,
+    runner_id: &str,
+) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let homeboy_binary = runners::runner_homeboy_path_for_command(
         runner_id,
         "rig up --dry-run --runner command plan",
@@ -758,6 +769,7 @@ fn shell_join(args: &[String]) -> String {
 }
 
 fn check(
+    config_root: &Path,
     target: &str,
     id: Option<&str>,
     path_override: Option<&str>,
@@ -773,7 +785,7 @@ fn check(
                 None,
             ));
         }
-        rig::load(target)?
+        rig::load(config_root, target)?
     };
     if let Some(path) = path_override {
         apply_check_path_override(&mut rig, path)?;
@@ -799,6 +811,7 @@ fn check(
 }
 
 fn lint(
+    config_root: &Path,
     target: &str,
     id: Option<&str>,
     all: bool,
@@ -850,7 +863,7 @@ fn lint(
                 None,
             ));
         }
-        rig::load(target)?
+        rig::load(config_root, target)?
     };
     let report = rig::run_lint(&rig)?;
     let exit_code = if report.success { 0 } else { 1 };
@@ -913,8 +926,12 @@ fn apply_check_path_override(rig: &mut rig::RigSpec, path: &str) -> homeboy::cor
     Ok(())
 }
 
-fn down(rig_id: &str, setting_args: &SettingArgs) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn down(
+    config_root: &Path,
+    rig_id: &str,
+    setting_args: &SettingArgs,
+) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let settings = materialized_setting_env_args(setting_args)?;
     let report = rig::run_down_with_settings(&rig, &settings)?;
     let exit_code = if report.success { 0 } else { 1 };
@@ -947,8 +964,8 @@ fn materialized_setting_env_args(
     Ok(settings)
 }
 
-fn repair(rig_id: &str) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn repair(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::run_repair(&rig)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
@@ -960,8 +977,8 @@ fn repair(rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn sync(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn sync(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::run_sync(&rig, dry_run)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
@@ -973,11 +990,11 @@ fn sync(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
+fn run_profile(config_root: &Path, args: RigRunArgs) -> CmdResult<RigCommandOutput> {
     // Boundary: one rig run is one unit of work (#7505).
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
     let source_update = refresh_rig_source_if_materialized(roots.config(), &args.rig_id)?;
-    let rig = rig::load(&args.rig_id)?;
+    let rig = rig::load(config_root, &args.rig_id)?;
     let sync_report = rig::run_sync(&rig, false)?;
     let bench_options = rig_run_bench_options(args);
     let profile = bench_options.profile.clone();
@@ -1044,8 +1061,8 @@ fn rig_run_bench_options(args: RigRunArgs) -> RigRunBenchOptions {
     }
 }
 
-fn status(rig_id: &str) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn status(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::run_status(&rig)?;
     Ok((
         RigCommandOutput::Status(RigStatusOutput {
@@ -1056,16 +1073,18 @@ fn status(rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn app(command: RigAppCommand) -> CmdResult<RigCommandOutput> {
+fn app(config_root: &Path, command: RigAppCommand) -> CmdResult<RigCommandOutput> {
     match command {
-        RigAppCommand::Install { rig_id, dry_run } => app_install(&rig_id, dry_run),
-        RigAppCommand::Update { rig_id, dry_run } => app_update(&rig_id, dry_run),
-        RigAppCommand::Uninstall { rig_id, dry_run } => app_uninstall(&rig_id, dry_run),
+        RigAppCommand::Install { rig_id, dry_run } => app_install(config_root, &rig_id, dry_run),
+        RigAppCommand::Update { rig_id, dry_run } => app_update(config_root, &rig_id, dry_run),
+        RigAppCommand::Uninstall { rig_id, dry_run } => {
+            app_uninstall(config_root, &rig_id, dry_run)
+        }
     }
 }
 
-fn app_install(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn app_install(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::app::install(&rig, rig::AppLauncherOptions { dry_run })?;
     Ok((
         RigCommandOutput::App(RigAppOutput {
@@ -1076,8 +1095,8 @@ fn app_install(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn app_update(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn app_update(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::app::update(&rig, rig::AppLauncherOptions { dry_run })?;
     Ok((
         RigCommandOutput::App(RigAppOutput {
@@ -1088,8 +1107,8 @@ fn app_update(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn app_uninstall(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn app_uninstall(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(config_root, rig_id)?;
     let report = rig::app::uninstall(&rig, rig::AppLauncherOptions { dry_run })?;
     Ok((
         RigCommandOutput::App(RigAppOutput {
@@ -1102,6 +1121,14 @@ fn app_uninstall(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
 
 #[cfg(test)]
 mod tests {
+    /// The isolated home each test below installs, named as a config root.
+    ///
+    /// A test is the entry point for its own unit of work, so resolving once
+    /// here is a boundary resolution (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy::core::paths::homeboy().expect("config root")
+    }
+
     use super::*;
     use clap::Parser;
     use std::fs;
@@ -1332,6 +1359,7 @@ mod tests {
             );
 
             let (_output, exit_code) = check(
+                &test_config_root(),
                 "studio-bfb",
                 None,
                 Some(&override_component.path().to_string_lossy()),
@@ -1359,6 +1387,7 @@ mod tests {
             );
 
             let err = match check(
+                &test_config_root(),
                 "multi-component",
                 None,
                 Some(&component.path().to_string_lossy()),
@@ -1479,12 +1508,19 @@ mod tests {
             );
 
             // Full check fails on the missing requirement file.
-            let (_check, check_exit) = check("lint-cmd", None, None).expect("rig check runs");
+            let (_check, check_exit) =
+                check(&test_config_root(), "lint-cmd", None, None).expect("rig check runs");
             assert_eq!(check_exit, 1, "missing requirement should fail rig check");
 
             // The lint command skips requirements entirely and succeeds.
-            let (output, exit_code) =
-                lint("lint-cmd", None, false, Some(RigLintFormat::Json)).expect("rig lint runs");
+            let (output, exit_code) = lint(
+                &test_config_root(),
+                "lint-cmd",
+                None,
+                false,
+                Some(RigLintFormat::Json),
+            )
+            .expect("rig lint runs");
             assert_eq!(exit_code, 0);
             let json = serde_json::to_value(output).expect("serialize lint output");
             assert_eq!(json["payload"]["command"], "rig.lint");
@@ -1501,7 +1537,13 @@ mod tests {
                 serde_json::json!({ "id": "lint-id-guard" }),
             );
 
-            let err = match lint("lint-id-guard", Some("alpha"), false, None) {
+            let err = match lint(
+                &test_config_root(),
+                "lint-id-guard",
+                Some("alpha"),
+                false,
+                None,
+            ) {
                 Ok(_) => panic!("--id against an installed rig id should fail"),
                 Err(err) => err,
             };
@@ -1524,6 +1566,7 @@ mod tests {
         }
 
         let (output, exit_code) = lint(
+            &test_config_root(),
             &temp.path().to_string_lossy(),
             None,
             true,
@@ -1559,6 +1602,7 @@ mod tests {
         .expect("write conflict");
 
         let (output, exit_code) = lint(
+            &test_config_root(),
             &temp.path().to_string_lossy(),
             None,
             true,
@@ -1620,8 +1664,9 @@ mod tests {
                 }),
             );
 
-            let (output, exit_code) = up_runner_exec_plan("script-matrix", "homeboy-lab")
-                .expect("command-only rig should plan");
+            let (output, exit_code) =
+                up_runner_exec_plan(&test_config_root(), "script-matrix", "homeboy-lab")
+                    .expect("command-only rig should plan");
 
             assert_eq!(exit_code, 0);
             let json = serde_json::to_value(output).expect("serialize plan");
@@ -1668,7 +1713,8 @@ mod tests {
                 }),
             );
 
-            let err = match up_runner_exec_plan("resource-rig", "homeboy-lab") {
+            let err = match up_runner_exec_plan(&test_config_root(), "resource-rig", "homeboy-lab")
+            {
                 Ok(_) => panic!("resource rig should not plan"),
                 Err(err) => err,
             };

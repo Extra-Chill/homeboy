@@ -32,6 +32,20 @@ mod matrix;
 mod observation;
 mod settings_matrix;
 
+/// Config root for rig-registry reads on the bench command surface.
+///
+/// The bench surface has no `PathRoots` carrier: `BenchRunArgs` threads through
+/// a dozen helpers that each need a rig spec, and none of them has another
+/// reason to know about paths. Adding a root parameter to all of them to remove
+/// these reads is the plumbing the PathRoots injection contract warns against.
+///
+/// The resolution stays, but it is named and greppable here instead of hidden
+/// inside `rig::load`, which every other caller now reaches with an explicit
+/// root. Delete this when the bench surface gains a carrier (#7505).
+pub(super) fn bench_config_root() -> homeboy::core::Result<PathBuf> {
+    homeboy::core::paths::homeboy()
+}
+
 use default_baseline::{
     add_default_baseline_failure_hint, apply_default_baseline_failure_context,
     default_baseline_notice, maybe_expand_default_baseline,
@@ -790,7 +804,7 @@ fn run_cross_rig_bench(
 }
 
 fn rig_axes(rig_id: &str) -> homeboy::core::Result<Option<BTreeMap<String, String>>> {
-    let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
+    let spec = rig::RigSourceContext::load_for_invocation(&bench_config_root()?, rig_id)?.spec;
     let Some(bench) = spec.bench else {
         return Ok(None);
     };
@@ -972,7 +986,7 @@ fn bench_list_empty_hints(
 }
 
 fn compatible_bench_rig_hints(component_id: &str) -> Vec<String> {
-    let Ok(rigs) = rig::list() else {
+    let Ok(Ok(rigs)) = bench_config_root().map(|root| rig::list(&root)) else {
         return Vec::new();
     };
 
@@ -1090,7 +1104,10 @@ type ListRigContext = rig::RigSourceContext;
 fn load_list_rig(args: &BenchListArgs) -> homeboy::core::Result<Option<ListRigContext>> {
     match args.rig.as_slice() {
         [] => Ok(None),
-        [rig_id] => Ok(Some(rig::RigSourceContext::load_for_invocation(rig_id)?)),
+        [rig_id] => Ok(Some(rig::RigSourceContext::load_for_invocation(
+            &bench_config_root()?,
+            rig_id,
+        )?)),
         _ => Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             "bench list accepts exactly one rig id",

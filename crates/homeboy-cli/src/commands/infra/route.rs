@@ -148,7 +148,9 @@ pub(crate) fn route_after_parse_with_provenance(
 
     if let (Some(runner_id), Commands::Rig(args)) = (cli.runner.as_deref(), &cli.command) {
         if let Some(rig_id) = args.up_dry_run_rig_id() {
-            let (output, exit_code) = crate::commands::rig::up_runner_exec_plan(rig_id, runner_id)?;
+            let roots = homeboy::core::paths::PathRoots::from_environment()?;
+            let (output, exit_code) =
+                crate::commands::rig::up_runner_exec_plan(roots.config(), rig_id, runner_id)?;
             let stdout = serde_json::to_string_pretty(&output).map_err(|err| {
                 Error::internal_io(
                     err.to_string(),

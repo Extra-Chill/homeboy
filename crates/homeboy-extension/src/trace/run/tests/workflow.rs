@@ -184,7 +184,12 @@ fn test_trace_is_unclaimed() {
 fn resolve_trace_baseline_root_without_rig_returns_component_path() {
     let temp = tempfile::tempdir().unwrap();
     let component_path = temp.path().to_string_lossy().to_string();
-    let root = resolve_trace_baseline_root(&component_path, None).unwrap();
+    let root = resolve_trace_baseline_root(
+        &homeboy_core::paths::homeboy().expect("config root"),
+        &component_path,
+        None,
+    )
+    .unwrap();
     assert_eq!(root, PathBuf::from(&component_path));
     // Crucially, no homeboy.json gets created in the component checkout
     // just by resolving — that only happens when a baseline is saved.
@@ -197,7 +202,12 @@ fn resolve_trace_baseline_root_with_rig_uses_rig_state_dir_and_skips_component_p
     let component_path = temp.path().to_string_lossy().to_string();
     let rig_id = format!("__hb-trace-baseline-test-{}", std::process::id());
 
-    let root = resolve_trace_baseline_root(&component_path, Some(&rig_id)).unwrap();
+    let root = resolve_trace_baseline_root(
+        &homeboy_core::paths::homeboy().expect("config root"),
+        &component_path,
+        Some(&rig_id),
+    )
+    .unwrap();
 
     assert!(
         root.ends_with(format!("{}.state/baselines", rig_id)),
@@ -232,7 +242,12 @@ fn rig_save_baseline_does_not_write_component_homeboy_json() {
     let component_path = temp.path().to_string_lossy().to_string();
     let rig_id = format!("__hb-trace-save-test-{}", std::process::id());
 
-    let baseline_root = resolve_trace_baseline_root(&component_path, Some(&rig_id)).unwrap();
+    let baseline_root = resolve_trace_baseline_root(
+        &homeboy_core::paths::homeboy().expect("config root"),
+        &component_path,
+        Some(&rig_id),
+    )
+    .unwrap();
 
     let results = TraceResults {
         component_id: "studio".to_string(),
