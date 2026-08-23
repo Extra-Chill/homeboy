@@ -3914,6 +3914,7 @@ fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attribu
 
         let behind = preflight_cook_workspace_base_ancestry(&destination, "main")
             .expect_err("strictly behind destination is rejected before provider execution");
+        assert_eq!(behind.retryable, Some(true));
         assert_eq!(
             behind.details["workspace_base_ancestry"]["direction"],
             "behind"
@@ -3940,9 +3941,11 @@ fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attribu
         );
         options.to_worktree = destination.display().to_string();
         options.source_worktree_path = Some(destination.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
         options.initial_plan.tasks[0].metadata = serde_json::json!({
             "worktree_provision": { "kind": "explicit_cwd" }
         });
+        options.attempt_dispatcher = None;
         let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("stale destination is a durable pre-execution failure");
         assert_eq!(report.value.status, "pre_execution_failure");
@@ -3957,7 +3960,30 @@ fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attribu
             .as_str()
             .expect("stale-base diagnostic")
             .contains("Cook destination is behind"));
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        crate::agent_task_service::retry_admission(&options.initial_run_id)
+            .expect("stale-base retry admission");
+        let failure_context = report
+            .value
+            .failure_context
+            .as_ref()
+            .expect("stale-base recovery context");
+        assert!(
+            failure_context.next_actions.iter().any(|action| {
+                action.command
+                    == format!("homeboy agent-task retry {} --run", options.initial_run_id)
+            }),
+            "{failure_context:#?}"
+        );
+        assert!(report
+            .value
+            .failure_context
+            .as_ref()
+            .expect("stale-base recovery context")
+            .next_actions
+            .iter()
+            .all(|action| !action.command.contains("cook-continue")));
 
         git(
             &destination,
@@ -3970,6 +3996,27 @@ fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attribu
         git(&destination, &["merge", "--ff-only", "origin/main"]);
         preflight_cook_workspace_base_ancestry(&destination, "main")
             .expect("clean intentional no-change destination is equivalent to its resolved base");
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("converged zero-execution stale-base failure reuses its Cook attempt");
+        assert_eq!(retry.record.metadata["cook_id"], options.cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 1);
+        let provider_starts = Arc::new(AtomicUsize::new(0));
+        options.initial_run_id = retry.record.run_id;
+        options.initial_plan = agent_task_lifecycle::load_controller_plan(&options.initial_run_id)
+            .expect("load the retry's persisted Cook plan");
+        let continued = run_cook(CookContext::new(
+            options.clone(),
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&provider_starts),
+            }),
+        ))
+        .expect("retried stale-base Cook reaches its provider");
+        assert_eq!(continued.value.cook_id, "cook-stale-origin-base");
+        assert_eq!(provider_starts.load(Ordering::SeqCst), 1, "{continued:#?}");
+        let retried_record = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("provider execution is durable on the replacement run");
+        assert_eq!(retried_record.metadata["provider_executions_consumed"], 1);
+
         std::fs::write(destination.join("candidate.txt"), "candidate only\n").unwrap();
         git(&destination, &["add", "candidate.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
@@ -7060,31 +7107,92 @@ fn retryable_pre_provider_retry_rejects_a_lifecycle_reservation_collision_withou
 }
 
 #[test]
-fn retryable_pre_provider_retry_enforces_the_persisted_attempt_budget() {
+fn retryable_zero_execution_pre_provider_failure_reuses_the_semantic_attempt_budget() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-retry-budget", 1);
 
-        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
-            .expect_err("retry cannot exceed the persisted Cook budget");
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("zero-execution retry replaces the semantic Cook attempt");
 
-        assert_eq!(
-            error.details["field"],
-            "cook_recipe.retry_budget.max_attempts"
-        );
+        assert_eq!(retry.record.metadata["cook_attempt"], 1);
+        assert_eq!(retry.record.metadata["retry_of"], options.initial_run_id);
         assert_eq!(
             super::super::load_recipe(&options.cook_id)
-                .expect("recipe remains intact")
+                .expect("replacement is recorded")
                 .attempts
                 .len(),
-            1
+            2
         );
         assert_eq!(
             agent_task_lifecycle::cook_index(&options.cook_id)
-                .expect("index remains intact")
+                .expect("replacement is indexed")
                 .attempts
                 .len(),
-            1
+            2
         );
+    });
+}
+
+#[test]
+fn repeated_zero_execution_replacements_keep_one_semantic_attempt_and_unique_lineage() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-retry-replacements", 1);
+        let first = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("first zero-execution replacement");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &first.record.run_id,
+            &options.initial_plan,
+            "gate_environment.preserve",
+            &Error::validation_invalid_argument("CARGO_HOME", "still unavailable", None, None)
+                .with_retryable(true),
+        )
+        .expect("record second zero-execution failure");
+        let second = crate::agent_task_service::retry(&first.record.run_id, None, false, false)
+            .expect("second zero-execution replacement");
+
+        assert_ne!(first.record.run_id, second.record.run_id);
+        assert_eq!(first.record.metadata["cook_attempt"], 1);
+        assert_eq!(second.record.metadata["cook_attempt"], 1);
+        assert_eq!(second.record.metadata["retry_of"], first.record.run_id);
+        let recipe = super::super::load_recipe(&options.cook_id).expect("replacement lineage");
+        assert_eq!(recipe.attempts.len(), 3);
+        assert!(recipe.attempts.iter().all(|attempt| attempt.attempt == 1));
+        assert_eq!(recipe.attempts[0].run_id, options.initial_run_id);
+        assert_eq!(recipe.attempts[1].run_id, first.record.run_id);
+        assert_eq!(recipe.attempts[2].run_id, second.record.run_id);
+        let stale_context = super::super::cook_failure_context(
+            &options.cook_id,
+            Some(&first.record.run_id),
+            "pre_execution_failure",
+        )
+        .expect("stale replacement failure context");
+        assert!(stale_context
+            .next_actions
+            .iter()
+            .all(|action| !action.command.contains("agent-task retry")));
+    });
+}
+
+#[test]
+fn non_retryable_pre_execution_failure_does_not_advertise_a_cook_losing_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-non-retryable-pre-execution", 1);
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["pre_execution_failure"]["retryable"] = serde_json::json!(false);
+        })
+        .expect("mark pre-execution failure non-retryable");
+
+        assert!(crate::agent_task_service::retry_admission(&options.initial_run_id).is_err());
+        let context = super::super::cook_failure_context(
+            &options.cook_id,
+            Some(&options.initial_run_id),
+            "pre_execution_failure",
+        )
+        .expect("Cook failure context");
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| !action.command.contains("agent-task retry")));
     });
 }
 
@@ -7132,6 +7240,10 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
 fn retryable_pre_provider_retry_materializes_orphaned_transport_replacement() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-retry-orphaned-replacement", 2);
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("make the predecessor budget-consuming");
         let first_retry =
             crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
                 .expect("reserve second attempt");

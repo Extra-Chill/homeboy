@@ -7005,6 +7005,12 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     }
+    if let Err(error) = agent_task_service_direct::retry_admission(&record.run_id) {
+        return RetryReplayAction::unavailable(
+            owner,
+            format!("retry admission is unavailable: {}", error.message),
+        );
+    }
     if !plan_has_retry_materialization_identity(&plan) {
         return RetryReplayAction::unavailable(
             owner,

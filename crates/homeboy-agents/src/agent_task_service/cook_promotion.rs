@@ -4359,10 +4359,9 @@ pub fn cook_failure_context(
         &chronological_latest_run_id,
         recovery_legal,
         blocking_claim.is_some(),
-        provider_executions_consumed
-            < recipe.retry_budget["max_attempts"]
-                .as_u64()
-                .unwrap_or_default(),
+        record
+            .as_ref()
+            .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
         exact_checkpoint_candidate_mismatch(&diagnostic),
         ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
         record.as_ref().and_then(lab_handoff_runtime_recovery),
@@ -4492,7 +4491,7 @@ fn cook_recovery_actions(
     run_id: &str,
     recovery_legal: bool,
     blocking_claim: bool,
-    provider_retry_available: bool,
+    retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
     ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
@@ -4511,8 +4510,9 @@ fn cook_recovery_actions(
         | "green_no_finalize"
         | "intentional_no_change"
         | "execution_budget_exhausted"
-        | "retries_exhausted" => false,
-        "gate_failed" | "no_op_gate_failed" => provider_retry_available,
+        | "retries_exhausted"
+        | "pre_execution_failure" => false,
+        "gate_failed" | "no_op_gate_failed" => retry_admitted,
         _ => true,
     };
     let mut actions = vec![
@@ -4531,7 +4531,7 @@ fn cook_recovery_actions(
             command: super::cook_recovery_command(run_id, &["reconcile", run_id, "--dry-run"]),
         });
     }
-    if exact_checkpoint_candidate_mismatch {
+    if exact_checkpoint_candidate_mismatch && retry_admitted {
         // The checkpoint authenticates one exact destination candidate. A
         // replacement run preserves that immutable evidence without claiming it
         // can safely continue against a diverged worktree.
@@ -4555,6 +4555,11 @@ fn cook_recovery_actions(
                 ),
             }
         }));
+    } else if status == "pre_execution_failure" && retry_admitted {
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "retry".to_string(),
+            command: super::cook_recovery_command(run_id, &["retry", run_id, "--run"]),
+        });
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
@@ -4608,6 +4613,12 @@ mod recovery_action_tests {
                 vec!["status", "diagnose"],
             ),
             (
+                "pre_execution_failure",
+                true,
+                false,
+                vec!["status", "diagnose", "retry"],
+            ),
+            (
                 "verification_pending",
                 false,
                 false,
@@ -4649,7 +4660,10 @@ mod recovery_action_tests {
             );
             assert!(recovery.legal_actions.iter().all(|action| {
                 action.command.starts_with("homeboy agent-task ")
-                    && action.command.ends_with("cook-state-matrix-attempt-1")
+                    && (action.command.ends_with("cook-state-matrix-attempt-1")
+                        || action
+                            .command
+                            .ends_with("cook-state-matrix-attempt-1 --run"))
                     || action.command
                         == "homeboy agent-task status cook-state-matrix-attempt-1 --full"
             }));
