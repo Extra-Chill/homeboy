@@ -187,6 +187,9 @@ impl LocalControllerJobClient {
                 .state
                 .as_ref()
                 .map(|state| state.build_identity.display.clone());
+            let recovery_command = (status.freshness.restartable
+                && status.freshness.active_jobs == 0)
+                .then_some("homeboy daemon recover --yes");
             let mut error = Error::validation_invalid_argument(
                 "daemon_build_identity",
                 "controller jobs require the resident daemon to match the invoking Homeboy build",
@@ -198,6 +201,9 @@ impl LocalControllerJobClient {
                         .to_string(),
                 ]),
             );
+            if let Some(recovery_command) = recovery_command {
+                error = error.with_hint(format!("Next: {recovery_command}"));
+            }
             error.details = json!({
                 "classification": "controller_job_daemon_build_mismatch",
                 "daemon_build_identity": daemon_identity,
@@ -205,6 +211,7 @@ impl LocalControllerJobClient {
                 "stale_reason": status.stale_reason,
                 "stale_reason_code": status.freshness.stale_reason_code,
                 "active_jobs": status.freshness.active_jobs,
+                "recovery_command": recovery_command,
             });
             return Err(error);
         }

@@ -1163,14 +1163,18 @@ pub fn record_detached_cook_handoff_child_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let record = lifecycle_store.mutate_record(&cook_id, |record| {
-        let cancelled = record.state == AgentTaskRunState::Cancelled;
-        let state = if cancelled { "cancelled" } else { "pending" };
+        // A concurrent observer may have already terminalized the handoff
+        // before this attachment write acquired the record lock. Keep that
+        // classification intact for the launcher to report.
+        if record.state.is_terminal() {
+            return false;
+        }
         let cancellation_fence =
             record.metadata["detached_cook_handoff"]["cancellation_fence"].clone();
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"] = json!({
-            "state": state,
-        "admission_state": if cancelled { "cancelled" } else { "child_attached" },
+            "state": "pending",
+        "admission_state": "child_attached",
         "child_supervisor_deadline_at": (chrono::Utc::now()
             + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
             .to_rfc3339(),
@@ -1182,7 +1186,7 @@ pub fn record_detached_cook_handoff_child_in_store(
         record.updated_at = Some(now_timestamp());
         true
     })?;
-    Ok(record.expect("detached handoff parent exists"))
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
 /// Persist the daemon job that supervises this locally launched Cook.
