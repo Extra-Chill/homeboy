@@ -2103,10 +2103,17 @@ where
         // Ordinary continuation consumes only the pending entry scheduled by
         // authoritative reconciliation. Failed and completed claims require an
         // explicit rearm and can never be silently replayed.
+        // The recipe membership check, the claim, and the state read are one
+        // decision, so all three have to name the same home (#7505).
+        let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
         let claim = if args.rearm {
-            agent_task_service::claim_continuation_for_recovery(&recipe.cook_id, &run_id)?
+            agent_task_service::claim_continuation_for_recovery_in_store(
+                &recipe_store,
+                &recipe.cook_id,
+                &run_id,
+            )?
         } else {
-            agent_task_service::claim_continuation_for(&recipe.cook_id, &run_id)?
+            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
         };
         let Some(claim) = claim else {
             return Ok((
@@ -2114,7 +2121,11 @@ where
                     &recipe.cook_id,
                     &run_id,
                     &format!("{:?}", record.state),
-                    agent_task_service::continuation_state(&recipe.cook_id, &run_id)?,
+                    agent_task_service::continuation_state_in_store(
+                        &recipe_store,
+                        &recipe.cook_id,
+                        &run_id,
+                    )?,
                 ),
                 0,
             ));
@@ -2257,14 +2268,25 @@ where
         > + Copy,
 {
     let operation_key = format!("retry-run:{run_id}");
-    match agent_task_lifecycle::claim_cook_operation(
+    // Claim, completion, and failure are one exactly-once operation-claim
+    // protocol, so all three have to name the same installation (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    match agent_task_lifecycle::claim_cook_operation_in_store(
+        &lifecycle_store,
         run_id,
         &operation_key,
         Duration::from_secs(30),
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
         | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::status(run_id)?;
+            let record = agent_task_lifecycle::status_in_store(
+                &lifecycle_store,
+                run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
             Ok((cook_continuation_status(&recipe.cook_id, &record), 0))
         }
         agent_task_lifecycle::ClaimOutcome::Acquired => {
@@ -2301,7 +2323,8 @@ where
             })();
             match dispatched {
                 Ok((value, exit_code)) => {
-                    agent_task_lifecycle::complete_cook_operation(
+                    agent_task_lifecycle::complete_cook_operation_in_store(
+                        &lifecycle_store,
                         run_id,
                         &operation_key,
                         serde_json::json!({ "exit_code": exit_code }),
@@ -2309,7 +2332,8 @@ where
                     Ok((value, exit_code))
                 }
                 Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation(
+                    agent_task_lifecycle::fail_cook_operation_in_store(
+                        &lifecycle_store,
                         run_id,
                         &operation_key,
                         serde_json::json!({ "error": error.message.clone() }),
