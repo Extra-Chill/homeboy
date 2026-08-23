@@ -35,6 +35,10 @@ if (args.includes('--version')) {
   process.stdout.write('0.21.0');
   process.exit(0);
 }
+if (args.join(' ') === 'runtime descriptor --json') {
+  process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }));
+  process.exit(0);
+}
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = await readFile(args[args.indexOf('--options') + 1], 'utf8');
   await writeFile(args[args.indexOf('--output') + 1], options);

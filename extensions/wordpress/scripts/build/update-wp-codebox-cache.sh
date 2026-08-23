@@ -88,6 +88,10 @@ cache_update_script() {
 set -euo pipefail
 
 fail() {
+    if [ -n "${IDENTITY_BACKUP:-}" ] && [ -n "${IDENTITY_PATH:-}" ]; then
+        cp "$IDENTITY_BACKUP" "$IDENTITY_PATH" 2>/dev/null || true
+        rm -f "$IDENTITY_BACKUP"
+    fi
     echo "ERROR: $*" >&2
     exit 1
 }
@@ -103,6 +107,8 @@ sha256_file() {
 }
 
 [ -n "$CACHE_DIR" ] || CACHE_DIR="${HOME}/.cache/homeboy/wp-codebox/source"
+IDENTITY_PATH="$CACHE_DIR/.homeboy-runtime-identity.json"
+IDENTITY_BACKUP=""
 
 command -v git >/dev/null 2>&1 || fail "git is required to update WP Codebox cache"
 command -v "$NPM_BIN" >/dev/null 2>&1 || fail "npm executable not found on runner: $NPM_BIN"
@@ -120,6 +126,14 @@ if [ -d "$CACHE_DIR" ] && [ ! -d "$CACHE_DIR/.git" ]; then
 fi
 
 mkdir -p "$(dirname "$CACHE_DIR")"
+
+# The identity is untracked build metadata and `git clean` removes it. Retain
+# it until the replacement CLI has passed every readiness probe so a failed
+# update cannot leave the managed cache without its last known identity.
+if [ -f "$IDENTITY_PATH" ]; then
+    IDENTITY_BACKUP="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-identity.XXXXXX")" || fail "failed to reserve managed runtime identity backup"
+    cp "$IDENTITY_PATH" "$IDENTITY_BACKUP" || fail "failed to back up managed runtime identity"
+fi
 
 if [ ! -d "$CACHE_DIR/.git" ]; then
     echo "Cloning WP Codebox cache: $SOURCE -> $CACHE_DIR"
@@ -150,8 +164,13 @@ echo "Building WP Codebox packages..."
 SHA="$(git -C "$CACHE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
 CLI="$CACHE_DIR/packages/cli/dist/index.js"
 [ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
+VERSION="$($CLI --version 2>&1)" || fail "built WP Codebox CLI version probe failed: $CLI. Rebuild the requested ref with a compatible WP Codebox CLI."
+printf '%s\n' "$VERSION" | grep -Eq '(^|[^0-9])v?0\.(2[1-9]|[3-9][0-9]|[1-9][0-9]{2,})\.[0-9]+([^0-9]|$)' || fail "built WP Codebox CLI does not satisfy the required >=0.21.0 version: ${VERSION:-unavailable}. Update the requested ref and retry."
+DESCRIPTOR="$($CLI runtime descriptor --json 2>&1)" || fail "built WP Codebox CLI runtime descriptor probe failed: $CLI. Rebuild the requested ref with browser preview support."
+printf '%s' "$DESCRIPTOR" | node -e 'let descriptor; try { descriptor = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch { process.exit(1); } process.exit(descriptor?.schema === "wp-codebox/runtime-descriptor/v1" && descriptor?.readiness?.status === "available" && descriptor?.readiness?.browserRuntime?.status === "ready" && descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen === "wp-codebox/browser-contained-site-open/v1" ? 0 : 1);' || fail "built WP Codebox CLI is missing required browser preview capability wp-codebox/browser-contained-site-open/v1: ${DESCRIPTOR:-unavailable}. Update the requested ref and retry."
 CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
-printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CACHE_DIR/.homeboy-runtime-identity.json"
+printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$IDENTITY_PATH" || fail "failed to record managed WP Codebox runtime identity"
+rm -f "$IDENTITY_BACKUP"
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
 }

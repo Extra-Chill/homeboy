@@ -79,7 +79,7 @@ async function waitForReaped(pids, timeoutMs = 5000) {
   assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/env/wp-codebox', HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: fixtureBin }) } }), '/env/wp-codebox');
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: '{"wp_codebox_bin":"/bin/wp-codebox"}' }), { wp_codebox_bin: '/bin/wp-codebox' });
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: 'not json' }), {});
-  assert.equal(typeof wpCodeboxBin({ env: {} }), 'string');
+  assert.throws(() => wpCodeboxBin({ env: {} }), /WP Codebox binary is not configured/);
   assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.cjs'), { command: process.execPath, args: ['/tmp/wp-codebox.cjs'] });
   assert.deepEqual(wpCodeboxCommand('wp-codebox'), { command: 'wp-codebox', args: [] });
   assert.deepEqual(

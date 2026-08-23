@@ -325,7 +325,7 @@ async function runWpCodeboxRecipe({
   }
 
   const eventOptions = { eventSource, eventPrefix };
-  const identity = createCodeboxClient({ wpCodeboxBin: explicitWpCodeboxBin, bin, env }).identity();
+  const identity = createCodeboxClient({ wp_codebox_bin: explicitWpCodeboxBin || bin, env }).identity();
   const { command, args } = identity.invocation;
   const commandArgs = [
     ...args,

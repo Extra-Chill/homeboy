@@ -32,9 +32,11 @@ function selectWpCodeboxRuntime(options = {}) {
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const managedSource = path.join(installDir, 'source');
   const managed = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+  const packaged = packagedWpCodeboxBin(env, options);
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
-    configured: candidate(configured, configured && samePath(expandHome(String(configured), env), managed) ? 'managed' : 'configured', options),
+    configured: candidate(configured, configured && sameFile(expandHome(String(configured), env), managed, options) ? 'managed' : 'configured', options),
+    packaged: candidate(packaged, 'packaged', options),
     managed: candidate(managed, 'managed', options),
     path: candidate(pathCandidate, 'path', options),
   };
@@ -42,6 +44,8 @@ function selectWpCodeboxRuntime(options = {}) {
   // is also a Homeboy-owned prerequisite, not permission to use PATH instead.
   const selected = configured
     ? candidates.configured
+    : candidates.packaged.available
+      ? candidates.packaged
     : directoryExists(managedSource, options)
       ? candidates.managed
       : [candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
@@ -111,15 +115,30 @@ function managedCommandBinary(binary, args, options = {}) {
   const env = options.env || process.env;
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const managed = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
-  return [binary, ...args].some((entry) => samePath(entry, managed)) ? managed : '';
+  return [binary, ...args].some((entry) => sameFile(entry, managed, options)) ? managed : '';
 }
 
-function samePath(left, right) {
+function sameFile(left, right, options = {}) {
   try {
-    return path.resolve(left) === path.resolve(right);
+    const fileSystem = options.fs || fs;
+    const leftStat = fileSystem.statSync(left);
+    const rightStat = fileSystem.statSync(right);
+    if (leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) return true;
+    return fileSystem.realpathSync(left) === fileSystem.realpathSync(right);
   } catch {
     return false;
   }
+}
+
+function packagedWpCodeboxBin(env, options = {}) {
+  const component = firstValue(env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT, env.WP_CODEBOX_RUNTIME_COMPONENT);
+  if (!component) return '';
+  const resolved = path.resolve(expandHome(component, env));
+  const candidates = [
+    path.resolve(resolved, '..', 'cli', 'dist', 'index.js'),
+    path.resolve(resolved, '..', '..', 'packages', 'cli', 'dist', 'index.js'),
+  ];
+  return candidates.find((entry) => executableFile(entry, options)) || '';
 }
 
 function probeRuntimeDescriptor(bin, options = {}, prefixArgs = []) {

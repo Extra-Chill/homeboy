@@ -18,9 +18,10 @@ const run = (env) => {
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 };
-const executable = (file, version, browserPreview = true) => {
+const executable = (file, version, browserPreview = true, invocationMarker = '') => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `#!/usr/bin/env node
+${invocationMarker ? `require('node:fs').writeFileSync(${JSON.stringify(invocationMarker)}, 'invoked');` : ''}
 if (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(version)});
 else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify(${JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: browserPreview ? 'ready' : 'unavailable' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: browserPreview ? 'wp-codebox/browser-contained-site-open/v1' : '' } } } })}));
 else process.exit(1);
@@ -45,9 +46,10 @@ try {
   assert.equal(declaration.remediation, 'homeboy extension setup wordpress');
   assert.equal(manifest.minimum_version, '0.21.0');
   assert.equal(manifest.version, '1.5.4');
-  const stalePath = path.join(temp, 'stale-path');
-  const stale = path.join(stalePath, 'wp-codebox');
-  executable(stale, '0.12.27');
+   const stalePath = path.join(temp, 'stale-path');
+   const stale = path.join(stalePath, 'wp-codebox');
+   const pathInvocation = path.join(temp, 'path-preflight');
+   executable(stale, '0.12.27', true, pathInvocation);
   const incomplete = path.join(temp, 'incomplete');
   fs.mkdirSync(path.join(incomplete, 'source/packages/cli'), { recursive: true });
 
@@ -80,11 +82,36 @@ try {
 
   const cachedCurrent = path.join(temp, 'cached-current');
   const cachedCli = managedRuntime(cachedCurrent, '0.21.0');
-  const cached = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: cachedCurrent, PATH: `${stalePath}:${process.env.PATH}` });
-  assert.equal(cached.ready, true);
+   const cached = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: cachedCurrent, PATH: `${stalePath}:${process.env.PATH}` });
+   assert.equal(cached.ready, true);
   assert.equal(cached.identity.executable, cachedCli);
   assert.equal(cached.identity.source, 'managed');
-  assert.equal(cached.identity.version, '0.21.0');
+   assert.equal(cached.identity.version, '0.21.0');
+
+   const packagedRoot = path.join(temp, 'packaged-runtime');
+   const packagedComponent = path.join(packagedRoot, 'plugin');
+   const packagedCli = path.join(packagedRoot, 'cli/dist/index.js');
+   fs.mkdirSync(packagedComponent, { recursive: true });
+   executable(packagedCli, '0.21.0');
+   const packaged = run({
+     HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete,
+     HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: packagedComponent,
+     PATH: `${stalePath}:${process.env.PATH}`,
+   });
+   assert.equal(packaged.ready, true);
+   assert.equal(packaged.identity.executable, packagedCli);
+   assert.equal(packaged.identity.source, 'packaged');
+   assert.equal(packaged.candidates.path.path, stale);
+   assert.equal(packaged.candidates.path.available, true);
+   assert.equal(fs.existsSync(pathInvocation), false, 'packaged selection must not preflight an unrelated PATH runtime');
+   const alternatePackaged = run({
+     HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete,
+     WP_CODEBOX_RUNTIME_COMPONENT: packagedComponent,
+     PATH: `${stalePath}:${process.env.PATH}`,
+   });
+   assert.equal(alternatePackaged.ready, true);
+   assert.equal(alternatePackaged.identity.executable, packagedCli);
+   assert.equal(alternatePackaged.identity.source, 'packaged');
 
   const staleBuild = path.join(temp, 'stale-build');
   managedRuntime(staleBuild, '0.21.0');
@@ -101,8 +128,14 @@ try {
    assert.equal(tamperedConfigured.classification, 'wp_codebox_managed_source_identity_invalid');
    assert.equal(tamperedConfigured.identity.source, 'managed');
    const tamperedCommand = preflightWpCodeboxCommand([process.execPath, tamperedCli], { env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild } });
-   assert.equal(tamperedCommand.reason, 'wp_codebox_managed_source_identity_invalid');
-   assert.equal(tamperedCommand.selected.source, 'managed');
+    assert.equal(tamperedCommand.reason, 'wp_codebox_managed_source_identity_invalid');
+    assert.equal(tamperedCommand.selected.source, 'managed');
+
+    const tamperedSymlink = path.join(temp, 'tampered-managed-symlink');
+    fs.symlinkSync(tamperedCli, tamperedSymlink);
+    const tamperedSymlinked = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: tamperedBuild, HOMEBOY_WP_CODEBOX_BIN: tamperedSymlink, PATH: `${stalePath}:${process.env.PATH}` });
+    assert.equal(tamperedSymlinked.classification, 'wp_codebox_managed_source_identity_invalid');
+    assert.equal(tamperedSymlinked.identity.source, 'managed');
 
   const missingCapability = path.join(temp, 'missing-capability');
   managedRuntime(missingCapability, '0.21.0', false);

@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${SCRIPT_DIR}/update-wp-codebox-cache.sh"
+REAL_NODE="$(command -v node)"
+export REAL_NODE
 TMPDIR="${TMPDIR:-/tmp}"
 WORK_DIR="$(mktemp -d "${TMPDIR%/}/homeboy-wp-codebox-cache.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -21,6 +23,26 @@ NPM
 cat > "${FAKE_BIN}/node" <<'NODE'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = '-e' ]; then
+    exec "$REAL_NODE" "$@"
+fi
+if [[ "${1:-}" = */packages/cli/dist/index.js ]]; then
+    cli="$1"
+    shift
+    if [ -f "$(dirname "$(dirname "$(dirname "$(dirname "$cli")")")")/incompatible" ] && grep -q '^incompatible$' "$(dirname "$(dirname "$(dirname "$(dirname "$cli")")")")/incompatible"; then
+        version='0.20.0'
+        descriptor='{}'
+    else
+        version='0.21.0'
+        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    fi
+    case "${*}" in
+        --version) printf '%s\n' "$version" ;;
+        'runtime descriptor --json') printf '%s\n' "$descriptor" ;;
+        *) exit 1 ;;
+    esac
+    exit 0
+fi
 shift
 prefix=""
 args=()
@@ -79,7 +101,8 @@ INITIAL_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main
 
 printf '%s\n' 'updated' > "${SOURCE_WORK}/fixture.txt"
-git -C "$SOURCE_WORK" add fixture.txt
+printf '%s\n' 'incompatible' > "${SOURCE_WORK}/incompatible"
+git -C "$SOURCE_WORK" add fixture.txt incompatible
 git -C "$SOURCE_WORK" commit --quiet -m 'updated wp-codebox fixture'
 UPDATED_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" tag fixture-ref
@@ -102,15 +125,20 @@ esac
 mkdir -p "${CACHE_DIR}/packages/cli/dist"
 printf '%s\n' 'stale build output' > "${CACHE_DIR}/packages/cli/dist/index.js"
 
-OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+IDENTITY_BEFORE_UPDATE="$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")"
+if OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" 2>&1)"; then
+    echo "Expected incompatible WP Codebox update to fail" >&2
+    exit 1
+fi
 case "$OUTPUT" in
-    *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
+    *"does not satisfy the required >=0.21.0 version"*) ;;
     *)
-        echo "Expected updated SHA in output" >&2
+        echo "Incompatible update did not report an actionable version failure" >&2
         echo "$OUTPUT" >&2
         exit 1
         ;;
 esac
+[ "$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")" = "$IDENTITY_BEFORE_UPDATE" ] || { echo "Incompatible update replaced managed runtime identity" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash
@@ -187,9 +215,9 @@ case "$DRY_RUN_OUTPUT" in
 esac
 
 PATH_WITHOUT_FAKE_BIN="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -F "$FAKE_BIN" | paste -sd ':' -)"
-OUTPUT="$(PATH="$PATH_WITHOUT_FAKE_BIN" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+OUTPUT="$(PATH="$PATH_WITHOUT_FAKE_BIN" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
-    *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
+    *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
     *)
         echo "Expected absolute npm path run to succeed" >&2
         echo "$OUTPUT" >&2
