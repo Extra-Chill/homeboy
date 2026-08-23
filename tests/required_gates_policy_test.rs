@@ -124,6 +124,38 @@ fn run_validator(mode: &str, env: &[(&str, &str)]) -> Output {
         .expect("required-gates validator should run")
 }
 
+fn run_execution_gate(env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new("bash");
+    command.arg(".github/ci-required-gates-executed.sh");
+    command.env_remove("GITHUB_STEP_SUMMARY");
+    command.env("CI_GATE_RESULTS", r#"{"gates":{"result":"success"}}"#);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
+        .output()
+        .expect("required-gates execution gate should run")
+}
+
+fn execution_jobs(contexts: &[String], exception: Option<(&str, serde_json::Value)>) -> String {
+    serde_json::to_string(
+        &contexts
+            .iter()
+            .map(|context| {
+                serde_json::json!({
+                    "name": context,
+                    "conclusion": exception
+                        .as_ref()
+                        .filter(|(candidate, _)| *candidate == context)
+                        .map(|(_, conclusion)| conclusion.clone())
+                        .unwrap_or_else(|| serde_json::json!("success")),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("execution jobs fixture")
+}
+
 fn stdout_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -531,6 +563,86 @@ fn github_mode_rejects_rulesets_that_omit_the_terminal_execution_verdict() {
         stderr_of(&output).contains("enforcement is divergent"),
         "{}",
         stderr_of(&output)
+    );
+}
+
+/// GitHub only allows a merge once a required context succeeds. These fixtures
+/// exercise the terminal context's fail-closed contract for every non-success
+/// check state that could otherwise leave a candidate unverified.
+#[test]
+fn terminal_execution_verdict_rejects_pending_skipped_cancelled_failed_and_absent_contexts() {
+    let contexts = declared_contexts();
+    let target = "homeboy / Test";
+
+    for (state, conclusion, expected_outcome) in [
+        ("pending", serde_json::Value::Null, "failed"),
+        ("skipped", serde_json::json!("skipped"), "failed"),
+        ("cancelled", serde_json::json!("cancelled"), "failed"),
+        ("failed", serde_json::json!("failure"), "failed"),
+    ] {
+        let scratch = Scratch::new(state);
+        let jobs = scratch.write(
+            "jobs.json",
+            &execution_jobs(&contexts, Some((target, conclusion))),
+        );
+        let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+        assert!(
+            !output.status.success(),
+            "a {state} terminal context must leave the PR unmergeable: {}",
+            stdout_of(&output)
+        );
+        assert!(
+            stdout_of(&output).contains(&format!(
+                "required-gates-executed-status={expected_outcome}"
+            )),
+            "a {state} terminal context must have a fail-closed verdict: {}",
+            stdout_of(&output)
+        );
+    }
+
+    let absent: Vec<String> = contexts
+        .iter()
+        .filter(|context| context.as_str() != target)
+        .cloned()
+        .collect();
+    let scratch = Scratch::new("absent-terminal-context");
+    let jobs = scratch.write("jobs.json", &execution_jobs(&absent, None));
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+    assert!(
+        !output.status.success()
+            && stdout_of(&output).contains("required-gates-executed-status=skipped"),
+        "an absent terminal context must leave the PR unmergeable: {}",
+        stdout_of(&output)
+    );
+}
+
+/// The terminal job has no conclusion until this script exits. Its own required
+/// context is enforced by GitHub after that exit, so observing it as a running
+/// job would make every otherwise-green run fail cyclically.
+#[test]
+fn terminal_execution_verdict_does_not_require_its_own_in_progress_conclusion() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("terminal-self-observation");
+    let jobs = scratch.write(
+        "jobs.json",
+        &execution_jobs(
+            &contexts,
+            Some(("homeboy / Required Gates Executed", serde_json::Value::Null)),
+        ),
+    );
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+    assert!(
+        output.status.success(),
+        "the terminal context is enforced by GitHub after this job exits: {}\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("required-gates-executed-status=executed"),
+        "{}",
+        stdout_of(&output)
     );
 }
 
