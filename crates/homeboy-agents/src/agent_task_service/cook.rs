@@ -4990,7 +4990,10 @@ fn run_cook_spine(
                         });
                     }
                 }
-                if options.attempt_dispatcher.is_none() {
+                // A controller-owned baseline replaces the admitted workspace
+                // for both local and detached dispatch. Attest that exact
+                // replacement before either path can persist or hand it off.
+                if effective_baseline.is_some() || options.attempt_dispatcher.is_none() {
                     bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 }
                 failed_dispatch_plan = Some(dispatch_plan.clone());

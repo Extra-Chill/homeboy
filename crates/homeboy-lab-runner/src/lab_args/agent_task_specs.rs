@@ -103,15 +103,21 @@ pub(crate) fn verify_cook_workspace_attestations_in_args(
                 Path::new(root),
                 attestation,
             ) {
-                return Err(Error::validation_invalid_argument(
+                let mut error = Error::validation_invalid_argument(
                     "workspace",
-                    "Cook source workspace no longer matches its admission identity attestation before Lab snapshotting",
+                    "Cook workspace identity does not match its admission attestation before Lab snapshotting",
                     Some(root.to_string()),
                     Some(vec![
-                        "Restore the admitted worktree or start a new Cook so Lab can snapshot the verified source."
+                        "Resolve the reported identity mismatch in the managed source, then start a new Cook; Homeboy recreates dispatch baselines."
                             .to_string(),
                     ]),
-                ));
+                );
+                error.details["identity_attestation"] =
+                    homeboy_agents::agent_task_workspace_identity::workspace_attestation_diagnostics(
+                        Path::new(root),
+                        attestation,
+                    );
+                return Err(error);
             }
         }
     }
