@@ -106,7 +106,11 @@ pub fn set_home_root_override(path: Option<PathBuf>) {
 }
 
 /// Resolved home root: the process-local override when set, else `$HOME`.
-#[cfg(not(windows))]
+///
+/// Defined on every platform so [`home_root`] is, too. On Windows `HOME` is
+/// normally unset and this returns `Err`, which is exactly what the callers
+/// that used to read the variable directly already handled — the override is
+/// consulted first either way, so a hermetic test can still repoint them.
 fn resolved_home_root() -> Result<PathBuf> {
     let override_path = {
         let guard = home_root_override()
@@ -142,7 +146,6 @@ fn resolved_home_root() -> Result<PathBuf> {
 ///
 /// Subprocesses are unaffected and should keep inheriting or being handed an
 /// explicit environment; they read their own copy after `fork`.
-#[cfg(not(windows))]
 pub fn home_root() -> Result<PathBuf> {
     resolved_home_root()
 }

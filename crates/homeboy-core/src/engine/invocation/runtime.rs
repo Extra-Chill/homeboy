@@ -171,8 +171,15 @@ fn cache_fallback_root() -> Result<PathBuf> {
         // Socket paths under this root must stay inside the `sockaddr_un`
         // budget (~104 bytes), so its shape is load-bearing in a way the
         // config root's is not. Keep them independent.
-        let home = crate::paths::home_root()?;
-        Ok(home.join(".cache").join("homeboy").join("inv"))
+        let home = env::var("HOME").map_err(|_| {
+            Error::internal_unexpected(
+                "HOME environment variable not set on Unix-like system".to_string(),
+            )
+        })?;
+        Ok(PathBuf::from(home)
+            .join(".cache")
+            .join("homeboy")
+            .join("inv"))
     }
 }
 

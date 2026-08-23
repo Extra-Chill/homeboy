@@ -101,20 +101,41 @@ fn only_the_paths_resolver_reads_home_directly() {
             {
                 continue;
             }
-            let line = body[..offset].matches('\n').count() + 1;
-            readers.push(format!("{}:{line}", path.display()));
+            // File, not line: the invariant is *which* code reads the
+            // variable, and pinning line numbers would make every unrelated
+            // edit above a reader look like a policy change.
+            let _ = offset;
+            readers.push(path.display().to_string());
         }
     }
 
+    readers.sort();
+    readers.dedup();
+
+    let expected = vec![
+        // The resolver itself. Consults the override, then falls back.
+        "crates/homeboy-core/src/engine/invocation/runtime.rs".to_string(),
+        // Deliberate, and documented at the call site. #11266 routed this
+        // through `paths` and broke
+        // `promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id`
+        // in every run after. The invocation runtime root is separately pinned
+        // by `HOMEBOY_INVOCATION_RUNTIME_DIR_ENV` for every hermetic test, so
+        // routing it through the override buys no isolation and re-adds the
+        // blast radius that regression came from. Socket paths under this root
+        // must also stay inside the `sockaddr_un` budget, which makes its shape
+        // load-bearing in a way the config root's is not.
+        "crates/homeboy-paths/src/lib.rs".to_string(),
+    ];
+
     assert_eq!(
-        readers,
-        vec!["crates/homeboy-paths/src/lib.rs:120".to_string()],
+        readers, expected,
         "\nProduction `HOME` readers changed.\n\n\
-         Exactly one is allowed: `resolved_home_root` in homeboy-paths, which \
-         consults the process-local override before falling back to the \
-         variable. Every other reader races `HomeGuard`'s `set_var(\"HOME\", ..)` \
-         — `setenv` is not thread-safe, and a concurrent `getenv` can observe \
-         the variable mid-write rather than merely stale.\n\n\
+         Two are allowed, and the second is an exception with a named \
+         regression behind it — read the comment at that call site before \
+         touching it. Every other reader races `HomeGuard`'s \
+         `set_var(\"HOME\", ..)`: `setenv` is not thread-safe, so a concurrent \
+         `getenv` can observe the variable mid-write rather than merely \
+         stale.\n\n\
          Each such reader is a reason `rust_cargo_test_threads` cannot leave 1 \
          (#7505). Call `paths::home_root()` instead.\n\n\
          Found: {readers:#?}"
