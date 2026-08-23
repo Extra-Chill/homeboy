@@ -714,7 +714,7 @@ fn function_regions(lines: &[&str], start: usize, indent: usize) -> Option<(Stri
 /// away is that `update_cook_candidate_after_completion` has an `_in_store`
 /// sibling and resolves a root of its own.
 const PRE_FIX_RECORD_AGGREGATE: &str = r#"
-pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(), 
+pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(),
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
@@ -753,7 +753,7 @@ pub(crate) fn record_aggregate_in_store(
 /// The same region as #12618 merged it: one call rerouted to the rooted sibling,
 /// with a comment that names the ambient function it stopped calling.
 const FIXED_RECORD_AGGREGATE: &str = r#"
-pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(), 
+pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(),
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
