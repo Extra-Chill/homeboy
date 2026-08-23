@@ -774,7 +774,14 @@ fn load_portfolio(
                 batch_record.child_runs.iter().map(|child| {
                     supervisor::AgentTaskFanoutPortfolioChild {
                         child_id: child.task_id.clone(),
-                        tracker_ref: format!("homeboy://agent-task/run/{}", child.run_id),
+                        tracker_ref: agent_task_lifecycle::persisted_status(&child.run_id)
+                            .ok()
+                            .and_then(|record| {
+                                declared_tracker_ref(&record.metadata).map(str::to_string)
+                            })
+                            .unwrap_or_else(|| {
+                                format!("homeboy://agent-task/run/{}", child.run_id)
+                            }),
                         run_id: child.run_id.clone(),
                         source_sha: None,
                         base_sha: None,
@@ -1125,7 +1132,7 @@ fn portfolio_observation(
     let (tracker, pr, remote_head_sha, findings) = match path {
         Some(path) => github_observation(path, record.as_ref(), finalization)?,
         None => (
-            supervisor::AgentTaskFanoutTrackerState::Unknown,
+            tracker_state_without_observation(record.as_ref()),
             supervisor::AgentTaskFanoutPrState::Unknown,
             None,
             Vec::new(),
@@ -1172,13 +1179,9 @@ fn github_observation(
     Option<String>,
     Vec<supervisor::AgentTaskFanoutReviewFinding>,
 )> {
-    let task_url = record
-        .and_then(|record| record.metadata.pointer("/cook_recipe/source_refs/0"))
-        .and_then(Value::as_str);
-    let tracker = task_url
-        .and_then(|url| IssueRef::parse(url).ok())
-        .map(|issue| {
-            homeboy::core::git::issue_find(
+    let tracker = match record.and_then(|record| declared_tracker_ref(&record.metadata)) {
+        Some(task_url) => match IssueRef::parse(task_url) {
+            Ok(issue) => homeboy::core::git::issue_find(
                 None,
                 homeboy::core::git::IssueFindOptions {
                     state: homeboy::core::git::IssueState::All,
@@ -1192,17 +1195,22 @@ fn github_observation(
                     .items
                     .iter()
                     .find(|item| item.number.to_string() == issue.number)
-                    .map_or(supervisor::AgentTaskFanoutTrackerState::Unknown, |item| {
-                        if item.state.eq_ignore_ascii_case("open") {
-                            supervisor::AgentTaskFanoutTrackerState::Open
-                        } else {
-                            supervisor::AgentTaskFanoutTrackerState::Closed
-                        }
-                    })
-            })
-        })
-        .transpose()?
-        .unwrap_or(supervisor::AgentTaskFanoutTrackerState::Unknown);
+                    .map_or(
+                        supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
+                        |item| {
+                            if item.state.eq_ignore_ascii_case("open") {
+                                supervisor::AgentTaskFanoutTrackerState::Open
+                            } else {
+                                supervisor::AgentTaskFanoutTrackerState::Closed
+                            }
+                        },
+                    )
+            }),
+            // Tracker identity is generic; this adapter only observes GitHub.
+            Err(_) => Ok(supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved),
+        }?,
+        None => supervisor::AgentTaskFanoutTrackerState::Unknown,
+    };
     let head = finalization
         .and_then(|value| value.get("head"))
         .and_then(Value::as_str);
@@ -1253,6 +1261,23 @@ fn github_observation(
         supervisor::AgentTaskFanoutPrState::OpenChecksPending
     };
     Ok((tracker, state, view.head_sha, findings))
+}
+
+fn declared_tracker_ref(metadata: &Value) -> Option<&str> {
+    metadata
+        .pointer("/cook_recipe/source_refs/0")
+        .and_then(Value::as_str)
+        .filter(|reference| reference.starts_with("https://") || reference.starts_with("http://"))
+}
+
+fn tracker_state_without_observation(
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+) -> supervisor::AgentTaskFanoutTrackerState {
+    if record.is_some_and(|record| declared_tracker_ref(&record.metadata).is_some()) {
+        supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved
+    } else {
+        supervisor::AgentTaskFanoutTrackerState::Unknown
+    }
 }
 
 fn git_candidate_state(
@@ -8586,6 +8611,26 @@ esac
         assert_eq!(pr, supervisor::AgentTaskFanoutPrState::OpenChecksPassing);
         assert_eq!(remote_head.as_deref(), Some("candidate-sha"));
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn declared_recipe_tracker_reference_is_projected_without_a_github_observation() {
+        let metadata = json!({
+            "cook_recipe": {
+                "source_refs": ["https://tracker.example.test/issues/42"]
+            }
+        });
+
+        assert_eq!(
+            declared_tracker_ref(&metadata),
+            Some("https://tracker.example.test/issues/42")
+        );
+        assert_eq!(
+            declared_tracker_ref(&json!({
+                "cook_recipe": { "source_refs": ["fanout:recipe"] }
+            })),
+            None
+        );
     }
 
     fn git(path: &std::path::Path, args: &[&str]) -> String {
