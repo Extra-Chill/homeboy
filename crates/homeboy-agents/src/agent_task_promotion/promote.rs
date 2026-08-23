@@ -1478,7 +1478,7 @@ mod declared_base_tests {
         let git = fixture_dir.path().join("git");
         std::fs::write(
             &git,
-            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access remote: Failed to connect to proxy' >&2\nexit 1\n",
+            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access https://git-user:git-secret@proxy.example.test/repository: Failed to connect to proxy' >&2\nexit 1\n",
         )
         .expect("write Git fixture");
         let mut permissions = std::fs::metadata(&git)
@@ -1509,6 +1509,8 @@ mod declared_base_tests {
             error.details["git_base_preflight"]["required_environment"],
             json!(["HTTPS_PROXY"])
         );
+        assert!(!error.message.contains("git-secret"));
+        assert!(!error.message.contains("git-user"));
         assert!(!error.details.to_string().contains("proxy.example.test"));
     }
 
@@ -2505,7 +2507,7 @@ fn declared_base_git_failure(
     environment: &[(String, String)],
     timeout: Duration,
 ) -> Error {
-    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(stderr));
     if is_git_transport_failure(&stderr) {
         return declared_base_transport_error(
             base_ref,
@@ -2521,6 +2523,11 @@ fn declared_base_git_failure(
         None,
         None,
     )
+}
+
+fn redact_declared_base_git_diagnostic(value: &str) -> String {
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    policy.redact_embedded_urls(value).trim().to_string()
 }
 
 fn declared_base_transport_error(

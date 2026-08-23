@@ -5734,6 +5734,81 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
     });
 }
 
+#[test]
+fn cook_persists_initial_base_transport_failure_before_provider_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("configure Git workspace")
+                .success());
+        }
+        std::fs::write(workspace.path().join("tracked.txt"), "base\n").expect("write base");
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "base"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "http://git-user:git-secret@127.0.0.1:1/repository.git",
+            ],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("prepare Git transport fixture")
+                .success());
+        }
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            "cook-initial-base-transport-failure",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.initial_run_id = "cook-initial-base-transport-failure-attempt-1".to_string();
+        options.to_worktree = workspace.path().display().to_string();
+        options.source_worktree_path = Some(workspace.path().to_path_buf());
+        options.initial_plan.tasks[0].workspace.root = Some(workspace.path().display().to_string());
+
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("base transport failure is durable and retryable");
+
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let record = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("initial base transport failure has a durable run");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "workspace_base_capture"
+        );
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        let persisted = record.metadata.to_string();
+        assert!(!persisted.contains("git-secret"), "{persisted}");
+        assert!(!persisted.contains("git-user"), "{persisted}");
+        let report_evidence = format!("{report:#?}");
+        assert!(!report_evidence.contains("git-secret"), "{report_evidence}");
+        let retry = agent_task_lifecycle::retry(
+            &options.initial_run_id,
+            Some("cook-initial-base-transport-failure-retry"),
+        )
+        .expect("zero-provider transport failure is retryable");
+        assert_eq!(retry.metadata["retry_of"], options.initial_run_id);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {

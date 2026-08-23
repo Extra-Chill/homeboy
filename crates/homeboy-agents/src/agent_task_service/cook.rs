@@ -4301,9 +4301,6 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
-    if !store.recipe_exists(&options.cook_id) {
-        pin_initial_cook_workspace_base(&mut options)?;
-    }
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -4431,6 +4428,17 @@ fn run_cook_spine(
         &options,
         recipe_materialization.created,
     )?;
+    // Base resolution reaches origin. Keep its transport failure behind the
+    // recipe/run saga so retry and replay have durable zero-provider evidence.
+    if options.task_base_sha.is_none() {
+        pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
+            |error| {
+                let mut error = with_pre_execution_phase(error, "workspace_base_capture");
+                error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+                error
+            },
+        )?;
+    }
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -6483,6 +6491,38 @@ fn pin_initial_cook_workspace_base(options: &mut AgentTaskCookServiceOptions) ->
         return Ok(());
     };
     pin_cook_workspace_base_at(options, &workspace)
+}
+
+fn pin_and_persist_initial_cook_workspace_base(
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
+    pin_initial_cook_workspace_base(options)?;
+    let Some(task_base_sha) = options.task_base_sha.as_ref() else {
+        return Ok(());
+    };
+    let mut recipe = store.load_recipe(&options.cook_id)?;
+    let attempt = recipe
+        .attempts
+        .iter_mut()
+        .find(|attempt| attempt.run_id == options.initial_run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "initial Cook recipe is missing its materialized attempt",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    attempt.plan = options.initial_plan.clone();
+    recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
+    store.persist_recipe(&recipe)?;
+    agent_task_lifecycle::persist_controller_plan_in_store(
+        lifecycle_store,
+        &options.initial_run_id,
+        &options.initial_plan,
+    )
 }
 
 fn pin_cook_workspace_base_at(
