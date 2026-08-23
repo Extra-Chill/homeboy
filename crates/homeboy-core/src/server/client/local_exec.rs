@@ -211,7 +211,7 @@ fn run_local_command(
             let containment_error = containment
                 .terminate_on_failure_bounded(Duration::from_secs(2), false)
                 .err();
-            ProcessGroupCleanupGuard::new(child.id()).cleanup();
+            let _ = ProcessGroupCleanupGuard::new(child.id()).cleanup();
             let _ = child.wait();
             return CommandOutput {
                 stdout: String::new(),
@@ -283,9 +283,10 @@ fn run_local_command(
     let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
-    let cleanup_detail = cleanup_guard
+    let cleanup_report = cleanup_guard
         .take()
-        .and_then(ProcessGroupCleanupGuard::cleanup);
+        .map(ProcessGroupCleanupGuard::cleanup)
+        .unwrap_or_default();
     let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
 
     let stdin_failed = stdin_handle
@@ -295,13 +296,20 @@ fn run_local_command(
     let (stdout, stdout_stalled) = collect_output_reader(stdout_reader, reader_deadline);
     let (mut stderr, stderr_stalled) = collect_output_reader(stderr_reader, reader_deadline);
     let streams_stalled = stdout_stalled || stderr_stalled;
-    if streams_stalled || cleanup_detail.is_some() {
+    if streams_stalled || !cleanup_report.is_empty() {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
-        if let Some(detail) = cleanup_detail {
+        if let Some(detail) = cleanup_report.incomplete {
             stderr.push_str(&format!(
                 "Homeboy containment cleanup was incomplete: {detail}.\n"
+            ));
+        }
+        // Evidence only. Reduced discovery confidence is not a producer result,
+        // so it is recorded without touching success or the exit code (#13128).
+        if let Some(warning) = cleanup_report.warning {
+            stderr.push_str(&format!(
+                "Homeboy containment cleanup completed with reduced confidence: {warning}.\n"
             ));
         }
         if streams_stalled {

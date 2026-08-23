@@ -162,8 +162,16 @@ pub struct ProcessContainment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessContainmentCleanup {
     pub forced: bool,
+    /// True when no run-owned process is known to remain. Reduced visibility
+    /// into unrelated host processes lowers confidence but is not evidence that
+    /// containment leaked, so it does not clear this flag.
     pub complete: bool,
+    /// Why cleanup could not be verified. Present only when `complete` is false.
     pub detail: Option<String>,
+    /// A non-fatal confidence diagnostic worth retaining as evidence. Callers
+    /// must surface it without overriding the result the contained command
+    /// already produced.
+    pub diagnostic: Option<String>,
 }
 
 impl ProcessContainment {
@@ -270,6 +278,7 @@ impl ProcessContainment {
                     forced: true,
                     complete: true,
                     detail: None,
+                    diagnostic: None,
                 })
             } else {
                 Err(Error::internal_unexpected(format!(
@@ -299,6 +308,7 @@ impl ProcessContainment {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
                 detail: cleanup.detail,
+                diagnostic: cleanup.diagnostic,
             });
         }
         #[cfg(not(target_os = "linux"))]
@@ -312,6 +322,7 @@ impl ProcessContainment {
                         forced: termination.signal == "SIGKILL",
                         complete: true,
                         detail: None,
+                        diagnostic: None,
                     }
                 });
             }
@@ -323,6 +334,7 @@ impl ProcessContainment {
                     forced,
                     complete: true,
                     detail: None,
+                    diagnostic: None,
                 }
             })
         }
@@ -1265,20 +1277,28 @@ fn scope_cleanup_report(
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    let complete = !targets.pids.is_empty() && unreadable == 0;
+    // Cleanup is incomplete only when a run-owned process is *known* to be
+    // unaccounted for: discovery ran and found no marker-owned process at all,
+    // meaning a descendant escaped by dropping HOMEBOY_PROCESS_SCOPE.
+    //
+    // A same-owner /proc entry we could not read lowers confidence but proves
+    // nothing. Treating it as incomplete turned every clean gate on a shared
+    // host into an infrastructure failure (#13128), so it is reported as a
+    // diagnostic that never overrides the producer's own result.
+    let complete = !targets.pids.is_empty();
     let detail = (!complete).then(|| {
-        if unreadable > 0 {
-            format!(
-                "process-scope discovery was incomplete: {unreadable} /proc environment entries could not be read"
-            )
-        } else {
-            "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
-        }
+        "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
+    });
+    let diagnostic = (unreadable > 0).then(|| {
+        format!(
+            "process-scope discovery had reduced confidence: {unreadable} same-owner /proc environment entries could not be read"
+        )
     });
     ProcessContainmentCleanup {
         forced,
         complete,
         detail,
+        diagnostic,
     }
 }
 
@@ -1631,6 +1651,17 @@ struct LinuxScopeDiscovery {
     unreadable_environments: usize,
 }
 
+/// Whether `/proc/<pid>` is owned by the user this process runs as. A false
+/// answer — including a `/proc` entry that vanished before it could be
+/// inspected — means the process cannot belong to a Homeboy process scope.
+#[cfg(target_os = "linux")]
+fn linux_proc_is_same_owner(proc_entry: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = unsafe { libc::geteuid() };
+    std::fs::metadata(proc_entry).is_ok_and(|metadata| metadata.uid() == euid)
+}
+
 #[cfg(target_os = "linux")]
 fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
     let entries = std::fs::read_dir("/proc").map_err(|error| {
@@ -1656,15 +1687,23 @@ fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
             // happened to exit mid-scan, which is constant under load and was
             // reproducible as soon as tests ran concurrently (#7505).
             //
-            // Permission denied is different and still counts: another user's
-            // process is one we cannot prove is outside our scope.
+            // Permission denied on a process owned by another user is equally
+            // expected and equally uninformative. Homeboy spawns every scope
+            // member as this user, so a foreign-owned process cannot be
+            // carrying this run's marker. On a shared VPS or a GitHub-hosted
+            // runner practically every unrelated process is foreign-owned, so
+            // counting them reported hundreds of "unreadable" entries on a
+            // totally clean run (#13128). Only a same-owner process we still
+            // cannot read is a genuine gap in discovery.
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
                 ) =>
             {
-                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && linux_proc_is_same_owner(&entry.path())
+                {
                     unreadable_environments += 1;
                 }
                 continue;
@@ -1789,7 +1828,10 @@ mod tests {
             .detail
             .as_deref()
             .is_some_and(|detail| detail.contains("no marker-owned process")));
+        assert_eq!(omitted.diagnostic, None);
 
+        // Reduced visibility is evidence, not a cleanup failure: the scope was
+        // discovered and drained, so the run's own result must stand (#13128).
         let unreadable = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: vec![42],
@@ -1801,12 +1843,55 @@ mod tests {
             },
             true,
         );
-        assert!(!unreadable.complete);
+        assert!(unreadable.complete);
         assert!(unreadable.forced);
+        assert_eq!(unreadable.detail, None);
         assert!(unreadable
-            .detail
+            .diagnostic
             .as_deref()
-            .is_some_and(|detail| detail.contains("could not be read")));
+            .is_some_and(|diagnostic| diagnostic.contains("could not be read")));
+    }
+
+    #[test]
+    fn scope_discovery_ignores_environments_owned_by_other_users() {
+        // Every unrelated process on a shared host denies `environ` reads to a
+        // non-root Homeboy. None of them can carry this run's scope marker, so
+        // discovery must stay silent about them (#13128).
+        let mut denied_foreign = 0usize;
+        let mut denied_same_owner = 0usize;
+        for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_none_or(|name| name.parse::<u32>().is_err())
+            {
+                continue;
+            }
+            let Err(error) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            if error.kind() != std::io::ErrorKind::PermissionDenied {
+                continue;
+            }
+            if linux_proc_is_same_owner(&entry.path()) {
+                denied_same_owner += 1;
+            } else {
+                denied_foreign += 1;
+            }
+        }
+
+        let discovery = linux_scope_pids(&Uuid::new_v4().to_string()).expect("scope discovery");
+
+        assert!(discovery.pids.is_empty(), "an unused scope owns no process");
+        // Before the fix this equalled `denied_foreign`, which is in the
+        // hundreds on a shared VPS or a GitHub-hosted runner and failed every
+        // clean gate. Only same-owner denials may ever be counted, so the
+        // reported gap can never exceed what this sample could plausibly see.
+        assert!(
+            discovery.unreadable_environments <= denied_same_owner,
+            "counted {} unreadable environments with {denied_same_owner} same-owner and {denied_foreign} foreign denials",
+            discovery.unreadable_environments
+        );
     }
 
     #[test]
