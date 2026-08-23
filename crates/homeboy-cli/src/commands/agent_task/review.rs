@@ -1396,16 +1396,20 @@ fn providers_with_catalog(
             },
             "operator_summary": {
                 "identity": "agent-task providers",
-                "state": route.as_ref().map(ProviderRoute::state).unwrap_or(if providers.is_empty() { "empty" } else { "available" }),
+                "state": provider_report_state(route.as_ref(), all_providers),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
                 "next_action": route.as_ref().map(ProviderRoute::next_command).unwrap_or(full_command.clone()),
+                "selection_choices": selection_choices(route.as_ref()),
             },
             "truncation": {
                 "providers": { "shown": shown_providers.len(), "omitted": providers.len().saturating_sub(shown_providers.len()), "evidence_ref": "agent-task:provider-catalog", "full_command": full_command.clone() },
                 "diagnostics": { "shown": shown_diagnostics.len(), "omitted": diagnostics.len().saturating_sub(shown_diagnostics.len()), "evidence_ref": "agent-task:provider-discovery-diagnostics", "full_command": full_command },
             },
             "dispatch_config_layers": if args.full { dispatch_config_layers(providers) } else { Value::Null },
-            "provider_identity_catalog": if args.full { provider_identity_catalog(providers) } else { Vec::new() },
+            // The compact provider list and identity catalog describe the same
+            // displayed entries. Requiring `--full` for identities made a ready
+            // catalog look empty even while it listed selectable executors.
+            "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
             "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
             // Availability means dispatchable. Anything that is declared but
@@ -1507,10 +1511,19 @@ enum ProviderRoute {
         reason: String,
         next_command: String,
     },
+    SelectionRequired {
+        choices: Vec<ProviderSelectionChoice>,
+    },
     Ambiguous {
         backend: String,
         candidate_ids: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct ProviderSelectionChoice {
+    backend: String,
+    command: String,
 }
 
 impl ProviderRoute {
@@ -1527,7 +1540,8 @@ impl ProviderRoute {
                 dispatchable: false,
                 ..
             }
-            | Self::Blocked { .. } => "blocked",
+            | Self::Blocked { .. } => "configuration_unavailable",
+            Self::SelectionRequired { .. } => "selection_required",
             Self::Ambiguous { .. } => "configuration_ambiguous",
         }
     }
@@ -1544,6 +1558,11 @@ impl ProviderRoute {
                 shell_arg(provider_id),
             ),
             Self::Blocked { next_command, .. } => next_command.clone(),
+            Self::SelectionRequired { choices } => choices
+                .first()
+                .expect("selection-required routes have choices")
+                .command
+                .clone(),
             Self::Ambiguous {
                 backend,
                 candidate_ids,
@@ -1575,6 +1594,7 @@ fn resolve_provider_route_for(
     selector: Option<String>,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<ProviderRoute> {
+    let backend_was_omitted = backend.is_none();
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
         backend,
         selector,
@@ -1585,6 +1605,13 @@ fn resolve_provider_route_for(
     ) {
         Ok(route) => route,
         Err(error) => {
+            let choices = dispatchable_backend_choices(catalog.providers());
+            if backend_was_omitted
+                && error.details["selection_required"] == Value::Bool(true)
+                && !choices.is_empty()
+            {
+                return Some(ProviderRoute::SelectionRequired { choices });
+            }
             return Some(ProviderRoute::Blocked {
                 reason: error.message,
                 next_command: "homeboy agent-task providers --catalog".to_string(),
@@ -1624,6 +1651,57 @@ fn resolve_provider_route_for(
     }
 }
 
+fn selection_choices(route: Option<&ProviderRoute>) -> Vec<Value> {
+    match route {
+        Some(ProviderRoute::SelectionRequired { choices }) => choices
+            .iter()
+            .map(|choice| {
+                serde_json::json!({
+                    "backend": choice.backend,
+                    "command": choice.command,
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn dispatchable_backend_choices(
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<ProviderSelectionChoice> {
+    let mut backends = providers
+        .iter()
+        .filter(|provider| provider_credential_readiness(provider).dispatchable)
+        .map(|provider| provider.backend.trim())
+        .filter(|backend| !backend.is_empty())
+        .collect::<Vec<_>>();
+    backends.sort_unstable();
+    backends.dedup();
+    backends
+        .into_iter()
+        .map(|backend| ProviderSelectionChoice {
+            backend: backend.to_string(),
+            command: format!(
+                "homeboy agent-task providers --backend {} --validate-readiness",
+                shell_arg(backend)
+            ),
+        })
+        .collect()
+}
+
+fn provider_report_state(
+    route: Option<&ProviderRoute>,
+    providers: &[AgentTaskExecutorProvider],
+) -> &'static str {
+    if !providers
+        .iter()
+        .any(|provider| provider_credential_readiness(provider).dispatchable)
+    {
+        return "blocked";
+    }
+    route.map(ProviderRoute::state).unwrap_or("available")
+}
+
 fn validate_effective_provider_route(
     route: Option<&ProviderRoute>,
     catalog: &AgentTaskProviderCatalog,
@@ -1639,6 +1717,9 @@ fn validate_effective_provider_route(
     else {
         let reason = match route {
             ProviderRoute::Blocked { reason, .. } => reason.clone(),
+            ProviderRoute::SelectionRequired { .. } => {
+                "Cook requires an explicit --backend selection".to_string()
+            }
             ProviderRoute::Ambiguous { backend, .. } => {
                 format!("Cook's effective backend `{backend}` requires --selector")
             }
@@ -1784,6 +1865,7 @@ fn readiness_validation_projection(
         "route_state": route.map(ProviderRoute::state),
         "next_command": route.map(ProviderRoute::next_command),
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
+        "selection_choices": selection_choices(route),
         // One entry per declared backend, each carrying this same projection
         // plus the `backend` it describes, so an operator with no configured
         // default can read which `--backend` value is usable here (#12569).
@@ -2691,10 +2773,72 @@ mod tests {
                 serde_json::json!(["ready"]),
                 "the usable --backend values are named directly"
             );
-            // The effective route stays blocked because no default backend is
-            // configured; the sweep is what makes that recoverable.
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            // Providers are available, but Cook still requires an explicit
+            // backend when policy supplies no default. The report separates
+            // that operator selection from an executor outage.
+            assert_eq!(output["operator_summary"]["state"], "selection_required");
+            assert_eq!(validation["route_state"], "selection_required");
+            assert_eq!(
+                output["operator_summary"]["selection_choices"],
+                serde_json::json!([
+                    {
+                        "backend": "failing",
+                        "command": "homeboy agent-task providers --backend failing --validate-readiness",
+                    },
+                    {
+                        "backend": "ready",
+                        "command": "homeboy agent-task providers --backend ready --validate-readiness",
+                    },
+                ])
+            );
             assert_eq!(validation["validated"], false);
+        });
+    }
+
+    #[test]
+    fn providers_report_selection_required_with_matching_identity_catalog() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let output = providers_with_catalog(
+                providers_args(),
+                provider_catalog(vec![
+                    provider("zeta.provider", "zeta"),
+                    provider("alpha.provider", "alpha"),
+                ]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "selection_required");
+            assert_eq!(
+                output["readiness_validation"]["route_state"],
+                "selection_required"
+            );
+            assert_eq!(output["providers"].as_array().map(Vec::len), Some(2));
+            assert_eq!(
+                output["provider_identity_catalog"].as_array().map(Vec::len),
+                Some(2),
+                "the compact identity catalog covers every displayed provider"
+            );
+            assert_eq!(
+                output["provider_identity_catalog"]
+                    .as_array()
+                    .expect("identity catalog")
+                    .iter()
+                    .map(|identity| identity["executor_provider_id"].clone())
+                    .collect::<Vec<_>>(),
+                output["providers"]
+                    .as_array()
+                    .expect("compact providers")
+                    .iter()
+                    .map(|provider| provider["id"].clone())
+                    .collect::<Vec<_>>(),
+                "each presented provider has its matching identity entry"
+            );
+            assert_eq!(
+                output["operator_summary"]["next_action"],
+                "homeboy agent-task providers --backend alpha --validate-readiness"
+            );
         });
     }
 
@@ -2720,6 +2864,29 @@ mod tests {
                 .expect("missing-default output")
                 .0;
             assert_eq!(output["operator_summary"]["state"], "blocked");
+        });
+    }
+
+    #[test]
+    fn providers_report_blocked_when_missing_default_has_no_dispatchable_executor() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let output = providers_with_catalog(
+                providers_args(),
+                provider_catalog(vec![credential_declaring_provider()]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(
+                output["readiness_validation"]["route_state"],
+                "configuration_unavailable"
+            );
+            assert_eq!(
+                output["operator_summary"]["selection_choices"],
+                serde_json::json!([])
+            );
         });
     }
 
