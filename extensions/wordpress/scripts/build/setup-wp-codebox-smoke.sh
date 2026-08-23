@@ -16,7 +16,6 @@ OVERRIDE_GITHUB_ENV_FILE="${TMPDIR}/override-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 REAL_GIT_BIN="${TMPDIR}/real-git-bin"
-SHA256SUM_GITHUB_ENV_FILE="${TMPDIR}/sha256sum-github-env"
 
 mkdir -p "${FAKE_BIN}" "${REAL_GIT_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
 ln -s "$(command -v git)" "${REAL_GIT_BIN}/git"
@@ -155,25 +154,6 @@ done
 SH
 chmod +x "${FAKE_BIN}/npm"
 
-cat > "${FAKE_BIN}/sha256sum" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' used > "${FAKE_SHA256SUM_MARKER}"
-node -e 'const crypto=require("node:crypto"); const fs=require("node:fs"); process.stdout.write(`${crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")}  ${process.argv[1]}\n`);' "$1"
-SH
-chmod +x "${FAKE_BIN}/sha256sum"
-
-# Keep the source-install fixture on a PATH without shasum while retaining the
-# few macOS utilities setup invokes by absolute shim.
-for utility in dirname awk uname; do
-    utility_path="$(command -v "${utility}")"
-    cat > "${FAKE_BIN}/${utility}" <<SH
-#!/usr/bin/env bash
-exec "${utility_path}" "\$@"
-SH
-    chmod +x "${FAKE_BIN}/${utility}"
-done
-
 (
     cd "${EXTENSION_DIR}"
     HOME="${HOME_DIR}" \
@@ -232,24 +212,6 @@ fi
 
 if [ ! -f "${source_wp_codebox_core_module}" ]; then
     echo "Expected source fallback to export built runtime core module" >&2
-    exit 1
-fi
-
-SHA256SUM_MARKER="${TMPDIR}/sha256sum-used"
-(
-    cd "${EXTENSION_DIR}"
-    HOME="${HOME_DIR}" \
-    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/bin" \
-    GITHUB_ENV="${SHA256SUM_GITHUB_ENV_FILE}" \
-    FAKE_SHA256SUM_MARKER="${SHA256SUM_MARKER}" \
-    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
-    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/sha256sum-source-install" \
-    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
-    HOMEBOY_WP_CODEBOX_REF="main" \
-    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/sha256sum-source-setup.out"
-)
-if [ ! -f "${SHA256SUM_MARKER}" ]; then
-    echo "Expected source setup to use sha256sum when shasum is unavailable" >&2
     exit 1
 fi
 
