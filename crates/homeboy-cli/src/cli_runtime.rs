@@ -2040,7 +2040,13 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.extension_override,
         Some(homeboy_extension::ExtensionCapability::Test),
     )
-    .map(|_| ())
+	.and_then(|context| {
+		homeboy::core::extension_execution::resolve_execution_context(
+			&context.component,
+			homeboy_extension::ExtensionCapability::Test,
+		)
+		.map(|_| ())
+	})
     .map_err(|mut error| {
         error.details["review_capability_preflight"] = serde_json::json!({
             "capability": "test",
@@ -2691,9 +2697,27 @@ mod tests {
                 ] {
                     let mut argv = vec!["homeboy"];
                     argv.extend(placement.iter().copied());
-                    argv.extend(["review", "test", "--path", script_path]);
-                    argv.extend(test_mode.iter().copied());
+                    argv.extend(["review", "test"]);
+                    if test_mode.first().copied() != Some("--") {
+                        argv.extend(test_mode.iter().copied());
+                    }
+                    argv.extend(["--path", script_path]);
+                    if test_mode.first().copied() == Some("--") {
+                        argv.extend(test_mode.iter().copied());
+                    }
                     let cli = Cli::parse_from(argv);
+
+                    let result = preflight_review_test_capability(&cli);
+                    assert!(
+						result.is_err(),
+						"modified test mode requires an extension test provider: {test_mode:?}, {placement:?}"
+					);
+                    let error = result.expect_err("error checked above");
+                    assert!(
+                        error.message.contains("No extension provider configured"),
+                        "{test_mode:?}, {placement:?}: {}",
+                        error.message
+                    );
 
                     assert_eq!(
                         preflight_hot_command_with(
@@ -2707,10 +2731,6 @@ mod tests {
                         Some(2),
                         "{test_mode:?}, {placement:?}"
                     );
-                    assert!(preflight_review_test_capability(&cli)
-                        .expect_err("modified test mode requires an extension test provider")
-                        .message
-                        .contains("No extension provider configured"));
                 }
             }
 
