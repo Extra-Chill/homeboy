@@ -1280,6 +1280,7 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::Arc;
@@ -1330,6 +1331,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn sync_lab_offload_rigs_snapshots_worktree_and_remaps_nested_relative_directory_package() {
         homeboy_core::test_support::with_isolated_home(|home| {
@@ -1359,7 +1361,7 @@ mod tests {
                 linked: true,
                 materialized: false,
             };
-            std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
+            std::fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
                 .expect("rig sources");
             homeboy_rig::install::write_source_metadata(
                 &homeboy_core::paths::homeboy().expect("config root"),
@@ -1485,7 +1487,7 @@ mod tests {
                 linked: true,
                 materialized: false,
             };
-            std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
+            std::fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
                 .expect("rig sources");
             homeboy_rig::install::write_source_metadata(
                 &homeboy_core::paths::homeboy().expect("config root"),
