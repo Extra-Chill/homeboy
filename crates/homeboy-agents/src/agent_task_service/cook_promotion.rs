@@ -2993,6 +2993,10 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
+    // A verified empty remediation is evidence about the already-applied
+    // candidate, not a replacement candidate. Recover the source promotion so
+    // an exact `--recover <remediation>` cannot hide that applied promotion.
+    let run_id = substantive_source_for_empty_remediation(&recipe, &run_id).unwrap_or(run_id);
     if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
         promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && promotion.changed_files.is_empty()
@@ -3244,6 +3248,7 @@ pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
                             .pointer("/cook_follow_up/source_run_id")
                             .and_then(Value::as_str)
                             == Some(source_run_id.as_str())
+                            && !is_empty_verified_remediation(&promotion)
                     })
             {
                 return Some(attempt.run_id.clone());
@@ -3251,6 +3256,49 @@ pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
         }
     }
     Some(source_run_id)
+}
+
+fn substantive_source_for_empty_remediation(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Option<String> {
+    let remediation = persisted_promotion_for_attempt(run_id).ok().flatten()?;
+    if !is_empty_verified_remediation(&remediation) {
+        return None;
+    }
+    let source_run_id = remediation
+        .provenance
+        .pointer("/cook_follow_up/source_run_id")
+        .and_then(Value::as_str)?;
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == source_run_id)
+        || canonical_cook_candidate(&recipe.cook_id)
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string))
+            .as_deref()
+            != Some(source_run_id)
+    {
+        return None;
+    }
+    persisted_promotion_for_attempt(source_run_id)
+        .ok()
+        .flatten()
+        .filter(|promotion| {
+            promotion.status == AgentTaskPromotionStatus::Applied
+                && !promotion.changed_files.is_empty()
+        })?;
+    Some(source_run_id.to_string())
+}
+
+fn is_empty_verified_remediation(promotion: &AgentTaskPromotionReport) -> bool {
+    promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
+        && promotion.changed_files.is_empty()
+        && promotion
+            .provenance
+            .pointer("/cook_follow_up/source_run_id")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| !run_id.is_empty())
 }
 
 /// Recover a standalone manual-finalization record. Unlike Cook attempts, a
