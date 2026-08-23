@@ -31,12 +31,19 @@ use super::test_mapping::{
 use super::test_vacuity::{find_vacuous_test_methods, resolve_package_name};
 use homeboy_audit_contract::TestMappingConfig;
 
-pub(crate) fn run(
-    root: &Path,
-    fingerprints: &[&FileFingerprint],
-    config: &TestMappingConfig,
-) -> Vec<Finding> {
-    analyze_test_coverage(root, fingerprints, config)
+/// Run vacuity checks that do not need an extension test mapping. The descriptor
+/// runtime invokes this when no mapping is declared, preserving standalone Rust
+/// test-quality findings while keeping `VacuousTest` under one owner.
+pub(crate) fn run_vacuity(root: &Path) -> Vec<Finding> {
+    crate::test_quality::run_vacuity(root)
+}
+
+pub(crate) fn run_vacuity_from_shared(findings: &[Finding]) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|finding| finding.kind == AuditFinding::VacuousTest)
+        .cloned()
+        .collect()
 }
 
 /// Analyze test coverage gaps given source fingerprints and a test mapping config.

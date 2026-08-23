@@ -13,7 +13,21 @@ use crate::conventions::AuditFinding;
 use crate::findings::{Finding, Severity};
 use crate::walker::is_test_path;
 
-pub(super) fn run(root: &Path) -> Vec<Finding> {
+pub(crate) fn run_vacuity(root: &Path) -> Vec<Finding> {
+    run(root)
+        .into_iter()
+        .filter(|finding| finding.kind == AuditFinding::VacuousTest)
+        .collect()
+}
+
+pub(crate) fn run_without_vacuity(root: &Path) -> Vec<Finding> {
+    run(root)
+        .into_iter()
+        .filter(|finding| finding.kind != AuditFinding::VacuousTest)
+        .collect()
+}
+
+pub(crate) fn run(root: &Path) -> Vec<Finding> {
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
         ..Default::default()

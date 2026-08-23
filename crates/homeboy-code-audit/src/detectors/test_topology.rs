@@ -1,6 +1,8 @@
 //! Test topology audit.
 //!
-//! This detector emits standalone `vacuous_test` findings via `test_quality`.
+//! Vacuity findings are owned by `test_coverage`, which runs the shared
+//! `test_quality` scan alongside policy-driven vacuity checks. This root-only
+//! detector retains the topology-specific findings used by the PR profile.
 //!
 //! It used to carry a second, script-driven branch: extensions were meant to
 //! classify files as source/test through a `scripts.topology` manifest key, and
@@ -22,13 +24,18 @@ use std::path::Path;
 
 use super::findings::Finding;
 
-#[path = "../test_quality.rs"]
-mod test_quality;
-
 pub(crate) fn run(root: &Path) -> Vec<Finding> {
-    let mut findings = test_quality::run(root);
+    let mut findings = crate::test_quality::run_without_vacuity(root);
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+pub(crate) fn run_from_shared(findings: &[Finding]) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|finding| finding.kind != crate::conventions::AuditFinding::VacuousTest)
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

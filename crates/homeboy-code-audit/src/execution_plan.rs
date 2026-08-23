@@ -274,6 +274,8 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::MissingTestFile,
             AuditFinding::MissingTestMethod,
             AuditFinding::OrphanedTest,
+            // This descriptor owns all vacuity findings: policy-driven methods
+            // in `test_vacuity` and standalone Rust test-quality checks.
             AuditFinding::VacuousTest,
         ],
         access: DetectorAccess::Discovery,
@@ -296,7 +298,6 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         findings: &[
             AuditFinding::InlineTestModule,
             AuditFinding::ScatteredTestFile,
-            AuditFinding::VacuousTest,
             AuditFinding::RedundantTestWrapper,
             AuditFinding::IgnoredTestWithoutReason,
         ],
