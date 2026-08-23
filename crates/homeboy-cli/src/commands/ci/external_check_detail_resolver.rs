@@ -726,7 +726,7 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     std::fs::write(
         &path,
         format!(
-            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nif \"%{fixture_mode_env}%\"==\"timeout\" timeout /t 30 /nobreak >nul\r\nexit /b 24\r\n"
+            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nif \"%{fixture_mode_env}%\"==\"timeout\" ping -n 31 127.0.0.1 >nul\r\nexit /b 24\r\n"
         ),
     )
     .unwrap();
