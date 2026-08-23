@@ -174,7 +174,7 @@ pub fn resume_promoted_patch(
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
-    resume_promoted_patch_internal(options, target_path, previous, None, false)
+    resume_promoted_patch_internal(options, target_path, previous, None, false, None)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -189,6 +189,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         previous,
         Some(observation_store),
         false,
+        None,
     )
 }
 
@@ -198,6 +199,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
+    gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
     resume_promoted_patch_internal(
@@ -206,6 +208,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
         previous,
         Some(observation_store),
         true,
+        gate_workspace,
     )
 }
 
@@ -215,6 +218,7 @@ fn resume_promoted_patch_internal(
     previous: &Value,
     observation_store: Option<&homeboy_core::observation::ObservationStore>,
     replacement_gates: bool,
+    gate_workspace: Option<&Path>,
 ) -> Result<AgentTaskPromotionReport> {
     validate_resume_provenance(&options, target_path, previous)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
@@ -293,6 +297,7 @@ fn resume_promoted_patch_internal(
         &mut provider,
         target_path,
         expected_candidate.as_ref(),
+        gate_workspace,
     )?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
@@ -784,7 +789,7 @@ fn promote_with_provider_and_checkpoint_internal(
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
         let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(&options, provider, worktree_path, None)?
+            run_promotion_gates(&options, provider, worktree_path, None, None)?
         } else {
             PromotionGateRun::without_gates(options.dry_run)
         };
@@ -969,6 +974,7 @@ fn promote_with_provider_and_checkpoint_internal(
                         )
                     })?
                     .as_ref(),
+                None,
             )?,
             verified_base,
         )
@@ -1595,6 +1601,7 @@ fn promote_committed_changes(
                         )
                     })?
                     .as_ref(),
+                None,
             )?,
             verified_base,
         )
@@ -1736,6 +1743,7 @@ fn run_promotion_gates(
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+    gate_workspace: Option<&Path>,
 ) -> Result<PromotionGateRun> {
     emit_promotion_progress(
         "hydration",
@@ -1766,7 +1774,9 @@ fn run_promotion_gates(
     // setup is intentionally destination-only: gates must consume the exact
     // executable projection this report describes.
     let candidate_setup = Vec::new();
-    let gate_workspace = gate_workspace_path(options, worktree_path);
+    let gate_workspace = gate_workspace
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
     let destination_gate_setup = if gate_workspace.is_dir() {
         crate::agent_task_gate::hydrate_gate_dependency_roots(
             &gate_workspace,

@@ -90,6 +90,7 @@ pub use lint_results::LintCommandOutput;
 pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;
+pub mod external_check_detail_resolver;
 pub mod fuzz_config;
 pub mod manifest;
 pub mod manifest_action_config;
@@ -110,6 +111,11 @@ pub use notification_transport_config::{
 pub mod runner_contract;
 pub mod runtime_helper;
 pub mod sidecar_config;
+pub use external_check_detail_resolver::{
+    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
+    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
+    EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
+};
 pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
     ArtifactCleanupCategory, ArtifactCleanupConfig, ArtifactCleanupDeclaration,

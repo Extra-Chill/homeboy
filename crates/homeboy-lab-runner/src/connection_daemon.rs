@@ -883,8 +883,8 @@ fn daemon_pid_from_body(body: &Value) -> Option<u32> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::process::Command;
+    use std::net::{TcpListener, TcpStream};
+    use std::process::{Command, Stdio};
 
     fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
         DaemonHealthReport {
@@ -1322,14 +1322,45 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn durability_health_failure_rechecks_tunnel_identity() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let address = listener.local_addr().expect("address");
         let body = serde_json::json!({
             "freshness": report("lease-live", 7331).freshness,
             "pid": 7331,
         })
         .to_string();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("read _")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start tunnel child");
+        let mut child_stdin = child.stdin.take().expect("tunnel child stdin");
+        let pid = child.id();
+        let identity = super::super::capture_tunnel_process_start_identity(Some(pid))
+            .expect("capture child identity")
+            .expect("child identity");
+        let server_identity = identity.clone();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("initial health request");
+            fn accept_until(listener: &TcpListener, label: &str) -> TcpStream {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => return stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{label}: {error}"),
+                    }
+                }
+            }
+
+            let mut stream = accept_until(&listener, "initial health request");
             let mut request = [0; 1024];
             let _ = stream.read(&mut request).expect("read request");
             stream
@@ -1341,19 +1372,21 @@ mod tests {
                     .as_bytes(),
                 )
                 .expect("health response");
-            let (second, _) = listener.accept().expect("durability health request");
-            std::thread::sleep(Duration::from_millis(100));
+            let second = accept_until(&listener, "durability health request");
+            child_stdin.write_all(b"\n").expect("release tunnel child");
+            drop(child_stdin);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while tunnel_process_identity_matches(Some(pid), Some(&server_identity))
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !tunnel_process_identity_matches(Some(pid), Some(&server_identity)),
+                "tunnel child did not exit after its durability request"
+            );
             drop(second);
         });
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 0.3")
-            .spawn()
-            .expect("start tunnel child");
-        let pid = child.id();
-        let identity = super::super::capture_tunnel_process_start_identity(Some(pid))
-            .expect("capture child identity")
-            .expect("child identity");
         let daemon = RemoteDaemon {
             address: address.to_string(),
             pid: Some(7331),

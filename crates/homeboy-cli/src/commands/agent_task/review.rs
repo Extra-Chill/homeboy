@@ -1,6 +1,7 @@
 use clap::Args;
 use serde_json::Value;
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -918,6 +919,13 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
             ));
         }
     }
+    if let Err(error) = validate_finalization_base(
+        args.path.as_deref(),
+        &args.base,
+        args.verified_base_sha.as_deref(),
+    ) {
+        errors.push(error);
+    }
     for raw in &args.gate_results {
         if let Err(error) = parse_gate_results(std::slice::from_ref(raw)) {
             errors.push(error);
@@ -961,11 +969,119 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
         .collect();
     let mut error = errors.remove(0);
     error.message = format!(
-        "finalize-pr input validation failed with {} independent error(s)",
-        diagnostics.len()
+        "finalize-pr input validation failed with {} independent error(s): {}",
+        diagnostics.len(),
+        error.message
     );
     error.details = serde_json::json!({ "diagnostics": diagnostics });
     Err(error)
+}
+
+fn validate_finalization_base(
+    path: Option<&str>,
+    base: &str,
+    verified_base_sha: Option<&str>,
+) -> homeboy::core::Result<()> {
+    if !is_branch_name(base) {
+        return Err(invalid_finalization_base(base));
+    }
+    if let Some(verified_base_sha) = verified_base_sha {
+        if !is_full_git_object_id(verified_base_sha) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "verified_base_sha",
+                "--verified-base-sha must be a full immutable Git object ID",
+                Some(verified_base_sha.to_string()),
+                None,
+            ));
+        }
+    }
+    // A local branch is authoritative even when its name looks like an object ID.
+    if local_branch_exists(path, base) {
+        return Ok(());
+    }
+    if is_pseudo_ref(base)
+        || is_abbreviated_git_object_id(base)
+        || resolves_git_revision(path, base)
+    {
+        return Err(invalid_finalization_base(base));
+    }
+    Ok(())
+}
+
+fn invalid_finalization_base(base: &str) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "base",
+        "--base must name a branch, not an immutable revision or Git revision expression; use --base <branch> and --verified-base-sha <full-sha> for immutable proof",
+        Some(base.to_string()),
+        None,
+    )
+}
+
+fn local_branch_exists(path: Option<&str>, base: &str) -> bool {
+    git_ref_exists(path, &format!("refs/heads/{base}"))
+}
+
+fn resolves_git_revision(path: Option<&str>, base: &str) -> bool {
+    git_ref_exists(path, base)
+}
+
+fn git_ref_exists(path: Option<&str>, reference: &str) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            reference,
+        ])
+        .current_dir(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn is_branch_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.starts_with("refs/")
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.contains("//")
+        && !value.contains([' ', '~', '^', ':', '?', '*', '[', '\\'])
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && !value.split('/').any(|component| {
+            component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+        })
+        && value != "@"
+}
+
+fn is_abbreviated_git_object_id(value: &str) -> bool {
+    (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_pseudo_ref(value: &str) -> bool {
+    matches!(
+        value,
+        "HEAD"
+            | "FETCH_HEAD"
+            | "ORIG_HEAD"
+            | "MERGE_HEAD"
+            | "CHERRY_PICK_HEAD"
+            | "REVERT_HEAD"
+            | "BISECT_HEAD"
+            | "AUTO_MERGE"
+    )
+}
+
+fn is_full_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_public_contract(raw: &str) -> homeboy::core::Result<AgentTaskPublicContract> {
@@ -1415,16 +1531,20 @@ fn providers_with_catalog(
             },
             "operator_summary": {
                 "identity": "agent-task providers",
-                "state": route.as_ref().map(ProviderRoute::state).unwrap_or(if providers.is_empty() { "empty" } else { "available" }),
+                "state": provider_report_state(route.as_ref(), all_providers),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
                 "next_action": route.as_ref().map(ProviderRoute::next_command).unwrap_or(full_command.clone()),
+                "selection_choices": selection_choices(route.as_ref()),
             },
             "truncation": {
                 "providers": { "shown": shown_providers.len(), "omitted": providers.len().saturating_sub(shown_providers.len()), "evidence_ref": "agent-task:provider-catalog", "full_command": full_command.clone() },
                 "diagnostics": { "shown": shown_diagnostics.len(), "omitted": diagnostics.len().saturating_sub(shown_diagnostics.len()), "evidence_ref": "agent-task:provider-discovery-diagnostics", "full_command": full_command },
             },
             "dispatch_config_layers": if args.full { dispatch_config_layers(providers) } else { Value::Null },
-            "provider_identity_catalog": if args.full { provider_identity_catalog(providers) } else { Vec::new() },
+            // The compact provider list and identity catalog describe the same
+            // displayed entries. Requiring `--full` for identities made a ready
+            // catalog look empty even while it listed selectable executors.
+            "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
             "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
             // Availability means dispatchable. Anything that is declared but
@@ -1526,10 +1646,19 @@ enum ProviderRoute {
         reason: String,
         next_command: String,
     },
+    SelectionRequired {
+        choices: Vec<ProviderSelectionChoice>,
+    },
     Ambiguous {
         backend: String,
         candidate_ids: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct ProviderSelectionChoice {
+    backend: String,
+    command: String,
 }
 
 impl ProviderRoute {
@@ -1546,7 +1675,8 @@ impl ProviderRoute {
                 dispatchable: false,
                 ..
             }
-            | Self::Blocked { .. } => "blocked",
+            | Self::Blocked { .. } => "configuration_unavailable",
+            Self::SelectionRequired { .. } => "selection_required",
             Self::Ambiguous { .. } => "configuration_ambiguous",
         }
     }
@@ -1563,6 +1693,11 @@ impl ProviderRoute {
                 shell_arg(provider_id),
             ),
             Self::Blocked { next_command, .. } => next_command.clone(),
+            Self::SelectionRequired { choices } => choices
+                .first()
+                .expect("selection-required routes have choices")
+                .command
+                .clone(),
             Self::Ambiguous {
                 backend,
                 candidate_ids,
@@ -1594,6 +1729,7 @@ fn resolve_provider_route_for(
     selector: Option<String>,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<ProviderRoute> {
+    let backend_was_omitted = backend.is_none();
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
         backend,
         selector,
@@ -1604,6 +1740,13 @@ fn resolve_provider_route_for(
     ) {
         Ok(route) => route,
         Err(error) => {
+            let choices = dispatchable_backend_choices(catalog.providers());
+            if backend_was_omitted
+                && error.details["selection_required"] == Value::Bool(true)
+                && !choices.is_empty()
+            {
+                return Some(ProviderRoute::SelectionRequired { choices });
+            }
             return Some(ProviderRoute::Blocked {
                 reason: error.message,
                 next_command: "homeboy agent-task providers --catalog".to_string(),
@@ -1643,6 +1786,57 @@ fn resolve_provider_route_for(
     }
 }
 
+fn selection_choices(route: Option<&ProviderRoute>) -> Vec<Value> {
+    match route {
+        Some(ProviderRoute::SelectionRequired { choices }) => choices
+            .iter()
+            .map(|choice| {
+                serde_json::json!({
+                    "backend": choice.backend,
+                    "command": choice.command,
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn dispatchable_backend_choices(
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<ProviderSelectionChoice> {
+    let mut backends = providers
+        .iter()
+        .filter(|provider| provider_credential_readiness(provider).dispatchable)
+        .map(|provider| provider.backend.trim())
+        .filter(|backend| !backend.is_empty())
+        .collect::<Vec<_>>();
+    backends.sort_unstable();
+    backends.dedup();
+    backends
+        .into_iter()
+        .map(|backend| ProviderSelectionChoice {
+            backend: backend.to_string(),
+            command: format!(
+                "homeboy agent-task providers --backend {} --validate-readiness",
+                shell_arg(backend)
+            ),
+        })
+        .collect()
+}
+
+fn provider_report_state(
+    route: Option<&ProviderRoute>,
+    providers: &[AgentTaskExecutorProvider],
+) -> &'static str {
+    if !providers
+        .iter()
+        .any(|provider| provider_credential_readiness(provider).dispatchable)
+    {
+        return "blocked";
+    }
+    route.map(ProviderRoute::state).unwrap_or("available")
+}
+
 fn validate_effective_provider_route(
     route: Option<&ProviderRoute>,
     catalog: &AgentTaskProviderCatalog,
@@ -1658,6 +1852,9 @@ fn validate_effective_provider_route(
     else {
         let reason = match route {
             ProviderRoute::Blocked { reason, .. } => reason.clone(),
+            ProviderRoute::SelectionRequired { .. } => {
+                "Cook requires an explicit --backend selection".to_string()
+            }
             ProviderRoute::Ambiguous { backend, .. } => {
                 format!("Cook's effective backend `{backend}` requires --selector")
             }
@@ -1803,6 +2000,7 @@ fn readiness_validation_projection(
         "route_state": route.map(ProviderRoute::state),
         "next_command": route.map(ProviderRoute::next_command),
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
+        "selection_choices": selection_choices(route),
         // One entry per declared backend, each carrying this same projection
         // plus the `backend` it describes, so an operator with no configured
         // default can read which `--backend` value is usable here (#12569).
@@ -2745,10 +2943,72 @@ mod tests {
                 serde_json::json!(["ready"]),
                 "the usable --backend values are named directly"
             );
-            // The effective route stays blocked because no default backend is
-            // configured; the sweep is what makes that recoverable.
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            // Providers are available, but Cook still requires an explicit
+            // backend when policy supplies no default. The report separates
+            // that operator selection from an executor outage.
+            assert_eq!(output["operator_summary"]["state"], "selection_required");
+            assert_eq!(validation["route_state"], "selection_required");
+            assert_eq!(
+                output["operator_summary"]["selection_choices"],
+                serde_json::json!([
+                    {
+                        "backend": "failing",
+                        "command": "homeboy agent-task providers --backend failing --validate-readiness",
+                    },
+                    {
+                        "backend": "ready",
+                        "command": "homeboy agent-task providers --backend ready --validate-readiness",
+                    },
+                ])
+            );
             assert_eq!(validation["validated"], false);
+        });
+    }
+
+    #[test]
+    fn providers_report_selection_required_with_matching_identity_catalog() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let output = providers_with_catalog(
+                providers_args(),
+                provider_catalog(vec![
+                    provider("zeta.provider", "zeta"),
+                    provider("alpha.provider", "alpha"),
+                ]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "selection_required");
+            assert_eq!(
+                output["readiness_validation"]["route_state"],
+                "selection_required"
+            );
+            assert_eq!(output["providers"].as_array().map(Vec::len), Some(2));
+            assert_eq!(
+                output["provider_identity_catalog"].as_array().map(Vec::len),
+                Some(2),
+                "the compact identity catalog covers every displayed provider"
+            );
+            assert_eq!(
+                output["provider_identity_catalog"]
+                    .as_array()
+                    .expect("identity catalog")
+                    .iter()
+                    .map(|identity| identity["executor_provider_id"].clone())
+                    .collect::<Vec<_>>(),
+                output["providers"]
+                    .as_array()
+                    .expect("compact providers")
+                    .iter()
+                    .map(|provider| provider["id"].clone())
+                    .collect::<Vec<_>>(),
+                "each presented provider has its matching identity entry"
+            );
+            assert_eq!(
+                output["operator_summary"]["next_action"],
+                "homeboy agent-task providers --backend alpha --validate-readiness"
+            );
         });
     }
 
@@ -2774,6 +3034,29 @@ mod tests {
                 .expect("missing-default output")
                 .0;
             assert_eq!(output["operator_summary"]["state"], "blocked");
+        });
+    }
+
+    #[test]
+    fn providers_report_blocked_when_missing_default_has_no_dispatchable_executor() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let output = providers_with_catalog(
+                providers_args(),
+                provider_catalog(vec![credential_declaring_provider()]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(
+                output["readiness_validation"]["route_state"],
+                "configuration_unavailable"
+            );
+            assert_eq!(
+                output["operator_summary"]["selection_choices"],
+                serde_json::json!([])
+            );
         });
     }
 
@@ -3503,7 +3786,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_preflight_rejects_dirty_candidates_and_recovers_committed_candidates_idempotently() {
+    fn manual_preflight_rejects_dirty_and_unpushed_candidates_then_recovers_idempotently() {
         homeboy::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("fixture root");
             let remote = root.path().join("origin.git");
@@ -3610,6 +3893,50 @@ mod tests {
             );
             run_git(&checkout, &["add", "."]);
             run_git(&checkout, &["commit", "-m", "feature"]);
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-cli-unpushed-13053",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Unpushed manual preflight",
+                "--commit-message",
+                "fixture",
+                "--gate-result",
+                "fixture=passed",
+                "--changed-file",
+                "feature.txt",
+                "--targeted-check-run",
+                "cargo test fixture",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI unpushed preflight coverage",
+            ]);
+            assert!(
+                error
+                    .message
+                    .contains("recoverable manual preflight requires an already-pushed candidate"),
+                "unexpected error: {error:?}"
+            );
+            assert!(error
+                .message
+                .contains("push the candidate branch and rerun preflight"));
+            assert!(agent_task_lifecycle::status("manual-cli-unpushed-13053")
+                .expect("manual identity was reserved")
+                .metadata["manual_finalization_intent"]
+                .is_null());
             run_git(&checkout, &["push", "-u", "origin", "feature"]);
             run_git(
                 &checkout,
@@ -3806,6 +4133,101 @@ esac
             "validated",
             true,
         ));
+    }
+
+    #[test]
+    fn finalization_base_validation_rejects_immutable_and_revision_bases() {
+        for base in [
+            "a".repeat(40),
+            "abcd".to_string(),
+            "HEAD".to_string(),
+            "main~1".to_string(),
+            "refs/heads/main".to_string(),
+            "CHERRY_PICK_HEAD".to_string(),
+            "REVERT_HEAD".to_string(),
+            "BISECT_HEAD".to_string(),
+            "AUTO_MERGE".to_string(),
+        ] {
+            let error =
+                validate_finalization_base(None, &base, None).expect_err("base is not a branch");
+            assert_eq!(
+                error.code,
+                homeboy::core::error::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(error.message.contains("--verified-base-sha"));
+        }
+    }
+
+    #[test]
+    fn finalization_base_validation_allows_branch_names_and_full_verified_sha() {
+        let verified_base_sha = "a".repeat(40);
+
+        validate_finalization_base(None, "main", Some(&verified_base_sha))
+            .expect("default branch is valid");
+        validate_finalization_base(None, "release/2026.08", Some(&verified_base_sha))
+            .expect("slash-separated branch is valid");
+    }
+
+    #[test]
+    fn finalization_base_validation_defers_missing_branch_to_remote_resolution() {
+        validate_finalization_base(None, "missing-remote-branch", None)
+            .expect("branch syntax is valid even when origin does not have it");
+    }
+
+    #[test]
+    fn finalization_base_validation_rejects_abbreviated_verified_sha() {
+        let error = validate_finalization_base(None, "main", Some("abcdef0"))
+            .expect_err("verified base must be immutable");
+
+        assert_eq!(
+            error.code,
+            homeboy::core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("full immutable Git object ID"));
+    }
+
+    #[test]
+    fn finalization_base_validation_allows_existing_hex_named_branch() {
+        let repo = tempfile::tempdir().expect("temporary repository");
+        run_git(repo.path(), &["init", "--initial-branch=main"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.test"]);
+        run_git(repo.path(), &["config", "user.name", "Finalization Test"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
+        run_git(repo.path(), &["add", "base.txt"]);
+        run_git(repo.path(), &["commit", "-m", "base"]);
+        run_git(repo.path(), &["branch", "abcd"]);
+
+        validate_finalization_base(repo.path().to_str(), "abcd", None)
+            .expect("existing refs/heads branch wins over object-like syntax");
+    }
+
+    #[test]
+    fn immutable_base_rejection_precedes_manual_lifecycle_reservation() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let run_id = "manual-immutable-base";
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                run_id,
+                "--path",
+                "/not-used-before-validation",
+                "--base",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--title",
+                "Reject immutable base",
+                "--commit-message",
+                "fixture",
+                "--ai-used-for",
+                "validation coverage",
+            ]);
+
+            assert!(error.message.contains("--base must name a branch"));
+            assert!(error.message.contains("--verified-base-sha"));
+            assert!(agent_task_lifecycle::status(run_id).is_err());
+        });
     }
 
     fn provider_fixture(id: &str, backend: &str) -> AgentTaskExecutorProvider {

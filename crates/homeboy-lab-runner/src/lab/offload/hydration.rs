@@ -55,6 +55,8 @@ pub struct LabWorkspaceHydrationOutput {
     pub(crate) steps: Vec<LabWorkspaceHydrationStep>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cache_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prepared_source_cache_observations: Option<Vec<String>>,
 }
 
 impl LabWorkspaceHydrationOutput {
@@ -65,6 +67,7 @@ impl LabWorkspaceHydrationOutput {
             workspace: workspace.to_string(),
             steps: Vec::new(),
             cache_source: None,
+            prepared_source_cache_observations: None,
         }
     }
 
@@ -75,6 +78,7 @@ impl LabWorkspaceHydrationOutput {
             workspace: workspace.to_string(),
             steps: Vec::new(),
             cache_source: Some("runner_prepared_source".to_string()),
+            prepared_source_cache_observations: None,
         }
     }
 
@@ -195,6 +199,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
                 workspace: remote_path.to_string(),
                 steps: Vec::new(),
                 cache_source: Some("controller_package".to_string()),
+                prepared_source_cache_observations: None,
             });
         }
     }
@@ -246,6 +251,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         workspace: remote_path.to_string(),
         steps,
         cache_source: None,
+        prepared_source_cache_observations: None,
     })
 }
 
@@ -518,7 +524,7 @@ fn hydrate_for_lab_workspace_exec_internal(
     plan: HomeboyPlan,
     agent_task_run_id: Option<&str>,
 ) -> Result<LabOffloadDependencyHydration> {
-    let record = if skip_deps_hydration {
+    let mut record = if skip_deps_hydration {
         LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
     } else {
         LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies_for_run(
@@ -531,8 +537,11 @@ fn hydrate_for_lab_workspace_exec_internal(
 
     // Persist a source/dependency preparation only after hydration has completed.
     // The next same-commit job receives a private view of this immutable cache.
-    if matches!(&record, LabWorkspaceHydrationRecord::Applied(_)) {
-        crate::workspace::save_prepared_source_cache(runner_id, local_path, remote_path)?;
+    if let LabWorkspaceHydrationRecord::Applied(output) = &mut record {
+        output.prepared_source_cache_observations = Some(
+            crate::workspace::save_prepared_source_cache(runner_id, local_path, remote_path)?
+                .observations,
+        );
     }
 
     let plan = match &record {
