@@ -648,6 +648,63 @@ fn provider_timeout_returns_structured_outcome() {
 }
 
 #[test]
+fn provider_timeout_persists_bounded_redacted_last_activity() {
+    const SECRET_ENV: &str = "HOMEBOY_TIMEOUT_TEST_SECRET";
+    const SECRET: &str = "timeout-secret-value";
+    std::env::set_var(SECRET_ENV, SECRET);
+    struct ClearSecret;
+    impl Drop for ClearSecret {
+        fn drop(&mut self) {
+            std::env::remove_var(SECRET_ENV);
+        }
+    }
+    let _clear_secret = ClearSecret;
+
+    let command = format!(
+        "node {}",
+        script("process.stderr.write('x'.repeat(20000) + process.env.HOMEBOY_TIMEOUT_TEST_SECRET); setInterval(() => {}, 1000);")
+    );
+    let (mut request, provider) = request("task-timeout-evidence", command);
+    request.limits.timeout_ms = Some(50);
+    request.executor.secret_env = vec![SECRET_ENV.to_string()];
+
+    let outcome = run_provider_command(&request, &provider, Some("run-timeout-evidence"));
+
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+        .expect("timeout diagnostic");
+    assert!(
+        diagnostic.data["output_event_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1
+    );
+    assert_eq!(diagnostic.data["stdout_bytes"], json!(0));
+    assert!(diagnostic.data["stderr_bytes"].as_u64().unwrap_or_default() > 16 * 1024);
+    assert_eq!(diagnostic.data["last_activity"]["kind"], json!("stderr"));
+    assert_eq!(diagnostic.data["stderr_tail_truncated"], json!(true));
+    assert!(
+        diagnostic.data["stderr_tail"]
+            .as_str()
+            .unwrap_or_default()
+            .len()
+            <= 16 * 1024
+    );
+    assert!(!diagnostic.data.to_string().contains(SECRET));
+    assert!(diagnostic.data.to_string().contains("[redacted]"));
+    assert_eq!(
+        diagnostic.data["log_lookup"],
+        json!("homeboy agent-task logs run-timeout-evidence --task task-timeout-evidence")
+    );
+    assert_eq!(
+        diagnostic.data["provider_boundary_evidence"],
+        json!("executor-result")
+    );
+}
+
+#[test]
 fn expired_execution_deadline_returns_typed_outcome_without_spawning_provider() {
     let (mut request, provider) = request("task-deadline", "missing-provider-command".to_string());
     request.limits.execution_deadline_unix_ms = Some(0);

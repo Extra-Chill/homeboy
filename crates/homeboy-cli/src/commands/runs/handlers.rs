@@ -38,7 +38,21 @@ use super::types::{
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
-pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOutput> {
+#[cfg(test)]
+/// The observation store the enclosing isolated home installs.
+///
+/// At file scope so every `#[cfg(test)]` module here reaches it the same way.
+/// A test is the entry point for its own unit of work, so opening once here is
+/// a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
+pub fn list_runs(
+    store: &ObservationStore,
+    args: RunsListArgs,
+    command: &'static str,
+) -> CmdResult<RunsOutput> {
     if args.active {
         return list_active_runs(args);
     }
@@ -47,7 +61,6 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         return remote::list_runner_runs(&runner_id, args, command);
     }
 
-    let store = ObservationStore::open_initialized()?;
     // `--running` is shorthand for `--status running`; the two are mutually
     // exclusive at the CLI layer so this never overrides an explicit status.
     let status = if args.running {
@@ -129,8 +142,7 @@ fn list_active_runs(args: RunsListArgs) -> CmdResult<RunsOutput> {
     Ok((RunsOutput::Active(Box::new(report)), 0))
 }
 
-pub fn cancel_run(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub fn cancel_run(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     let run = runs_service::require_run(&store, run_id)?;
     if run.status != RunStatus::Running.as_str() {
         return Err(Error::validation_invalid_argument(
@@ -602,6 +614,7 @@ fn stale_run_summary(
 
 #[cfg(test)]
 mod runner_enrichment_tests {
+
     use super::*;
 
     #[test]
@@ -1740,7 +1753,8 @@ mod pull_tests {
                 )
                 .expect("run");
 
-            let (output, exit_code) = cancel_run(&run.id).expect("cancel run");
+            let (output, exit_code) =
+                cancel_run(&super::test_store(), &run.id).expect("cancel run");
 
             assert_eq!(exit_code, 0);
             let RunsOutput::Cancel(output) = output else {

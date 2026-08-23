@@ -45,6 +45,7 @@ Options:
 - `--head`: deploy the current branch `HEAD` instead of the latest tag.
 - `--ref <git-ref-or-sha>`: resolve a commit from each component's declared Git repository and deploy that exact immutable tree. The configured checkout's current branch and `HEAD` do not affect resolution.
 - `--tagged`: force tag-based deploy and ignore reusable build artifacts.
+- `--target <server|provider>`: select which deliverable a dual-deliverable component deploys. See [Dual-deliverable components](#dual-deliverable-components).
 
 Real deploys with `--head`, `--ref`, or `--force` require `--confirm-dangerous`. Preview and status commands (`--dry-run` or `--check`) do not require `--confirm-dangerous`.
 
@@ -287,6 +288,27 @@ homeboy release changes --project myproject
 # Show changes with git diffs included
 homeboy release changes --project myproject --git-diffs
 ```
+
+## Dual-deliverable components
+
+A component can ship two things at once: a build artifact installed at a project's `remote_path`, and a target owned by a deployment provider it declares in its own `homeboy.json` (a Worker runtime, a hosted service, anything the provider owns).
+
+Declaring a provider does not make it the exclusive owner of the component. Provider ownership is **project-owned**: the provider route is selected only when the project attachment supplies `components[].deployment_provider_input` (or the legacy project-level `components[].deployment_provider` override). A project that attaches such a component and configures only the server target still deploys the server deliverable normally.
+
+Use `--target` to state the choice explicitly:
+
+```bash
+# Deploy the build artifact to this project's remote path, even if the
+# project also configures the provider target.
+homeboy deploy --project myproject --component my-component --target server
+
+# Deploy through the component's declared deployment provider.
+homeboy deploy --project myproject --component my-component --target provider
+```
+
+`--target provider` is never downgraded to the server route. If the provider requires target input the project has not configured, the deploy fails before planning and the error names both remedies: configure `deployment_provider_input`, or deploy the server deliverable with `--target server`.
+
+Without `--target`, the route is inferred from project target configuration and reported on the result. A dual-deliverable component always carries a `deployment route:` warning naming the deliverable it deployed and the provider it did not, so the choice is visible in `--dry-run`, `--check`, and real deploy output alike.
 
 ## Post-Deploy Hooks
 

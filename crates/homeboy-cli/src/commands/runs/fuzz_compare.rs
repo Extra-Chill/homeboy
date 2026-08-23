@@ -30,8 +30,10 @@ pub struct RunsFuzzCompareArgs {
     pub hotspot_policy: FuzzCompareHotspotPolicy,
 }
 
-pub(crate) fn fuzz_compare_from_args(args: RunsFuzzCompareArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub(crate) fn fuzz_compare_from_args(
+    store: &ObservationStore,
+    args: RunsFuzzCompareArgs,
+) -> CmdResult<RunsOutput> {
     let baseline = resolve_run_fuzz_envelope(&store, &args.from_run)?;
     let candidate = resolve_run_fuzz_envelope(&store, &args.to_run)?;
     let output = compare_envelopes(
@@ -178,6 +180,14 @@ fn is_related_fuzz_json(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
@@ -241,11 +251,14 @@ mod tests {
                 .record_artifact(&candidate.id, "fuzz_result_envelope", &candidate_path)
                 .expect("candidate artifact");
 
-            let (_, exit_code) = fuzz_compare_from_args(RunsFuzzCompareArgs {
-                from_run: baseline.id.clone(),
-                to_run: candidate.id.clone(),
-                hotspot_policy: FuzzCompareHotspotPolicy::Advisory,
-            })
+            let (_, exit_code) = fuzz_compare_from_args(
+                &test_store(),
+                RunsFuzzCompareArgs {
+                    from_run: baseline.id.clone(),
+                    to_run: candidate.id.clone(),
+                    hotspot_policy: FuzzCompareHotspotPolicy::Advisory,
+                },
+            )
             .expect("fuzz compare");
 
             assert_eq!(exit_code, 0);

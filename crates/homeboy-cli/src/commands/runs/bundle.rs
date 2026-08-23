@@ -93,7 +93,7 @@ pub struct RunsImportOutput {
     pub imported: ObservationBundleImportSummary,
 }
 
-pub(super) fn export_runs(args: RunsExportArgs) -> CmdResult<RunsOutput> {
+pub(super) fn export_runs(store: &ObservationStore, args: RunsExportArgs) -> CmdResult<RunsOutput> {
     if args
         .output
         .extension()
@@ -108,7 +108,6 @@ pub(super) fn export_runs(args: RunsExportArgs) -> CmdResult<RunsOutput> {
         ));
     }
 
-    let store = ObservationStore::open_initialized()?;
     let runs = if let Some(run_id) = args.run.as_deref() {
         vec![require_run(&store, run_id)?]
     } else if let Some(since) = args.since.as_deref() {
@@ -139,7 +138,7 @@ pub(super) fn export_runs(args: RunsExportArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
-pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
+pub(super) fn import_runs(store: &ObservationStore, args: RunsImportArgs) -> CmdResult<RunsOutput> {
     if args.from_gh_actions {
         return import_via_gh_actions(args);
     }
@@ -149,7 +148,6 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
         ])
     })?;
     let mut bundle = read_bundle_dir(&input)?;
-    let store = ObservationStore::open_initialized()?;
     for index in 0..bundle.runs.len() {
         let original_run_id = bundle.runs[index].id.clone();
         let imported_run_id = import_bundle_run(&store, &mut bundle.runs[index])?;

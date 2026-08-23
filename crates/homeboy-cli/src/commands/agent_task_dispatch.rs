@@ -151,6 +151,8 @@ pub struct DispatchArgs {
     ///   cat task.md | homeboy agent-task cook --prompt - ...
     #[arg(long, value_name = "PROMPT")]
     pub prompt: Option<String>,
+    #[arg(skip)]
+    pub prompt_is_literal: bool,
 
     /// Reserved batch input retained for forward-compatible command decoding.
     #[arg(long = "task", value_name = "PROMPT", hide = true)]
@@ -221,6 +223,7 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
     fn from(args: DispatchArgs) -> Self {
         AgentTaskDispatchCommand {
             prompt: args.prompt,
+            prompt_is_literal: args.prompt_is_literal,
             tasks: args.tasks,
             cwd: args.cwd,
             workspace: args.workspace,
@@ -333,6 +336,7 @@ mod tests {
         let request = dispatch_service::resolve_dispatch_request_with_default(
             DispatchArgs {
                 prompt: Some("run with default".to_string()),
+                prompt_is_literal: false,
                 tasks: Vec::new(),
                 cwd: None,
                 workspace: None,
@@ -373,6 +377,7 @@ mod tests {
         let error = dispatch_service::resolve_dispatch_request_with_default(
             DispatchArgs {
                 prompt: Some("run without default".to_string()),
+                prompt_is_literal: false,
                 tasks: Vec::new(),
                 cwd: None,
                 workspace: None,
@@ -481,6 +486,7 @@ mod tests {
     fn dispatch_args(overrides: DispatchArgOverrides) -> DispatchArgs {
         DispatchArgs {
             prompt: overrides.prompt,
+            prompt_is_literal: false,
             tasks: Vec::new(),
             cwd: overrides.cwd,
             workspace: overrides.workspace,

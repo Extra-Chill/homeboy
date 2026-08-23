@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 
 use super::check;
 use super::spec::{PipelineStep, RigSpec};
+use super::state::RigStateStore;
 use homeboy_core::error::Result;
 
 pub use outcome::{PipelineOutcome, PipelineStepOutcome};
@@ -33,11 +34,17 @@ pub(super) use command_step::run_command_step;
 /// writes, instead of a second copy that can drift.
 pub(super) use lifecycle_step::step_key as lifecycle_step_key;
 
-pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<PipelineOutcome> {
-    run_pipeline_with_settings(rig, name, fail_fast, &[])
+pub fn run_pipeline(
+    state_store: &RigStateStore,
+    rig: &RigSpec,
+    name: &str,
+    fail_fast: bool,
+) -> Result<PipelineOutcome> {
+    run_pipeline_with_settings(state_store, rig, name, fail_fast, &[])
 }
 
 pub fn run_pipeline_with_settings(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     name: &str,
     fail_fast: bool,
@@ -45,10 +52,19 @@ pub fn run_pipeline_with_settings(
 ) -> Result<PipelineOutcome> {
     let steps = rig.pipeline.get(name).cloned().unwrap_or_default();
     let ordered_indices = ordering::order_pipeline_steps(rig, name, &steps)?;
-    run_ordered_steps(rig, name, &steps, ordered_indices, fail_fast, settings)
+    run_ordered_steps(
+        state_store,
+        rig,
+        name,
+        &steps,
+        ordered_indices,
+        fail_fast,
+        settings,
+    )
 }
 
 pub fn run_pipeline_check_groups(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     groups: &[String],
     fail_fast: bool,
@@ -64,7 +80,15 @@ pub fn run_pipeline_check_groups(
         .filter(|step| ordering::step_matches_groups(step, &wanted))
         .collect::<Vec<_>>();
     let ordered_indices = ordering::order_pipeline_steps(rig, "check", &steps)?;
-    run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast, settings)
+    run_ordered_steps(
+        state_store,
+        rig,
+        "check",
+        &steps,
+        ordered_indices,
+        fail_fast,
+        settings,
+    )
 }
 
 pub fn run_prepare_requirement_steps(
@@ -141,13 +165,14 @@ fn is_prepare_requirement_step(step: &PipelineStep, phase: &str) -> bool {
     )
 }
 
-pub fn cleanup_shared_paths(rig: &RigSpec) -> Result<()> {
-    fs_step::cleanup_shared_paths(rig)
+pub fn cleanup_shared_paths(state_store: &RigStateStore, rig: &RigSpec) -> Result<()> {
+    fs_step::cleanup_shared_paths(state_store, rig)
 }
 
 pub(super) use fs_step::{repair_shared_paths, SharedPathRepair, SharedPathRepairStatus};
 
 fn run_ordered_steps(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     name: &str,
     steps: &[PipelineStep],
@@ -178,7 +203,7 @@ fn run_ordered_steps(
 
         let result = runner_capabilities
             .validate_step(&rig.id, &label, step)
-            .and_then(|()| run_step(rig, name, step, settings));
+            .and_then(|()| run_step(state_store, rig, name, step, settings));
 
         let outcome = match &result {
             Ok(()) => PipelineStepOutcome {
@@ -291,13 +316,16 @@ fn runner_id() -> String {
 }
 
 fn run_step(
+    state_store: &RigStateStore,
     rig: &RigSpec,
     pipeline_name: &str,
     step: &PipelineStep,
     settings: &[(String, String)],
 ) -> Result<()> {
     match step {
-        PipelineStep::Service { id, op, .. } => service_step::run_service_step(rig, id, *op),
+        PipelineStep::Service { id, op, .. } => {
+            service_step::run_service_step(state_store, rig, id, *op)
+        }
         PipelineStep::Build { component, .. } => component::run_build_step(rig, component),
         PipelineStep::Extension { component, op, .. } => {
             component::run_extension_step(rig, component, op)
@@ -321,7 +349,7 @@ fn run_step(
             requirement_step::run_requirement_step(rig, pipeline_name, step, settings)
         }
         PipelineStep::Symlink { op, .. } => fs_step::run_symlink_step(rig, *op),
-        PipelineStep::SharedPath { op, .. } => fs_step::run_shared_path_step(rig, *op),
+        PipelineStep::SharedPath { op, .. } => fs_step::run_shared_path_step(state_store, rig, *op),
         PipelineStep::Patch {
             component,
             file,
@@ -347,6 +375,7 @@ fn run_step(
             op,
             ..
         } => lifecycle_step::run_lifecycle_step(
+            state_store,
             rig,
             step_id.as_deref(),
             component.as_deref(),

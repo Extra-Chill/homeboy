@@ -59,6 +59,7 @@ pub(crate) fn read_prompt_spec(spec: &str) -> Result<ResolvedPromptSpec> {
 pub(crate) struct DispatchPromptSpec {
     pub(crate) prompt: String,
     pub(crate) task_id: Option<String>,
+    pub(crate) is_literal: bool,
 }
 
 impl DispatchPromptSpec {
@@ -66,6 +67,7 @@ impl DispatchPromptSpec {
         Self {
             prompt,
             task_id: None,
+            is_literal: false,
         }
     }
 }
@@ -151,7 +153,11 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<DispatchPromp
                     })
                 })
                 .transpose()?;
-            Ok(DispatchPromptSpec { prompt, task_id })
+            Ok(DispatchPromptSpec {
+                prompt,
+                task_id,
+                is_literal: false,
+            })
         }
         _ => Err(Error::validation_invalid_argument(
             "tasks",

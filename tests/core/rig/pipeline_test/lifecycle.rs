@@ -9,7 +9,6 @@ use std::fs;
 
 use crate::pipeline::run_pipeline;
 use crate::spec::RigSpec;
-use crate::state::RigState;
 use homeboy_core::test_support::with_isolated_home;
 
 fn rig_from_json(json: &str) -> RigSpec {
@@ -42,7 +41,8 @@ fn test_lifecycle_step_runs_matching_phases_in_declared_order() {
         log = log_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(out.steps[0].kind, "lifecycle");
@@ -77,7 +77,8 @@ fn test_lifecycle_step_exposes_phase_identity_to_commands() {
         marker = marker_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(
@@ -115,7 +116,8 @@ fn test_lifecycle_snapshot_handle_is_visible_to_later_phases() {
             marker = marker_arg
         ));
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline runs");
 
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
         assert_eq!(
@@ -148,10 +150,13 @@ fn test_lifecycle_snapshot_handle_lands_in_rig_state() {
             }"#,
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline runs");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
 
-        let state = RigState::load(&rig.id).expect("state");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state");
         let entry = state
             .lifecycle_snapshots
             .get("capture")
@@ -190,10 +195,13 @@ fn test_lifecycle_snapshot_handle_can_be_a_full_contract_ref() {
             }"#,
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline runs");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
 
-        let state = RigState::load(&rig.id).expect("state");
+        let state = crate::state::test_state_store()
+            .load(&rig.id)
+            .expect("state");
         let entry = state
             .lifecycle_snapshots
             .get("sandbox-7f3")
@@ -238,20 +246,24 @@ fn test_lifecycle_teardown_reaps_the_handles_its_step_owns() {
             }"#,
         );
 
-        let up = run_pipeline(&rig, "up", true).expect("up runs");
+        let up =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("up runs");
         assert!(up.is_success(), "outcomes: {:?}", up.steps);
         assert_eq!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state")
                 .lifecycle_snapshots
                 .len(),
             1
         );
 
-        let down = run_pipeline(&rig, "down", true).expect("down runs");
+        let down =
+            run_pipeline(&crate::state::test_state_store(), &rig, "down", true).expect("down runs");
         assert!(down.is_success(), "outcomes: {:?}", down.steps);
         assert!(
-            RigState::load(&rig.id)
+            crate::state::test_state_store()
+                .load(&rig.id)
                 .expect("state")
                 .lifecycle_snapshots
                 .is_empty(),
@@ -277,7 +289,8 @@ fn test_lifecycle_step_rejects_unknown_contract_schema() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     assert_eq!(out.steps[0].kind, "lifecycle");
@@ -305,7 +318,8 @@ fn test_lifecycle_step_fails_when_op_has_no_declared_phase() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "down", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "down", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -328,7 +342,8 @@ fn test_lifecycle_step_rejects_phase_without_hook_or_command() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -362,7 +377,8 @@ fn test_lifecycle_step_fails_on_required_phase_failure() {
         marker = marker_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -394,7 +410,8 @@ fn test_lifecycle_step_continues_past_optional_phase_failure() {
         marker = marker_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert!(marker.exists(), "an optional phase failure is not fatal");
@@ -417,7 +434,8 @@ fn test_lifecycle_step_fails_on_undeclared_component() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -444,7 +462,8 @@ fn test_lifecycle_step_rejects_malformed_extension_hook() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -469,7 +488,8 @@ fn test_pipeline_without_lifecycle_step_is_unchanged() {
         marker = marker_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(out.steps[0].kind, "command");
@@ -524,11 +544,13 @@ fn test_lifecycle_step_resolves_a_workload_declared_contract() {
             log = log_arg
         ));
 
-        let up = run_pipeline(&rig, "up", true).expect("up runs");
+        let up =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("up runs");
         assert!(up.is_success(), "outcomes: {:?}", up.steps);
         assert_eq!(up.steps[0].kind, "lifecycle");
 
-        let down = run_pipeline(&rig, "down", true).expect("down runs");
+        let down =
+            run_pipeline(&crate::state::test_state_store(), &rig, "down", true).expect("down runs");
         assert!(down.is_success(), "outcomes: {:?}", down.steps);
 
         assert_eq!(
@@ -569,7 +591,8 @@ fn test_lifecycle_workload_ref_resolves_bench_and_trace_maps() {
             marker = marker_arg
         ));
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline runs");
         assert!(out.is_success(), "{kind} outcomes: {:?}", out.steps);
         assert_eq!(fs::read_to_string(&marker).expect("marker"), kind);
     }
@@ -614,7 +637,8 @@ fn test_lifecycle_workload_ref_disambiguates_by_path() {
         marker = marker_arg
     ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(fs::read_to_string(&marker).expect("marker"), "b");
 }
@@ -646,7 +670,8 @@ fn test_lifecycle_workload_ref_rejects_ambiguous_selection() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -675,7 +700,8 @@ fn test_lifecycle_workload_ref_rejects_unknown_extension() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -707,7 +733,8 @@ fn test_lifecycle_workload_ref_rejects_unknown_path() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -733,7 +760,8 @@ fn test_lifecycle_workload_ref_rejects_workload_without_contract() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -761,7 +789,8 @@ fn test_lifecycle_step_rejects_both_inline_and_workload_sources() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -779,7 +808,8 @@ fn test_lifecycle_step_rejects_neither_inline_nor_workload_source() {
         }"#,
     );
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();

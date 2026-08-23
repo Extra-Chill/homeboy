@@ -235,6 +235,14 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
+    // A daemon build mismatch cannot be resumed from the handoff parent: it has
+    // no materialized Cook recipe yet. Reject it before the first durable write
+    // so the supplied repair command can be followed by the same invocation.
+    let preflight_controller_client = cli
+        .detach_after_handoff
+        .then(homeboy::core::daemon::LocalControllerJobClient::connect_current_build)
+        .transpose()?;
+
     // One store for the whole handoff. The parent record, the child record, the
     // supervisor projection, and every compensating failure below are one
     // transaction: a parent opened in one installation and failed in another
@@ -258,15 +266,13 @@ pub(super) fn intercept_local_detached_cook(
     // A daemon-owned job is the authority that outlives this launcher. Prove it
     // is reachable before a provider-capable child exists, so unsupported
     // detachment is rejected before dispatch.
-    let controller_client =
-        match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
+    let controller_client = match preflight_controller_client {
+        Some(client) => client,
+        None => match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
             Ok(client) => client,
-            Err(error)
-                if controller_job_daemon_build_mismatch(&error) && !cli.detach_after_handoff =>
-            {
-                // An attached caller can retain foreground ownership. This keeps a
-                // newer client useful without letting an older resident daemon
-                // interpret and terminate lifecycle records it does not understand.
+            Err(error) if controller_job_daemon_build_mismatch(&error) => {
+                // Attached callers retain foreground ownership when the resident
+                // daemon is an older build; #12581 owns that wait-policy path.
                 return Ok(None);
             }
             Err(error) => {
@@ -277,7 +283,8 @@ pub(super) fn intercept_local_detached_cook(
                 );
                 return Err(error);
             }
-        };
+        },
+    };
     let route = detached_route(cli);
     let launch_token = create_local_cook_launch_token(&session_root)?;
     let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)
@@ -328,6 +335,14 @@ pub(super) fn intercept_local_detached_cook(
     // materialize an attempt after cancellation.
     if handoff_parent.state.is_terminal() {
         terminate_and_reap_detached_child(&mut child);
+        if handoff_parent.metadata["detached_cook_handoff"]["state"] == "exited_before_handoff" {
+            return Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "detached Cook exited before materializing its first attempt",
+                Some(cook_id),
+                None,
+            ));
+        }
         return Err(Error::validation_invalid_argument(
             "detach-after-handoff",
             "detached Cook became terminal before durable controller ownership could be established",
@@ -628,7 +643,7 @@ fn materialize_prompt_from(
 /// following element, an attached `--prompt=-` names itself.
 fn stdin_prompt_index(args: &[String]) -> Option<usize> {
     args.iter().enumerate().find_map(|(index, arg)| {
-        if arg == "--prompt" && args.get(index + 1).is_some_and(|value| value == "-") {
+        if arg == "--prompt" && args.get(index + 1).is_some_and(|value| value.trim() == "-") {
             Some(index + 1)
         } else if arg == "--prompt=-" {
             Some(index)
@@ -1748,6 +1763,45 @@ mod tests {
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["state"],
                 "exited_before_handoff"
+            );
+        });
+    }
+
+    #[test]
+    fn attaching_a_child_preserves_an_exited_before_handoff_terminal_parent() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-exited-before-child-attachment";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist handoff parent");
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "detached Cook exited before materializing its first attempt",
+            )
+            .expect("terminalize handoff before delayed child attachment");
+
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn child for delayed attachment");
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_child(
+                cook_id,
+                child.id(),
+                detached_child_start_identity(child.id()).expect("capture child identity"),
+            )
+            .expect("read terminal handoff parent");
+            terminate_and_reap_detached_child(&mut child);
+
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "failed"
             );
         });
     }

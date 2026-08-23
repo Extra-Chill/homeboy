@@ -59,22 +59,25 @@ One thread per test binary closes that window on the Cargo fallback. Nextest
 closes it more directly by running each test in its own process.
 
 The Cargo cap is a fallback workaround for a race that is specific to sharing
-one process across threads. Sharded nextest replay does not have that race — but
-it sets `rust_nextest_shard_threads = 1` anyway, for a second and independent
-reason.
+one process across threads. Sharded nextest replay does not have that race, and
+`rust_nextest_shard_threads` is now `0` — nextest's num-cpus parallelism.
 
-Process-per-test isolates environment. It does not isolate the filesystem. The
-controller-runtime admission store and the rig registry are machine-global
-directories beneath the real `$HOME`, so concurrent test *processes* share them
-just as thoroughly as concurrent threads would. Run `32294476539` caught one
-test reading another's admission lease — the two sides of an "unchanged record"
-assertion differed only in `controller_admission.owner`, which carried a peer
-test's `request_id` — and ten `workspace::tests::prune::*` failures traced to
-shared rig-registry writes.
+It was `1` for a second and independent reason, which no longer holds. Process-
+per-test isolates environment but not the filesystem, and the controller-runtime
+admission store and the rig registry used to be machine-global directories
+beneath the real `$HOME`. Run `32294476539` caught one test reading another's
+admission lease, and ten `workspace::tests::prune::*` failures traced to shared
+rig-registry writes.
 
-The two settings are therefore both `1` and clear on different conditions. The
-Cargo cap lifts when `HomeGuard` stops mutating process-global environment; the
-nextest cap lifts when those stores take explicit roots. Both are #7505.
+Both stores now take explicit roots for every production caller (#7505), and
+both failure families pass in parallel. Measured on an 8-core host,
+`homeboy-lab-runner --lib` went from 410.3s serial to 98.5s parallel with an
+identical failure set, and neither it nor `homeboy-agents --lib` has any
+parallel-only failure. `tests/nextest_shard_parallelism_test.rs` pins the `0` and
+carries the measurement.
+
+The two settings therefore now differ. The Cargo cap stays `1` until `HomeGuard`
+stops mutating process-global environment; the nextest cap is lifted.
 
 Unsharded nextest runs were previously unmeasurable — they emit no
 `test result:` lines, so the cargo-test adapter matched nothing and produced no

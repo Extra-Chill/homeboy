@@ -800,6 +800,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 

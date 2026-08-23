@@ -17,6 +17,13 @@ const MAX_AUDIT_PROJECTION_BYTES: usize = 4 * 1024;
 const MAX_REFRESH_PROJECTION_BYTES: usize = 8 * 1024;
 const MAX_REFRESH_TEXT_BYTES: usize = 256;
 const MAX_REFRESH_PHASES: usize = 12;
+const MAX_RELEASE_STDOUT_BYTES: usize = 16 * 1024;
+const MAX_RELEASE_ARTIFACTS: usize = 16;
+const MAX_RELEASE_URLS: usize = 16;
+const MAX_RELEASE_WARNINGS: usize = 8;
+const MAX_RELEASE_EVIDENCE_REFS: usize = 16;
+const MAX_RELEASE_ACTIONS: usize = 4;
+const MAX_RELEASE_TEXT_BYTES: usize = 512;
 
 /// Dispatch a command to its handler and map the structured result to JSON.
 pub fn run(
@@ -159,6 +166,14 @@ pub(crate) fn run_command_output(
                 },
             )
         }
+        Commands::Release(args) => {
+            let full = args.requests_full_output();
+            release_command_run(
+                dispatch(Commands::Release(args), spec, placement),
+                output_file,
+                full,
+            )
+        }
         command if summarize_changed_since_audit => {
             changed_since_audit_command_run(dispatch(command, spec, placement), output_file)
         }
@@ -169,6 +184,232 @@ pub(crate) fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+/// Release payloads contain execution plans and step transcripts that can be
+/// several megabytes. Keep the lossless result for `--output` and make stdout
+/// an operator-facing projection unless the caller explicitly asks for `--full`.
+fn release_command_run(
+    (output_file_result, exit_code): JsonRun,
+    output_file: Option<&str>,
+    full: bool,
+) -> CommandRun {
+    let stdout_result = output_file_result.clone().map(|payload| {
+        if full || !is_single_release_execution(&payload) {
+            payload
+        } else {
+            bounded_release_projection(&payload, exit_code, output_file)
+        }
+    });
+
+    CommandRun::from_command_stdout_result("release", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+}
+
+fn is_single_release_execution(payload: &Value) -> bool {
+    payload.get("command").and_then(Value::as_str) == Some("release")
+        && payload.get("variant").and_then(Value::as_str) == Some("single")
+}
+
+fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Option<&str>) -> Value {
+    let result = payload.get("result").unwrap_or(payload);
+    let run = result.get("run");
+    let run_result = run.and_then(|run| run.get("result"));
+    let steps = run_result
+        .and_then(|result| result.get("steps"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let step = |name: &str| {
+        steps.iter().find(|step| {
+            step.get("id").and_then(Value::as_str) == Some(name)
+                || step.get("type").and_then(Value::as_str) == Some(name)
+        })
+    };
+    let step_data = |name: &str| step(name).and_then(|step| step.get("data"));
+    let version = step_data("version");
+    let artifacts = step_data("artifacts.authority")
+        .and_then(|data| data.get("artifacts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_RELEASE_ARTIFACTS)
+        .map(|artifact| {
+            serde_json::json!({
+                "name": artifact.get("path").and_then(Value::as_str).map(|path| bounded_release_text(&release_artifact_name(path))),
+                "sha256": artifact.get("sha256").and_then(Value::as_str).map(bounded_release_text),
+            })
+        })
+        .collect::<Vec<_>>();
+    let publications = steps
+        .iter()
+        .filter(|step| {
+            step.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "github.release" || kind.starts_with("publish."))
+        })
+        .filter_map(|step| {
+            let data = step.get("data")?;
+            let url = release_publication_url(data)?;
+            Some(serde_json::json!({
+                "target": step.get("type").and_then(Value::as_str).map(bounded_release_text),
+                "url": bounded_release_text(url),
+            }))
+        })
+        .take(MAX_RELEASE_URLS)
+        .collect::<Vec<_>>();
+    let warnings = run_result
+        .and_then(|result| result.get("warnings"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(MAX_RELEASE_WARNINGS)
+        .map(bounded_release_text)
+        .collect::<Vec<_>>();
+    let mut evidence_refs = result
+        .get("readiness")
+        .and_then(|readiness| readiness.get("evidence_refs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(bounded_release_text)
+        .collect::<Vec<_>>();
+    for key in ["continuation_ref", "reconciliation_ref", "owner_run_ref"] {
+        if let Some(reference) = payload
+            .get("workspace")
+            .and_then(|workspace| workspace.get(key))
+            .and_then(Value::as_str)
+        {
+            evidence_refs.push(bounded_release_text(reference));
+        }
+    }
+    if let Some(path) = output_file {
+        evidence_refs.push(format!("output://{}", bounded_release_text(path)));
+    }
+    evidence_refs.sort();
+    evidence_refs.dedup();
+    evidence_refs.truncate(MAX_RELEASE_EVIDENCE_REFS);
+    let failed_step = steps.iter().find(|step| {
+        matches!(
+            step.get("status").and_then(Value::as_str),
+            Some("failed") | Some("missing")
+        )
+    });
+    let failure = failed_step.map(|step| {
+        serde_json::json!({
+            "step": step.get("id").and_then(Value::as_str).map(bounded_release_text),
+            "type": step.get("type").and_then(Value::as_str).map(bounded_release_text),
+            "cause": step.get("error").and_then(Value::as_str).map(bounded_release_text),
+            "reproduction_commands": release_reproduction_commands(step, result),
+        })
+    });
+    let projection = serde_json::json!({
+        "schema": "homeboy/release-operator-summary/v1",
+        "command": "release",
+        "exit_code": exit_code,
+        "component": result.get("component_id").and_then(Value::as_str).map(bounded_release_text),
+        "status": result.get("status").and_then(Value::as_str).map(bounded_release_text),
+        "phase": result.get("phase").and_then(Value::as_str).map(bounded_release_text),
+        "old_version": version.and_then(|data| data.get("old_version")).and_then(Value::as_str).map(bounded_release_text),
+        "new_version": result.get("new_version").and_then(Value::as_str).map(bounded_release_text),
+        "release_commit": step_data("git.commit").and_then(|data| data.get("commit").or_else(|| data.get("sha"))).or_else(|| step_data("git.tag").and_then(|data| data.get("head"))).and_then(Value::as_str).map(bounded_release_text),
+        "tag": result.get("tag").and_then(Value::as_str).map(bounded_release_text),
+        "push_target": step_data("git.push").and_then(|data| data.get("target").or_else(|| data.get("remote"))).and_then(Value::as_str).map(bounded_release_text),
+        "artifacts": artifacts,
+        "publication_urls": publications,
+        "gates": run_result.and_then(|value| value.get("summary")).map(|summary| serde_json::json!({
+            "total": summary.get("total_steps"), "succeeded": summary.get("succeeded"),
+            "failed": summary.get("failed"), "skipped": summary.get("skipped"), "missing": summary.get("missing"),
+        })),
+        "warnings": warnings,
+        "evidence_refs": evidence_refs,
+        "failure": failure,
+        "full_command": format!("homeboy release {} --full", bounded_release_text(result.get("component_id").and_then(Value::as_str).unwrap_or("<component>"))),
+        "output": output_file.map(bounded_release_text),
+    });
+
+    bounded_release_envelope(projection, exit_code)
+}
+
+fn bounded_release_envelope(projection: Value, exit_code: i32) -> Value {
+    if release_envelope_bytes(&projection, exit_code)
+        .is_ok_and(|bytes| bytes <= MAX_RELEASE_STDOUT_BYTES)
+    {
+        return projection;
+    }
+
+    let fallback = serde_json::json!({
+        "schema": "homeboy/release-operator-summary/v1",
+        "command": "release",
+        "exit_code": exit_code,
+        "full_command": "homeboy release <component> --full",
+    });
+    debug_assert!(release_envelope_bytes(&fallback, exit_code)
+        .is_ok_and(|bytes| bytes <= MAX_RELEASE_STDOUT_BYTES));
+    fallback
+}
+
+fn release_envelope_bytes(payload: &Value, exit_code: i32) -> serde_json::Result<usize> {
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+        &Ok(payload.clone()),
+        exit_code,
+        "release",
+        None,
+    );
+    serde_json::to_vec(&response).map(|rendered| rendered.len())
+}
+
+fn release_artifact_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+fn release_publication_url(data: &Value) -> Option<&str> {
+    let response = data.get("response").unwrap_or(data);
+    let verification = response
+        .get("registry_verification")
+        .or_else(|| response.get("registryVerification"))
+        .unwrap_or(response);
+    ["version_url", "versionUrl", "url"]
+        .into_iter()
+        .find_map(|key| verification.get(key).and_then(Value::as_str))
+}
+
+fn bounded_release_text(value: &str) -> String {
+    let mut end = value.len().min(MAX_RELEASE_TEXT_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == value.len() {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..end])
+    }
+}
+
+fn release_reproduction_commands(step: &Value, result: &Value) -> Vec<String> {
+    let component = result
+        .get("component_id")
+        .and_then(Value::as_str)
+        .map(bounded_release_text)
+        .unwrap_or_else(|| "<component>".to_string());
+    let gate = step
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| step.get("type").and_then(Value::as_str))
+        .and_then(|name| name.strip_prefix("preflight."));
+    let command = match gate {
+        Some("lint") | Some("test") | Some("audit") => {
+            format!("homeboy review {} {component}", gate.unwrap())
+        }
+        Some("package") | Some("build") => format!("homeboy review build {component}"),
+        _ => format!("homeboy release {component} --dry-run"),
+    };
+    vec![command]
+        .into_iter()
+        .take(MAX_RELEASE_ACTIONS)
+        .collect()
 }
 
 fn refresh_homeboy_uses_bounded_output(args: &runner::RunnerArgs) -> bool {
@@ -1062,6 +1303,196 @@ mod tests {
         assert_eq!(
             agent_task_controller_run_from_spec_output_ref_eligible(&args, None),
             None
+        );
+    }
+
+    #[test]
+    fn release_stdout_is_bounded_and_output_file_remains_lossless() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("release.json");
+        let large = "x".repeat(512 * 1024);
+        let payload = serde_json::json!({
+            "command": "release",
+            "variant": "single",
+            "result": {
+                "component_id": "fixture",
+                "status": "released",
+                "phase": "publish",
+                "new_version": "1.2.3",
+                "tag": "v1.2.3",
+                "plan": { "changelog": large },
+                "run": { "result": {
+                    "warnings": (0..100).map(|_| large.clone()).collect::<Vec<_>>(),
+                    "summary": { "total_steps": 23, "succeeded": 23, "failed": 0, "skipped": 0, "missing": 0 },
+                    "steps": [
+                        { "id": "version", "type": "version", "status": "success", "data": { "old_version": "1.2.2", "new_version": "1.2.3", "notes": large } },
+                        { "id": "git.commit", "type": "git.commit", "status": "success", "data": { "sha": "abc123" } },
+                        { "id": "git.tag", "type": "git.tag", "status": "success", "data": { "head": "abc123" } },
+                        { "id": "git.push", "type": "git.push", "status": "success", "data": { "target": "origin/main" } },
+                        { "id": "package", "type": "package", "status": "success", "data": { "action": "release.package", "response": { "log": large } } },
+                        { "id": "artifacts.authority", "type": "artifacts.authority", "status": "success", "data": { "artifacts": (0..100).map(|i| serde_json::json!({ "path": format!("dist/fixture-{i}.tgz"), "sha256": "a".repeat(64), "log": large })).collect::<Vec<_>>() } },
+                        { "id": "github.release", "type": "github.release", "status": "success", "data": { "url": "https://github.com/example/fixture/releases/tag/v1.2.3", "notes": large } },
+                        { "id": "publish.npm", "type": "publish.npm", "status": "success", "data": { "response": { "registry_verification": { "version_url": "https://registry.example/fixture/1.2.3" } } } }
+                    ]
+                } }
+            }
+        });
+        let run = release_command_run((Ok(payload.clone()), 0), Some("release.json"), false);
+        let stdout = serde_json::to_vec(run.stdout_result.as_ref().expect("stdout"))
+            .expect("stdout serializes");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &run.stdout_result,
+            0,
+            "release",
+            None,
+        );
+        let rendered_envelope = serde_json::to_vec(&envelope).expect("envelope serializes");
+
+        assert!(
+            stdout.len() <= MAX_RELEASE_STDOUT_BYTES,
+            "stdout was {} bytes",
+            stdout.len()
+        );
+        assert!(
+            rendered_envelope.len() <= MAX_RELEASE_STDOUT_BYTES,
+            "stdout envelope was {} bytes",
+            rendered_envelope.len()
+        );
+        assert!(!String::from_utf8_lossy(&stdout).contains(&large));
+        assert_eq!(run.stdout_result.as_ref().unwrap()["component"], "fixture");
+        assert_eq!(
+            run.stdout_result.as_ref().unwrap()["release_commit"],
+            "abc123"
+        );
+        assert_eq!(
+            run.stdout_result.as_ref().unwrap()["push_target"],
+            "origin/main"
+        );
+        assert_eq!(
+            run.stdout_result.as_ref().unwrap()["artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_RELEASE_ARTIFACTS
+        );
+        assert_eq!(
+            run.stdout_result.as_ref().unwrap()["publication_urls"][0]["url"],
+            "https://github.com/example/fixture/releases/tag/v1.2.3"
+        );
+        assert_eq!(
+            run.stdout_result.as_ref().unwrap()["publication_urls"][1]["url"],
+            "https://registry.example/fixture/1.2.3"
+        );
+
+        super::super::output_runtime::write_output_file(
+            &run,
+            crate::command_contract::CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(written["data"], payload);
+    }
+
+    #[test]
+    fn release_failure_stdout_keeps_bounded_cause_and_reproduction_command() {
+        let payload = serde_json::json!({
+            "command": "release",
+            "variant": "single",
+            "result": {
+                "component_id": "fixture",
+                "status": "failed",
+                "run": { "result": { "steps": [{
+                    "id": "preflight.lint", "type": "preflight.lint", "status": "failed",
+                    "error": "lint output: ".to_string() + &"x".repeat(512 * 1024),
+                    "data": { "transcript": "x".repeat(512 * 1024) }
+                }] } }
+            }
+        });
+        let run = release_command_run((Ok(payload), 20), None, false);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &run.stdout_result,
+            20,
+            "release",
+            None,
+        );
+        let rendered = serde_json::to_vec(&envelope).expect("envelope serializes");
+
+        assert!(
+            rendered.len() <= MAX_RELEASE_STDOUT_BYTES,
+            "stdout was {} bytes",
+            rendered.len()
+        );
+        assert_eq!(
+            envelope
+                .diagnostics
+                .as_ref()
+                .unwrap()
+                .failure_digest
+                .as_ref()
+                .unwrap()
+                .next_actions[0]
+                .command,
+            "homeboy review lint fixture"
+        );
+        assert!(!String::from_utf8_lossy(&rendered).contains(&"x".repeat(512)));
+    }
+
+    #[test]
+    fn release_batch_and_utility_output_remain_lossless_on_stdout() {
+        let batch = serde_json::json!({
+            "command": "release.batch", "variant": "batch",
+            "result": { "results": [{ "component_id": "a", "status": "released" }],
+                "summary": { "total": 1, "released": 1, "failed": 0, "skipped": 0 } }
+        });
+        let utility = serde_json::json!({
+            "command": "release.changes", "variant": "single",
+            "result": { "commits": [{ "sha": "abc123", "subject": "feat: keep output" }] }
+        });
+
+        for payload in [batch, utility] {
+            let run = release_command_run((Ok(payload.clone()), 0), None, false);
+            assert_eq!(run.stdout_result.unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn release_full_keeps_single_execution_lossless_on_stdout() {
+        let payload = serde_json::json!({
+            "command": "release", "variant": "single",
+            "result": { "component_id": "fixture", "plan": { "changelog": "x".repeat(32 * 1024) } }
+        });
+        let run = release_command_run((Ok(payload.clone()), 0), None, true);
+        assert_eq!(run.stdout_result.unwrap(), payload);
+    }
+
+    #[test]
+    fn release_failure_with_adversarial_component_id_stays_within_envelope_budget() {
+        let payload = serde_json::json!({
+            "command": "release", "variant": "single",
+            "result": {
+                "component_id": "x".repeat(64 * 1024), "status": "failed",
+                "run": { "result": { "steps": [{
+                    "id": "preflight.lint", "type": "preflight.lint", "status": "failed",
+                    "error": "failure"
+                }] } }
+            }
+        });
+        let run = release_command_run((Ok(payload), 20), None, false);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &run.stdout_result,
+            20,
+            "release",
+            None,
+        );
+        let rendered = serde_json::to_vec(&envelope).expect("envelope serializes");
+
+        assert!(rendered.len() <= MAX_RELEASE_STDOUT_BYTES);
+        assert!(
+            envelope.data.as_ref().unwrap()["full_command"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= "homeboy release ".len() + MAX_RELEASE_TEXT_BYTES + "... --full".len()
         );
     }
 }

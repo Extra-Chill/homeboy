@@ -1260,6 +1260,14 @@ fn controller_job_client_rejects_a_live_daemon_from_another_build() {
         "homeboy 0.0.0-stale+fixture"
     );
     assert_eq!(error.details["active_jobs"], 0);
+    assert_eq!(
+        error.details["recovery_command"],
+        "homeboy daemon recover --yes"
+    );
+    assert!(error
+        .hints
+        .iter()
+        .any(|hint| hint.message == "Next: homeboy daemon recover --yes"));
 }
 
 #[test]

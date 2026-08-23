@@ -138,6 +138,13 @@ pub struct ReleaseExecuteArgs {
     #[command(flatten)]
     dry_run_args: DryRunArgs,
 
+    /// Emit the complete release command-result envelope on stdout.
+    ///
+    /// The default is a bounded operator summary; `--output <path>` always
+    /// writes the complete structured result.
+    #[arg(long)]
+    pub full: bool,
+
     /// Confirm risky release execution modes.
     #[arg(long)]
     apply: bool,
@@ -255,6 +262,12 @@ pub struct ReleaseExecuteArgs {
     /// releases only.
     #[arg(long)]
     cascade: bool,
+}
+
+impl ReleaseArgs {
+    pub(crate) fn requests_full_output(&self) -> bool {
+        self.execute.full
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -1586,6 +1599,7 @@ mod tests {
             preflight_runner: None,
             preflight_placement: ReleasePreflightPlacementArg::Local,
             dry_run_args: DryRunArgs { dry_run: true },
+            full: false,
             apply: false,
             deploy: false,
             recover: false,
@@ -1704,6 +1718,7 @@ mod tests {
             preflight_runner: None,
             preflight_placement: ReleasePreflightPlacementArg::Local,
             dry_run_args: DryRunArgs { dry_run: true },
+            full: false,
             apply: false,
             deploy: false,
             recover: false,

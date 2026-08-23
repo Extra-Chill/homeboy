@@ -72,6 +72,62 @@ fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
     });
 }
 
+#[test]
+fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
+    with_isolated_home(|_| {
+        let run_id = "status-scoped-cleanup";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+        let worktrees = (0..10_000)
+            .map(|index| format!("/workspace/unrelated-{index}"))
+            .collect::<Vec<_>>();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["automatic_artifact_retention"] = json!({
+                "status": "completed",
+                "worktree_count": worktrees.len(),
+                "worktrees": worktrees,
+            });
+        })
+        .expect("persist unrelated cleanup inventory");
+
+        let (value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            bounded: false,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("full status");
+
+        assert_eq!(value["schema"], "homeboy/agent-task-status-full/v2");
+        assert_eq!(value["evidence_graph"].as_array().map(Vec::len), Some(8));
+        assert_eq!(
+            value["evidence_graph"][0]["ref"],
+            format!("homeboy://agent-task/run/{run_id}/aggregate")
+        );
+        assert!(value["evidence_graph"]
+            .as_array()
+            .expect("stable graph")
+            .iter()
+            .all(|entry| entry["export_command"].as_str().is_some()));
+        assert!(!value.to_string().contains("/workspace/unrelated-9999"));
+        assert!(value.to_string().len() < 16 * 1024);
+
+        let persisted = agent_task_lifecycle::status(run_id).expect("persisted record");
+        assert_eq!(
+            persisted.metadata["automatic_artifact_retention"]["worktrees"]
+                .as_array()
+                .map(Vec::len),
+            Some(10_000)
+        );
+    });
+}
+
 #[derive(Debug)]
 struct RecoverableRunnerDispatcher {
     unavailable: AtomicBool,
@@ -326,6 +382,33 @@ fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
     ]);
 
     validate_cook_request(&args).expect("goal plus prompt is one valid Cook source");
+}
+
+#[test]
+fn cook_preflight_scans_at_file_content_not_its_absolute_source_path() {
+    let file = tempfile::NamedTempFile::new().expect("prompt file");
+    std::fs::write(file.path(), "Implement the outcome.\n").expect("write prompt");
+    let args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        format!("@{}", file.path().display()),
+        "--to-worktree".to_string(),
+        "sample-plugin@fix-issue".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+
+    validate_cook_request(&args).expect("absolute @file source is not provider evidence");
+
+    std::fs::write(file.path(), "Read /private/evidence.json before editing.\n")
+        .expect("rewrite prompt");
+    let error =
+        validate_cook_request(&args).expect_err("absolute path in prompt content is evidence");
+    assert_eq!(error.details["field"], "prompt");
+    assert!(error.message.contains("undeclared absolute evidence path"));
 }
 
 #[test]

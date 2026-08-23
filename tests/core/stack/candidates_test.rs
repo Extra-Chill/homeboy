@@ -9,6 +9,18 @@ use std::process::Command;
 mod support;
 use support::{commit_file, git, init_repo, rev_parse};
 
+/// The isolated home each test below installs, named as a config root.
+///
+/// A test is the entry point for its own unit of work, so resolving once here is
+/// a boundary resolution, not an ambient one. What matters is that the
+/// production path beneath it resolves nothing (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::PathRoots::from_environment()
+        .expect("path roots")
+        .config()
+        .to_path_buf()
+}
+
 fn stack(id: &str, component: &str, base: &str, prs: &[(&str, u64)]) -> StackSpec {
     StackSpec {
         id: id.to_string(),
@@ -59,10 +71,11 @@ fn stale_trunk_stack_ranks_compatible_pr_based_candidate_first() {
             .requirements
             .compatible_bases
             .push(stale.base.clone());
-        save(&stale).expect("save stale stack");
-        save(&candidate).expect("save candidate stack");
+        save(&test_config_root(), &stale).expect("save stale stack");
+        save(&test_config_root(), &candidate).expect("save candidate stack");
 
-        let candidates = discover_candidates(&stale).expect("discover candidates");
+        let candidates =
+            discover_candidates(&test_config_root(), &stale).expect("discover candidates");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].stack_id, "abi-pr");
         assert!(candidates[0].base_compatible);
@@ -119,12 +132,12 @@ fn ambiguous_candidates_are_ranked_by_overlap_then_id() {
             .requirements
             .compatible_bases
             .push(source.base.clone());
-        save(&source).unwrap();
-        save(&beta).unwrap();
-        save(&overlap).unwrap();
-        save(&alpha).unwrap();
+        save(&test_config_root(), &source).unwrap();
+        save(&test_config_root(), &beta).unwrap();
+        save(&test_config_root(), &overlap).unwrap();
+        save(&test_config_root(), &alpha).unwrap();
 
-        let candidates = discover_candidates(&source).unwrap();
+        let candidates = discover_candidates(&test_config_root(), &source).unwrap();
         assert_eq!(
             candidates
                 .iter()
@@ -167,10 +180,10 @@ fn stale_target_with_compatible_candidate_is_blocked_without_mutation() {
             .requirements
             .compatible_bases
             .push(source.base.clone());
-        save(&source).unwrap();
-        save(&alternative).unwrap();
+        save(&test_config_root(), &source).unwrap();
+        save(&test_config_root(), &alternative).unwrap();
 
-        let report = preflight(&source, &path, "main").expect("preflight");
+        let report = preflight(&test_config_root(), &source, &path, "main").expect("preflight");
         assert!(report.blocked);
         assert_eq!(report.target_behind, Some(1));
         assert_eq!(report.candidates[0].stack_id, "topic-stack");
@@ -217,12 +230,12 @@ fn unrelated_stacks_are_excluded_and_missing_provenance_is_null() {
             "topic",
             &[("Automattic/wordpress", 10)],
         );
-        save(&source).unwrap();
-        save(&matching).unwrap();
-        save(&other_component).unwrap();
-        save(&other_repository).unwrap();
+        save(&test_config_root(), &source).unwrap();
+        save(&test_config_root(), &matching).unwrap();
+        save(&test_config_root(), &other_component).unwrap();
+        save(&test_config_root(), &other_repository).unwrap();
 
-        let candidates = discover_candidates(&source).unwrap();
+        let candidates = discover_candidates(&test_config_root(), &source).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].stack_id, "matching");
         assert!(candidates[0].provenance.is_none());

@@ -235,6 +235,7 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 }
 
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
+    snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request(&args)?;
@@ -252,14 +253,17 @@ pub(crate) fn preview_cook(
 ) -> CmdResult<Value> {
     let mut progress = Vec::new();
     record_preview_phase(&mut progress, "prompt_input");
-    if args.dispatch.prompt.as_deref().is_some_and(|prompt| {
-        prompt == "-"
-            || (prompt.starts_with('@')
-                && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(prompt).is_none())
+    if args
+        .dispatch
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt == "-")
+    {
+        snapshot_cook_prompt_bounded(&mut args, PREVIEW_STDIN_TIMEOUT)?;
+    } else if args.dispatch.prompt.as_deref().is_some_and(|prompt| {
+        prompt.starts_with('@')
+            && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(prompt).is_none()
     }) {
-        // Preview owns stdin exactly once. Capturing it before preflight keeps
-        // every later validation and projection byte-for-byte aligned with live
-        // Cook without allowing an open pipe to wait forever for EOF.
         args.dispatch.prompt = Some(
             homeboy::agents::agent_task_prompts::read_prompt_input_bounded(
                 args.dispatch.prompt.as_deref().expect("prompt source"),
@@ -269,6 +273,28 @@ pub(crate) fn preview_cook(
     }
     record_preview_phase(&mut progress, "input_validation");
     args.gates.snapshot_file_inputs()?;
+    // Authorization is a security boundary, not an unrelated task-input
+    // validation, so preserve its precedence over backend guidance.
+    if args.no_finalize {
+        if let Some(provenance) = provenance {
+            provenance
+                .require_sources(
+                    &["no_finalize"],
+                    &[crate::cli_surface::ArgumentSource::CommandLine],
+                )
+                .map_err(|error| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "no_finalize",
+                        "--no-finalize must be explicitly authorized on the command line",
+                        Some(serde_json::to_string(&error).expect("source policy serializes")),
+                        None,
+                    )
+                })?;
+        }
+    }
+    if let Some(backend) = unresolved_cook_backend_preview(&args)? {
+        return Ok((backend, 0));
+    }
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -336,8 +362,7 @@ pub(crate) fn preview_cook(
                 None,
             )
         })?;
-        let mut dispatch = dispatch_args_for_cook(&args);
-        resolve_dispatch_prompt(&mut dispatch)?;
+        let dispatch = resolved_dispatch_args_for_cook(&args)?;
         let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
         compile_args.dispatch.prompt = dispatch.prompt;
         let evidence =
@@ -423,6 +448,90 @@ fn record_preview_phase(progress: &mut Vec<Value>, phase: &'static str) {
     });
     eprintln!("{event}");
     progress.push(event);
+}
+
+/// Resolve missing backend policy before validating task content. This keeps the
+/// task-first preview useful when the command cannot execute regardless of its
+/// prompt, evidence, or gates.
+fn unresolved_cook_backend_preview(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<Option<Value>> {
+    let resolution =
+        dispatch_service::resolve_dispatch_request(dispatch_args_for_cook(args).into());
+    let Err(error) = resolution else {
+        return Ok(None);
+    };
+    if !is_missing_default_backend_policy_error(&error) {
+        return Err(error);
+    }
+
+    let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+    let ready_backends = catalog
+        .backends()
+        .into_iter()
+        .filter(|backend| {
+            homeboy::agents::agent_tasks::provider::preflight_provider_credentials_for_backend(
+                catalog.providers(),
+                backend,
+                None,
+            )
+            .and_then(|_| {
+                homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
+                    &catalog, backend, None,
+                )
+            })
+            .is_ok()
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(missing_backend_preview_value(args, ready_backends)))
+}
+
+fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool {
+    error.code == homeboy::core::ErrorCode::ValidationInvalidArgument
+        && error.details["field"] == "backend"
+        && error.details["problem"]
+            .as_str()
+            .is_some_and(|problem| problem.starts_with("agent-task cook requires --backend because no default backend policy is configured"))
+}
+
+fn missing_backend_preview_value(args: &AgentTaskCookArgs, ready_backends: Vec<String>) -> Value {
+    let replay_backend = (ready_backends.len() == 1).then(|| ready_backends[0].clone());
+    let mut replay = cook_preview_replay_argv(args);
+    if let Some(backend) = &replay_backend {
+        replay
+            .argv
+            .extend(["--backend".to_string(), backend.clone()]);
+    }
+    let state = if replay_backend.is_some() {
+        "ready_backend_unambiguous"
+    } else if ready_backends.is_empty() {
+        "backend_required_no_ready_route"
+    } else {
+        "backend_required_multiple_ready_routes"
+    };
+    if replay_backend.is_none() {
+        replay.requires.push(
+            "pass --backend with one ready backend before replaying; multiple eligible routes are never selected implicitly"
+                .to_string(),
+        );
+    }
+
+    serde_json::json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "resolved": {
+                "backend": {
+                    "state": state,
+                    "default_policy": "missing",
+                    "ready_backends": ready_backends,
+                    "replay_backend": replay_backend,
+                    "next_command": "homeboy agent-task providers --validate-readiness",
+                },
+            },
+            "replay_argv": replay.argv,
+            "replay_requires": replay.requires,
+    })
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -748,6 +857,111 @@ mod preview_tests {
             "{replay:?}"
         );
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
+    }
+
+    #[test]
+    fn missing_backend_preview_requires_policy_when_no_ready_backend_exists() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "backend_required_no_ready_route"
+        );
+        assert!(preview["replay_argv"]
+            .as_array()
+            .expect("replay argv")
+            .iter()
+            .all(|arg| arg != "--backend"));
+    }
+
+    #[test]
+    fn preview_reports_missing_backend_policy_before_prompt_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            let (preview, exit_code) =
+                preview_cook(cook(&["homeboy", "agent-task", "cook", "--preview"]), None)
+                    .expect("missing policy returns backend guidance before prompt validation");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["backend"]["default_policy"], "missing");
+            assert!(matches!(
+                preview["resolved"]["backend"]["state"].as_str(),
+                Some(
+                    "ready_backend_unambiguous"
+                        | "backend_required_no_ready_route"
+                        | "backend_required_multiple_ready_routes"
+                )
+            ));
+        });
+    }
+
+    #[test]
+    fn missing_backend_preview_replays_the_one_ready_backend() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            vec!["fixture".to_string()],
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "ready_backend_unambiguous"
+        );
+        assert_eq!(preview["resolved"]["backend"]["replay_backend"], "fixture");
+        let replay = preview["replay_argv"].as_array().expect("replay argv");
+        assert!(replay
+            .windows(2)
+            .any(|pair| pair == ["--backend", "fixture"]));
+        Cli::try_parse_from(
+            replay
+                .iter()
+                .map(|value| value.as_str().expect("argv string")),
+        )
+        .expect("ready-backend replay parses as Cook");
+    }
+
+    #[test]
+    fn missing_backend_preview_keeps_multiple_ready_backends_explicit() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            vec!["alpha".to_string(), "beta".to_string()],
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "backend_required_multiple_ready_routes"
+        );
+        assert!(preview["resolved"]["backend"]["replay_backend"].is_null());
+        assert!(preview["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|value| value
+                .as_str()
+                .unwrap_or_default()
+                .contains("multiple eligible routes")));
     }
 
     #[cfg(unix)]
@@ -1252,7 +1466,7 @@ mod preview_tests {
                 "--backend".to_string(),
                 "fixture".to_string(),
                 "--prompt".to_string(),
-                "inspect the task".to_string(),
+                "-".to_string(),
                 "--to-worktree".to_string(),
                 workspace,
                 "--no-finalize".to_string(),
@@ -1263,9 +1477,15 @@ mod preview_tests {
             let Commands::AgentTask(agent_task) = cli.command else {
                 panic!("agent-task command");
             };
-            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+            let super::super::AgentTaskCommand::Cook(mut args) = agent_task.command else {
                 panic!("Cook command");
             };
+            args.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
+                content: "@/not/a/prompt/file".to_string(),
+                source: "stdin".to_string(),
+                sha256: "sha256:fixture".to_string(),
+                size_bytes: "@/not/a/prompt/file".len(),
+            });
             let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
 
             assert_eq!(exit_code, 0);
@@ -3567,6 +3787,11 @@ pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
+    // Backend policy is an execution prerequisite. Resolve it before validating
+    // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
+    // an operator must fix first.
+    let mut dispatch = dispatch_args_for_cook(args);
+    let request = dispatch_service::resolve_dispatch_request(dispatch.clone().into())?;
     if args.no_finalize {
         if let Some(provenance) = provenance {
             provenance
@@ -3594,9 +3819,13 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
-    // Resolve @file input before scanning its provider-visible content. The host
-    // path is an ingestion detail, not evidence; stdin remains unread here.
-    let mut dispatch = dispatch_args_for_cook(args);
+    // Resolve @file input before scanning its provider-visible content. The
+    // host path is an ingestion detail, not evidence. Stdin remains unread
+    // until execution so this preflight cannot consume its prompt bytes.
+    if let Some(snapshot) = &args.prompt_snapshot {
+        dispatch.prompt = Some(snapshot.content.clone());
+        dispatch.prompt_is_literal = true;
+    }
     if dispatch.prompt.as_deref().is_some_and(|spec| {
         spec.starts_with('@')
             && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(spec).is_none()
@@ -3632,7 +3861,6 @@ pub(crate) fn validate_cook_request_with_provenance(
     }
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
-    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let configured_rotations = dispatch_service::controller_resolved_execution_policy(&request)
         .rotation
         .as_ref()
@@ -3733,6 +3961,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
+    snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -3772,10 +4001,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         project_provider_evidence_inputs(&args.provider_evidence_inputs, workspace, None)?;
     }
 
-    let mut dispatch_args = dispatch_args_for_cook(&args);
-    // Resolve @file / stdin / stored-ref prompts before anything consumes the
-    // prompt, so the executor receives the exact bytes (#10100).
-    resolve_dispatch_prompt(&mut dispatch_args)?;
+    let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -3951,6 +4177,33 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     ))
 }
 
+fn cook_component_workspace(
+    args: &AgentTaskCookArgs,
+    workspace: &Path,
+) -> homeboy::core::Result<PathBuf> {
+    let Some(component_id) = args.dispatch.repo.as_deref() else {
+        return Ok(workspace.to_path_buf());
+    };
+    let Some(component) = homeboy::core::component::registered_by_id(component_id)? else {
+        return Ok(workspace.to_path_buf());
+    };
+    let effective = homeboy::core::component::resolution::rebase_component_path_to_checkout(
+        &component, workspace,
+    );
+    if !effective.is_dir() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "component workspace",
+            format!(
+                "resolved component `{component_id}` is not present in Cook workspace: {}",
+                effective.display()
+            ),
+            Some(effective.display().to_string()),
+            None,
+        ));
+    }
+    Ok(effective)
+}
+
 pub(crate) fn record_cook_argument_provenance(
     plan: &mut AgentTaskPlan,
     provenance: &crate::cli_surface::CommandArgumentProvenance,
@@ -3967,6 +4220,22 @@ pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
         dispatch_args.prompt = args.goal.clone();
     }
     dispatch_args
+}
+
+/// Resolve a Cook prompt without treating an ingress snapshot as another
+/// structured spec. The original `dispatch.prompt` remains source provenance;
+/// the typed snapshot supplies literal task content.
+fn resolved_dispatch_args_for_cook(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<DispatchArgs> {
+    let mut dispatch = dispatch_args_for_cook(args);
+    if let Some(snapshot) = &args.prompt_snapshot {
+        dispatch.prompt = Some(snapshot.content.clone());
+        dispatch.prompt_is_literal = true;
+    } else {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    Ok(dispatch)
 }
 
 fn resolve_cook_execution_budget(
@@ -4036,6 +4305,75 @@ pub(super) fn resolve_dispatch_prompt(
     };
     let resolved = homeboy::agents::agent_task_prompts::read_prompt_input(spec)?;
     dispatch_args.prompt = Some(resolved);
+    Ok(())
+}
+
+/// Snapshot stdin at the Cook ingress boundary. Later compilation may happen in
+/// a detached child or retry a plan, neither of which owns the original stream.
+pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if args.prompt_snapshot.is_some()
+        || args.attempt_plan.is_some()
+        || !args
+            .dispatch
+            .prompt
+            .as_deref()
+            .is_some_and(|spec| spec.trim() == "-")
+    {
+        return Ok(());
+    }
+
+    let content = homeboy::agents::agent_task_prompts::read_prompt_input("-")?;
+    if content.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook --prompt - received empty stdin",
+            None,
+            Some(vec!["Pipe a non-empty prompt, for example: homeboy agent-task cook --prompt - < task.md".to_string()]),
+        ));
+    }
+    let size_bytes = content.len();
+    let sha256 = format!(
+        "sha256:{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
+    );
+    args.prompt_snapshot = Some(super::args::CookPromptSnapshot {
+        content,
+        source: "stdin".to_string(),
+        sha256,
+        size_bytes,
+    });
+    Ok(())
+}
+
+/// Preview uses the same literal snapshot contract as live Cook, but bounds the
+/// original stream before the read-only planner begins.
+fn snapshot_cook_prompt_bounded(
+    args: &mut AgentTaskCookArgs,
+    timeout: Duration,
+) -> homeboy::core::Result<()> {
+    if args.prompt_snapshot.is_some() || args.attempt_plan.is_some() {
+        return Ok(());
+    }
+    let content = homeboy::agents::agent_task_prompts::read_prompt_input_bounded("-", timeout)?;
+    if content.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook --prompt - received empty stdin",
+            None,
+            Some(vec!["Pipe a non-empty prompt, for example: homeboy agent-task cook --prompt - < task.md".to_string()]),
+        ));
+    }
+    let size_bytes = content.len();
+    let sha256 = format!(
+        "sha256:{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
+    );
+    args.prompt_snapshot = Some(super::args::CookPromptSnapshot {
+        content,
+        source: "stdin".to_string(),
+        sha256,
+        size_bytes,
+    });
     Ok(())
 }
 
@@ -4118,10 +4456,13 @@ mod rotation_disclosure_tests {
 #[cfg(test)]
 mod prompt_input_tests {
     use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
 
     fn dispatch_with_prompt(prompt: Option<&str>) -> DispatchArgs {
         DispatchArgs {
             prompt: prompt.map(str::to_string),
+            prompt_is_literal: false,
             tasks: Vec::new(),
             cwd: None,
             workspace: None,
@@ -4166,6 +4507,26 @@ mod prompt_input_tests {
     }
 
     #[test]
+    fn relative_and_absolute_at_file_prompts_resolve_to_equivalent_bytes() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let file = tempfile::NamedTempFile::new_in(&cwd).expect("prompt file");
+        let body = "Preserve these prompt bytes.\n\n";
+        std::fs::write(file.path(), body).expect("write prompt");
+        let relative = file
+            .path()
+            .strip_prefix(&cwd)
+            .expect("prompt file is in the current directory");
+
+        let mut relative_args = dispatch_with_prompt(Some(&format!("@{}", relative.display())));
+        let mut absolute_args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
+        resolve_dispatch_prompt(&mut relative_args).expect("resolve relative @file prompt");
+        resolve_dispatch_prompt(&mut absolute_args).expect("resolve absolute @file prompt");
+
+        assert_eq!(relative_args.prompt, absolute_args.prompt);
+        assert_eq!(absolute_args.prompt.as_deref(), Some(body));
+    }
+
+    #[test]
     fn inline_prompt_is_unchanged() {
         let mut args = dispatch_with_prompt(Some("fix the flaky test"));
         resolve_dispatch_prompt(&mut args).expect("resolve inline prompt");
@@ -4192,6 +4553,40 @@ mod prompt_input_tests {
         resolve_dispatch_prompt(&mut args).expect("no prompt is fine");
         assert!(args.prompt.is_none());
     }
+
+    #[test]
+    fn stdin_snapshot_literals_are_never_reparsed_as_structured_prompt_specs() {
+        for literal in ["-", "@/missing/prompt.md", "@prompt:missing", " \n\t"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "-",
+                "--backend",
+                "fixture",
+                "--no-finalize",
+            ])
+            .expect("parse Cook");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let crate::commands::agent_task::AgentTaskCommand::Cook(mut cook) = agent_task.command
+            else {
+                panic!("Cook command");
+            };
+            cook.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
+                content: literal.to_string(),
+                source: "stdin".to_string(),
+                sha256: "sha256:test".to_string(),
+                size_bytes: literal.len(),
+            });
+
+            let dispatch = resolved_dispatch_args_for_cook(&cook).expect("literal snapshot");
+            assert_eq!(dispatch.prompt.as_deref(), Some(literal));
+            assert_eq!(cook.dispatch.prompt.as_deref(), Some("-"));
+        }
+    }
 }
 
 /// Compile the one durable provider-cell plan used by local Cook and Lab handoff.
@@ -4203,7 +4598,7 @@ pub(crate) fn compile_cook_plan(
         provision.get("action").and_then(Value::as_str),
         Some("lookup_pending" | "attestation_pending" | "planned_create")
     );
-    let workspace = (!pending_lookup)
+    let requested_workspace = (!pending_lookup)
         .then(|| {
             provision
                 .get("path")
@@ -4211,12 +4606,12 @@ pub(crate) fn compile_cook_plan(
                 .map(str::to_string)
         })
         .flatten();
-    if workspace.is_none() && !pending_lookup {
+    if requested_workspace.is_none() && !pending_lookup {
         return Err(homeboy::core::Error::internal_unexpected(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
-    if !args.provider_evidence_inputs.is_empty() && workspace.is_none() {
+    if !args.provider_evidence_inputs.is_empty() && requested_workspace.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence requires a bound Cook workspace",
@@ -4224,14 +4619,35 @@ pub(crate) fn compile_cook_plan(
             None,
         ));
     }
-    let mut dispatch = dispatch_args_for_cook(args);
-    resolve_dispatch_prompt(&mut dispatch)?;
+    if let Some(workspace) = requested_workspace.as_deref() {
+        validate_cook_destination_identity(args, Path::new(workspace))?;
+    }
+    let component_cwd = requested_workspace
+        .as_deref()
+        .map(|workspace| cook_component_workspace(args, Path::new(workspace)))
+        .transpose()?
+        .map(|workspace| {
+            workspace
+                .strip_prefix(
+                    requested_workspace
+                        .as_deref()
+                        .expect("component workspace has root"),
+                )
+                .map_err(|_| {
+                    homeboy::core::Error::internal_unexpected(
+                        "resolved component workspace escapes the Cook workspace".to_string(),
+                    )
+                })
+                .map(|path| path.display().to_string())
+        })
+        .transpose()?;
+    let mut dispatch = resolved_dispatch_args_for_cook(args)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
-    dispatch.workspace = workspace.clone();
+    dispatch.workspace = requested_workspace.clone();
     let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
-    let evidence = if let Some(workspace) = workspace.as_deref() {
+    let evidence = if let Some(workspace) = requested_workspace.as_deref() {
         project_admitted_provider_evidence_inputs(
             &args.provider_evidence_inputs,
             &admitted_evidence,
@@ -4245,12 +4661,9 @@ pub(crate) fn compile_cook_plan(
         &mut dispatch.prompt,
         &args.provider_evidence_inputs,
         &admitted_evidence,
-        workspace.as_deref(),
+        requested_workspace.as_deref(),
         &projected_paths,
     )?;
-    if let Some(workspace) = workspace.as_deref() {
-        validate_cook_destination_identity(args, Path::new(workspace))?;
-    }
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -4270,11 +4683,28 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
+    if let (Some(requested), Some(component_cwd)) =
+        (requested_workspace.as_deref(), component_cwd.as_deref())
+    {
+        plan.metadata["gate_workspace"] = serde_json::json!({
+            "requested_cwd": requested,
+            "effective_cwd": Path::new(requested).join(component_cwd),
+            "component_cwd": component_cwd,
+            "component_id": args.dispatch.repo,
+        });
+    }
     if let Some(identity) = &args.repository_identity {
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
     if let Some(resolution) = &args.base_resolution {
         plan.metadata["cook_base_resolution"] = resolution.clone();
+    }
+    if let Some(snapshot) = &args.prompt_snapshot {
+        for task in &mut plan.tasks {
+            task.metadata["prompt_source"] = serde_json::json!(args.dispatch.prompt);
+        }
+        plan.metadata["prompt_input_v1"] = serde_json::to_value(snapshot)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     for task in &mut plan.tasks {
         if pending_lookup {
@@ -4289,6 +4719,12 @@ pub(crate) fn compile_cook_plan(
             )
         })?;
         task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
+        if let Some(component_cwd) = component_cwd.as_deref() {
+            if !task.executor.config.is_object() {
+                task.executor.config = serde_json::json!({});
+            }
+            task.executor.config["component_cwd"] = serde_json::json!(component_cwd);
+        }
     }
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
         .validate_explicit_models(&plan)?;
@@ -4369,20 +4805,25 @@ fn validate_provider_evidence_prompt(
     projected_paths: &std::collections::BTreeSet<String>,
 ) -> homeboy::core::Result<()> {
     let Some(prompt) = prompt else { return Ok(()) };
-    let undeclared = absolute_host_paths_in_provider_prompt(prompt)?
+    let undeclared = classified_absolute_host_paths_in_provider_prompt(prompt)?
         .into_iter()
-        .filter(|path| !is_projected_provider_evidence_path(path, projected_paths))
+        .filter(|path| !is_projected_provider_evidence_path(&path.path, projected_paths))
         .collect::<Vec<_>>();
     if !undeclared.is_empty() {
         let paths = undeclared
             .iter()
-            .map(|path| format!("`{path}`"))
+            .map(|path| format!("`{}` ({})", path.path, path.classification))
             .collect::<Vec<_>>()
             .join(", ");
+        let classification_evidence = undeclared
+            .iter()
+            .map(ClassifiedHostPath::diagnostic_evidence)
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
             format!("prompt names undeclared absolute evidence paths: {paths}"),
-            Some(undeclared.join(", ")),
+            Some(classification_evidence),
             Some(vec!["Declare each path with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()]),
         ));
     }
@@ -4391,11 +4832,39 @@ fn validate_provider_evidence_prompt(
 
 const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
 
+const MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES: usize = 160;
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ClassifiedHostPath {
+    path: String,
+    token: String,
+    classification: &'static str,
+}
+
+impl ClassifiedHostPath {
+    fn diagnostic_evidence(&self) -> String {
+        format!(
+            "path={} classification={} token={}",
+            self.path, self.classification, self.token
+        )
+    }
+}
+
 /// Extract concrete Unix absolute paths from the bounded provider prompt
-/// surface. A path must begin at a syntax boundary and contain at least two
-/// segments or resolve locally, so prose such as `core/html` and `/endpoint`
-/// is not evidence.
+/// surface. URL references, quoted examples, code, and slash-separated
+/// concepts are excluded; host paths need an explicit file syntax, an
+/// explicit assignment, or a recognized Unix root.
+#[cfg(test)]
 fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
+    Ok(classified_absolute_host_paths_in_provider_prompt(prompt)?
+        .into_iter()
+        .map(|path| path.path)
+        .collect())
+}
+
+fn classified_absolute_host_paths_in_provider_prompt(
+    prompt: &str,
+) -> homeboy::core::Result<Vec<ClassifiedHostPath>> {
     if prompt.len() > MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
@@ -4406,55 +4875,161 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
     }
 
     let mut paths = std::collections::BTreeSet::new();
-    for token in prompt.split_whitespace() {
-        if token.contains("://") && !token.contains("file://") {
+    let mut fenced = false;
+    for line in prompt.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
             continue;
         }
-        let mut candidate = token;
-        if let Some(file) = token.find("file://") {
-            let rest = &token[file + "file://".len()..];
-            candidate = if rest.starts_with('/') {
-                rest
-            } else {
-                rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
-            };
+        if fenced || line.starts_with('\t') || line.starts_with("    ") {
+            continue;
         }
-        let mut offset = 0;
-        while offset < candidate.len() {
-            let Some(relative) = candidate[offset..].find('/') else {
-                break;
-            };
-            let start = offset + relative;
-            if start != 0
-                && !matches!(
-                    candidate[..start].chars().next_back(),
-                    Some('=' | ':' | '(' | '[' | '{' | '<' | '\'' | '"' | '`')
-                )
-            {
-                offset = start + 1;
+        for token in line.split_whitespace() {
+            if token.contains("://") && !token.contains("file://") {
                 continue;
             }
-            let path = &candidate[start..];
-            let end = path.find(|character: char| {
-                character.is_whitespace()
-                    || matches!(
-                        character,
-                        '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
-                    )
-            });
-            let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
-            let trimmed = path.trim_start_matches('/');
-            let segments = trimmed.split('/').count();
-            if path.starts_with('/')
-                && !trimmed.is_empty()
-                && (segments >= 2 || Path::new(path).exists())
-            {
-                paths.insert(path.to_string());
+            let mut candidate = token;
+            let file_url = token.find("file://");
+            if let Some(file) = file_url {
+                if slash_is_quoted(token, file) {
+                    continue;
+                }
+                let rest = &token[file + "file://".len()..];
+                candidate = if rest.starts_with('/') {
+                    rest
+                } else {
+                    rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
+                };
             }
-            offset = start.saturating_add(path.len()).max(start + 1);
+            let mut offset = 0;
+            while offset < candidate.len() {
+                let Some(relative) = candidate[offset..].find('/') else {
+                    break;
+                };
+                let start = offset + relative;
+                if slash_is_quoted(candidate, start) {
+                    offset = start + 1;
+                    continue;
+                }
+                if start != 0
+                    && !matches!(
+                        candidate[..start].chars().next_back(),
+                        Some('=' | ':' | '(' | '[' | '{' | '<')
+                    )
+                {
+                    offset = start + 1;
+                    continue;
+                }
+                let path = &candidate[start..];
+                let end = path.find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(
+                            character,
+                            '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
+                        )
+                });
+                let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
+                let prefix = (start > 0)
+                    .then(|| candidate[..start].chars().next_back())
+                    .flatten();
+                let assignment = prefix == Some('=');
+                if let Some(classification) =
+                    classify_absolute_host_path(path, file_url.is_some(), assignment)
+                {
+                    paths.insert(ClassifiedHostPath {
+                        path: path.to_string(),
+                        token: bounded_prompt_path_token(token),
+                        classification,
+                    });
+                }
+                offset = start.saturating_add(path.len()).max(start + 1);
+            }
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn slash_is_quoted(token: &str, offset: usize) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    for character in token[..offset].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if matches!(character, '\'' | '"' | '`') {
+            quote = if quote == Some(character) {
+                None
+            } else if quote.is_none() {
+                Some(character)
+            } else {
+                quote
+            };
+        }
+    }
+    quote.is_some()
+}
+
+fn classify_absolute_host_path(
+    path: &str,
+    file_url: bool,
+    assignment: bool,
+) -> Option<&'static str> {
+    let trimmed = path.trim_start_matches('/');
+    let root = trimmed.split('/').next()?;
+    if trimmed.is_empty() || path.contains('#') {
+        return None;
+    }
+    if file_url {
+        return Some("file-uri");
+    }
+    if assignment {
+        return Some("explicit-path-assignment");
+    }
+    if matches!(
+        root,
+        "bin"
+            | "boot"
+            | "dev"
+            | "etc"
+            | "home"
+            | "lib"
+            | "lib64"
+            | "media"
+            | "mnt"
+            | "opt"
+            | "private"
+            | "proc"
+            | "root"
+            | "run"
+            | "sbin"
+            | "srv"
+            | "sys"
+            | "tmp"
+            | "usr"
+            | "var"
+            | "Users"
+            | "Volumes"
+            | "workspace"
+    ) {
+        return Some("unix-host-root");
+    }
+    None
+}
+
+fn bounded_prompt_path_token(token: &str) -> String {
+    if token.len() <= MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES {
+        return token.to_string();
+    }
+    let end = token
+        .char_indices()
+        .take_while(|(index, _)| *index < MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    format!("{}...", &token[..end])
 }
 
 fn is_projected_provider_evidence_path(
@@ -5204,12 +5779,11 @@ mod provider_evidence_tests {
     }
 
     #[test]
-    fn scans_absolute_paths_across_provider_prompt_syntaxes() {
+    fn scans_explicit_absolute_paths_across_provider_prompt_syntaxes() {
         for prompt in [
             "Read file:///private/evidence.json",
             "evidence=/private/evidence.json",
             "[evidence](/private/evidence.json)",
-            "Read '/private/evidence.json', please.",
             "See </private/evidence.json>.",
         ] {
             let error = validate_provider_evidence_inputs(&[], Some(prompt))
@@ -5243,8 +5817,54 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
     }
 
     #[test]
-    #[cfg(unix)]
-    fn scans_an_existing_single_segment_root_path() {
+    fn prompt_path_classifier_separates_host_paths_from_urls_references_and_concepts() {
+        for prompt in [
+            "See https://example.test/report#fragment.",
+            "Follow /#fragment.",
+            "Track /blocks-engine#1032 and issue #12991.",
+            "Preserve public/plan/report compatibility.",
+            "Use /page/report as a conceptual route.",
+        ] {
+            assert_eq!(
+                absolute_host_paths_in_provider_prompt(prompt).expect("classify accepted syntax"),
+                Vec::<String>::new(),
+                "{prompt}"
+            );
+            validate_provider_evidence_inputs(&[], Some(prompt))
+                .expect("URLs, references, and concepts are not host evidence");
+        }
+
+        let classified = classified_absolute_host_paths_in_provider_prompt(
+            "Read /private/evidence.json and set input=/tmp/command-input.json.",
+        )
+        .expect("classify host paths");
+        assert_eq!(
+            classified
+                .iter()
+                .map(|path| (path.path.as_str(), path.classification))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/private/evidence.json", "unix-host-root"),
+                ("/tmp/command-input.json", "explicit-path-assignment"),
+            ]
+        );
+
+        let error = validate_provider_evidence_inputs(
+            &[],
+            Some("Read /private/evidence.json and set input=/tmp/command-input.json."),
+        )
+        .expect_err("Unix and quoted command paths require evidence");
+        let evidence = error.details["id"]
+            .as_str()
+            .expect("classification evidence");
+        assert!(evidence.contains("classification=unix-host-root token=/private/evidence.json"));
+        assert!(evidence.contains(
+            "classification=explicit-path-assignment token=input=/tmp/command-input.json."
+        ));
+    }
+
+    #[test]
+    fn scans_a_recognized_single_segment_root_path() {
         assert_eq!(
             absolute_host_paths_in_provider_prompt("Read /tmp.").expect("scan real path"),
             vec!["/tmp".to_string()]
@@ -5362,29 +5982,45 @@ Evidence=file:///private/three.json path=/private/four.json.
         assert!(error.message.contains("//private/two.json"));
         assert!(error.message.contains("/private/three.json"));
         assert!(error.message.contains("/private/four.json"));
-        assert!(error.message.contains("/also/not-evidence"));
+        assert!(!error.message.contains("/also/not-evidence"));
         assert!(!error.message.contains("`/`"));
         assert!(!error.message.contains("// not evidence"));
     }
 
     #[test]
-    fn prompt_path_scanner_handles_embedded_json_quotes_angles_and_local_file_urls() {
+    fn prompt_path_scanner_ignores_quoted_examples_and_scans_explicit_local_paths() {
         let paths = absolute_host_paths_in_provider_prompt(
-            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///file/url.json //double/path.md / // https://example.com/ignore/me"#,
+            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /private/angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///private/file-url.json //private/double/path.md / // https://example.com/ignore/me"#,
         )
         .expect("scan bounded prompt");
 
         assert_eq!(
             paths,
             vec![
-                "//double/path.md",
-                "/angle/path.rs",
+                "//private/double/path.md",
                 "/assigned/path.toml",
-                "/file/url.json",
-                "/json/path.md",
                 "/local/file.json",
-                "/quoted/path.txt",
+                "/private/angle/path.rs",
+                "/private/file-url.json",
             ]
+        );
+    }
+
+    #[test]
+    fn ignores_endpoint_repository_and_code_path_vocabulary() {
+        let prompt = r#"
+Route requests through /response, /startup, /sw.js, and /wp-codebox.
+Use core/html, direct/staged, and model/tool for Extra-Chill/homeboy.
+`/private/inline-example.json`, "/tmp/quoted-example.json", and "file:///tmp/quoted.json" are examples.
+    let path = "/private/indented-code.json";
+```
+let path = "/private/fenced-code.json";
+```
+"#;
+
+        assert_eq!(
+            absolute_host_paths_in_provider_prompt(prompt).expect("scan technical prose"),
+            Vec::<String>::new()
         );
     }
 

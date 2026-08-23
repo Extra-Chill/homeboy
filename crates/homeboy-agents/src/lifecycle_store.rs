@@ -199,9 +199,12 @@ impl AgentTaskLifecycleStore {
             plan,
             run_id,
             super::lifecycle_ops::execution_runner_id(),
-            &|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok(),
+            &crate::agent_task_service::cook_pre_execution::store_admission_status(self),
             |run_id| {
-                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                let runtime_root =
+                    homeboy_core::controller_runtime::runtime_root_in(self.roots().data())?;
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
+                    &runtime_root,
                     run_id,
                     || Ok(self.read_record(run_id)?.state.is_terminal()),
                 )
@@ -239,7 +242,13 @@ impl AgentTaskLifecycleStore {
     /// Like every opener on this store, BOTH roots come from `self`: the
     /// database below `data` and the artifact tree it indexes below `artifacts`,
     /// which `PathRoots` carries separately.
-    pub(crate) fn open_observation_maintained(&self) -> Result<ObservationStore> {
+    ///
+    /// Public because rooting is a cross-crate migration: `homeboy-lab-runner`
+    /// promotes runner-exec artifacts and has the same constraint, so it needs
+    /// the same opener. Reach for this only when replacing an ambient
+    /// `ObservationStore::open_initialized()`; a caller that never ran startup
+    /// artifact maintenance wants [`Self::open_observation_initialized`].
+    pub fn open_observation_maintained(&self) -> Result<ObservationStore> {
         ObservationStore::open_initialized_in_roots(&self.roots)
     }
 
@@ -297,6 +306,32 @@ impl AgentTaskLifecycleStore {
     ) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::record_provider_execution_terminal_in_store(
             self, run_id, task_id, attempt, state,
+        )
+    }
+
+    pub(crate) fn record_provider_execution_terminal_with_model(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        state: &str,
+        model: Option<&str>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_terminal_with_model_in_store(
+            self, run_id, task_id, attempt, state, model,
+        )
+    }
+
+    pub(crate) fn record_provider_execution_runtime_evidence(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        stdout_uri: Option<String>,
+        stderr_uri: Option<String>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_runtime_evidence_in_store(
+            self, run_id, task_id, attempt, stdout_uri, stderr_uri,
         )
     }
 

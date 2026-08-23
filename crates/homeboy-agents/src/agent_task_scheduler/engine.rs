@@ -853,6 +853,11 @@ impl AgentTaskScheduler {
                     }
                     let mut outcome = result.outcome;
                     let provider_completed_at = result.completed_at;
+                    attach_candidate_adoption_provenance(
+                        &mut outcome,
+                        running_task.adoption.as_ref(),
+                    );
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Some(run_id) = running_task.run_id.as_deref() {
                         let terminal_state = match outcome.status {
                             AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
@@ -864,18 +869,20 @@ impl AgentTaskScheduler {
                             _ => "failed",
                         };
                         let terminal = match self.lifecycle_store.as_ref() {
-                            Some(store) => store.record_provider_execution_terminal(
+                            Some(store) => store.record_provider_execution_terminal_with_model(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 terminal_state,
+                                outcome.selected_model(),
                             ),
                             None => {
-                                crate::agent_task_lifecycle::record_provider_execution_terminal(
+                                crate::agent_task_lifecycle::record_provider_execution_terminal_with_model(
                                     run_id,
                                     &outcome.task_id,
                                     result.attempt,
                                     terminal_state,
+                                    outcome.selected_model(),
                                 )
                             }
                         };
@@ -895,16 +902,15 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
-                    attach_candidate_adoption_provenance(
-                        &mut outcome,
-                        running_task.adoption.as_ref(),
-                    );
-                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
                         outcome = committed_harvest_failure(outcome, error);
                     }
+                    // Harvest can add Homeboy-generated patch artifacts after the
+                    // provider result was normalized. Keep their provenance tied
+                    // to the same concrete model as the canonical outcome.
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
@@ -1411,7 +1417,18 @@ pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
 ) {
-    let provider_reported = outcome.selected_model().map(str::to_string);
+    // A second normalization pass runs after patch harvest. Once the first pass
+    // supplied a configured fallback in `metadata.model`, retain the original
+    // runtime-report boundary instead of mistaking that fallback for a report.
+    let provider_reported = outcome.metadata["model_identity"]["provider_reported"]
+        .as_str()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            (!outcome.metadata["model_identity"].is_object())
+                .then(|| outcome.selected_model().map(str::to_string))
+                .flatten()
+        });
     let requested = request.metadata["model_selection"]["requested"]
         .as_str()
         .filter(|model| !model.trim().is_empty())
@@ -1420,7 +1437,16 @@ pub(crate) fn persist_resolved_provider_model(
         .executor
         .model()
         .filter(|model| !model.trim().is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            request.metadata["model_selection"]["selected"]
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+        });
+    // A runtime report is execution fact. When the runtime omits it, the
+    // dispatch-selected model is the only concrete identity available.
+    let actual = provider_reported.clone().or_else(|| resolved.clone());
     if !outcome.metadata.is_object() {
         outcome.metadata = serde_json::json!({});
     }
@@ -1439,11 +1465,21 @@ pub(crate) fn persist_resolved_provider_model(
             // Retained for consumers of the previous outcome metadata shape.
             "resolved": resolved,
             "provider_reported": provider_reported,
-            "actual": provider_reported,
+            "actual": actual,
         }),
     );
-    if let Some(actual) = provider_reported {
+    if let Some(actual) = actual {
         metadata.insert("model".to_string(), serde_json::json!(actual));
+    }
+    let actual = outcome.selected_model().map(str::to_string);
+    for artifact in &mut outcome.artifacts {
+        if artifact.kind != "patch" && artifact.role.as_deref() != Some("patch") {
+            continue;
+        }
+        if !artifact.metadata.is_object() {
+            artifact.metadata = serde_json::json!({});
+        }
+        artifact.metadata["provider_model"] = serde_json::json!(actual);
     }
 }
 
@@ -1554,9 +1590,13 @@ pub(super) fn deferred_cleanup_action_artifact(
         "safe_next_action": "Wait for cleanup completion; mutable workspace recovery is intentionally deferred until provider exit.",
     });
     let content = serde_json::to_vec_pretty(&action).expect("cleanup action serializes");
-    std::fs::write(&path, &content).map_err(|error| HarvestError::ArtifactWrite {
-        path: path.clone(),
-        message: error.to_string(),
+    // The aggregate may expose this path as soon as this function returns, so
+    // publish only a complete descriptor.
+    write_deferred_cleanup_action(&path, &content).map_err(|error| {
+        HarvestError::ArtifactWrite {
+            path: path.clone(),
+            message: error.to_string(),
+        }
     })?;
     Ok(AgentTaskArtifact {
         schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -1592,15 +1632,34 @@ pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf
     }
 }
 
+fn write_deferred_cleanup_action(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .expect("cleanup action has a parent directory");
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .expect("cleanup action has a file name")
+            .to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&temporary, content)?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(super) fn complete_deferred_cleanup_recovery(
     path: &Path,
     outcome: &AgentTaskOutcome,
     cleanup: Result<(), String>,
-) {
-    let mut action = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read deferred cleanup descriptor: {error}"))?;
+    let mut action: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("cannot parse deferred cleanup descriptor: {error}"))?;
     let candidates = outcome
         .artifacts
         .iter()
@@ -1629,7 +1688,10 @@ pub(super) fn complete_deferred_cleanup_recovery(
                 serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
         }
     }
-    let _ = std::fs::write(path, serde_json::to_vec_pretty(&action).unwrap_or_default());
+    let content = serde_json::to_vec_pretty(&action)
+        .map_err(|error| format!("cannot serialize deferred cleanup receipt: {error}"))?;
+    write_deferred_cleanup_action(path, &content)
+        .map_err(|error| format!("cannot persist deferred cleanup receipt: {error}"))
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
@@ -2100,6 +2162,28 @@ mod executor_erasure_tests {
             calls.load(Ordering::SeqCst),
             2,
             "both the original and its clone must dispatch to the same executor"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_descriptor_replaces_only_complete_content() {
+        let directory = tempfile::tempdir().expect("descriptor directory");
+        let descriptor = directory.path().join("deferred-cleanup.json");
+        std::fs::write(&descriptor, b"old receipt").expect("seed descriptor");
+
+        write_deferred_cleanup_action(&descriptor, br#"{"status":"pending"}"#)
+            .expect("atomically publish descriptor");
+
+        assert_eq!(
+            std::fs::read(&descriptor).expect("published descriptor"),
+            br#"{"status":"pending"}"#
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("descriptor directory entries")
+                .count(),
+            1,
+            "temporary descriptor files must not be exposed"
         );
     }
 }

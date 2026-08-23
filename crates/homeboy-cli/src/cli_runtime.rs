@@ -1,5 +1,5 @@
 use clap::{ArgMatches, Command};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -593,6 +593,21 @@ impl CliRuntime {
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
+        if let Commands::AgentTask(agent_task) = &mut cli.command {
+            if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
+                &mut agent_task.command
+            {
+                if let Err(err) = crate::commands::agent_task::run::snapshot_cook_prompt(cook) {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            }
+        }
         if let Commands::Fuzz(args) = &mut cli.command {
             match args.absorb_planning_runner(cli.runner.take()) {
                 Ok(runner) => cli.runner = runner,
@@ -1015,16 +1030,31 @@ fn delegate_agent_task_cook_to_pinned_runtime(
     }
 
     let request_id = format!("seal-{}", Uuid::new_v4());
-    let pinned =
-        crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(&request_id, || {
-            Ok(false)
-        })
-        .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
-    let status = ProcessCommand::new(&pinned)
+    // Boundary: sealing the controller for a cook is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
+        roots.data(),
+        &request_id,
+        || Ok(false),
+    )
+    .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
+    let prompt_snapshot = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
+                .prompt_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.content.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut command = ProcessCommand::new(&pinned);
+    command
         .args(&normalized_args[1..])
-        .env(COOK_PINNED_RUNTIME_ENV, &pinned)
-        .status()
-        .map_err(|error| {
+        .env(COOK_PINNED_RUNTIME_ENV, &pinned);
+    let status = if let Some(prompt) = prompt_snapshot {
+        command.stdin(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
                 Some(format!(
@@ -1033,6 +1063,38 @@ fn delegate_agent_task_cook_to_pinned_runtime(
                 )),
             )
         })?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "pinned Cook runtime stdin was not piped".to_string(),
+                )
+            })?
+            .write_all(prompt.as_bytes())
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("write captured Cook prompt to pinned runtime stdin".to_string()),
+                )
+            })?;
+        child.wait().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("wait for pinned Cook runtime".to_string()),
+            )
+        })?
+    } else {
+        command.status().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "execute pinned controller runtime {}",
+                    pinned.display()
+                )),
+            )
+        })?
+    };
     Ok(Some(status.code().unwrap_or(1)))
 }
 
@@ -1776,6 +1838,10 @@ fn preflight_hot_command_with(
     if controller_owned_unmaterialized_resume(cli) {
         return None;
     }
+    if let Err(err) = preflight_review_test_capability(cli) {
+        output_runtime::emit_json_result_for_identity(Err(err), output_file, 2, command_identity);
+        return Some(2);
+    }
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
@@ -1997,6 +2063,76 @@ fn detached_cook_unmaterialized_admission_eligible(cli: &Cli) -> bool {
                 command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
             })
         )
+}
+
+/// Verify `review test` can execute without creating work, admitting controller
+/// capacity, selecting a runner, or preparing a Lab workspace.
+fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
+    let Commands::Review(review) = &cli.command else {
+        return Ok(());
+    };
+    let Some(crate::commands::review::ReviewCommand::Test(args)) = review.command.as_ref() else {
+        return Ok(());
+    };
+
+    let source = crate::commands::source_command::resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        None,
+    )?;
+    let passthrough_args = crate::commands::utils::args::filter_passthrough_args(
+        crate::commands::utils::args::PassthroughCommand::Test,
+        &args.args,
+    );
+    if args.should_use_self_check_dispatch(&passthrough_args)
+        && source
+            .component
+            .has_script(homeboy_extension::ExtensionCapability::Test)
+    {
+        return Ok(());
+    }
+
+    crate::commands::source_command::resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        Some(homeboy_extension::ExtensionCapability::Test),
+    )
+	.and_then(|context| {
+		homeboy::core::extension_execution::resolve_execution_context(
+			&context.component,
+			homeboy_extension::ExtensionCapability::Test,
+		)
+		.map(|_| ())
+	})
+    .map_err(|mut error| {
+        error.details["review_capability_preflight"] = serde_json::json!({
+            "capability": "test",
+            "effective_component": {
+                "id": source.component_id,
+                "source_path": source.source_path,
+                "config_provenance": review_test_config_provenance(&source),
+            },
+        });
+        error.with_hint(
+            "Review capability preflight failed before resource admission or Lab routing; repair the component capability, then retry the same command.",
+        )
+    })
+}
+
+fn review_test_config_provenance(
+    source: &homeboy::core::engine::execution_context::ExecutionContext,
+) -> String {
+    let portable_config = source.source_path.join("homeboy.json");
+    if portable_config.is_file() {
+        return format!("portable component config: {}", portable_config.display());
+    }
+    format!(
+        "resolved component '{}' without a portable homeboy.json at {} (registry or synthetic target)",
+        source.component_id,
+        source.source_path.display()
+    )
 }
 
 fn review_test_runner_requirements(
@@ -2535,6 +2671,211 @@ mod tests {
                     ["local_fallback"],
                 false
             );
+        });
+    }
+
+    #[test]
+    fn review_test_missing_capability_fails_before_resource_admission_for_all_placements() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component directory");
+            std::fs::write(
+                component.path().join("homeboy.json"),
+                r#"{"id":"unconfigured-review-test"}"#,
+            )
+            .expect("write component config");
+            let path = component.path().to_str().expect("component path");
+
+            for placement in [
+                vec!["--placement", "local"],
+                vec!["--placement", "auto"],
+                vec!["--placement", "lab"],
+                vec!["--runner", "homeboy-lab"],
+            ] {
+                let mut argv = vec!["homeboy"];
+                argv.extend(placement.iter().copied());
+                argv.extend(["review", "test", "--path", path]);
+                let cli = Cli::parse_from(argv);
+
+                assert_eq!(
+                    preflight_hot_command_with(
+                        &cli,
+                        None,
+                        &output::CommandIdentity::with_operation("review", "test"),
+                        || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                            panic!("capability preflight must run before resource admission")
+                        },
+                    ),
+                    Some(2),
+                    "{placement:?}"
+                );
+
+                let error = preflight_review_test_capability(&cli)
+                    .expect_err("unconfigured review test must fail capability preflight");
+                assert!(error.message.contains("No extension provider configured"));
+                assert_eq!(
+                    error.details["review_capability_preflight"]["effective_component"]["id"],
+                    "unconfigured-review-test"
+                );
+                assert!(
+                    error.details["review_capability_preflight"]["effective_component"]
+                        ["config_provenance"]
+                        .as_str()
+                        .expect("config provenance")
+                        .contains("homeboy.json")
+                );
+                assert!(error.hints.iter().any(|hint| hint
+                    .message
+                    .contains("component set unconfigured-review-test --extension")));
+            }
+        });
+    }
+
+    #[test]
+    fn review_test_capability_preflight_only_accepts_eligible_component_scripts() {
+        crate::test_support::with_isolated_home(|home| {
+            let script_component = tempfile::tempdir().expect("script component directory");
+            std::fs::write(
+                script_component.path().join("homeboy.json"),
+                r#"{"id":"script-review-test","scripts":{"test":["./test.sh"]}}"#,
+            )
+            .expect("write script component config");
+            let script_path = script_component
+                .path()
+                .to_str()
+                .expect("script component path");
+            let script_cli = Cli::parse_from(["homeboy", "review", "test", "--path", script_path]);
+            preflight_review_test_capability(&script_cli)
+                .expect("component-owned test script remains supported");
+
+            for test_mode in [vec!["--skip-lint"], vec!["--", "--testsuite=imports"]] {
+                for placement in [
+                    vec!["--placement", "local"],
+                    vec!["--placement", "auto"],
+                    vec!["--placement", "lab"],
+                    vec!["--runner", "homeboy-lab"],
+                ] {
+                    let mut argv = vec!["homeboy"];
+                    argv.extend(placement.iter().copied());
+                    argv.extend(["review", "test"]);
+                    if test_mode.first().copied() != Some("--") {
+                        argv.extend(test_mode.iter().copied());
+                    }
+                    argv.extend(["--path", script_path]);
+                    if test_mode.first().copied() == Some("--") {
+                        argv.extend(test_mode.iter().copied());
+                    }
+                    let cli = Cli::parse_from(argv);
+
+                    let result = preflight_review_test_capability(&cli);
+                    assert!(
+						result.is_err(),
+						"modified test mode requires an extension test provider: {test_mode:?}, {placement:?}"
+					);
+                    let error = result.expect_err("error checked above");
+                    assert!(
+                        error.message.contains("No extension provider configured"),
+                        "{test_mode:?}, {placement:?}: {}",
+                        error.message
+                    );
+
+                    assert_eq!(
+                        preflight_hot_command_with(
+                            &cli,
+                            None,
+                            &output::CommandIdentity::with_operation("review", "test"),
+                            || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                                panic!("unsupported scripted test mode must fail before resource admission")
+                            },
+                        ),
+                        Some(2),
+                        "{test_mode:?}, {placement:?}"
+                    );
+                }
+            }
+
+            let extension_component = tempfile::tempdir().expect("extension component directory");
+            std::fs::write(
+                extension_component.path().join("homeboy.json"),
+                r#"{"id":"extension-review-test","extensions":{"fixture-test":{}}}"#,
+            )
+            .expect("write extension component config");
+            let extension_dir = home.path().join(".config/homeboy/extensions/fixture-test");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("fixture-test.json"),
+                r#"{"name":"fixture-test","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("write extension manifest");
+            let extension_path = extension_component
+                .path()
+                .to_str()
+                .expect("extension component path");
+            let extension_cli =
+                Cli::parse_from(["homeboy", "review", "test", "--path", extension_path]);
+            preflight_review_test_capability(&extension_cli)
+                .expect("configured extension test support remains valid");
+        });
+    }
+
+    #[test]
+    fn review_test_capability_preflight_preserves_extension_override_diagnostics() {
+        crate::test_support::with_isolated_home(|home| {
+            let component = tempfile::tempdir().expect("component directory");
+            std::fs::write(
+                component.path().join("homeboy.json"),
+                r#"{"id":"override-review-test","extensions":{"fixture-without-test":{}}}"#,
+            )
+            .expect("write component config");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/fixture-without-test");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("fixture-without-test.json"),
+                r#"{"name":"fixture-without-test","version":"1.0.0"}"#,
+            )
+            .expect("write extension manifest");
+            let path = component.path().to_str().expect("component path");
+
+            for placement in [
+                vec!["--placement", "local"],
+                vec!["--placement", "auto"],
+                vec!["--placement", "lab"],
+                vec!["--runner", "homeboy-lab"],
+            ] {
+                let mut argv = vec!["homeboy"];
+                argv.extend(placement.iter().copied());
+                argv.extend([
+                    "review",
+                    "test",
+                    "--path",
+                    path,
+                    "--extension",
+                    "fixture-without-test",
+                ]);
+                let cli = Cli::parse_from(argv);
+
+                assert_eq!(
+                    preflight_hot_command_with(
+                        &cli,
+                        None,
+                        &output::CommandIdentity::with_operation("review", "test"),
+                        || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                            panic!("invalid extension override must fail before resource admission")
+                        },
+                    ),
+                    Some(2),
+                    "{placement:?}"
+                );
+                let error = preflight_review_test_capability(&cli)
+                    .expect_err("override without test support must fail capability preflight");
+                assert!(error
+                    .message
+                    .contains("explicit extension override 'fixture-without-test'"));
+                assert!(error.hints.iter().any(|hint| hint
+                    .message
+                    .contains("Upgrade or refresh the runner extension")));
+            }
         });
     }
 

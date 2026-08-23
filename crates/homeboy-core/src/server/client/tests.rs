@@ -871,10 +871,50 @@ fn managed_session_connect_builds_master_command() {
 
 #[cfg(unix)]
 #[test]
-fn timed_command_does_not_wait_for_a_pipe_holding_descendant() {
+fn successful_ssh_child_with_delayed_eof_reaps_descendant_before_drain() {
+    let marker =
+        std::env::temp_dir().join(format!("homeboy-ssh-stream-drain-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
     let mut command = Command::new("sh");
     command
-        .args(["-c", "sleep 5 & exit 0"])
+        .args([
+            "-c",
+            &format!(
+                "sleep 5 & printf '%s' \"$!\" > {}; printf snapshot-output",
+                crate::engine::shell::quote_path(&marker.to_string_lossy())
+            ),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = run_ssh_with_child(command);
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "snapshot-output");
+    assert!(
+        started.elapsed() < Duration::from_millis(750),
+        "successful output collection must not wait for a pipe-holding descendant"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let pid = std::fs::read_to_string(&marker)
+        .expect("pipe-holding descendant pid")
+        .parse()
+        .expect("numeric descendant pid");
+    assert!(
+        !crate::process::pid_is_running(pid),
+        "successful SSH child leaked its descendant"
+    );
+    let _ = std::fs::remove_file(marker);
+}
+
+#[cfg(unix)]
+#[test]
+fn timed_ssh_child_with_stuck_streams_fails_within_its_cleanup_bound() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "sleep 5"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
@@ -886,9 +926,9 @@ fn timed_command_does_not_wait_for_a_pipe_holding_descendant() {
     assert_eq!(output.exit_code, 124);
     assert!(
         started.elapsed() < Duration::from_millis(750),
-        "timeout plus its single cleanup allowance must remain bounded"
+        "stuck SSH child must remain bounded by its deadline and cleanup allowance"
     );
-    assert!(output.stderr.contains("stream drain exceeded"));
+    assert!(output.stderr.contains("timed out after 50ms"));
 }
 
 #[cfg(unix)]

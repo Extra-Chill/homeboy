@@ -97,7 +97,7 @@ pub struct DriftValue {
     pub share_delta: Option<f64>,
 }
 
-pub(crate) fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_drift(store: &ObservationStore, args: RunsDriftArgs) -> CmdResult<RunsOutput> {
     if args.metric.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "metric",
@@ -116,7 +116,6 @@ pub(crate) fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
     }
 
     let metric_path = compile_jsonpath(&args.metric)?;
-    let store = ObservationStore::open_initialized()?;
 
     let filter = RunListFilter {
         kind: args.kind.clone(),

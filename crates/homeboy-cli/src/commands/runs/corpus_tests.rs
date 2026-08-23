@@ -14,6 +14,14 @@ use serde_json::Value;
 use super::bundle::{RunsExportArgs, RunsImportArgs};
 use super::{bundle::import_runs, drift, query, RunsOutput};
 
+/// The observation store the enclosing isolated home installs.
+///
+/// A test is the entry point for its own unit of work, so opening once here
+/// is a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
 /// Restore `XDG_DATA_HOME` for the test scope so the observation store
 /// resolves under the temporary home created by `with_isolated_home`.
 struct XdgGuard(Option<String>);
@@ -87,16 +95,19 @@ fn runs_query_projects_select_jsonpath_over_artifact_corpus() {
             "design-distribution",
         );
 
-        let (output, _) = query::runs_query(query::RunsQueryArgs {
-            component_id: Some("wc-site-generator".into()),
-            kind: Some("gh-actions".into()),
-            since: None,
-            select: vec!["$.theme".into()],
-            group_by: None,
-            count: false,
-            format: query::QueryFormat::Json,
-            limit: 200,
-        })
+        let (output, _) = query::runs_query(
+            &test_store(),
+            query::RunsQueryArgs {
+                component_id: Some("wc-site-generator".into()),
+                kind: Some("gh-actions".into()),
+                since: None,
+                select: vec!["$.theme".into()],
+                group_by: None,
+                count: false,
+                format: query::QueryFormat::Json,
+                limit: 200,
+            },
+        )
         .expect("query");
 
         let RunsOutput::Query(output) = output else {
@@ -130,16 +141,19 @@ fn runs_query_groups_by_jsonpath_with_count() {
             );
         }
 
-        let (output, _) = query::runs_query(query::RunsQueryArgs {
-            component_id: Some("wc-site-generator".into()),
-            kind: Some("gh-actions".into()),
-            since: None,
-            select: vec!["$.theme".into()],
-            group_by: Some("$.theme".into()),
-            count: true,
-            format: query::QueryFormat::Json,
-            limit: 200,
-        })
+        let (output, _) = query::runs_query(
+            &test_store(),
+            query::RunsQueryArgs {
+                component_id: Some("wc-site-generator".into()),
+                kind: Some("gh-actions".into()),
+                since: None,
+                select: vec!["$.theme".into()],
+                group_by: Some("$.theme".into()),
+                count: true,
+                format: query::QueryFormat::Json,
+                limit: 200,
+            },
+        )
         .expect("query");
 
         let RunsOutput::Query(output) = output else {
@@ -170,15 +184,18 @@ fn runs_drift_reports_dominant_value_above_threshold() {
             );
         }
 
-        let (output, _) = drift::runs_drift(drift::RunsDriftArgs {
-            component_id: Some("wc-site-generator".into()),
-            kind: Some("gh-actions".into()),
-            metric: "$.theme".into(),
-            window: "30d".into(),
-            threshold: 0.6,
-            baseline: None,
-            format: drift::DriftFormat::Json,
-        })
+        let (output, _) = drift::runs_drift(
+            &test_store(),
+            drift::RunsDriftArgs {
+                component_id: Some("wc-site-generator".into()),
+                kind: Some("gh-actions".into()),
+                metric: "$.theme".into(),
+                window: "30d".into(),
+                threshold: 0.6,
+                baseline: None,
+                format: drift::DriftFormat::Json,
+            },
+        )
         .expect("drift");
 
         let RunsOutput::Drift(output) = output else {
@@ -206,11 +223,14 @@ fn import_from_gh_actions_requires_gh_specific_arguments() {
         let _xdg = XdgGuard::unset();
         // Without --component, --repo, --workflow/--run-id, --artifact-glob, the
         // gh-actions branch must reject with a missing-argument error.
-        let err = import_runs(RunsImportArgs {
-            input: None,
-            from_gh_actions: true,
-            ..RunsImportArgs::default()
-        })
+        let err = import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: None,
+                from_gh_actions: true,
+                ..RunsImportArgs::default()
+            },
+        )
         .err()
         .expect("must fail without required gh-actions args");
         assert_eq!(err.code.as_str(), "validation.missing_argument");
@@ -221,14 +241,17 @@ fn import_from_gh_actions_requires_gh_specific_arguments() {
 fn import_from_gh_actions_requires_workflow_or_run_id() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
-        let err = import_runs(RunsImportArgs {
-            input: None,
-            from_gh_actions: true,
-            component_id: Some("wp-site-generator".into()),
-            repo: Some("example-org/wp-site-generator".into()),
-            artifact_glob: Some("php-transformer-iterator-transcript-*".into()),
-            ..RunsImportArgs::default()
-        })
+        let err = import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: None,
+                from_gh_actions: true,
+                component_id: Some("wp-site-generator".into()),
+                repo: Some("example-org/wp-site-generator".into()),
+                artifact_glob: Some("php-transformer-iterator-transcript-*".into()),
+                ..RunsImportArgs::default()
+            },
+        )
         .err()
         .expect("must fail without workflow or run id");
         assert_eq!(err.code.as_str(), "validation.missing_argument");
@@ -255,20 +278,26 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
         );
         run_id = run.id.clone();
 
-        super::bundle::export_runs(RunsExportArgs {
-            run: Some(run.id),
-            since: None,
-            output: bundle_dir.path().to_path_buf(),
-        })
+        super::bundle::export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: bundle_dir.path().to_path_buf(),
+            },
+        )
         .expect("export bundle");
     });
 
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
-        let (output, _) = import_runs(RunsImportArgs {
-            input: Some(bundle_dir.path().to_path_buf()),
-            ..RunsImportArgs::default()
-        })
+        let (output, _) = import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle_dir.path().to_path_buf()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("import bundle");
         let RunsOutput::Import(output) = output else {
             panic!("expected import output");
@@ -283,16 +312,19 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
         assert!(!artifacts[0].path.contains(&source_home_path));
         assert!(std::path::Path::new(&artifacts[0].path).is_absolute());
 
-        let (output, _) = query::runs_query(query::RunsQueryArgs {
-            component_id: Some("homeboy".into()),
-            kind: Some("observe".into()),
-            since: None,
-            select: vec!["$.component_id".into()],
-            group_by: None,
-            count: false,
-            format: query::QueryFormat::Json,
-            limit: 200,
-        })
+        let (output, _) = query::runs_query(
+            &test_store(),
+            query::RunsQueryArgs {
+                component_id: Some("homeboy".into()),
+                kind: Some("observe".into()),
+                since: None,
+                select: vec!["$.component_id".into()],
+                group_by: None,
+                count: false,
+                format: query::QueryFormat::Json,
+                limit: 200,
+            },
+        )
         .expect("query");
         let RunsOutput::Query(output) = output else {
             panic!("expected query output");
@@ -307,16 +339,19 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
 fn runs_query_rejects_invalid_jsonpath() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
-        let err = query::runs_query(query::RunsQueryArgs {
-            component_id: None,
-            kind: None,
-            since: None,
-            select: vec!["definitely not a jsonpath".into()],
-            group_by: None,
-            count: false,
-            format: query::QueryFormat::Json,
-            limit: 10,
-        })
+        let err = query::runs_query(
+            &test_store(),
+            query::RunsQueryArgs {
+                component_id: None,
+                kind: None,
+                since: None,
+                select: vec!["definitely not a jsonpath".into()],
+                group_by: None,
+                count: false,
+                format: query::QueryFormat::Json,
+                limit: 10,
+            },
+        )
         .err()
         .expect("must reject invalid jsonpath");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -327,15 +362,18 @@ fn runs_query_rejects_invalid_jsonpath() {
 fn runs_drift_rejects_threshold_outside_unit_interval() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
-        let err = drift::runs_drift(drift::RunsDriftArgs {
-            component_id: None,
-            kind: None,
-            metric: "$.theme".into(),
-            window: "7d".into(),
-            threshold: 1.5,
-            baseline: None,
-            format: drift::DriftFormat::Json,
-        })
+        let err = drift::runs_drift(
+            &test_store(),
+            drift::RunsDriftArgs {
+                component_id: None,
+                kind: None,
+                metric: "$.theme".into(),
+                window: "7d".into(),
+                threshold: 1.5,
+                baseline: None,
+                format: drift::DriftFormat::Json,
+            },
+        )
         .err()
         .expect("must reject threshold > 1");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");

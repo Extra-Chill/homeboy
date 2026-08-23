@@ -718,6 +718,29 @@ mod tests {
     }
 
     #[test]
+    fn compact_cook_help_explains_backend_resolution() {
+        use clap::CommandFactory;
+
+        let command = crate::cli_surface::Cli::command();
+        let help = command
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("cook")
+            .expect("Cook command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("Backend selection: pass --backend explicitly"),
+            "{help}"
+        );
+        assert!(
+            help.contains("multiple ready routes require an explicit choice"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn cook_help_documents_explicit_execution_cap_precedence_over_configured_rotations() {
         let help = rendered_cook_help();
         assert!(
@@ -1039,6 +1062,19 @@ pub struct AgentTaskCookArgs {
     /// Controller-resolved base provenance persisted with the Cook plan.
     #[arg(skip)]
     pub base_resolution: Option<serde_json::Value>,
+    /// Captured at CLI ingress when `--prompt -` is used. This survives route
+    /// handoff and plan compilation without asking a later phase to reread stdin.
+    #[arg(skip)]
+    pub prompt_snapshot: Option<CookPromptSnapshot>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct CookPromptSnapshot {
+    #[serde(skip)]
+    pub content: String,
+    pub source: String,
+    pub sha256: String,
+    pub size_bytes: usize,
 }
 
 pub(crate) fn parse_provider_evidence_input(

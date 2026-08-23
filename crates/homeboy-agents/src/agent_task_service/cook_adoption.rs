@@ -1273,7 +1273,9 @@ fn materialize_adoption_attempt_in_stores(
             .recover_for_adoption_with_runtime(
                 &recipe.cook_id,
                 &attempt.run_id,
-                Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+                Some(&super::cook_pre_execution::store_admission_status(
+                    lifecycle_store,
+                )),
                 agent_task_lifecycle::execution_runner_id(),
                 super::cook_pre_execution::production_runtime_admission(lifecycle_store),
                 |cook_id| {

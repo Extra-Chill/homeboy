@@ -29,6 +29,7 @@ pub fn controller_request_dispatch_command(
     let dispatch = request.get("dispatch").unwrap_or(request);
     let mut command = AgentTaskDispatchCommand {
         prompt: optional_string(dispatch, "prompt"),
+        prompt_is_literal: false,
         tasks: optional_string_array(dispatch, "tasks")?,
         cwd: optional_string(dispatch, "cwd")
             .or_else(|| optional_string(request, "cwd"))

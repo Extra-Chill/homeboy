@@ -31,8 +31,14 @@ fn test_run_pipeline_check_groups() {
     )
     .expect("parse rig");
 
-    let outcome = run_pipeline_check_groups(&rig, &["desktop-app".to_string()], false, &[])
-        .expect("scoped pipeline runs");
+    let outcome = run_pipeline_check_groups(
+        &crate::state::test_state_store(),
+        &rig,
+        &["desktop-app".to_string()],
+        false,
+        &[],
+    )
+    .expect("scoped pipeline runs");
 
     assert!(outcome.is_success());
     assert_eq!(outcome.steps.len(), 1);
@@ -66,7 +72,13 @@ fn test_command_if_missing_runs_only_when_guard_path_is_missing() {
         ))
         .expect("parse rig");
 
-        let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+        let out = run_pipeline(
+            &crate::state::test_state_store(),
+            &rig,
+            "bench_prepare",
+            true,
+        )
+        .expect("pipeline runs");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
         assert_eq!(marker.exists(), !guard_exists);
     }
@@ -95,8 +107,14 @@ fn test_command_step_exposes_pipeline_settings_env() {
         "sample_runtime_source_root".to_string(),
         "/tmp/sample-runtime".to_string(),
     )];
-    let out =
-        run_pipeline_with_settings(&rig, "bench_prepare", true, &settings).expect("pipeline runs");
+    let out = run_pipeline_with_settings(
+        &crate::state::test_state_store(),
+        &rig,
+        "bench_prepare",
+        true,
+        &settings,
+    )
+    .expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(
@@ -126,7 +144,13 @@ fn test_command_step_fails_with_structured_runner_capability_missing() {
     )
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline reports failure");
+    let out = run_pipeline(
+        &crate::state::test_state_store(),
+        &rig,
+        "bench_prepare",
+        true,
+    )
+    .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
@@ -175,7 +199,13 @@ fn test_bootstrap_step_provides_required_runner_capability_before_consumer() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+    let out = run_pipeline(
+        &crate::state::test_state_store(),
+        &rig,
+        "bench_prepare",
+        true,
+    )
+    .expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(out.steps[0].label, "bootstrap");
@@ -206,7 +236,8 @@ fn test_host_mutation_step_reports_contract_validation_failure() {
     )
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("pipeline reports failure");
 
     assert!(!out.is_success());
     assert_eq!(out.steps[0].kind, "host-mutation");
@@ -247,7 +278,8 @@ fn test_host_mutation_step_dry_run_does_not_mutate_filesystem() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+    let out =
+        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
 
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert!(
@@ -333,13 +365,15 @@ fn test_host_mutation_step_applies_and_reverts_package_manifest_rewrite() {
     ))
     .expect("parse rig");
 
-    let up = run_pipeline(&rig, "up", true).expect("up pipeline runs");
+    let up = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("up pipeline runs");
     assert!(up.is_success(), "outcomes: {:?}", up.steps);
     let rewritten = std::fs::read_to_string(&manifest).expect("read rewritten");
     assert!(rewritten.contains("2.0.0"), "manifest: {rewritten}");
     assert!(backup.exists(), "apply should create revert backup");
 
-    let down = run_pipeline(&rig, "down", true).expect("down pipeline runs");
+    let down = run_pipeline(&crate::state::test_state_store(), &rig, "down", true)
+        .expect("down pipeline runs");
     assert!(down.is_success(), "outcomes: {:?}", down.steps);
     let restored = std::fs::read_to_string(&manifest).expect("read restored");
     assert!(restored.contains("1.0.0"), "manifest: {restored}");
@@ -462,7 +496,8 @@ fn test_host_mutation_step_applies_and_reverts_filesystem_mutations() {
     ))
     .expect("parse rig");
 
-    let up = run_pipeline(&rig, "up", true).expect("up pipeline runs");
+    let up = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+        .expect("up pipeline runs");
     assert!(up.is_success(), "outcomes: {:?}", up.steps);
     assert_eq!(std::fs::read_link(&link).expect("read link"), target);
     assert!(temp_dir.is_dir(), "temp dir should be created");
@@ -472,7 +507,8 @@ fn test_host_mutation_step_applies_and_reverts_filesystem_mutations() {
     );
 
     std::fs::write(&original, "changed").expect("change original");
-    let down = run_pipeline(&rig, "down", true).expect("down pipeline runs");
+    let down = run_pipeline(&crate::state::test_state_store(), &rig, "down", true)
+        .expect("down pipeline runs");
     assert!(down.is_success(), "outcomes: {:?}", down.steps);
     assert!(!link.exists(), "revert should remove symlink");
     assert!(!temp_dir.exists(), "revert should remove temp dir");
@@ -534,7 +570,8 @@ fn test_requirement_passes_when_declared_file_exists() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
@@ -559,7 +596,13 @@ fn test_requirement_prepare_command_runs_only_in_declared_phase() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+    let out = run_pipeline(
+        &crate::state::test_state_store(),
+        &rig,
+        "bench_prepare",
+        true,
+    )
+    .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(std::fs::read_to_string(marker).expect("marker"), "prepared");
 }
@@ -586,7 +629,8 @@ fn test_requirement_fails_with_remediation_without_prepare_phase() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
     assert!(error.contains("run bench_prepare"), "error: {error}");
@@ -617,7 +661,8 @@ fn test_requirement_validates_component_path_contains() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
@@ -649,7 +694,8 @@ fn test_requirement_executable_falls_back_to_path_when_env_override_missing() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
@@ -682,7 +728,8 @@ fn test_requirement_executable_uses_ordered_env_aliases_before_path() {
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
@@ -712,7 +759,8 @@ fn test_requirement_executable_falls_back_to_path_when_env_override_is_unusable(
     ))
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
@@ -738,7 +786,8 @@ fn test_requirement_executable_reports_resolution_sources() {
     )
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
     assert!(
@@ -772,7 +821,8 @@ fn test_requirement_executable_reports_missing_tool() {
     )
     .expect("parse rig");
 
-    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+        .expect("pipeline runs");
     assert!(!out.is_success());
     let error = out.steps[0].error.as_deref().unwrap_or_default();
     assert!(
@@ -902,7 +952,8 @@ mod dag {
             HashMap::new(),
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
         assert_eq!(
             fs::read_to_string(&log).expect("read log"),
@@ -929,7 +980,8 @@ mod dag {
             HashMap::new(),
         );
 
-        let err = run_pipeline(&rig, "up", true).expect_err("missing dependency errors");
+        let err = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect_err("missing dependency errors");
         let msg = err.to_string();
         assert!(msg.contains("missing step id 'missing-step'"), "{msg}");
     }
@@ -944,7 +996,8 @@ mod dag {
             HashMap::new(),
         );
 
-        let err = run_pipeline(&rig, "up", true).expect_err("cycle errors");
+        let err = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect_err("cycle errors");
         let msg = err.to_string();
         assert!(msg.contains("dependency cycle"), "{msg}");
         assert!(msg.contains("'a'"), "{msg}");
@@ -970,7 +1023,8 @@ mod dag {
             HashMap::new(),
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(out.is_success());
         assert_eq!(
             fs::read_to_string(&log).expect("read log"),
@@ -1016,7 +1070,8 @@ mod dag {
             components,
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline report");
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline report");
         assert!(!out.is_success());
         assert_eq!(out.failed, 1);
         assert_eq!(out.steps[0].kind, "stack");
@@ -1089,7 +1144,8 @@ mod dag {
             components,
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(out.is_success(), "outcomes: {:?}", out.steps);
         assert_eq!(
             fs::read_to_string(component_b.join("ready.txt")).expect("ready"),
@@ -1224,7 +1280,8 @@ mod git_steps {
         assert!(status.success(), "update-index failed");
 
         let rig = rig_with_git_step(repo.to_string_lossy().into_owned(), GitOp::Status);
-        let outcome = run_pipeline(&rig, "up", true).expect("pipeline outcome");
+        let outcome = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline outcome");
 
         assert!(!outcome.is_success());
         assert_eq!(outcome.steps[0].status, "fail");
@@ -1354,7 +1411,8 @@ mod extension_lifecycle {
                 },
             );
 
-            let out = run_pipeline(&rig, "up", true).expect("pipeline");
+            let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+                .expect("pipeline");
             assert!(out.is_success(), "outcomes: {:?}", out.steps);
             assert_eq!(out.steps[0].kind, "extension");
 
@@ -1383,7 +1441,8 @@ mod extension_lifecycle {
             },
         );
 
-        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        let out =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
         assert!(!out.is_success());
         assert_eq!(out.steps[0].kind, "extension");
         let error = out.steps[0].error.as_deref().expect("error");
@@ -1465,7 +1524,8 @@ mod command_env {
             format!("printf '%s' \"$PATH\" > {}", path_file.to_string_lossy()),
             env,
         );
-        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+        let outcome =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
 
         assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
         assert_eq!(
@@ -1489,7 +1549,8 @@ mod command_env {
             "fixture must exercise the built-in default"
         );
         let expected = toolchain::command_step_path(Some(&rig)).expect("toolchain path");
-        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+        let outcome =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
 
         assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
         assert_eq!(
@@ -1515,7 +1576,8 @@ mod command_env {
             ..Default::default()
         });
 
-        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+        let outcome =
+            run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline");
 
         assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
         let observed = fs::read_to_string(path_file).expect("path file");
@@ -1534,7 +1596,8 @@ mod command_env {
             "definitely-not-a-homeboy-test-command-1758 2>/dev/null".to_string(),
             HashMap::new(),
         );
-        let outcome = run_pipeline(&rig, "up", true).expect("pipeline report");
+        let outcome = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+            .expect("pipeline report");
 
         assert!(!outcome.is_success());
         let error = outcome.steps[0].error.as_deref().expect("error");

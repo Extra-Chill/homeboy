@@ -1,6 +1,9 @@
 name: Required Gates Ruleset
 
 on:
+  schedule:
+    # Audit only. Reconciliation remains an explicit approved dispatch.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       operation:
@@ -48,21 +51,7 @@ jobs:
       - name: Reconcile the existing ruleset and verify effective enforcement
         env:
           GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
-        run: |
-          test -n "${GH_TOKEN}"
-          gh api "repos/${GITHUB_REPOSITORY}/environments/main-ruleset-administration" \
-            --jq '.can_admins_bypass == false and any(.protection_rules[]; .type == "required_reviewers")' \
-            | grep -qx true
-          head="$(git rev-parse HEAD)"
-          current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
-          test "${head}" = "${current_main}"
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs?per_page=100" \
-            --jq 'any(.check_runs[]; .name == "homeboy / Test" and .conclusion == "success")' \
-            | grep -qx true
-          current_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
-          test "${head}" = "${current_main}"
-          bash .github/manage-required-gates-ruleset.sh --operation reconcile --evidence required-gates-ruleset-reconcile.json
-          bash .github/validate-required-gates.sh --github
+        run: bash .github/reconcile-required-gates-ruleset.sh --evidence required-gates-ruleset-reconcile.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

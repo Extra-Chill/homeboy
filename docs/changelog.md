@@ -4,6 +4,100 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.3] - 2026-08-23
+
+### Fixed
+- bound full agent task evidence
+- share one store across directory-child promotion
+
+## [0.355.2] - 2026-08-23
+
+### Changed
+- open one observation store per HTTP request
+- open one observation store per `runs` invocation
+
+### Fixed
+- run `runner exec` against one observation store
+- reconcile runner-exec recovery through one store
+- persist resolved provider model provenance
+- recover orphaned retry replacements
+- preserve reconcile preflight evidence
+
+## [0.355.1] - 2026-08-23
+
+### Fixed
+- bind ruleset preflight to Actions
+- audit required gates ruleset drift
+- restore nextest shard parallelism
+- preserve pre-provider ownership
+- reap descendants before stream drain
+- preserve tracked nested build sources
+- return snapshot stability failure
+- stabilize snapshot manifests
+
+## [0.355.0] - 2026-08-23
+
+### Added
+- report recursive copy progress
+
+### Changed
+- cover nested provider cwd attestation
+- root controller admission and gate the ambient path
+- root the rig spec loader — production reaches zero
+- give rig state its root at construction
+- root the rig install and source-metadata writers
+- root the stack registry and the rig lease store
+- ratchet module-level dead_code suppression downward
+- tolerate concurrent fixture startup
+- drop the last two imports orphaned by the deleted doc tests
+- clear the second-order dead code and dead re-exports
+- delete the dead code the narrowing exposed
+- delete leaf dead code and collapse three default-arg shims
+- narrow visibility so rustc can see inside the commands module
+
+### Fixed
+- retain workspace validation phases
+- sync directory contents with scp
+- distinguish prompt evidence paths
+- attest root for component execution
+- normalize stdin prompt markers
+- carry stdin snapshots as literals
+- resolve stale remote bases
+- require extensions for advanced test modes
+- bound successful operator output
+- retain named worktree identity
+- preflight test capability before admission
+- inherit canonical worktree settings
+- converge pinned worktree destinations
+- select the deployment target explicitly
+- preserve scheduler workspace root
+- preserve terminal handoff classification
+- classify terminal detached handoffs
+- recover detached daemon preflight
+- classify prompt evidence paths
+- reject stale destination bases
+- snapshot stdin prompts at ingress
+- retain provider timeout evidence
+- preserve declared tracker state
+- authenticate promoted destinations
+- protect active controller binaries
+- persist deferred cleanup atomically
+- guide missing backend selection
+- align gates with component cwd
+- resolve prompt files before evidence validation
+- retain runner job context
+- retain diagnostics after cancellation
+- reattest Lab baseline workspaces
+- stage root-anchored snapshot excludes
+- bound unrelated cleanup evidence
+- clarify Lab binary diagnostics
+- persist provider lifecycle intent
+- adopt explicit prepared worktrees
+- distinguish prompt prose from evidence paths
+- pin dry-run replay identities
+- extend review form timeout
+- persist unmaterialized runner admission
+
 ## [0.354.2] - 2026-08-22
 
 ### Changed

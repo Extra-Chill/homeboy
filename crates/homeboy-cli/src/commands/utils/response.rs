@@ -752,6 +752,42 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
         return None;
     }
 
+    if data.get("schema").and_then(Value::as_str) == Some("homeboy/release-operator-summary/v1") {
+        let failure = data.get("failure")?;
+        let step = failure
+            .get("step")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let step_type = failure.get("type").and_then(Value::as_str).unwrap_or(step);
+        let cause = failure
+            .get("cause")
+            .and_then(Value::as_str)
+            .unwrap_or("release step failed without a reported error");
+        let next_actions = failure
+            .get("reproduction_commands")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(4)
+            .map(|command| {
+                CommandNextAction::new("reproduce the failed release step", command)
+                    .with_kind(CommandNextActionKind::Repair)
+            })
+            .collect();
+        return Some(CommandFailureDigest {
+            summary: format!(
+                "Release step {step} ({step_type}) failed: {}",
+                bounded_text(cause, 1000)
+            ),
+            stdout_tail: None,
+            stderr_tail: None,
+            artifact_refs: Vec::new(),
+            next_actions,
+            retryable: None,
+        });
+    }
+
     let result = data.get("result")?;
     let component_id = result.get("component_id").and_then(Value::as_str)?;
     let steps = result.get("run")?.get("result")?.get("steps")?.as_array()?;

@@ -332,7 +332,9 @@ pub(super) fn run_trace_workflow_with_context(
         runner_output.exit_code
     };
     let rig_id = args.rig_id.as_deref();
-    let baseline_root = resolve_trace_baseline_root(&component_path, rig_id)?;
+    // Boundary: one trace workflow run is one unit of work (#7505).
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let baseline_root = resolve_trace_baseline_root(roots.config(), &component_path, rig_id)?;
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
     let mut hints = non_canonical_evidence_hints(&evidence);

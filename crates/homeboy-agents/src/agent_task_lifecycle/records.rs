@@ -586,6 +586,14 @@ impl AgentTaskRunRecord {
             return;
         }
 
+        // Worktree lookup and materialization run in the controller before a
+        // runner job can exist. Their fresh Cook heartbeat is therefore the
+        // ownership evidence; applying the runner-PID watchdog here would
+        // cancel a healthy provider command before its declared timeout.
+        if self.has_fresh_controller_pre_provider_heartbeat() {
+            return;
+        }
+
         // A reverse-broker job may begin before the daemon's accepted job/PID
         // projection arrives. Its complete, unexpired submission intent remains
         // the authoritative owner during that narrow handoff window.
@@ -850,6 +858,21 @@ impl AgentTaskRunRecord {
                 .and_then(|value| value.get("runner_id"))
                 .and_then(Value::as_str)
                 .is_some_and(|runner_id| self.runner_id() == Some(runner_id))
+    }
+
+    /// A controller-owned pre-provider phase is live only while its heartbeat
+    /// is fresh. Once runner submission begins, runner identity remains the
+    /// fail-closed ownership boundary.
+    pub(crate) fn has_fresh_controller_pre_provider_heartbeat(&self) -> bool {
+        self.runner_job_id().is_none()
+            && self.provider_handles.is_empty()
+            && matches!(
+                self.metadata
+                    .pointer("/cook_progress/phase")
+                    .and_then(Value::as_str),
+                Some("worktree_provider_lookup" | "worktree_provider_ensure")
+            )
+            && self.has_fresh_update()
     }
 
     /// A run is runner-backed when its durable record carries a runner id or

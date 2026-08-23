@@ -94,6 +94,26 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
         };
         let raw = match fs::read_to_string(path) {
             Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !outcome
+                    .diagnostics
+                    .iter()
+                    .any(|entry| entry.class == "agent_task.deferred_cleanup_descriptor_missing")
+                {
+                    outcome.diagnostics.push(AgentTaskDiagnostic {
+                        class: "agent_task.deferred_cleanup_descriptor_missing".to_string(),
+                        message: "deferred cleanup descriptor is missing; its workspace receipt cannot be reconciled".to_string(),
+                        data: json!({
+                            "path": path,
+                            "safe_next_action": format!(
+                                "homeboy agent-task diagnose {run_id} --full"
+                            ),
+                        }),
+                    });
+                    changed = true;
+                }
+                continue;
+            }
             Err(_) => continue,
         };
         let action_value: Value = match serde_json::from_str(&raw) {
@@ -1143,14 +1163,18 @@ pub fn record_detached_cook_handoff_child_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let record = lifecycle_store.mutate_record(&cook_id, |record| {
-        let cancelled = record.state == AgentTaskRunState::Cancelled;
-        let state = if cancelled { "cancelled" } else { "pending" };
+        // A concurrent observer may have already terminalized the handoff
+        // before this attachment write acquired the record lock. Keep that
+        // classification intact for the launcher to report.
+        if record.state.is_terminal() {
+            return false;
+        }
         let cancellation_fence =
             record.metadata["detached_cook_handoff"]["cancellation_fence"].clone();
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"] = json!({
-            "state": state,
-        "admission_state": if cancelled { "cancelled" } else { "child_attached" },
+            "state": "pending",
+        "admission_state": "child_attached",
         "child_supervisor_deadline_at": (chrono::Utc::now()
             + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
             .to_rfc3339(),
@@ -1162,7 +1186,7 @@ pub fn record_detached_cook_handoff_child_in_store(
         record.updated_at = Some(now_timestamp());
         true
     })?;
-    Ok(record.expect("detached handoff parent exists"))
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
 /// Persist the daemon job that supervises this locally launched Cook.
@@ -2242,13 +2266,15 @@ where
     A: RuntimeAdmissionEvidence,
 {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let admission_status =
+        crate::agent_task_service::cook_pre_execution::store_admission_status(&lifecycle_store);
     submit_plan_with_runtime_admission_in_store(
         &lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
         None,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&admission_status),
         admit_runtime,
     )
 }
@@ -2349,7 +2375,6 @@ where
         metadata["runner_id"] = json!(runner_id);
         if let Some(execution_context) =
             homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::from_direct_daemon_child_environment(
-                &run_id,
                 runner_id,
             )?
         {
@@ -2976,11 +3001,19 @@ pub fn runner_pinned_runtime_for_mutation(run_id: &str) -> Result<Option<RunnerP
 /// FIFO admission queue so concurrent seals wait their turn instead of
 /// fast-failing.
 pub fn pin_current_controller_runtime(
+    data_root: &std::path::Path,
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<std::path::PathBuf> {
-    let runtime =
-        homeboy_core::controller_runtime::pin_current_queued(request_id, cancellation_requested)?;
+    // The seal joins the FIFO admission queue, and that queue's lock lives under
+    // the runtime root. Taking the caller's data root is what keeps two
+    // installations from serializing against each other's queue (#7505).
+    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
+    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root(
+        &runtime_root,
+        request_id,
+        cancellation_requested,
+    )?;
     runtime
         .pointer("/originating/pinned_executable")
         .and_then(Value::as_str)
@@ -3440,7 +3473,9 @@ pub fn record_cook_progress_with_activity_in_store(
             }
             metadata.insert("cook_progress".to_string(), progress);
         }
-        if !record.state.is_terminal() && !record.is_runner_backed() {
+        if !record.state.is_terminal()
+            && (!record.is_runner_backed() || record.has_fresh_controller_pre_provider_heartbeat())
+        {
             record.updated_at = Some(now_timestamp());
             update_lifecycle_heartbeat(record);
         }
@@ -3607,7 +3642,33 @@ pub fn record_provider_execution_terminal(
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_in_store(&lifecycle_store, run_id, task_id, attempt, state)
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        None,
+    )
+}
+
+/// Record a terminal provider result with its normalized concrete model.
+pub fn record_provider_execution_terminal_with_model(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+    model: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        model,
+    )
 }
 
 pub fn record_provider_execution_terminal_in_store(
@@ -3616,6 +3677,24 @@ pub fn record_provider_execution_terminal_in_store(
     task_id: &str,
     attempt: u32,
     state: &str,
+) -> Result<AgentTaskRunRecord> {
+    record_provider_execution_terminal_with_model_in_store(
+        lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        None,
+    )
+}
+
+pub fn record_provider_execution_terminal_with_model_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+    model: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     if !matches!(
         state,
@@ -3658,6 +3737,9 @@ pub fn record_provider_execution_terminal_in_store(
             return false;
         }
         execution["state"] = json!(state);
+        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+            execution["model"] = json!(model);
+        }
         execution["finished_at"] = json!(now_timestamp());
         found = true;
         true
@@ -3670,6 +3752,66 @@ pub fn record_provider_execution_terminal_in_store(
     // The mutation is intentionally a no-op when cancellation or another
     // terminal writer won the race. That existing record is the durable outcome.
     Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
+}
+
+/// Attach stable, bounded provider stream references while the process is still
+/// running. Cancellation can win before the scheduler receives an outcome, so
+/// these references belong to the durable execution reservation rather than its
+/// eventual aggregate.
+pub fn record_provider_execution_runtime_evidence_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    stdout_uri: Option<String>,
+    stderr_uri: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        execution["runtime_evidence"] = json!({
+            "stdout": stdout_uri,
+            "stderr": stderr_uri,
+            "capture": "bounded_incremental",
+        });
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot attach runtime evidence to an unreserved provider execution",
+            Some(key),
+            None,
+        )
+    })
+}
+
+pub fn record_provider_execution_runtime_evidence(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    stdout_uri: Option<String>,
+    stderr_uri: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_runtime_evidence_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        stdout_uri,
+        stderr_uri,
+    )
 }
 
 // The ambient `has_active_provider_execution()` shim that used to sit here is gone;
@@ -6180,7 +6322,10 @@ pub(crate) fn record_cook_attempt_locked_in_store(
     if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         let handoff = &parent.metadata["detached_cook_handoff"];
         let reserved_child = handoff["materializing_attempt_run_id"] == run_id;
-        if handoff["cook_id"] == cook_id
+        // An existing index proves this is later-attempt materialization; a
+        // terminal first-handoff placeholder no longer owns that boundary.
+        if !lifecycle_store.cook_index_exists(&cook_id)
+            && handoff["cook_id"] == cook_id
             && (((parent.state.is_terminal() && handoff["state"] != "redirected")
                 || handoff["cancellation_fence"]["state"] == "cancelled")
                 && !reserved_child

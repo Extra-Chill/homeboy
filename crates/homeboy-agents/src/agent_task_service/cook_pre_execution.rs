@@ -281,7 +281,7 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
         &options.cook_id,
         &options.initial_run_id,
         &options.initial_plan,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
@@ -305,7 +305,7 @@ pub(crate) fn materialize_cook_attempt_with_stores(
         cook_id,
         run_id,
         plan,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
@@ -324,11 +324,15 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
     if !lifecycle_store.record_exists(run_id)? {
-        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
-            lifecycle_store,
-            cook_id,
-            run_id,
-        )?;
+        // The detached handoff placeholder only owns first-attempt admission.
+        // Once indexed, later attempts derive ownership from the Cook index.
+        if !agent_task_lifecycle::cook_index_exists_in_store(lifecycle_store, cook_id)? {
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                lifecycle_store,
+                cook_id,
+                run_id,
+            )?;
+        }
         let submission = match admission_status {
             Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
                 plan,
@@ -365,6 +369,23 @@ pub(crate) fn reconcile_reserved_cancellation_in_store(
     lifecycle_store
         .cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
         .map(|_| ())
+}
+
+/// Probe admission status against the store's own runtime root.
+///
+/// The ambient `admission_status` resolves the data root itself, so a probe
+/// could read the admission lease of a *different* installation than the store
+/// it was passed alongside. Deriving the root from the store is what keeps a
+/// probe and the admission it is probing in one home (#7505).
+pub(crate) fn store_admission_status(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> impl Fn(&str) -> Option<Value> + '_ {
+    move |run_id| {
+        let runtime_root =
+            homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())
+                .ok()?;
+        homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
+    }
 }
 
 pub(crate) fn production_runtime_admission(
@@ -496,7 +517,7 @@ pub(crate) fn recover_recipe_attempt_with_stores(
 ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_with_runtime(
         cook_or_attempt_id,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
@@ -515,7 +536,7 @@ pub(crate) fn recover_adoption_attempt_with_stores(
     CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_for_adoption_with_runtime(
         cook_id,
         run_id,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),

@@ -112,7 +112,7 @@ pub struct QueryGroup {
     pub count: usize,
 }
 
-pub(crate) fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_query(store: &ObservationStore, args: RunsQueryArgs) -> CmdResult<RunsOutput> {
     if args.select.iter().any(|s| s.trim().is_empty()) {
         return Err(Error::validation_invalid_argument(
             "select",
@@ -132,7 +132,6 @@ pub(crate) fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
         .map(|expr| compile_jsonpath(expr).map(|p| (expr.to_string(), p)))
         .transpose()?;
 
-    let store = ObservationStore::open_initialized()?;
     let filter = RunListFilter {
         kind: args.kind.clone(),
         component_id: args.component_id.clone(),

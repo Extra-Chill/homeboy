@@ -747,6 +747,7 @@ impl DeployConfig {
             tagged: request.config.tagged,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 }
@@ -785,6 +786,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            target: None,
         }
     }
 

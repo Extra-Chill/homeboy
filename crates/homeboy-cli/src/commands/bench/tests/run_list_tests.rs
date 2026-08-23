@@ -150,6 +150,7 @@ fn run_list_filters_installed_rig_workloads_discovered_under_a_component_alias()
         )
         .expect("write rig");
         homeboy::rig::install(
+            &homeboy::core::paths::homeboy().expect("config root"),
             package_root.to_string_lossy().as_ref(),
             Some("installed-alias-rig"),
             false,

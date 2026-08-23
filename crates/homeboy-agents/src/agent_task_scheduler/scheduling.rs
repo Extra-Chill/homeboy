@@ -769,22 +769,27 @@ impl AgentTaskScheduleSupport {
                             );
                             super::finalize_candidate_artifacts(&mut recovered, &task);
                         }
-                        let _ = super::engine::release_scratch(
-                            &task.scratch,
-                            "scheduler_timeout_completion",
-                            &recovered,
-                        );
                         let cleanup = harvest.and_then(|_| {
                             task._attempt_workspace
                                 .as_ref()
                                 .map(|workspace| workspace.cleanup())
                                 .unwrap_or(Ok(()))
                         });
-                        super::complete_deferred_cleanup_recovery(
+                        let receipt = super::complete_deferred_cleanup_recovery(
                             &action_path,
                             &recovered,
                             cleanup,
                         );
+                        // Keep the scratch lease active until both checkout
+                        // cleanup and its durable receipt have reached a
+                        // terminal state. A released lease is reclaimable.
+                        if receipt.is_ok() {
+                            let _ = super::engine::release_scratch(
+                                &task.scratch,
+                                "scheduler_timeout_completion",
+                                &recovered,
+                            );
+                        }
                     })
                 });
             }
@@ -1376,7 +1381,10 @@ impl AgentTaskScheduleSupport {
                 .map(str::to_string)
                 .or_else(|| request.executor.model().map(str::to_string)),
             attempted_model: request.executor.model().map(str::to_string),
-            candidate_producing_model: outcome.selected_model().map(str::to_string),
+            candidate_producing_model: outcome.metadata["model_identity"]["provider_reported"]
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string),
             status: outcome.status,
             failure_classification: outcome.failure_classification,
             summary: outcome.summary.clone(),

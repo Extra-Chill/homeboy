@@ -45,6 +45,53 @@ const IMMEDIATE_FAILURE_WINDOW: Duration = Duration::from_secs(10);
 const IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT: usize = 4 * 1024;
 const IMMEDIATE_FAILURE_ERROR_REF_LIMIT: usize = 8;
 
+/// Bounded pipe activity retained until a provider reaches a terminal state.
+/// The runner owns this rather than relying on provider-specific event formats.
+#[derive(Default)]
+struct ProviderOutputCapture {
+    tail: Vec<u8>,
+    full_output: Option<Vec<u8>>,
+    total_bytes: u64,
+    events: u64,
+    last_activity_ms: u64,
+}
+
+impl ProviderOutputCapture {
+    fn with_full_output() -> Self {
+        Self {
+            full_output: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    fn record(&mut self, bytes: &[u8], elapsed_ms: u64) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+        self.events = self.events.saturating_add(1);
+        self.last_activity_ms = elapsed_ms;
+        if let Some(full_output) = &mut self.full_output {
+            full_output.extend_from_slice(bytes);
+        }
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES {
+            let excess = self.tail.len() - EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES;
+            self.tail.drain(..excess);
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.tail).trim().to_string()
+    }
+
+    fn full_text(&self) -> String {
+        self.full_output
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_else(|| String::from_utf8_lossy(&self.tail))
+            .trim()
+            .to_string()
+    }
+}
+
 /// Run the provider command with a bounded retry on transient provider/network
 /// failures.
 ///
@@ -613,18 +660,43 @@ fn run_materialized_provider_command_once_contained(
         );
     };
 
-    // The scheduler may replace a task workspace with an isolated attempt
-    // worktree. That task root is the execution cwd; a manifest cwd is only a
-    // fallback for requests without a workspace.
-    let cwd = request
-        .request
-        .workspace
-        .root
+    // Workspace identity stays at the Git root for scheduler admission and
+    // baseline replacement. A component-relative cwd is resolved only after
+    // that identity is established, so nested packages execute correctly in
+    // both the original worktree and isolated retry baselines.
+    let attestation_root = request.request.workspace.root.as_deref().map(PathBuf::from);
+    let cwd = match attestation_root.as_deref() {
+        Some(root) => match homeboy_core::resolve_contained_local_path(
+            root,
+            request
+                .request
+                .executor
+                .config
+                .get("component_cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("."),
+            "component_cwd",
+        ) {
+            Ok(cwd) => Some(cwd),
+            Err(error) => {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.component_cwd_invalid",
+                    error.to_string(),
+                    json!({ "provider": provider.id }),
+                )
+            }
+        },
+        None => provider_cwd,
+    };
+    let attestation_identity = attestation_root
         .as_deref()
-        .map(PathBuf::from)
-        .or(provider_cwd);
-    let cwd_identity = cwd.as_deref().map(workspace_identity).transpose();
-    let cwd_identity = match cwd_identity {
+        .or(cwd.as_deref())
+        .map(workspace_identity)
+        .transpose();
+    let attestation_identity = match attestation_identity {
         Ok(identity) => identity,
         Err(message) => {
             return failure_outcome(
@@ -754,7 +826,7 @@ fn run_materialized_provider_command_once_contained(
             .or_else(|| request.request.metadata.get("cook_workspace_identity"))
         {
             let identity_match = crate::agent_task_workspace_identity::workspace_attestation_match(
-                &cwd,
+                attestation_root.as_deref().unwrap_or(&cwd),
                 attestation,
             );
             if identity_match
@@ -776,18 +848,24 @@ fn run_materialized_provider_command_once_contained(
                     } else {
                         "provider workspace no longer matches its Cook attempt identity attestation; refusing execution".to_string()
                     },
-                    json!({ "provider": provider.id, "workspace": cwd }),
+                    json!({ "provider": provider.id, "workspace": attestation_root.as_deref().unwrap_or(&cwd), "execution_cwd": cwd }),
                 );
             }
         }
-        if workspace_identity(&cwd).as_ref().ok() != cwd_identity.as_ref() {
+        if attestation_root
+            .as_deref()
+            .or(Some(&cwd))
+            .and_then(|path| workspace_identity(path).ok())
+            .as_ref()
+            != attestation_identity.as_ref()
+        {
             return failure_outcome(
                 request,
                 AgentTaskOutcomeStatus::ProviderError,
                 AgentTaskFailureClassification::InvalidInput,
                 "agent_task.workspace_identity_changed",
                 "provider workspace changed after validation; refusing execution".to_string(),
-                json!({ "provider": provider.id, "workspace": cwd }),
+                json!({ "provider": provider.id, "workspace": attestation_root.as_deref().unwrap_or(&cwd), "execution_cwd": cwd }),
             );
         }
         command_builder.current_dir(cwd);
@@ -864,26 +942,47 @@ fn run_materialized_provider_command_once_contained(
     }
 
     let started = Instant::now();
-    let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let stderr_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // Provider stdout may be a large valid JSON outcome, so retain it for
+    // parsing while the timeout diagnostic persists only its bounded tail.
+    let stdout_capture = Arc::new(Mutex::new(ProviderOutputCapture::with_full_output()));
+    let stderr_capture = Arc::new(Mutex::new(ProviderOutputCapture::default()));
     // Progress and the wall timeout must share a monotonic clock. A system-clock
     // adjustment must never turn a stale provider into a live one.
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
+    let (stdout_runtime_capture, stderr_runtime_capture) =
+        runtime_output_captures(request, run_id, attempt);
+    if let Some(run_id) = run_id {
+        // The files exist before any output arrives, so a controller-side
+        // cancellation retains resolvable diagnostics even if it interrupts us.
+        let _ = crate::agent_task_lifecycle::record_provider_execution_runtime_evidence(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            stdout_runtime_capture
+                .as_ref()
+                .map(|capture| capture.uri.clone()),
+            stderr_runtime_capture
+                .as_ref()
+                .map(|capture| capture.uri.clone()),
+        );
+    }
     let stdout_reader = child.stdout.take().map(|stdout| {
-        spawn_output_reader(
+        spawn_provider_output_reader(
             stdout,
-            Arc::clone(&stdout_buffer),
+            Arc::clone(&stdout_capture),
             Arc::clone(&last_progress_ms),
             started,
+            stdout_runtime_capture.map(|capture| capture.file),
         )
     });
     let stderr_reader = child.stderr.take().map(|stderr| {
-        spawn_output_reader(
+        spawn_provider_output_reader(
             stderr,
-            Arc::clone(&stderr_buffer),
+            Arc::clone(&stderr_capture),
             Arc::clone(&last_progress_ms),
             started,
+            stderr_runtime_capture.map(|capture| capture.file),
         )
     });
 
@@ -940,6 +1039,7 @@ fn run_materialized_provider_command_once_contained(
     } else {
         containment.reap_after_exit()
     };
+    let cancellation_acknowledged = containment_cleanup.is_ok();
     containment_report.record(&containment, containment_cleanup);
 
     if let Some(handle) = stdout_reader {
@@ -949,10 +1049,10 @@ fn run_materialized_provider_command_once_contained(
         let _ = handle.join();
     }
 
-    let stdout_bytes = stdout_buffer.lock().expect("stdout buffer").clone();
-    let stderr_bytes = stderr_buffer.lock().expect("stderr buffer").clone();
-    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+    let stdout_capture = stdout_capture.lock().expect("stdout capture");
+    let stderr_capture = stderr_capture.lock().expect("stderr capture");
+    let stdout = stdout_capture.full_text();
+    let stderr = stderr_capture.text();
 
     if killed_for_liveness {
         let (status, classification, message) = classify_stall_or_rate_limit(
@@ -976,8 +1076,8 @@ fn run_materialized_provider_command_once_contained(
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
                 "liveness_timeout_ms": request.limits.liveness_timeout_ms,
-                "stdout_bytes": stdout_bytes.len(),
-                "stderr_bytes": stderr_bytes.len(),
+                "stdout_bytes": stdout_capture.total_bytes,
+                "stderr_bytes": stderr_capture.total_bytes,
             }),
         );
     }
@@ -999,14 +1099,17 @@ fn run_materialized_provider_command_once_contained(
                 "provider '{}' exceeded timeout_ms={}",
                 provider.id, requested_timeout_ms
             ),
-            json!({
-                "provider": provider.id,
-                "command": command,
-                "deadline": "wall_clock",
-                "timeout_ms": requested_timeout_ms,
-                "process_timeout_ms": process_timeout.as_millis(),
-                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
-            }),
+            provider_timeout_diagnostic_data(
+                request,
+                provider,
+                &command,
+                run_id,
+                requested_timeout_ms,
+                process_timeout.as_millis(),
+                cancellation_acknowledged,
+                &stdout_capture,
+                &stderr_capture,
+            ),
         );
     }
     let Some(status) = status else {
@@ -1449,23 +1552,157 @@ fn spawn_output_reader<R>(
     buffer: Arc<Mutex<Vec<u8>>>,
     last_progress_ms: Arc<AtomicU64>,
     started: Instant,
+    capture: Option<std::fs::File>,
 ) -> std::thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
 {
     std::thread::spawn(move || {
+        let mut capture = capture;
+        let mut captured = 0;
         let mut chunk = [0; 4096];
         while let Ok(read) = reader.read(&mut chunk) {
             if read == 0 {
                 break;
             }
             buffer.lock().expect("output buffer").extend(&chunk[..read]);
+            if let Some(file) = capture.as_mut() {
+                let remaining = EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES.saturating_sub(captured);
+                let written = remaining.min(read);
+                if written > 0 && file.write_all(&chunk[..written]).is_ok() {
+                    captured += written;
+                }
+            }
             last_progress_ms.store(
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 Ordering::SeqCst,
             );
         }
     })
+}
+
+fn spawn_provider_output_reader<R>(
+    mut reader: R,
+    capture: Arc<Mutex<ProviderOutputCapture>>,
+    last_progress_ms: Arc<AtomicU64>,
+    started: Instant,
+    runtime_capture: Option<std::fs::File>,
+) -> std::thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut runtime_capture = runtime_capture;
+        let mut runtime_captured = 0;
+        let mut chunk = [0; 4096];
+        while let Ok(read) = reader.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            capture
+                .lock()
+                .expect("provider output capture")
+                .record(&chunk[..read], elapsed_ms);
+            if let Some(file) = runtime_capture.as_mut() {
+                let remaining =
+                    EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES.saturating_sub(runtime_captured);
+                let written = remaining.min(read);
+                if written > 0 && file.write_all(&chunk[..written]).is_ok() {
+                    runtime_captured += written;
+                }
+            }
+            last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_timeout_diagnostic_data(
+    request: &AgentTaskExecutorRequest,
+    provider: &AgentTaskExecutorProvider,
+    command: &str,
+    run_id: Option<&str>,
+    timeout_ms: u64,
+    process_timeout_ms: u128,
+    cancellation_acknowledged: bool,
+    stdout: &ProviderOutputCapture,
+    stderr: &ProviderOutputCapture,
+) -> Value {
+    let last_activity = match (stdout.events > 0, stderr.events > 0) {
+        (false, false) => Value::Null,
+        (true, false) => json!({ "kind": "stdout", "elapsed_ms": stdout.last_activity_ms }),
+        (false, true) => json!({ "kind": "stderr", "elapsed_ms": stderr.last_activity_ms }),
+        (true, true) if stdout.last_activity_ms >= stderr.last_activity_ms => {
+            json!({ "kind": "stdout", "elapsed_ms": stdout.last_activity_ms })
+        }
+        (true, true) => json!({ "kind": "stderr", "elapsed_ms": stderr.last_activity_ms }),
+    };
+    let redactions = provider_output_redactions(request, provider);
+    let command = redact_sensitive_text(command, &redactions);
+    let stdout_text = stdout.text();
+    let stderr_text = stderr.text();
+    let stdout_tail = redact_sensitive_text(&stdout_text, &redactions);
+    let stderr_tail = redact_sensitive_text(&stderr_text, &redactions);
+    let log_lookup = run_id.map_or_else(
+        || "homeboy agent-task logs <run-id> --task <task-id>".to_string(),
+        |run_id| {
+            format!(
+                "homeboy agent-task logs {run_id} --task {}",
+                request.task_id
+            )
+        },
+    );
+
+    json!({
+        "provider": provider.id,
+        "provider_backend": provider.backend,
+        "command": command,
+        "deadline": "wall_clock",
+        "timeout_ms": timeout_ms,
+        "process_timeout_ms": process_timeout_ms,
+        "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+        "output_event_count": stdout.events.saturating_add(stderr.events),
+        "stdout_bytes": stdout.total_bytes,
+        "stderr_bytes": stderr.total_bytes,
+        "last_activity": last_activity,
+        "stdout_tail": bounded_executor_output(&stdout_tail),
+        "stderr_tail": bounded_executor_output(&stderr_tail),
+        "stdout_tail_truncated": stdout.total_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
+        "stderr_tail_truncated": stderr.total_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
+        "cancellation_requested": true,
+        "cancellation_acknowledged": cancellation_acknowledged,
+        "provider_boundary_evidence": "executor-result",
+        "log_lookup": log_lookup,
+    })
+}
+
+struct RuntimeOutputCapture {
+    uri: String,
+    file: std::fs::File,
+}
+
+fn runtime_output_captures(
+    request: &AgentTaskExecutorRequest,
+    run_id: Option<&str>,
+    attempt: u32,
+) -> (Option<RuntimeOutputCapture>, Option<RuntimeOutputCapture>) {
+    if run_id.is_none() || std::fs::create_dir_all(&request.artifacts_path).is_err() {
+        return (None, None);
+    }
+    let capture = |name: &str| {
+        let path = request.artifacts_path.join(name);
+        std::fs::File::create(&path)
+            .ok()
+            .map(|file| RuntimeOutputCapture {
+                uri: format!("file://{}", path.display()),
+                file,
+            })
+    };
+    (
+        capture(&format!("provider-runtime-stdout-{attempt}.log")),
+        capture(&format!("provider-runtime-stderr-{attempt}.log")),
+    )
 }
 
 fn classify_stall_or_rate_limit(
@@ -2097,7 +2334,13 @@ pub fn run_provider_readiness_invocation(
     let last_progress = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
     let stdout_reader = child.stdout.take().map(|stdout| {
-        spawn_output_reader(stdout, Arc::clone(&stdout_buffer), last_progress, started)
+        spawn_output_reader(
+            stdout,
+            Arc::clone(&stdout_buffer),
+            last_progress,
+            started,
+            None,
+        )
     });
     let status = loop {
         match child.try_wait() {

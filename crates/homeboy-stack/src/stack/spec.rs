@@ -144,11 +144,14 @@ pub(crate) fn resolve_existing_component_path(spec: &StackSpec) -> Result<String
     ))
 }
 
-/// Load a stack spec by ID from `~/.config/homeboy/stacks/{id}.json`.
-pub fn load(id: &str) -> Result<StackSpec> {
-    let path = paths::stack_config(id)?;
+/// Load a stack spec by ID from `<config_root>/stacks/{id}.json`.
+///
+/// The caller supplies the config root it already resolved, so one unit of work
+/// cannot straddle two Homeboy homes (#7505).
+pub fn load(config_root: &Path, id: &str) -> Result<StackSpec> {
+    let path = paths::stack_config_in_root(config_root, id);
     if !path.exists() {
-        let suggestions = list_ids().unwrap_or_default();
+        let suggestions = list_ids(config_root).unwrap_or_default();
         return Err(Error::stack_not_found(id, suggestions));
     }
     let content = fs::read_to_string(&path).map_err(|e| {
@@ -167,9 +170,9 @@ pub fn load(id: &str) -> Result<StackSpec> {
     Ok(spec)
 }
 
-/// List all stack specs in `~/.config/homeboy/stacks/`.
-pub fn list() -> Result<Vec<StackSpec>> {
-    let dir = paths::stacks()?;
+/// List all stack specs in `<config_root>/stacks/`.
+pub fn list(config_root: &Path) -> Result<Vec<StackSpec>> {
+    let dir = paths::stacks_in_root(config_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -188,7 +191,7 @@ pub fn list() -> Result<Vec<StackSpec>> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        if let Ok(spec) = load(&stem) {
+        if let Ok(spec) = load(config_root, &stem) {
             stacks.push(spec);
         }
     }
@@ -198,8 +201,8 @@ pub fn list() -> Result<Vec<StackSpec>> {
 
 /// Return sorted stack IDs (cheaper than load+collect when you only need IDs,
 /// e.g. for error suggestions).
-pub fn list_ids() -> Result<Vec<String>> {
-    let dir = paths::stacks()?;
+pub fn list_ids(config_root: &Path) -> Result<Vec<String>> {
+    let dir = paths::stacks_in_root(config_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -223,14 +226,14 @@ pub fn list_ids() -> Result<Vec<String>> {
 }
 
 /// Whether a stack spec with this ID already exists on disk.
-pub fn exists(id: &str) -> Result<bool> {
-    Ok(paths::stack_config(id)?.exists())
+pub fn exists(config_root: &Path, id: &str) -> Result<bool> {
+    Ok(paths::stack_config_in_root(config_root, id).exists())
 }
 
 /// Write a spec to disk. Creates the stacks directory if missing. Pretty-printed
 /// so humans can edit by hand.
-pub fn save(spec: &StackSpec) -> Result<()> {
-    let dir = paths::stacks()?;
+pub fn save(config_root: &Path, spec: &StackSpec) -> Result<()> {
+    let dir = paths::stacks_in_root(config_root);
     fs::create_dir_all(&dir).map_err(|e| {
         Error::internal_unexpected(format!(
             "Failed to create stacks dir {}: {}",
@@ -238,7 +241,7 @@ pub fn save(spec: &StackSpec) -> Result<()> {
             e
         ))
     })?;
-    let path = paths::stack_config(&spec.id)?;
+    let path = paths::stack_config_in_root(config_root, &spec.id);
     let json = serde_json::to_string_pretty(spec).map_err(|e| {
         Error::internal_unexpected(format!("Failed to serialize stack spec: {}", e))
     })?;

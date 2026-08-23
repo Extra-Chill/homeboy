@@ -61,8 +61,8 @@ pub use component_resolution::{component_ref, resolve_component, resolve_compone
 pub use install::{
     default_materialize_source_root, discover_rigs, discover_stacks, install, materialize_rig_spec,
     materialize_rig_spec_with_default_source_root, package_content_hash, read_source_metadata,
-    read_stack_source_metadata, DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult,
-    RigSourceMetadata, StackSourceMetadata,
+    read_source_metadata_in_root, read_stack_source_metadata_in_root, DiscoveredRig,
+    DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata, StackSourceMetadata,
 };
 pub use lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
@@ -120,7 +120,7 @@ pub use stack::{
 };
 pub use state::{
     ComponentSnapshot, LifecycleSnapshotState, MaterializedRigState, RigState, RigStateSnapshot,
-    ServiceState,
+    RigStateStore, ServiceState,
 };
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,
@@ -351,13 +351,13 @@ fn component_with_unrecognized_schema(value: &serde_json::Value) -> Option<Strin
         .map(|(name, _)| name.clone())
 }
 
-fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
-    let path = paths::rig_config(id)?;
+fn read_config(config_root: &Path, id: &str) -> Result<(RigSpec, Option<String>)> {
+    let path = paths::rig_config_in_root(config_root, id);
     if !path.exists() {
-        if let Some(error) = stale_source_error(id, &path) {
+        if let Some(error) = stale_source_error(config_root, id, &path) {
             return Err(error);
         }
-        let suggestions = list_ids().unwrap_or_default();
+        let suggestions = list_ids(config_root).unwrap_or_default();
         return Err(Error::rig_not_found(id, suggestions));
     }
     let content = fs::read_to_string(&path).map_err(|e| {
@@ -480,8 +480,8 @@ fn apply_trace_workload_defaults(spec: &mut RigSpec) -> Result<()> {
     Ok(())
 }
 
-fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
-    let metadata = read_source_metadata(id)?;
+fn stale_source_error(config_root: &Path, id: &str, config_path: &Path) -> Option<Error> {
+    let metadata = read_source_metadata_in_root(config_root, id)?;
     let package_present = Path::new(&metadata.package_path).exists();
     let rig_present = Path::new(&metadata.rig_path).is_file();
     let config_entry_present = fs::symlink_metadata(config_path).is_ok();
@@ -521,9 +521,12 @@ fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
     )
 }
 
-/// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
-pub fn load(id: &str) -> Result<RigSpec> {
-    read_config(id).map(|(spec, _)| spec)
+/// Load a rig spec by ID from `<config_root>/rigs/{id}.json`.
+///
+/// The caller supplies the config root it already resolved, so one unit of work
+/// cannot straddle two Homeboy homes (#7505).
+pub fn load(config_root: &Path, id: &str) -> Result<RigSpec> {
+    read_config(config_root, id).map(|(spec, _)| spec)
 }
 
 /// Load a rig spec directly from a local package directory or `rig.json` path
@@ -614,30 +617,30 @@ pub struct RigSourceContext {
 impl RigSourceContext {
     /// Build a source context from an already-loaded spec, resolving the
     /// package root from the rig's recorded source metadata.
-    pub fn from_spec(spec: RigSpec) -> Self {
+    pub fn from_spec(config_root: &Path, spec: RigSpec) -> Self {
         let package_root = local_package_root(&spec.id).or_else(|| {
-            read_source_metadata(&spec.id)
+            read_source_metadata_in_root(config_root, &spec.id)
                 .map(|metadata| std::path::PathBuf::from(metadata.package_path))
         });
         Self { spec, package_root }
     }
 
     /// Load a rig spec by ID and resolve its package root.
-    pub fn load(id: &str) -> Result<Self> {
-        Ok(Self::from_spec(load(id)?))
+    pub fn load(config_root: &Path, id: &str) -> Result<Self> {
+        Ok(Self::from_spec(config_root, load(config_root, id)?))
     }
 
     /// Load a rig for a command invocation, preferring an enclosing local rig
     /// package checkout that contains the requested rig ID over the globally
     /// installed rig registry.
-    pub fn load_for_invocation(id: &str) -> Result<Self> {
+    pub fn load_for_invocation(config_root: &Path, id: &str) -> Result<Self> {
         if let Some(package_root) = enclosing_local_package_for_rig(id)? {
-            return Ok(Self::from_spec(load_local_source(
-                package_root.to_string_lossy().as_ref(),
-                Some(id),
-            )?));
+            return Ok(Self::from_spec(
+                config_root,
+                load_local_source(package_root.to_string_lossy().as_ref(), Some(id))?,
+            ));
         }
-        Self::load(id)
+        Self::load(config_root, id)
     }
 
     /// Load a rig for an invocation with an explicit component checkout.
@@ -645,22 +648,29 @@ impl RigSourceContext {
     /// A linked rig source can disappear when its managed worktree is cleaned
     /// up. When the active checkout contains the same rig declaration, refresh
     /// the installed link through the normal install ownership checks.
-    pub fn load_for_invocation_at(id: &str, component_path: Option<&str>) -> Result<Self> {
+    /// This used to resolve its own roots. It now receives them: a boundary is
+    /// only a boundary while nothing above it can supply one, and every caller
+    /// can (#7505).
+    pub fn load_for_invocation_at(
+        config_root: &Path,
+        id: &str,
+        component_path: Option<&str>,
+    ) -> Result<Self> {
         let Some(component_path) = component_path else {
-            return Self::load_for_invocation(id);
+            return Self::load_for_invocation(config_root, id);
         };
-        let Some(metadata) = read_source_metadata(id) else {
-            return Self::load_for_invocation(id);
+        let Some(metadata) = read_source_metadata_in_root(config_root, id) else {
+            return Self::load_for_invocation(config_root, id);
         };
         if !metadata.linked || Path::new(&metadata.package_path).is_dir() {
-            return Self::load_for_invocation(id);
+            return Self::load_for_invocation(config_root, id);
         }
 
         // Confirm the active checkout declares this rig before refreshing its
         // global registration. `install` then enforces existing ID ownership.
         load_local_source(component_path, Some(id))?;
-        install(component_path, Some(id), false)?;
-        Self::load(id)
+        install(config_root, component_path, Some(id), false)?;
+        Self::load(config_root, id)
     }
 }
 
@@ -682,13 +692,13 @@ fn enclosing_local_package_for_rig(id: &str) -> Result<Option<PathBuf>> {
 }
 
 /// Return the JSON-declared rig ID when it differs from the installed ID.
-pub fn declared_id(id: &str) -> Result<Option<String>> {
-    read_config(id).map(|(_, declared_id)| declared_id)
+pub fn declared_id(config_root: &Path, id: &str) -> Result<Option<String>> {
+    read_config(config_root, id).map(|(_, declared_id)| declared_id)
 }
 
-/// List all rig specs in `~/.config/homeboy/rigs/`.
-pub fn list() -> Result<Vec<RigSpec>> {
-    let dir = paths::rigs()?;
+/// List all rig specs in `<config_root>/rigs/`.
+pub fn list(config_root: &Path) -> Result<Vec<RigSpec>> {
+    let dir = paths::rigs_in_root(config_root);
     let mut rigs = Vec::new();
     for entry in json_config::sorted_json_config_entries(
         &dir,
@@ -696,7 +706,7 @@ pub fn list() -> Result<Vec<RigSpec>> {
         "read rig entry",
         |e, context| Error::internal_unexpected(format!("Failed to {}: {}", context, e)),
     )? {
-        if let Ok(spec) = load(&entry.id) {
+        if let Ok(spec) = load(config_root, &entry.id) {
             rigs.push(spec);
         }
     }
@@ -705,8 +715,8 @@ pub fn list() -> Result<Vec<RigSpec>> {
 
 /// Return sorted rig IDs (cheaper than load+collect when you only need IDs,
 /// e.g. for error suggestions).
-pub fn list_ids() -> Result<Vec<String>> {
-    let dir = paths::rigs()?;
+pub fn list_ids(config_root: &Path) -> Result<Vec<String>> {
+    let dir = paths::rigs_in_root(config_root);
     json_config::sorted_json_config_entries(&dir, "list rigs", "read rig entry", |e, context| {
         Error::internal_unexpected(format!("Failed to {}: {}", context, e))
     })

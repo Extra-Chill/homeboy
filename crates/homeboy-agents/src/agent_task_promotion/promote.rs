@@ -1766,9 +1766,10 @@ fn run_promotion_gates(
     // setup is intentionally destination-only: gates must consume the exact
     // executable projection this report describes.
     let candidate_setup = Vec::new();
-    let destination_gate_setup = if worktree_path.is_dir() {
+    let gate_workspace = gate_workspace_path(options, worktree_path);
+    let destination_gate_setup = if gate_workspace.is_dir() {
         crate::agent_task_gate::hydrate_gate_dependency_roots(
-            worktree_path,
+            &gate_workspace,
             options.gates.hydrate_dependencies,
             "destination_gate_workspace",
         )
@@ -1823,7 +1824,7 @@ fn run_promotion_gates(
             run_promotion_gate(
                 options,
                 provider,
-                worktree_path,
+                &gate_workspace,
                 index + 1,
                 command,
                 visibility,
@@ -1836,6 +1837,11 @@ fn run_promotion_gates(
         {
             blocking_gate_id = Some(gate.id.clone());
         }
+        let mut gate = gate;
+        gate.cwd = Some(crate::agent_task_gate::AgentTaskGateCwdEvidence {
+            requested: worktree_path.display().to_string(),
+            effective: gate_workspace.display().to_string(),
+        });
         deterministic_gates.push(gate);
     }
     emit_promotion_progress(
@@ -1869,6 +1875,15 @@ fn run_promotion_gates(
         destination_gate_setup,
         candidate_checkout,
     })
+}
+
+fn gate_workspace_path(options: &AgentTaskPromotionOptions, worktree_path: &Path) -> PathBuf {
+    options
+        .source_worktree_path
+        .as_ref()
+        .filter(|source| source.is_dir())
+        .cloned()
+        .unwrap_or_else(|| worktree_path.to_path_buf())
 }
 
 fn bounded_setup_error_text(value: &str) -> String {
@@ -2207,7 +2222,7 @@ fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
     Ok(path.is_dir().then_some(path))
 }
 
-fn capture_declared_base(
+pub(crate) fn capture_declared_base(
     worktree_path: &Path,
     base_ref: Option<&str>,
 ) -> Result<Option<AgentTaskPromotionVerifiedBase>> {

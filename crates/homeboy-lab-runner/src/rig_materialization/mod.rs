@@ -589,6 +589,21 @@ fn selected_rig_component_remote_path(
     ))
 }
 
+/// Config root for rig-registry reads on the lab-offload path.
+///
+/// The lab offload stack holds no `PathRoots` anywhere — not in
+/// `lab/offload/inner.rs`, not in `lab/workspace_plan.rs`, not on any carrier
+/// passing through. Threading a root down to the three readers below would mean
+/// adding a path parameter to functions whose job is parsing offload arguments,
+/// which the PathRoots injection contract calls out as adding plumbing.
+///
+/// So the resolution stays here for now — but it is *visible* here, rather than
+/// hidden inside `homeboy_rig::load`, which 27 other callers now reach with an
+/// explicit root. Delete this when lab offload gains a carrier (#7505).
+fn rig_registry_config_root() -> Result<PathBuf> {
+    homeboy_core::paths::homeboy()
+}
+
 fn default_rig_component_selector(args: &[String]) -> Result<Option<String>> {
     let rig_ids = lab_offload_rig_ids(args);
     let [rig_id] = rig_ids.as_slice() else {
@@ -599,7 +614,7 @@ fn default_rig_component_selector(args: &[String]) -> Result<Option<String>> {
         Some("fuzz") => homeboy_rig::RigWorkloadKind::Fuzz,
         _ => return Ok(None),
     };
-    let spec = homeboy_rig::load(rig_id)?;
+    let spec = homeboy_rig::load(&rig_registry_config_root()?, rig_id)?;
     let component_ids = homeboy_rig::component_ids_for_workload(&spec, kind, None);
     Ok((component_ids.len() == 1).then(|| component_ids[0].clone()))
 }
@@ -833,7 +848,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     if rig_ids.len() != 1 {
         return Ok(None);
     }
-    let spec = homeboy_rig::load(&rig_ids[0])?;
+    let spec = homeboy_rig::load(&rig_registry_config_root()?, &rig_ids[0])?;
     if spec.components.len() != 1 {
         return Ok(None);
     }
@@ -858,7 +873,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
     let mut dependencies = Vec::new();
     let component_path_override = component_path_override(args);
     for rig_id in lab_offload_rig_ids(args) {
-        let spec = homeboy_rig::load(&rig_id)?;
+        let spec = homeboy_rig::load(&rig_registry_config_root()?, &rig_id)?;
         let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
             if let Some(lab_stack) = &component.lab_stack {
@@ -2272,6 +2287,7 @@ mod tests {
             std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
                 .expect("create rig sources");
             homeboy_rig::install::write_source_metadata(
+                &homeboy_core::paths::homeboy().expect("config root"),
                 "studio-web-product-matrix",
                 &homeboy_rig::install::RigSourceMetadata {
                     source: checkout.display().to_string(),

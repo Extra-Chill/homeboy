@@ -89,10 +89,12 @@ struct HotspotAccumulator {
     sources: BTreeSet<String>,
 }
 
-pub(crate) fn runs_hotspots(args: RunsHotspotsArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn runs_hotspots(
+    store: &ObservationStore,
+    args: RunsHotspotsArgs,
+) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
     validate_hotspot_args(&args)?;
-    let store = ObservationStore::open_initialized()?;
     let ranking_run_ids = if args.run_ids.is_empty() {
         combined_run_ids(&args.baseline_runs, &args.candidate_runs)
     } else {
@@ -760,6 +762,14 @@ fn severity_score(value: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
     use serde_json::json;
@@ -864,12 +874,15 @@ mod tests {
                 .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
                 .expect("directory artifact");
 
-            let (output, _) = runs_hotspots(RunsHotspotsArgs {
-                run_ids: vec![run.id.clone()],
-                baseline_runs: Vec::new(),
-                candidate_runs: Vec::new(),
-                limit: 20,
-            })
+            let (output, _) = runs_hotspots(
+                &test_store(),
+                RunsHotspotsArgs {
+                    run_ids: vec![run.id.clone()],
+                    baseline_runs: Vec::new(),
+                    candidate_runs: Vec::new(),
+                    limit: 20,
+                },
+            )
             .expect("hotspots");
 
             let RunsOutput::Hotspots(output) = output else {
@@ -918,12 +931,15 @@ mod tests {
                 .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
                 .expect("directory artifact");
 
-            let (output, _) = runs_hotspots(RunsHotspotsArgs {
-                run_ids: vec!["hotspot-label".to_string()],
-                baseline_runs: Vec::new(),
-                candidate_runs: Vec::new(),
-                limit: 20,
-            })
+            let (output, _) = runs_hotspots(
+                &test_store(),
+                RunsHotspotsArgs {
+                    run_ids: vec!["hotspot-label".to_string()],
+                    baseline_runs: Vec::new(),
+                    candidate_runs: Vec::new(),
+                    limit: 20,
+                },
+            )
             .expect("durable run label resolves through runs_service::require_run");
 
             let RunsOutput::Hotspots(output) = output else {
@@ -945,12 +961,15 @@ mod tests {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
-            let error = match runs_hotspots(RunsHotspotsArgs {
-                run_ids: vec!["definitely-missing-run".to_string()],
-                baseline_runs: Vec::new(),
-                candidate_runs: Vec::new(),
-                limit: 20,
-            }) {
+            let error = match runs_hotspots(
+                &test_store(),
+                RunsHotspotsArgs {
+                    run_ids: vec!["definitely-missing-run".to_string()],
+                    baseline_runs: Vec::new(),
+                    candidate_runs: Vec::new(),
+                    limit: 20,
+                },
+            ) {
                 Ok(_) => panic!("expected a missing-run error"),
                 Err(error) => error,
             };

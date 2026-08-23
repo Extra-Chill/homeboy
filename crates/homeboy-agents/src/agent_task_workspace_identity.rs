@@ -113,6 +113,43 @@ pub fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
     workspace_attestation_match(path, attestation) == WorkspaceAttestationMatch::Matched
 }
 
+/// Return the exact identity values compared during a failed handoff admission.
+/// This evidence is diagnostic only; callers must still use
+/// [`workspace_matches_attestation`] for the admission decision.
+#[cfg(unix)]
+pub fn workspace_attestation_diagnostics(path: &Path, attestation: &Value) -> Value {
+    const FIELDS: [&str; 10] = [
+        "canonical_path",
+        "device",
+        "inode",
+        "git_representation",
+        "git_file_content",
+        "gitdir_target",
+        "git_dir_canonical_path",
+        "git_dir_device",
+        "git_dir_inode",
+        "git_file_is_file",
+    ];
+
+    match attest_workspace(path) {
+        Ok(observed) => serde_json::json!({
+            "match": format!("{:?}", workspace_attestation_match(path, attestation)),
+            "expected": attestation,
+            "observed": observed,
+            "compared_fields": FIELDS.into_iter().map(|field| serde_json::json!({
+                "field": field,
+                "expected": attestation[field],
+                "observed": observed[field],
+            })).collect::<Vec<_>>(),
+        }),
+        Err(error) => serde_json::json!({
+            "match": "Mismatched",
+            "expected": attestation,
+            "observed_error": error.message,
+        }),
+    }
+}
+
 #[cfg(unix)]
 pub fn workspace_attestation_match(path: &Path, attestation: &Value) -> WorkspaceAttestationMatch {
     use std::os::unix::fs::MetadataExt;
@@ -206,6 +243,27 @@ pub fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
         .and_then(|path| path.to_str().map(str::to_string))
         .as_deref()
         == attestation["canonical_path"].as_str()
+}
+
+#[cfg(not(unix))]
+pub fn workspace_attestation_diagnostics(path: &Path, attestation: &Value) -> Value {
+    match attest_workspace(path) {
+        Ok(observed) => serde_json::json!({
+            "match": format!("{:?}", workspace_attestation_match(path, attestation)),
+            "expected": attestation,
+            "observed": observed,
+            "compared_fields": [{
+                "field": "canonical_path",
+                "expected": attestation["canonical_path"],
+                "observed": observed["canonical_path"],
+            }],
+        }),
+        Err(error) => serde_json::json!({
+            "match": "Mismatched",
+            "expected": attestation,
+            "observed_error": error.message,
+        }),
+    }
 }
 
 #[cfg(not(unix))]

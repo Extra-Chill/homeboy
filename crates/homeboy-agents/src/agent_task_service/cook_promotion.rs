@@ -55,6 +55,45 @@ pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> O
     .map(PathBuf::from)
 }
 
+fn component_workspace_path(options: &AgentTaskCookServiceOptions) -> Option<PathBuf> {
+    let source = options.source_worktree_path.as_ref()?;
+    let component_cwd = options
+        .initial_plan
+        .metadata
+        .pointer("/gate_workspace/component_cwd")
+        .and_then(Value::as_str)?;
+    homeboy_core::resolve_contained_local_path(source, component_cwd, "component_cwd").ok()
+}
+
+fn replacement_component_workspace(
+    original: &AgentTaskPromotionReport,
+    target: &std::path::Path,
+) -> Result<Option<PathBuf>> {
+    let Some(cwd) = original
+        .deterministic_gates
+        .iter()
+        .find_map(|gate| gate.cwd.as_ref())
+    else {
+        return Ok(None);
+    };
+    let relative = PathBuf::from(&cwd.effective)
+        .strip_prefix(&cwd.requested)
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "replacement_gate.cwd",
+                "persisted effective gate cwd is outside its requested worktree root",
+                Some(cwd.effective.clone()),
+                None,
+            )
+        })?
+        .to_path_buf();
+    Ok(Some(homeboy_core::resolve_contained_local_path(
+        target,
+        relative,
+        "replacement_gate.cwd",
+    )?))
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
@@ -117,7 +156,8 @@ pub(crate) fn promote_attempt_in_store(
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
+            source_worktree_path: component_workspace_path(options)
+                .or_else(|| options.source_worktree_path.clone()),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
             candidate_ref: None,
@@ -176,7 +216,8 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
-        source_worktree_path: options.source_worktree_path.clone(),
+        source_worktree_path: component_workspace_path(options)
+            .or_else(|| options.source_worktree_path.clone()),
         base_ref: Some(options.base.clone()),
         task_base_sha: options.task_base_sha.clone(),
         candidate_ref: None,
@@ -650,6 +691,30 @@ pub(crate) fn promote_or_load_attempt_in_store(
     options: &AgentTaskCookServiceOptions,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    let aggregate = lifecycle_store.read_aggregate(run_id)?;
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_model",
+                "Cook promotion has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if concrete_provider_model(outcome.selected_model()).is_none() {
+        return Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook promotion requires a concrete executed model",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             let target_path = promotion.target.path.as_deref().or_else(|| {
@@ -674,7 +739,8 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     source,
                     source_run_id: Some(run_id.to_string()),
                     source_path,
-                    source_worktree_path: options.source_worktree_path.clone(),
+                    source_worktree_path: component_workspace_path(options)
+                        .or_else(|| options.source_worktree_path.clone()),
                     base_ref: Some(options.base.clone()),
                     task_base_sha: options.task_base_sha.clone(),
                     candidate_ref: None,
@@ -1075,12 +1141,13 @@ fn verify_replacement_gates_owned(
     // side effects, so a dead owner after this point must recover with external
     // candidate-bound proof rather than replaying an unknown partial execution.
     mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
+    let replacement_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: None,
+            source_worktree_path: replacement_workspace,
             base_ref: Some(verified_base.base.clone()),
             task_base_sha: inputs
                 .and_then(|value| value.get("task_base_sha"))
@@ -1602,7 +1669,8 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             source,
             source_run_id: Some(recovery.run_id.clone()),
             source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
+            source_worktree_path: component_workspace_path(options)
+                .or_else(|| options.source_worktree_path.clone()),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
             candidate_ref: None,

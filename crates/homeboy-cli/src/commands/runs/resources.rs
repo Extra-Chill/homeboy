@@ -474,10 +474,13 @@ fn load_indexes(args: &RunsResourcesArgs) -> Result<Vec<LoadedResourceIndex>> {
     }
 
     let store = ObservationStore::open_initialized()?;
-    load_observation_store_index(&store, args.run_id.as_deref())
+    // Boundary: one `runs resources` load is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    load_observation_store_index(roots.config(), &store, args.run_id.as_deref())
 }
 
 fn load_observation_store_index(
+    config_root: &Path,
     store: &ObservationStore,
     run_id: Option<&str>,
 ) -> Result<Vec<LoadedResourceIndex>> {
@@ -507,7 +510,9 @@ fn load_observation_store_index(
     index
         .resources
         .extend(executor_evidence_resources(store, run_id)?);
-    index.resources.extend(rig_lease_resources(run_id)?);
+    index
+        .resources
+        .extend(rig_lease_resources(config_root, run_id)?);
 
     if index.resources.is_empty() {
         return Ok(Vec::new());
@@ -524,9 +529,12 @@ fn load_observation_store_index(
     }])
 }
 
-fn rig_lease_resources(run_id: Option<&str>) -> Result<Vec<ResourceLifecycleRecord>> {
+fn rig_lease_resources(
+    config_root: &Path,
+    run_id: Option<&str>,
+) -> Result<Vec<ResourceLifecycleRecord>> {
     let mut resources = Vec::new();
-    for diagnostic in homeboy::rig::lease::run_lease_diagnostics()? {
+    for diagnostic in homeboy::rig::lease::run_lease_diagnostics(config_root)? {
         if run_id.is_some_and(|run_id| diagnostic.run_id.as_deref() != Some(run_id)) {
             continue;
         }
@@ -610,7 +618,9 @@ fn load_runtime_diagnostics(
 
     let store = ObservationStore::open_initialized()?;
     let mut outputs = Vec::new();
-    for diagnostic in homeboy::rig::lease::run_lease_diagnostics()? {
+    // Boundary: one resource-lifecycle report is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    for diagnostic in homeboy::rig::lease::run_lease_diagnostics(roots.config())? {
         if args
             .run_id
             .as_deref()
@@ -847,6 +857,18 @@ mod tests {
 
     use super::*;
 
+    /// The isolated home each test below installs, named as a config root.
+    ///
+    /// A test is the entry point for its own unit of work, so resolving here is
+    /// a boundary resolution. What matters is that the production path beneath
+    /// it resolves nothing (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy::core::paths::PathRoots::from_environment()
+            .expect("path roots")
+            .config()
+            .to_path_buf()
+    }
+
     fn temp_store(tempdir: &tempfile::TempDir) -> ObservationStore {
         ObservationStore::open_initialized_at(tempdir.path().join("homeboy.sqlite"))
             .expect("temp observation store")
@@ -1039,7 +1061,8 @@ mod tests {
             };
             record_store_resource(&store, &run.id, &artifact_path, resource.clone());
 
-            let indexes = load_observation_store_index(&store, None).expect("store index");
+            let indexes = load_observation_store_index(&test_config_root(), &store, None)
+                .expect("store index");
 
             assert_eq!(indexes.len(), 1);
             assert_eq!(indexes[0].source, "observation-store");
@@ -1064,7 +1087,8 @@ mod tests {
             std::fs::write(evidence_dir.join("task-1/executor-input.json"), "{}")
                 .expect("evidence file");
 
-            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+                .expect("store index");
             assert_eq!(indexes.len(), 1);
             assert_eq!(indexes[0].source, format!("observation-store:{}", run.id));
             assert_eq!(indexes[0].index.resources.len(), 1);
@@ -1110,7 +1134,8 @@ mod tests {
                 Some(run.id.clone()),
             ));
 
-            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+                .expect("store index");
             let resources = &indexes[0].index.resources;
             assert_eq!(resources.len(), 4);
             assert!(resources
@@ -1127,7 +1152,7 @@ mod tests {
 
             let diagnostic = rig_lease_diagnostic_output(
                 &store,
-                homeboy::rig::lease::run_lease_diagnostics()
+                homeboy::rig::lease::run_lease_diagnostics(&test_config_root())
                     .expect("lease diagnostics")
                     .remove(0),
             )
@@ -1145,8 +1170,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             write_rig_lease(rig_lease("studio", u32::MAX, Some("stale-run".to_string())));
 
-            let diagnostics =
-                homeboy::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+            let diagnostics = homeboy::rig::lease::run_lease_diagnostics(&test_config_root())
+                .expect("lease diagnostics");
             assert_eq!(diagnostics.len(), 1);
             assert!(diagnostics[0].reclaimable_without_force);
             assert_eq!(
@@ -1154,7 +1179,8 @@ mod tests {
                 Some("homeboy rig release-lock studio")
             );
 
-            let resources = rig_lease_resources(None).expect("rig lease resources");
+            let resources =
+                rig_lease_resources(&test_config_root(), None).expect("rig lease resources");
             assert_eq!(resources.len(), 4);
             assert!(
                 resources
@@ -1174,15 +1200,16 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             write_rig_lease(rig_lease("studio", std::process::id(), None));
 
-            let resources = rig_lease_resources(None).expect("rig lease resources");
+            let resources =
+                rig_lease_resources(&test_config_root(), None).expect("rig lease resources");
             assert_eq!(resources[0].run_id, "rig-lease:studio");
             assert_eq!(
                 resources[0].cleanup_command.as_deref(),
                 Some("homeboy runs resources --actionable")
             );
 
-            let diagnostics =
-                homeboy::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+            let diagnostics = homeboy::rig::lease::run_lease_diagnostics(&test_config_root())
+                .expect("lease diagnostics");
             assert!(diagnostics[0].inspect_command.is_none());
             assert!(diagnostics[0].safe_cleanup_command.is_none());
             assert!(diagnostics[0]
@@ -1211,7 +1238,8 @@ mod tests {
             std::fs::write(evidence_dir.join("task-1/executor-result.json"), "{}")
                 .expect("evidence file");
 
-            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+                .expect("store index");
             let resource = &indexes[0].index.resources[0];
 
             assert_eq!(
@@ -1240,7 +1268,8 @@ mod tests {
                 .expect("evidence file");
 
             let mut indexes =
-                load_observation_store_index(&store, Some(run_id)).expect("store index");
+                load_observation_store_index(&test_config_root(), &store, Some(run_id))
+                    .expect("store index");
             let mut resource = indexes.remove(0).index.resources.remove(0);
             resource.ttl = Some("0s".to_string());
 
@@ -1291,7 +1320,8 @@ mod tests {
             ..record(ResourceLifecycleResourceStatus::CleanupPending)
         };
         record_store_resource(&store, &run.id, &artifact_path, resource);
-        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+        let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+            .expect("store index");
 
         let cleanup = build_cleanup_output(
             &indexes[0].index.resources,
@@ -1326,7 +1356,8 @@ mod tests {
             ..record(ResourceLifecycleResourceStatus::CleanupPending)
         };
         record_store_resource(&store, &run.id, &artifact_path, resource);
-        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+        let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+            .expect("store index");
 
         let cleanup = build_cleanup_output(
             &indexes[0].index.resources,
@@ -1546,7 +1577,8 @@ mod tests {
             )
             .expect("artifact with resource lifecycle metadata");
 
-        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+        let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
+            .expect("store index");
 
         let transitioned = &indexes[0].index.resources[0];
         assert_eq!(

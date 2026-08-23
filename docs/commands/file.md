@@ -165,9 +165,12 @@ Fields:
 
 - `source`
 - `destination`
+- `effective_source`: source passed to the transfer backend after sync directory-content semantics are applied
+- `effective_destination`: destination passed to the transfer backend
 - `method`: `scp`, `cat-pipe`, or `tar-pipe`
 - `direction`: `push`, `pull`, or `server-to-server`
 - `recursive`
+- `scope`: `single path`, `recursive path`, or `recursive directory contents`
 - `compress`
 - `success`
 - `error`

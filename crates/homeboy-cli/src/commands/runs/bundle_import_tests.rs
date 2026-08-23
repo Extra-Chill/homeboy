@@ -12,6 +12,14 @@ use super::bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
 use super::dead_owned_run;
 use super::RunsOutput;
 
+/// The observation store the enclosing isolated home installs.
+///
+/// A test is the entry point for its own unit of work, so opening once here
+/// is a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
 struct XdgGuard(Option<String>);
 
 impl XdgGuard {
@@ -68,11 +76,14 @@ fn lab_bundle_run_id_conflicts_are_remapped_idempotently() {
             .expect("finding");
 
         let bundle = home.path().join("lab-conflict-bundle");
-        export_runs(RunsExportArgs {
-            run: Some(run.id.clone()),
-            since: None,
-            output: bundle.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id.clone()),
+                since: None,
+                output: bundle.clone(),
+            },
+        )
         .expect("export");
 
         let conflicting_id = "runner-exec-conflict-fixture";
@@ -137,15 +148,21 @@ fn lab_bundle_run_id_conflicts_are_remapped_idempotently() {
             .expect("rewrite findings");
         }
 
-        import_runs(RunsImportArgs {
-            input: Some(bundle.clone()),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle.clone()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("import remaps conflict");
-        import_runs(RunsImportArgs {
-            input: Some(bundle),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("second import remains idempotent");
 
         let store = ObservationStore::open_initialized().expect("store");
@@ -206,11 +223,14 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
             .record_artifact(&run.id, "fuzz_result_envelope", &artifact_path)
             .expect("artifact");
 
-        let (output, exit) = export_runs(RunsExportArgs {
-            run: Some(run.id.clone()),
-            since: None,
-            output: bundle.clone(),
-        })
+        let (output, exit) = export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id.clone()),
+                since: None,
+                output: bundle.clone(),
+            },
+        )
         .expect("export");
         assert_eq!(exit, 0);
         let RunsOutput::Export(exported) = output else {
@@ -238,10 +258,13 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
 
     with_isolated_home(|_| {
         let _xdg = XdgGuard::unset();
-        import_runs(RunsImportArgs {
-            input: Some(bundle.clone()),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle.clone()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("import");
         let store = ObservationStore::open_initialized().expect("store");
         let imported_artifact = store
@@ -285,11 +308,14 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
             .record_directory_artifact(&run.id, "fuzz_artifacts", &artifact_dir)
             .expect("directory artifact");
 
-        let (output, exit) = export_runs(RunsExportArgs {
-            run: Some(run.id.clone()),
-            since: None,
-            output: bundle.clone(),
-        })
+        let (output, exit) = export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id.clone()),
+                since: None,
+                output: bundle.clone(),
+            },
+        )
         .expect("export");
         assert_eq!(exit, 0);
         let RunsOutput::Export(exported) = output else {
@@ -318,10 +344,13 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
 
     with_isolated_home(|_| {
         let _xdg = XdgGuard::unset();
-        import_runs(RunsImportArgs {
-            input: Some(bundle.clone()),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle.clone()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("import");
         let store = ObservationStore::open_initialized().expect("store");
         let imported_artifact = store

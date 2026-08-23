@@ -14,6 +14,14 @@ use serde_json::Value;
 use super::super::{export_runs, import_runs, RunsExportArgs, RunsImportArgs, RunsOutput};
 use super::{sample_run, XdgGuard};
 
+/// The observation store the enclosing isolated home installs.
+///
+/// A test is the entry point for its own unit of work, so opening once here
+/// is a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
 fn read_bundle_test_json<T: for<'de> Deserialize<'de>>(path: &Path) -> T {
     serde_json::from_str(&std::fs::read_to_string(path).expect("read json")).expect("json")
 }
@@ -31,11 +39,14 @@ fn export_one_run_writes_directory_bundle() {
             .expect("finish");
         let output = home.path().join("bundle");
 
-        let (result, _) = export_runs(RunsExportArgs {
-            run: Some(run.id.clone()),
-            since: None,
-            output: output.clone(),
-        })
+        let (result, _) = export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id.clone()),
+                since: None,
+                output: output.clone(),
+            },
+        )
         .expect("export");
 
         let RunsOutput::Export(result) = result else {
@@ -95,11 +106,14 @@ fn export_includes_findings_and_test_failures() {
             .expect("test failure");
         let output = home.path().join("findings-bundle");
 
-        let (result, _) = export_runs(RunsExportArgs {
-            run: Some(run.id),
-            since: None,
-            output: output.clone(),
-        })
+        let (result, _) = export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: output.clone(),
+            },
+        )
         .expect("export");
 
         let RunsOutput::Export(result) = result else {
@@ -129,11 +143,14 @@ fn export_since_writes_multiple_runs() {
             .expect("second");
         let output = home.path().join("recent-bundle");
 
-        export_runs(RunsExportArgs {
-            run: None,
-            since: Some("1d".to_string()),
-            output: output.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: None,
+                since: Some("1d".to_string()),
+                output: output.clone(),
+            },
+        )
         .expect("export recent");
 
         let runs: Vec<RunRecord> = read_bundle_test_json(&output.join("runs.json"));
@@ -160,11 +177,14 @@ fn export_embeds_local_file_artifact_bytes() {
             .expect("record artifact");
         let output = home.path().join("artifact-bundle");
 
-        export_runs(RunsExportArgs {
-            run: Some(run.id),
-            since: None,
-            output: output.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: output.clone(),
+            },
+        )
         .expect("export");
 
         let artifacts: Vec<ArtifactRecord> = read_bundle_test_json(&output.join("artifacts.json"));
@@ -208,11 +228,14 @@ fn export_rewrites_unproven_remote_artifact_paths_as_metadata_only() {
             .expect("artifact");
         let output = home.path().join("remote-artifact-bundle");
 
-        export_runs(RunsExportArgs {
-            run: Some(run.id),
-            since: None,
-            output: output.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: output.clone(),
+            },
+        )
         .expect("export");
 
         let artifacts: Vec<ArtifactRecord> = read_bundle_test_json(&output.join("artifacts.json"));
@@ -242,11 +265,14 @@ fn export_trace_spans_when_present() {
             .expect("span");
         let output = home.path().join("trace-bundle");
 
-        export_runs(RunsExportArgs {
-            run: Some(run.id),
-            since: None,
-            output: output.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: output.clone(),
+            },
+        )
         .expect("export");
 
         let spans: Vec<TraceSpanRecord> = read_bundle_test_json(&output.join("trace_spans.json"));
@@ -291,26 +317,35 @@ fn import_into_empty_db_and_reimport_is_idempotent() {
                     metadata_json: serde_json::json!({ "record_kind": "failure" }),
                 })
                 .expect("finding");
-            export_runs(RunsExportArgs {
-                run: Some(run.id.clone()),
-                since: None,
-                output: bundle.clone(),
-            })
+            export_runs(
+                &test_store(),
+                RunsExportArgs {
+                    run: Some(run.id.clone()),
+                    since: None,
+                    output: bundle.clone(),
+                },
+            )
             .expect("export");
             run.id
         };
         std::fs::remove_file(home.path().join(".local/share/homeboy/homeboy.sqlite"))
             .expect("remove db");
 
-        import_runs(RunsImportArgs {
-            input: Some(bundle.clone()),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle.clone()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("import");
-        import_runs(RunsImportArgs {
-            input: Some(bundle.clone()),
-            ..RunsImportArgs::default()
-        })
+        import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle.clone()),
+                ..RunsImportArgs::default()
+            },
+        )
         .expect("second import is idempotent");
 
         let store = ObservationStore::open_initialized().expect("store");
@@ -338,10 +373,13 @@ fn malformed_bundle_validation_fails_clearly() {
         std::fs::create_dir_all(&bundle).expect("bundle dir");
         std::fs::write(bundle.join("manifest.json"), "not json").expect("manifest");
 
-        let err = match import_runs(RunsImportArgs {
-            input: Some(bundle),
-            ..RunsImportArgs::default()
-        }) {
+        let err = match import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle),
+                ..RunsImportArgs::default()
+            },
+        ) {
             Ok(_) => panic!("malformed bundle should fail"),
             Err(err) => err,
         };
@@ -359,11 +397,14 @@ fn conflicting_existing_rows_fail_clearly() {
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
             .expect("run");
         let bundle = home.path().join("conflict-bundle");
-        export_runs(RunsExportArgs {
-            run: Some(run.id.clone()),
-            since: None,
-            output: bundle.clone(),
-        })
+        export_runs(
+            &test_store(),
+            RunsExportArgs {
+                run: Some(run.id.clone()),
+                since: None,
+                output: bundle.clone(),
+            },
+        )
         .expect("export");
         let mut runs: Vec<RunRecord> = read_bundle_test_json(&bundle.join("runs.json"));
         runs[0].status = "pass".to_string();
@@ -373,10 +414,13 @@ fn conflicting_existing_rows_fail_clearly() {
         )
         .expect("rewrite runs");
 
-        let err = match import_runs(RunsImportArgs {
-            input: Some(bundle),
-            ..RunsImportArgs::default()
-        }) {
+        let err = match import_runs(
+            &test_store(),
+            RunsImportArgs {
+                input: Some(bundle),
+                ..RunsImportArgs::default()
+            },
+        ) {
             Ok(_) => panic!("conflicting import should fail"),
             Err(err) => err,
         };

@@ -4,12 +4,24 @@ use crate::install::local_package_source_root_for_dependencies;
 use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
     load_local_source, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
-    read_source_metadata, read_stack_source_metadata, run_check, run_lint,
+    read_source_metadata_in_root, read_stack_source_metadata_in_root, run_check, run_lint,
 };
 use homeboy_core::test_support::HomeGuard;
 use homeboy_core::ErrorCode;
 use std::fs;
 use std::path::Path;
+
+/// The isolated home each test below installs, named as a config root.
+///
+/// A test is the entry point for its own unit of work, so resolving once here is
+/// a boundary resolution, not an ambient one. What matters is that the
+/// production path beneath it resolves nothing (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::PathRoots::from_environment()
+        .expect("path roots")
+        .config()
+        .to_path_buf()
+}
 
 use crate::rig_test_support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
 
@@ -60,7 +72,13 @@ mod discovery {
         let package = tempfile::tempdir().expect("package");
         let source = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
         assert!(result.linked);
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
@@ -74,7 +92,8 @@ mod discovery {
         assert!(installed_content.contains("${env.DEV_ROOT}/alpha"));
         assert!(installed_content.contains("${components.app.path}"));
 
-        let metadata = read_source_metadata("alpha").expect("metadata");
+        let metadata =
+            read_source_metadata_in_root(&test_config_root(), "alpha").expect("metadata");
         assert!(metadata.linked);
         assert_eq!(metadata.rig_path, source.to_string_lossy());
     }
@@ -373,7 +392,13 @@ mod install_flows {
         write_rig(package.path(), "studio", &minimal_rig("studio"));
         let stack_path = write_stack(package.path(), "studio-combined", "studio");
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
 
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed_stacks.len(), 1);
@@ -382,14 +407,23 @@ mod install_flows {
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        assert_eq!(homeboy_stack::stack::list().expect("stack list").len(), 1);
         assert_eq!(
-            homeboy_stack::stack::load("studio-combined")
-                .expect("load stack")
-                .component,
+            homeboy_stack::stack::list(&homeboy_core::paths::homeboy().expect("config root"))
+                .expect("stack list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            homeboy_stack::stack::load(
+                &homeboy_core::paths::homeboy().expect("config root"),
+                "studio-combined",
+            )
+            .expect("load stack")
+            .component,
             "studio"
         );
-        let metadata = read_stack_source_metadata("studio-combined").expect("stack metadata");
+        let metadata = read_stack_source_metadata_in_root(&test_config_root(), "studio-combined")
+            .expect("stack metadata");
         assert!(metadata.linked);
         assert_eq!(metadata.stack_path, stack_path.to_string_lossy());
     }
@@ -401,7 +435,13 @@ mod install_flows {
             let first_package = tempfile::tempdir().expect("first package");
             write_rig(first_package.path(), "studio", &minimal_rig("studio"));
             write_stack(first_package.path(), "studio-combined", "studio");
-            install(first_package.path().to_str().unwrap(), None, false).expect("install first");
+            install(
+                &test_config_root(),
+                first_package.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .expect("install first");
             if remove_original_source {
                 fs::remove_dir_all(first_package.path()).expect("remove stale source");
             }
@@ -418,8 +458,13 @@ mod install_flows {
                 .expect("update stack content");
             }
 
-            let result = install(second_package.path().to_str().unwrap(), None, false)
-                .expect("reinstall replaces owned stack link");
+            let result = install(
+                &test_config_root(),
+                second_package.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .expect("reinstall replaces owned stack link");
 
             assert_eq!(result.installed_stacks.len(), 1);
             let installed =
@@ -456,10 +501,13 @@ mod install_flows {
         );
         GitFixture::init(repo.path()).commit("nested package with shared dependency");
 
-        let result =
-            install(nested.to_str().unwrap(), None, false).expect("install nested package");
-        let metadata =
-            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
+            .expect("install nested package");
+        let metadata = read_source_metadata_in_root(
+            &test_config_root(),
+            "static-site-importer-fixture-matrix",
+        )
+        .expect("metadata");
         let repo_root = repo.path().canonicalize().expect("canonical repo root");
         let package_root = nested.canonicalize().expect("canonical package root");
         let rigs = discover_rigs(&nested).expect("discover local rigs");
@@ -504,10 +552,13 @@ mod install_flows {
             }"#,
         );
 
-        let result =
-            install(nested.to_str().unwrap(), None, false).expect("install materialized package");
-        let metadata =
-            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
+            .expect("install materialized package");
+        let metadata = read_source_metadata_in_root(
+            &test_config_root(),
+            "static-site-importer-fixture-matrix",
+        )
+        .expect("metadata");
         let source_root = snapshot.canonicalize().expect("canonical source root");
         let package_root = nested.canonicalize().expect("canonical package root");
         let rigs = discover_rigs(&nested).expect("discover materialized rigs");
@@ -542,7 +593,7 @@ mod install_flows {
             }"#,
         );
 
-        let err = install(nested.to_str().unwrap(), None, false)
+        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("dependency outside snapshot should fail");
 
         assert!(err
@@ -569,7 +620,7 @@ mod install_flows {
         );
         GitFixture::init(&repo).commit("bad dependency");
 
-        let err = install(nested.to_str().unwrap(), None, false)
+        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("dependency outside repo should fail");
 
         assert!(err
@@ -593,7 +644,7 @@ mod install_flows {
         );
         GitFixture::init(repo.path()).commit("bad dependency");
 
-        let err = install(nested.to_str().unwrap(), None, false)
+        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("absolute dependency should fail");
 
         assert!(err.message.contains("non-empty relative paths"));
@@ -611,8 +662,14 @@ mod install_flows {
         )
         .expect("conflict fixture");
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let rig = load("lint-fixture").expect("load rig");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
+        let rig = load(&test_config_root(), "lint-fixture").expect("load rig");
         let report = run_check(&rig).expect("check report");
 
         assert!(
@@ -653,8 +710,11 @@ mod install_flows {
         let report = run_check(&rig).expect("check local package rig");
 
         assert!(report.success, "local package check should pass");
-        assert!(read_source_metadata("local-alpha").is_none());
-        assert!(load("local-alpha").is_err(), "rig should not be installed");
+        assert!(read_source_metadata_in_root(&test_config_root(), "local-alpha").is_none());
+        assert!(
+            load(&test_config_root(), "local-alpha").is_err(),
+            "rig should not be installed"
+        );
     }
 
     #[test]
@@ -711,7 +771,7 @@ mod install_flows {
             crate::expand::expand_vars(&rig, "${package.root}/marker.txt"),
             package.path().join("marker.txt").to_string_lossy()
         );
-        assert!(read_source_metadata("direct-alpha").is_none());
+        assert!(read_source_metadata_in_root(&test_config_root(), "direct-alpha").is_none());
     }
 
     #[test]
@@ -747,7 +807,13 @@ mod install_flows {
         }"#,
         );
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
 
         assert_eq!(result.installed.len(), 1);
         let installed_path = homeboy_core::paths::rig_config("alpha").expect("rig config");
@@ -755,13 +821,13 @@ mod install_flows {
         assert!(fs::read_link(&installed_path).is_err());
         let installed = fs::read_to_string(&installed_path).expect("installed rig");
         assert!(!installed.contains("extends"));
-        let rig = load("alpha").expect("load rig");
+        let rig = load(&test_config_root(), "alpha").expect("load rig");
         assert_eq!(rig.description, "alpha rig");
         assert_eq!(rig.components["app"].path, "${env.DEV_ROOT}/alpha");
         assert_eq!(rig.components["app"].branch.as_deref(), Some("main"));
         assert_eq!(rig.pipeline["check"].len(), 1);
         assert!(
-            read_source_metadata("alpha")
+            read_source_metadata_in_root(&test_config_root(), "alpha")
                 .expect("metadata")
                 .materialized
         );
@@ -787,11 +853,16 @@ mod install_flows {
         }"#,
         );
 
-        let result = install(package.path().to_str().unwrap(), None, false)
-            .expect("install registry-backed component rig");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install registry-backed component rig");
 
         assert_eq!(result.installed.len(), 1);
-        let rig = load("registry-backed").expect("load registry-backed rig");
+        let rig = load(&test_config_root(), "registry-backed").expect("load registry-backed rig");
         let component = &rig.components["app"];
         assert!(component.path.is_empty());
         assert_eq!(component.component_id.as_deref(), Some("registry-app"));
@@ -815,8 +886,13 @@ mod install_flows {
         )
         .expect("rig json");
 
-        let err = install(package.path().to_str().unwrap(), None, false)
-            .expect_err("schema error should fail install discovery");
+        let err = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect_err("schema error should fail install discovery");
 
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(err.details["field"], "rig_spec");
@@ -839,7 +915,8 @@ mod install_flows {
         )
         .expect("rig json");
 
-        let err = install(package.to_str().unwrap(), None, false).expect_err("outside extends");
+        let err = install(&test_config_root(), package.to_str().unwrap(), None, false)
+            .expect_err("outside extends");
 
         assert_eq!(err.details["field"], "extends");
         assert!(err.message.contains("inside the rig package source root"));
@@ -876,8 +953,14 @@ mod install_flows {
         }"#,
         );
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let rig = load("trace-defaults").expect("load rig");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
+        let rig = load(&test_config_root(), "trace-defaults").expect("load rig");
         let workloads = rig
             .trace_workloads
             .get("trace-runner")
@@ -920,8 +1003,14 @@ mod install_flows {
         }"#,
         );
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let rig = load("lint-only").expect("load rig");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
+        let rig = load(&test_config_root(), "lint-only").expect("load rig");
 
         // Full check fails: the requirement file and probe file are both absent.
         let check = run_check(&rig).expect("check report");
@@ -957,8 +1046,14 @@ mod install_flows {
         )
         .expect("conflict fixture");
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let rig = load("lint-conflict").expect("load rig");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
+        let rig = load(&test_config_root(), "lint-conflict").expect("load rig");
         let lint = run_lint(&rig).expect("lint report");
 
         assert!(!lint.success, "conflict markers should fail rig lint");
@@ -988,8 +1083,14 @@ mod install_flows {
         fs::write(datamachine.join("notes.txt"), "<<<<<<< ours\n")
             .expect("conflict inside ignored dir");
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let rig = load("lint-dm").expect("load rig");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
+        let rig = load(&test_config_root(), "lint-dm").expect("load rig");
         let lint = run_lint(&rig).expect("lint report");
 
         assert!(
@@ -1056,7 +1157,13 @@ mod install_flows {
                 ),
             );
 
-            install(package.path().to_str().unwrap(), None, false).expect("install");
+            install(
+                &test_config_root(),
+                package.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .expect("install");
 
             let installed_path = homeboy_core::paths::rig_config(id).expect("rig config");
             let installed = fs::read_to_string(&installed_path).expect("installed rig");
@@ -1081,7 +1188,7 @@ mod install_flows {
                 assert_eq!(build["metadata"]["timeout"], expected_timeout);
             }
 
-            load(id).expect("load materialized rig");
+            load(&test_config_root(), id).expect("load materialized rig");
         }
     }
 
@@ -1115,7 +1222,13 @@ mod install_flows {
         }"#,
         );
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
+        install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install");
         let installed_path = homeboy_core::paths::rig_config("replacer").expect("rig config");
         let installed = fs::read_to_string(&installed_path).expect("installed rig");
         let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
@@ -1175,8 +1288,13 @@ mod install_flows {
                 ),
             );
 
-            let err = install(package.path().to_str().unwrap(), None, false)
-                .expect_err("invalid directive should fail");
+            let err = install(
+                &test_config_root(),
+                package.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .expect_err("invalid directive should fail");
 
             assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
             assert_eq!(err.details["field"], expected_field);
@@ -1204,7 +1322,13 @@ mod multi_rig {
         write_rig(package.path(), "alpha", &minimal_rig("alpha"));
         write_rig(package.path(), "beta", &minimal_rig("beta"));
 
-        let err = install(package.path().to_str().unwrap(), None, false).expect_err("error");
+        let err = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect_err("error");
         assert!(err.message.contains("multiple rigs"));
         assert!(err.message.contains("alpha"));
         assert!(err.message.contains("beta"));
@@ -1217,8 +1341,13 @@ mod multi_rig {
         write_rig(package.path(), "alpha", &minimal_rig("alpha"));
         write_rig(package.path(), "beta", &minimal_rig("beta"));
 
-        let result =
-            install(package.path().to_str().unwrap(), Some("beta"), false).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            Some("beta"),
+            false,
+        )
+        .expect("install");
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "beta");
         assert!(homeboy_core::paths::rig_config("beta").unwrap().exists());
@@ -1232,7 +1361,13 @@ mod multi_rig {
         let stale_source = tempfile::tempdir().expect("stale source");
         write_rig(stale_source.path(), "stale-rig", &minimal_rig("stale-rig"));
         let stale_stack = write_stack(stale_source.path(), "stale-stack", "stale-component");
-        install(stale_source.path().to_str().unwrap(), None, false).expect("install stale source");
+        install(
+            &test_config_root(),
+            stale_source.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("install stale source");
         fs::remove_dir_all(stale_source.path()).expect("remove stale source");
 
         let package = tempfile::tempdir().expect("package");
@@ -1240,8 +1375,13 @@ mod multi_rig {
         write_rig(package.path(), "beta", &minimal_rig("beta"));
         write_stack(package.path(), "stale-stack", "other-component");
 
-        let result = install(package.path().to_str().unwrap(), Some("alpha"), false)
-            .expect("install requested rig despite stale unrelated stack source");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            Some("alpha"),
+            false,
+        )
+        .expect("install requested rig despite stale unrelated stack source");
 
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
@@ -1268,8 +1408,13 @@ mod multi_rig {
         )
         .expect("broken rig json");
 
-        let result =
-            install(package.path().to_str().unwrap(), Some("alpha"), false).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            Some("alpha"),
+            false,
+        )
+        .expect("install");
 
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
@@ -1283,8 +1428,13 @@ mod multi_rig {
         let package = tempfile::tempdir().expect("package");
         write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-        let err = install(package.path().to_str().unwrap(), Some("missing"), false)
-            .expect_err("missing rig should error");
+        let err = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            Some("missing"),
+            false,
+        )
+        .expect_err("missing rig should error");
 
         assert_eq!(err.details["field"], "id");
         assert!(err.message.contains("missing"));
@@ -1298,7 +1448,13 @@ mod multi_rig {
         write_rig(package.path(), "alpha", &minimal_rig("alpha"));
         write_rig(package.path(), "beta", &minimal_rig("beta"));
 
-        let result = install(package.path().to_str().unwrap(), None, true).expect("install");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            true,
+        )
+        .expect("install");
         assert_eq!(result.installed.len(), 2);
         assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
         assert!(homeboy_core::paths::rig_config("beta").unwrap().exists());
@@ -1316,8 +1472,13 @@ mod multi_rig {
             r#"{"id":"unsupported-cleanup","lifecycle":{"cleanup":42}}"#,
         );
 
-        let error = install(package.path().to_str().unwrap(), None, true)
-            .expect_err("package preflight should reject incompatible member");
+        let error = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            true,
+        )
+        .expect_err("package preflight should reject incompatible member");
 
         assert_eq!(error.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(error.details["atomic"], true);
@@ -1355,14 +1516,22 @@ mod refresh_and_identity {
         )
         .expect("stale installed rig");
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("refresh");
 
         assert_eq!(result.installed.len(), 1);
         let installed = fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
             .expect("installed rig");
         assert!(installed.contains("alpha rig refreshed"));
         assert_eq!(
-            read_source_metadata("alpha").expect("metadata").rig_path,
+            read_source_metadata_in_root(&test_config_root(), "alpha")
+                .expect("metadata")
+                .rig_path,
             package.path().join("rigs/alpha/rig.json").to_string_lossy()
         );
     }
@@ -1380,7 +1549,13 @@ mod refresh_and_identity {
         std::os::unix::fs::symlink(package.path().join("missing-rig.json"), &installed)
             .expect("broken rig symlink");
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("refresh");
 
         assert_eq!(result.installed.len(), 1);
         assert_eq!(fs::read_link(&installed).expect("updated symlink"), source);
@@ -1401,7 +1576,13 @@ mod refresh_and_identity {
         )
         .expect("conflicting installed rig");
 
-        let err = install(package.path().to_str().unwrap(), None, false).expect_err("collision");
+        let err = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect_err("collision");
         assert!(err.message.contains("refusing to replace"));
     }
 
@@ -1419,11 +1600,18 @@ mod refresh_and_identity {
         )
         .expect("existing stack");
 
-        let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
+        let result = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("refresh");
 
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        let metadata = read_stack_source_metadata("studio-combined").expect("stack metadata");
+        let metadata = read_stack_source_metadata_in_root(&test_config_root(), "studio-combined")
+            .expect("stack metadata");
         assert_eq!(metadata.stack_path, stack_path.to_string_lossy());
     }
 
@@ -1440,8 +1628,13 @@ mod refresh_and_identity {
             homeboy_core::paths::stack_config("studio-combined").expect("stack path");
         fs::write(&stack_config, &manual_stack).expect("conflicting stack");
 
-        let err =
-            install(package.path().to_str().unwrap(), None, false).expect_err("stack collision");
+        let err = install(
+            &test_config_root(),
+            package.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect_err("stack collision");
         assert!(err.message.contains("different content"));
         assert_eq!(
             fs::read_to_string(stack_config).expect("manual stack preserved"),
@@ -1459,23 +1652,25 @@ mod refresh_and_identity {
         )
         .expect("replacement rig");
 
-        let ids = list_ids().expect("list ids");
+        let ids = list_ids(&test_config_root()).expect("list ids");
         assert_eq!(ids, vec!["replacement"]);
 
-        let rigs = list().expect("list rigs");
+        let rigs = list(&test_config_root()).expect("list rigs");
         assert_eq!(rigs.len(), 1);
         assert_eq!(rigs[0].id, "replacement");
         assert_eq!(
-            declared_id("replacement").expect("declared id"),
+            declared_id(&test_config_root(), "replacement").expect("declared id"),
             Some("alpha".to_string())
         );
 
         assert_eq!(
-            load("replacement").expect("load replacement").id,
+            load(&test_config_root(), "replacement")
+                .expect("load replacement")
+                .id,
             "replacement"
         );
 
-        let err = load("alpha").expect_err("alpha should not resolve");
+        let err = load(&test_config_root(), "alpha").expect_err("alpha should not resolve");
         assert_eq!(err.message, "Rig not found");
         assert_eq!(err.details["id"], "alpha");
         let hints = err
@@ -1505,8 +1700,11 @@ mod refresh_and_identity {
         )
         .expect("non-json rig sidecar");
 
-        assert_eq!(list_ids().expect("list ids"), vec!["alpha"]);
-        assert_eq!(list().expect("list rigs").len(), 1);
+        assert_eq!(
+            list_ids(&test_config_root()).expect("list ids"),
+            vec!["alpha"]
+        );
+        assert_eq!(list(&test_config_root()).expect("list rigs").len(), 1);
     }
 }
 
@@ -1530,7 +1728,7 @@ mod git_url {
 
         let root_source = bare.path().join("rig-package.git");
         let source = format!("{}//packages/studio", root_source.to_string_lossy());
-        let result = install(&source, None, false).expect("install subpath");
+        let result = install(&test_config_root(), &source, None, false).expect("install subpath");
 
         assert!(!result.linked);
         assert_eq!(result.source, root_source.to_string_lossy());
@@ -1550,7 +1748,8 @@ mod git_url {
             .unwrap()
             .exists());
 
-        let metadata = read_source_metadata("studio").expect("metadata");
+        let metadata =
+            read_source_metadata_in_root(&test_config_root(), "studio").expect("metadata");
         assert_eq!(metadata.source, root_source.to_string_lossy());
         assert!(metadata.rig_path.ends_with("packages/studio/rig.json"));
     }
@@ -1558,8 +1757,13 @@ mod git_url {
     #[test]
     fn git_url_subpath_rejects_invalid_relative_path() {
         let _home = HomeGuard::new();
-        let err = install("https://example.com/rigs.git//../secrets", None, false)
-            .expect_err("invalid subpath");
+        let err = install(
+            &test_config_root(),
+            "https://example.com/rigs.git//../secrets",
+            None,
+            false,
+        )
+        .expect_err("invalid subpath");
 
         assert!(err.message.contains("non-empty relative path"));
     }

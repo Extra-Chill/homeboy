@@ -11,8 +11,8 @@ use crate::workspace::snapshot::{
     snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
     synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
     workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -783,6 +783,43 @@ fn workspace_content_hash_skips_runner_metadata_removed_after_discovery() {
 }
 
 #[test]
+fn workspace_content_manifest_and_hash_share_one_traversal_instant() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let first = workspace.path().join("a-first.txt");
+    let trigger = workspace.path().join("z-trigger.txt");
+    fs::write(&first, "before\n").expect("first file");
+    fs::write(&trigger, "trigger\n").expect("trigger file");
+
+    let first_to_mutate = first.clone();
+    let _hook = register_after_snapshot_directory_discovery_hook(trigger, move || {
+        fs::write(first_to_mutate, "after\n").expect("mutate first file after its traversal");
+    });
+    let (manifest, identity) = workspace_content_manifest_and_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    )
+    .expect("collect manifest and identity");
+
+    let first_entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.path == "a-first.txt")
+        .expect("first file manifest entry");
+    assert_eq!(first_entry.bytes, Some(7));
+    assert_ne!(
+        identity,
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+        )
+        .expect("identity after mutation"),
+        "the source mutation happened after the shared traversal read the first file"
+    );
+}
+
+#[test]
 fn test_sync_workspace() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
@@ -1547,6 +1584,94 @@ fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
 }
 
 #[test]
+fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    fs::create_dir_all(source.join("src/generated-output")).expect("generated output directory");
+    fs::write(source.join("src/lib.rs"), "pub fn stable() {}\n").expect("source file");
+    fs::write(source.join("src/generated-output/state.json"), "ignored\n").expect("ignored output");
+    for index in 0..128 {
+        let sibling = source.join(format!("worktrees/sibling-{index}"));
+        fs::create_dir_all(&sibling).expect("sibling directory");
+        fs::write(sibling.join("build-output"), "ignored\n").expect("sibling output");
+    }
+
+    let excludes = vec![
+        "./src/generated-output".to_string(),
+        "./worktrees".to_string(),
+    ];
+    let baseline = snapshot_stable_manifest(&source, &excludes).expect("baseline manifest");
+    for destination in [
+        workspace.path().join("first"),
+        workspace.path().join("second"),
+    ] {
+        copy_snapshot_to_directory(&source, &destination, &excludes)
+            .expect("ignored outputs must not enter the staging archive");
+        assert_eq!(
+            snapshot_stable_manifest(&destination, &[]).expect("staged manifest"),
+            baseline,
+            "repeated snapshot must preserve the source manifest"
+        );
+        assert!(!destination.join("src/generated-output").exists());
+        assert!(!destination.join("worktrees").exists());
+    }
+}
+
+#[test]
+fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let tracked_build = source.join("crates/homeboy-extension/src/build");
+    fs::create_dir_all(&tracked_build).expect("tracked build source directory");
+    fs::create_dir_all(source.join("build")).expect("ignored root build directory");
+    fs::write(tracked_build.join("mod.rs"), "pub mod local_permissions;\n")
+        .expect("tracked build source");
+    fs::write(source.join("build/generated.bin"), "ignored\n").expect("ignored build output");
+    let excludes = vec!["./build".to_string(), "./build/**".to_string()];
+
+    let source_manifest = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let input_manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &input_manifest, None)
+        .expect("snapshot preacceptance stage");
+    let staged_source = stage.path().join("source");
+    let staged_manifest = snapshot_stable_manifest(&staged_source, &[]).expect("staged manifest");
+    let current_manifest = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+    assert_eq!(source_manifest, staged_manifest);
+    assert_eq!(staged_manifest, current_manifest);
+    assert!(staged_source
+        .join("crates/homeboy-extension/src/build/mod.rs")
+        .is_file());
+    assert!(!staged_source.join("build").exists());
+
+    let provider_workspace = workspace.path().join("provider-workspace");
+    let provider_marker = workspace.path().join("provider-executed");
+    fs::create_dir_all(&provider_workspace).expect("provider workspace");
+    let target_command = format!(
+        "tar -C {} -xf - && test -f {} && test ! -e {} && touch {}",
+        homeboy_core::engine::shell::quote_arg(&provider_workspace.display().to_string()),
+        homeboy_core::engine::shell::quote_arg(
+            &provider_workspace
+                .join("crates/homeboy-extension/src/build/mod.rs")
+                .display()
+                .to_string()
+        ),
+        homeboy_core::engine::shell::quote_arg(
+            &provider_workspace.join("build").display().to_string()
+        ),
+        homeboy_core::engine::shell::quote_arg(&provider_marker.display().to_string()),
+    );
+    materialize_snapshot_piped(
+        &source,
+        &target_command,
+        &excludes,
+        "test Lab provider execution",
+        None,
+    )
+    .expect("snapshot preacceptance reaches provider execution");
+    assert!(provider_marker.is_file());
+}
+
+#[test]
 fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift() {
     let source = tempfile::tempdir().expect("source");
     let scratch = tempfile::tempdir().expect("admitted scratch");
@@ -1592,6 +1717,79 @@ fn snapshot_stability_rejects_a_mixed_staged_tree_even_if_source_is_restored() {
     )
     .expect_err("mixed staged tree must fail even after source ABA restoration");
     assert_eq!(error.details["classification"], "snapshot_construction");
+    assert!(
+        error.message.contains("bounded differing entries"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("runtime-overlays"), "{error:?}");
+}
+
+#[test]
+fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace_root = tempfile::tempdir().expect("workspace root");
+        let source = workspace_root.path().join("homeboy@task");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::create_dir_all(&source).expect("source directory");
+        fs::write(source.join("tracked.txt"), "source\n").expect("tracked source");
+        fs::write(source.join(".gitignore"), "generated/\ntarget/\n").expect("gitignore");
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test User"]);
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "baseline"]);
+        for index in 0..16 {
+            let sibling = workspace_root
+                .path()
+                .join(format!("homeboy@sibling-{index}"));
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&sibling)
+                .arg("HEAD")
+                .current_dir(&source)
+                .output()
+                .expect("create sibling worktree");
+            assert!(
+                output.status.success(),
+                "create sibling worktree: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fs::create_dir_all(source.join("generated/runtime")).expect("generated directory");
+        fs::create_dir_all(source.join("target/debug")).expect("target directory");
+        fs::write(source.join("generated/runtime/output.js"), "generated\n")
+            .expect("generated output");
+        fs::write(source.join("target/debug/homeboy"), "binary\n").expect("target output");
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-stable-clean-worktree","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let options = RunnerWorkspaceSyncOptions {
+            path: source.display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
+        };
+
+        for attempt in 0..3 {
+            let (synced, exit_code) = sync_workspace("lab-stable-clean-worktree", options.clone())
+                .expect("clean worktree snapshot must remain stable");
+            assert_eq!(exit_code, 0, "attempt {attempt}");
+            let staged = Path::new(&synced.remote_path);
+            assert!(staged.join("tracked.txt").is_file());
+            assert!(!staged.join("generated/runtime/output.js").exists());
+            assert!(!staged.join("target/debug/homeboy").exists());
+        }
+    });
 }
 
 #[cfg(unix)]

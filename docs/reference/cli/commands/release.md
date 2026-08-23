@@ -32,6 +32,7 @@ Plan release workflows
 | `--preflight-runner` | `<RUNNER_ID>` | Run portable lint and test release gates through the existing Lab review commands before controller-owned release mutation |
 | `--preflight-placement` | `<PREFLIGHT_PLACEMENT>` | Placement policy for portable release preflight gates Values: `local`, `lab`. |
 | `--dry-run` | flag | _no help text_ |
+| `--full` | flag | Emit the complete release command-result envelope on stdout |
 | `--apply` | flag | Confirm risky release execution modes |
 | `--deploy` | flag | Deploy to all projects using this component after release |
 | `--recover` | flag | Recover from an interrupted release (tag + push current version) |

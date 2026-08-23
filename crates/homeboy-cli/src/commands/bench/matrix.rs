@@ -40,8 +40,14 @@ fn prepare_rig_bench_context(
     rig_id: &str,
     args: &BenchRunArgs,
 ) -> homeboy::core::Result<RigBenchContext> {
-    let mut source =
-        rig::RigSourceContext::load_for_invocation_at(rig_id, args.comp.path.as_deref())?;
+    // Boundary: one rig bench run is one unit of work; the roots resolved here
+    // also bind the lease below (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let mut source = rig::RigSourceContext::load_for_invocation_at(
+        roots.config(),
+        rig_id,
+        args.comp.path.as_deref(),
+    )?;
     report_rig_source(&source);
     let mut spec = source.spec.clone();
     let declared_spec = spec.clone();
@@ -49,8 +55,12 @@ fn prepare_rig_bench_context(
     source.spec = spec.clone();
     rig::preflight_effective_component_checkouts(&spec)?;
     let prepare_settings = bench_prepare_settings(args);
-    let lease =
-        rig::lease::acquire_active_run_lease_with_settings(&spec, "bench", &prepare_settings)?;
+    let lease = rig::lease::acquire_active_run_lease_with_settings(
+        roots.config(),
+        &spec,
+        "bench",
+        &prepare_settings,
+    )?;
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
         if !prepare.success {
             return Err(homeboy::core::Error::rig_pipeline_failed(
@@ -156,8 +166,12 @@ pub(super) fn validate_profile_available_for_rigs(
     let mut available_by_rig = Vec::new();
 
     for rig_id in &args.rig {
-        let spec =
-            rig::RigSourceContext::load_for_invocation_at(rig_id, args.comp.path.as_deref())?.spec;
+        let spec = rig::RigSourceContext::load_for_invocation_at(
+            &super::bench_config_root()?,
+            rig_id,
+            args.comp.path.as_deref(),
+        )?
+        .spec;
         if !spec.bench_profiles.contains_key(profile) {
             missing.push(rig_id.clone());
         }

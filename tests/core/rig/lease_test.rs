@@ -9,6 +9,18 @@ use crate::{run_up, RigRunLease};
 use homeboy_core::error::ErrorCode;
 use homeboy_core::test_support::with_isolated_home;
 
+/// The isolated home each test below installs, named as a config root.
+///
+/// A test is the entry point for its own unit of work, so resolving once here is
+/// a boundary resolution, not an ambient one. What matters is that the
+/// production path beneath it resolves nothing (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::PathRoots::from_environment()
+        .expect("path roots")
+        .config()
+        .to_path_buf()
+}
+
 struct EnvVarGuard {
     name: &'static str,
     previous: Option<String>,
@@ -85,19 +97,21 @@ fn test_acquire_active_run_lease_blocks_overlapping_resources_until_drop() {
         let studio = rig("studio", resources());
         let studio_bfb = rig("studio-bfb", resources());
 
-        let lease = acquire_active_run_lease(&studio, "up")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
             .expect("first lease")
             .expect("resourceful rig leases");
-        let conflict =
-            acquire_active_run_lease(&studio_bfb, "up").expect_err("second lease conflicts");
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
+            .expect_err("second lease conflicts");
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
         assert!(conflict.message.contains("studio-runtime"));
         assert!(conflict.message.contains("studio"));
 
         drop(lease);
-        assert!(acquire_active_run_lease(&studio_bfb, "up")
-            .expect("lease after drop")
-            .is_some());
+        assert!(
+            acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
+                .expect("lease after drop")
+                .is_some()
+        );
     });
 }
 
@@ -115,11 +129,11 @@ fn test_resource_conflict_reports_active_run_context_when_available() {
         let studio = rig("studio", resources());
         let studio_bfb = rig("studio-bfb", resources());
 
-        let lease = acquire_active_run_lease(&studio, "trace")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "trace")
             .expect("first lease")
             .expect("resourceful rig leases");
-        let conflict =
-            acquire_active_run_lease(&studio_bfb, "trace").expect_err("second lease conflicts");
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "trace")
+            .expect_err("second lease conflicts");
 
         assert_eq!(conflict.details["held_by"]["run_id"], "trace-run-123");
         assert_eq!(conflict.details["held_by"]["runner_id"], "lab-runner-1");
@@ -144,11 +158,11 @@ fn test_acquire_active_run_lease_blocks_env_expanded_exclusive_resources() {
         let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
         let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
 
-        let lease = acquire_active_run_lease(&studio, "up")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
             .expect("first lease")
             .expect("resourceful rig leases");
-        let conflict =
-            acquire_active_run_lease(&studio_bfb, "up").expect_err("expanded token conflicts");
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
+            .expect_err("expanded token conflicts");
 
         match previous {
             Some(value) => std::env::set_var("RIG_LEASE_NAMESPACE", value),
@@ -174,11 +188,21 @@ fn test_acquire_active_run_lease_expands_settings_in_resources() {
         let studio_bfb = rig("studio-bfb", resources);
         let settings = vec![("fixture_namespace".to_string(), "bench-a".to_string())];
 
-        let lease = acquire_active_run_lease_with_settings(&studio, "bench", &settings)
-            .expect("first lease")
-            .expect("resourceful rig leases");
-        let conflict = acquire_active_run_lease_with_settings(&studio_bfb, "bench", &settings)
-            .expect_err("settings-expanded token conflicts");
+        let lease = acquire_active_run_lease_with_settings(
+            &test_config_root(),
+            &studio,
+            "bench",
+            &settings,
+        )
+        .expect("first lease")
+        .expect("resourceful rig leases");
+        let conflict = acquire_active_run_lease_with_settings(
+            &test_config_root(),
+            &studio_bfb,
+            "bench",
+            &settings,
+        )
+        .expect_err("settings-expanded token conflicts");
 
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
         assert!(conflict.message.contains("fixture:bench-a"));
@@ -196,10 +220,10 @@ fn test_acquire_active_run_lease_uses_default_namespace_for_empty_exclusive_reso
         let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
         let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
 
-        let lease = acquire_active_run_lease(&studio, "trace")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "trace")
             .expect("first lease")
             .expect("resourceful rig leases");
-        let conflict = acquire_active_run_lease(&studio_bfb, "trace")
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "trace")
             .expect_err("default namespace token conflicts");
 
         match previous {
@@ -219,10 +243,10 @@ fn test_active_run_leases_lists_live_leases_without_mutating_them() {
     with_isolated_home(|_| {
         let studio = rig("studio", resources());
 
-        let lease = acquire_active_run_lease(&studio, "up")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
             .expect("first lease")
             .expect("resourceful rig leases");
-        let leases = active_run_leases().expect("list active leases");
+        let leases = active_run_leases(&test_config_root()).expect("list active leases");
 
         assert_eq!(leases.len(), 1);
         assert_eq!(leases[0].rig_id, "studio");
@@ -230,7 +254,7 @@ fn test_active_run_leases_lists_live_leases_without_mutating_them() {
         assert_eq!(leases[0].pid, std::process::id());
 
         drop(lease);
-        assert!(active_run_leases()
+        assert!(active_run_leases(&test_config_root())
             .expect("list active leases after drop")
             .is_empty());
     });
@@ -241,16 +265,21 @@ fn test_trace_compare_lease_allows_same_process_child_trace() {
     with_isolated_home(|_| {
         let studio = rig("studio", resources());
 
-        let compare_lease = acquire_active_run_lease(&studio, "trace compare")
+        let compare_lease = acquire_active_run_lease(&test_config_root(), &studio, "trace compare")
             .expect("compare lease")
             .expect("resourceful rig leases");
-        let child_lease = acquire_active_run_lease(&studio, "trace")
+        let child_lease = acquire_active_run_lease(&test_config_root(), &studio, "trace")
             .expect("child trace lease should be allowed under compare");
 
         assert!(child_lease.is_none());
-        assert_eq!(active_run_leases().expect("list active leases").len(), 1);
+        assert_eq!(
+            active_run_leases(&test_config_root())
+                .expect("list active leases")
+                .len(),
+            1
+        );
         drop(compare_lease);
-        assert!(active_run_leases()
+        assert!(active_run_leases(&test_config_root())
             .expect("list active leases after drop")
             .is_empty());
     });
@@ -277,9 +306,11 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
         .expect("write stale lease");
 
         let studio_bfb = rig("studio-bfb", resources());
-        assert!(acquire_active_run_lease(&studio_bfb, "up")
-            .expect("stale pid ignored")
-            .is_some());
+        assert!(
+            acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
+                .expect("stale pid ignored")
+                .is_some()
+        );
     });
 }
 
@@ -315,7 +346,7 @@ fn test_ttl_reclaims_live_but_stale_lease() {
 
         let studio_bfb = rig("studio-bfb", resources());
         assert!(
-            acquire_active_run_lease(&studio_bfb, "bench")
+            acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
                 .expect("ttl-stale lease is reclaimable")
                 .is_some(),
             "a live-but-stale holder past its TTL must be reclaimable"
@@ -328,12 +359,12 @@ fn test_live_holder_within_ttl_still_conflicts() {
     with_isolated_home(|_| {
         let _ttl = EnvVarGuard::set(RIG_LEASE_TTL_ENV, "100000");
         let studio = rig("studio", resources());
-        let lease = acquire_active_run_lease(&studio, "bench")
+        let lease = acquire_active_run_lease(&test_config_root(), &studio, "bench")
             .expect("first lease")
             .expect("resourceful rig leases");
 
         let studio_bfb = rig("studio-bfb", resources());
-        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
             .expect_err("a live, recent holder within its TTL must still conflict");
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
 
@@ -349,7 +380,7 @@ fn test_no_ttl_keeps_live_holder_locked() {
         write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
 
         let studio_bfb = rig("studio-bfb", resources());
-        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
             .expect_err("without a TTL a live holder is never stolen");
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
     });
@@ -361,7 +392,7 @@ fn test_resource_conflict_includes_age_and_reclaim_command() {
         write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
 
         let studio_bfb = rig("studio-bfb", resources());
-        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
             .expect_err("live holder conflicts without a TTL");
 
         let age = conflict.details["held_by"]["age_seconds"]
@@ -381,7 +412,8 @@ fn test_resource_conflict_includes_age_and_reclaim_command() {
 #[test]
 fn test_release_lock_reports_no_lease_when_absent() {
     with_isolated_home(|_| {
-        let outcome = release_active_run_lease("studio", false).expect("release with no lease");
+        let outcome = release_active_run_lease(&test_config_root(), "studio", false)
+            .expect("release with no lease");
         assert!(matches!(outcome, ReleaseLeaseOutcome::NoLease { .. }));
     });
 }
@@ -400,7 +432,8 @@ fn test_release_lock_frees_dead_holder_without_force() {
         };
         write_lease(&dead);
 
-        let outcome = release_active_run_lease("studio", false).expect("release dead holder");
+        let outcome = release_active_run_lease(&test_config_root(), "studio", false)
+            .expect("release dead holder");
         match outcome {
             ReleaseLeaseOutcome::Released {
                 was_reclaimable,
@@ -412,7 +445,9 @@ fn test_release_lock_frees_dead_holder_without_force() {
             }
             other => panic!("expected Released, got {other:?}"),
         }
-        assert!(active_run_leases().expect("list").is_empty());
+        assert!(active_run_leases(&test_config_root())
+            .expect("list")
+            .is_empty());
     });
 }
 
@@ -422,12 +457,12 @@ fn test_release_lock_requires_force_for_live_holder() {
         std::env::remove_var(RIG_LEASE_TTL_ENV);
         write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
 
-        let err = release_active_run_lease("studio", false)
+        let err = release_active_run_lease(&test_config_root(), "studio", false)
             .expect_err("a live holder must not be released without force");
         assert_eq!(err.code, ErrorCode::RigResourceConflict);
 
-        let outcome =
-            release_active_run_lease("studio", true).expect("force releases the live holder");
+        let outcome = release_active_run_lease(&test_config_root(), "studio", true)
+            .expect("force releases the live holder");
         match outcome {
             ReleaseLeaseOutcome::Released {
                 was_reclaimable,
@@ -450,7 +485,7 @@ fn test_run_up_acquires_active_run_lease() {
     with_isolated_home(|_| {
         let studio = rig("studio", resources());
         let studio_bfb = rig("studio-bfb", resources());
-        let _lease = acquire_active_run_lease(&studio, "up")
+        let _lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
             .expect("first lease")
             .expect("resourceful rig leases");
 

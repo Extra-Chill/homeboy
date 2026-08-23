@@ -567,6 +567,29 @@ struct ActiveWorktrees {
     available: bool,
 }
 
+/// Executables selected by durable controller recovery. A selected executable
+/// inside a rebuildable target is still an active recovery dependency.
+#[derive(Debug, Default)]
+struct ProtectedControllerExecutables {
+    paths: HashSet<PathBuf>,
+}
+
+impl ProtectedControllerExecutables {
+    fn resolve() -> Result<Self> {
+        Ok(Self {
+            paths: crate::controller_runtime::protected_executables()?
+                .into_iter()
+                .map(|path| canonical_or_owned(&path))
+                .collect(),
+        })
+    }
+
+    fn contains_in(&self, artifact: &Path) -> bool {
+        let artifact = canonical_or_owned(artifact);
+        self.paths.iter().any(|path| path.starts_with(&artifact))
+    }
+}
+
 impl ActiveWorktrees {
     fn resolve() -> Self {
         let Ok(listing) = crate::worktree::list_unlocked() else {
@@ -836,6 +859,7 @@ fn collect_worktree_candidates(
     worktree: &WorktreeInfo,
     options: &ArtifactCleanupOptions,
     active: &ActiveWorktrees,
+    protected: &ProtectedControllerExecutables,
 ) -> Result<WorktreeCandidateScan> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -928,6 +952,15 @@ fn collect_worktree_candidates(
                 } else {
                     "checkout is a registered active task worktree"
                 },
+            ));
+            continue;
+        }
+        if declaration.kind == "rust_target" && protected.contains_in(&artifact_path) {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "artifact contains an executable selected by active controller runtime recovery",
             ));
             continue;
         }
@@ -1037,6 +1070,7 @@ fn cleanup_artifacts_in_worktrees(
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
     let mut active = ActiveWorktrees::resolve();
+    let protected = ProtectedControllerExecutables::resolve()?;
     if !registry_quarantines.is_empty() {
         active.available = false;
     }
@@ -1048,7 +1082,7 @@ fn cleanup_artifacts_in_worktrees(
         // A single stale/non-Git/vanished worktree candidate must not abort the
         // whole batch: classify it, record a bounded diagnostic, and continue so
         // independent valid worktrees are still cleaned (#9925).
-        match collect_worktree_candidates(worktree, options, &active) {
+        match collect_worktree_candidates(worktree, options, &active, &protected) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
                 skipped: worktree_skipped,
@@ -1445,6 +1479,18 @@ fn apply_artifact_candidate(
         }
     }
     let path = Path::new(&candidate.path);
+    if candidate.kind == "rust_target" {
+        let protected = match ProtectedControllerExecutables::resolve() {
+            Ok(protected) => protected,
+            Err(error) => return ArtifactCleanupCandidateApplyOutcome::Failed(error),
+        };
+        if protected.contains_in(path) {
+            return ArtifactCleanupCandidateApplyOutcome::Skipped(
+                "artifact became selected by active controller runtime recovery before removal"
+                    .to_string(),
+            );
+        }
+    }
     if !path.exists() {
         return ArtifactCleanupCandidateApplyOutcome::Skipped(
             "artifact no longer exists after discovery".to_string(),
@@ -2435,6 +2481,53 @@ mod tests {
         assert_eq!(output.applied_count, 2);
         assert!(!repo.path().join("target").exists());
         assert!(!repo.path().join(".cargo-target").exists());
+    }
+
+    #[test]
+    fn controller_runtime_recovery_executable_protects_its_target_only() {
+        crate::test_support::with_isolated_home(|_| {
+            let protected_repo = repo_with_ignored_artifacts();
+            let unrelated_repo = repo_with_ignored_artifacts();
+            let protected_binary = protected_repo.path().join("target/release/homeboy");
+            write_file(&protected_binary, "selected recovery executable");
+            write_file(
+                &unrelated_repo.path().join("target/release/homeboy"),
+                "unrelated build output",
+            );
+            let runtime_root = crate::controller_runtime::runtime_root_in(
+                &homeboy_paths::homeboy_data().expect("data root"),
+            )
+            .expect("runtime root");
+            fs::write(
+                runtime_root.join("active.json"),
+                serde_json::json!({
+                    "originating": { "executable": protected_binary }
+                })
+                .to_string(),
+            )
+            .expect("register active controller runtime");
+
+            let retained = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(protected_repo.path().to_path_buf()),
+                apply: true,
+                ..Default::default()
+            })
+            .expect("cleanup protected source checkout");
+            let reclaimed = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(unrelated_repo.path().to_path_buf()),
+                apply: true,
+                ..Default::default()
+            })
+            .expect("cleanup unrelated source checkout");
+
+            assert_eq!(retained.applied_count, 0);
+            assert!(retained.skipped.iter().any(|row| {
+                row.relative_path == "target" && row.reason.contains("controller runtime recovery")
+            }));
+            assert_eq!(reclaimed.applied_count, 1);
+            assert!(protected_binary.exists());
+            assert!(!unrelated_repo.path().join("target").exists());
+        });
     }
 
     #[cfg(unix)]
@@ -3944,6 +4037,7 @@ mod tests {
             },
             &ArtifactCleanupOptions::default(),
             &ActiveWorktrees::default(),
+            &ProtectedControllerExecutables::default(),
         );
         assert!(
             scan.is_err(),

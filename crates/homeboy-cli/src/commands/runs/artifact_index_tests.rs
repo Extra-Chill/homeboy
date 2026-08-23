@@ -5,6 +5,14 @@ use serde_json::Value;
 use super::types::RunsArtifactsArgs;
 use super::{handlers, list_runs, RunsListArgs, RunsOutput};
 
+/// The observation store the enclosing isolated home installs.
+///
+/// A test is the entry point for its own unit of work, so opening once here
+/// is a boundary open, not an ambient one inside production code (#7505).
+fn test_store() -> homeboy::core::observation::ObservationStore {
+    homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+}
+
 struct XdgGuard(Option<String>);
 
 struct PublicArtifactBaseGuard(Option<String>);
@@ -93,6 +101,7 @@ fn runs_list_rig_filter_surfaces_compact_artifact_index() {
             .expect("record report");
 
         let (output, _) = list_runs(
+            &test_store(),
             RunsListArgs {
                 active: false,
                 task_url: None,

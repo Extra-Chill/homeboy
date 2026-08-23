@@ -1,28 +1,18 @@
 # Required CI Gates
 
 > [!IMPORTANT]
-> **Branch protection deliberately requires NO status checks (2026-08-22).**
+> **The checked-in policy requires the eight status checks below.**
 >
-> The `main` ruleset (`13680120`) carries only `deletion` and
-> `non_fast_forward`. Making the eight contexts below *required* was an
-> unwanted change: with 35 pre-existing test failures on `main`, `homeboy /
-> Test` fails on every pull request, so a required-checks rule blocks the
-> entire merge queue rather than protecting it.
+> The live `main` ruleset (`13680120`) is audited hourly against that policy.
+> Audit is read-only and fails closed with a replayable before/desired/after
+> artifact when the ruleset drifts. It never changes GitHub state.
 >
-> **Do not reconcile the live ruleset to the declaration in
-> `.github/required-gates-ruleset.json`.** That is exactly what #12904 added
-> and why it was reverted — its own live verification re-added the rule 75
-> minutes after it was deliberately removed, and the merge queue stopped again.
->
-> The declaration below is retained as a *description of which contexts CI
-> emits*, which is what `validate-required-gates.sh --report` measures and what
-> `required-gates-executed` enforces inside a run. Neither makes GitHub require
-> anything, and `--report` is non-blocking by construction
-> (`reporting_never_blocks_a_pull_request`). Reporting `unenforced` is the
-> intended steady state, not drift to repair.
->
-> Re-enabling required checks is a deliberate decision that belongs to the
-> repository owner, and it should follow a green suite, not precede one.
+> Reconciliation is a separate, explicit `workflow_dispatch` operation from
+> `main`, protected by the `main-ruleset-administration` environment. It only
+> updates the existing ruleset ID after the exact current `main` revision has a
+> successful `homeboy / Test`; it then verifies the effective branch rule. The
+> evidence records a policy version, source revision, and canonical policy
+> fingerprint so an operator can replay the decision.
 
 
 Three different things can be true or false here, and conflating them is what
@@ -83,9 +73,9 @@ Prior to #11084 this job was named `homeboy / Required Gates Policy` and ran
 that green tick, because `repos/Extra-Chill/homeboy/rules/branches/main` carried
 no required-status-check rule at all.
 
-This is a reporting fix on purpose. The repository merges fast by design and a
-post-merge guard was removed by design; the defect was the false assurance, not
-the absence of a block.
+This reporting check does not itself merge-protect a pull request. The active
+ruleset must require these contexts; the audit and approved reconciliation path
+keep that repository state converged with the reviewed declaration.
 
 ## Execution: What A Green Run Has To Mean
 
@@ -104,7 +94,7 @@ two independent things and fails unless both hold:
 | direction | claim |
 | --- | --- |
 | dependency results | every gate job `ci.yml` names in its `needs` concluded `success`; `skipped` and `cancelled` are failures here, not silence |
-| observed execution | every declared context appears in this run's job list with conclusion `success`, read back from `actions/runs/<id>/jobs` |
+| observed execution | every non-terminal declared context appears in this run's job list with conclusion `success`, read back from `actions/runs/<id>/jobs`; the terminal context is enforced by GitHub after this job succeeds |
 
 | outcome | meaning |
 | --- | --- |
@@ -130,13 +120,22 @@ without wiring it into the terminal job turns `Required Gates Declaration` red.
 ## Apply And Verify
 
 The GitHub ruleset is repository state, so it cannot be changed by a pull
-request. `Required Gates Ruleset` is an approved manual operation from `main`.
-It does not create another ruleset. Reconciliation first requires a successful
-`homeboy / Test` check on the current `main` SHA, so it cannot re-enable strict
-required checks while the main suite is red. Configure the `main-ruleset-administration`
-environment with required reviewers, administrator bypass disabled, and a
-repository-administration token named `HOMEBOY_RULESET_ADMIN_TOKEN`; only the
-approved manual reconciliation job can use that credential.
+request. `Required Gates Ruleset` audits hourly and supports an approved manual
+reconciliation operation from `main`. It does not create another ruleset.
+Reconciliation derives its preflight from the versioned `homeboy / Test`
+required context. GitHub's check-runs API reports that main-push job under its
+canonical name `Test`, while the PR UI displays the required context as
+`homeboy / Test`. The preflight requires the canonical API name, a `success`
+conclusion, and the integration ID declared by that required context (`15368`),
+so a same-named external check cannot satisfy it and strict required checks are
+not re-enabled while the main suite is red. Every reconciliation failure writes
+a bounded `required-gates-ruleset-reconcile.json` artifact with
+the failed stage, reason, canonical name, and integration ID. Issue #12833
+remains open until the
+`main-ruleset-administration` environment is provisioned with required
+reviewers and administrator bypass disabled, its scoped
+`HOMEBOY_RULESET_ADMIN_TOKEN` is available only to the approved manual job, and
+reconciliation succeeds with verified evidence.
 
 After reviewing the audit artifact, dispatch reconciliation from `main`:
 

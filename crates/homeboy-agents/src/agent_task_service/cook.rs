@@ -15,7 +15,10 @@ use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
-use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::agent_task_promotion::{
+    candidate_fingerprint, AgentTaskPromotionCandidate, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
+};
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
@@ -473,7 +476,10 @@ const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250
 /// before Cook can start any provider mutation or execution.
 const COOK_PROVIDER_RESOLVE_ATTEMPTS: u32 = 2;
 const COOK_PROVIDER_RESOLVE_BACKOFF: Duration = Duration::from_millis(100);
-const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(90);
+// Leave a small, explicit grace window around a provider's maximum supported
+// lookup budget so a configured 120-second exact-handle lookup is not cut off
+// by Cook before the provider can return its authoritative answer.
+const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(121);
 const COOK_PROVIDER_RESOLVE_MIN_BUDGET: Duration = Duration::from_millis(50);
 
 /// One Cook progress event, as delivered to a foreground observer.
@@ -4079,8 +4085,7 @@ fn run_cook_reported(
                     record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
                 }
                 if error.retryable != Some(true)
-                    && record.metadata["pre_execution_failure"]["phase"].as_str()
-                        == Some("cook_pre_execution")
+                    && record.metadata.get("pre_execution_failure").is_some()
                 {
                     return Ok(pre_execution_failure_report(
                         failure_options.cook_id.clone(),
@@ -4530,12 +4535,27 @@ fn run_cook_spine(
                     }
                     if Instant::now() >= next_heartbeat {
                         next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                        let phase = lookup_lifecycle_store
+                            .read_record(&lookup_run_id)
+                            .ok()
+                            .and_then(|record| {
+                                record.metadata["cook_progress"]["phase"]
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                            .filter(|phase| {
+                                matches!(
+                                    phase.as_str(),
+                                    "worktree_provider_lookup" | "worktree_provider_ensure"
+                                )
+                            })
+                            .unwrap_or_else(|| "worktree_provider_lookup".to_string());
                         let _ = report_cook_progress(
                             lookup_lifecycle_store,
                             durable_observer,
                             &lookup_cook_id,
                             &lookup_run_id,
-                            "worktree_provider_lookup",
+                            &phase,
                             1,
                             Some("bounded provider workspace lookup is still running"),
                         );
@@ -4990,7 +5010,10 @@ fn run_cook_spine(
                         });
                     }
                 }
-                if options.attempt_dispatcher.is_none() {
+                // A controller-owned baseline replaces the admitted workspace
+                // for both local and detached dispatch. Attest that exact
+                // replacement before either path can persist or hand it off.
+                if effective_baseline.is_some() || options.attempt_dispatcher.is_none() {
                     bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 }
                 failed_dispatch_plan = Some(dispatch_plan.clone());
@@ -5002,7 +5025,6 @@ fn run_cook_spine(
                         effective_baseline.map(CookFollowUpBaseline::capability),
                     )
                 } else {
-                    validate_cook_workspace(&options)?;
                     admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
@@ -6404,7 +6426,14 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
         let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
-        if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+        // A persisted identity must still be fresh, non-primary, and pushed.
+        // Its only admissible dirty state is authenticated below against this
+        // attempt's persisted promoted-candidate fingerprint.
+        if !safety.fresh
+            || safety.unpushed
+            || identity.primary
+            || (safety.dirty && continuation.is_none())
+        {
             return Err(Error::validation_invalid_argument(
                 "to_worktree",
                 "provider safety attestation is not current and safe for Cook execution",
@@ -6449,7 +6478,82 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
     }
+    preflight_cook_workspace_base_ancestry(&target, &options.base)
+        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))?;
     Ok(())
+}
+
+/// A candidate diff is meaningful only when its destination contains the
+/// resolved base. Otherwise base-only files appear to be provider changes.
+fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<()> {
+    let AgentTaskPromotionCandidate::Git { fingerprint } =
+        candidate_fingerprint(target.to_string_lossy().as_ref())?
+    else {
+        return Ok(());
+    };
+    // A provider-owned Git destination can intentionally have no origin. When
+    // origin is configured, resolve its authoritative base directly instead of
+    // trusting a potentially absent shallow or single-branch tracking ref.
+    let origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(target)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !origin.status.success() {
+        return Ok(());
+    }
+    let Some(resolved_base) =
+        crate::agent_task_promotion::capture_declared_base(target, Some(base))?
+    else {
+        return Ok(());
+    };
+    let counts = homeboy_core::git::run_git(
+        target,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...HEAD", resolved_base.sha),
+        ],
+        "compare Cook destination to resolved base",
+    )?;
+    let Some((behind, ahead)) = counts
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .get(..2)
+        .and_then(|parts| Some((parts[0].parse::<u64>().ok()?, parts[1].parse::<u64>().ok()?)))
+    else {
+        return Err(Error::git_command_failed(
+            "could not classify Cook destination ancestry against resolved base".to_string(),
+        ));
+    };
+    if behind == 0 {
+        return Ok(());
+    }
+    let direction = if ahead == 0 { "behind" } else { "diverged" };
+    let mut error = Error::validation_invalid_argument(
+        "base",
+        format!(
+            "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
+            resolved_base.base, resolved_base.sha
+        ),
+        Some(target.display().to_string()),
+        Some(vec![format!(
+            "Update the destination with `{}` and rerun Cook; provider execution has not started.",
+            format!("git merge --ff-only {}", resolved_base.sha)
+        )]),
+    );
+    error.details["workspace_base_ancestry"] = serde_json::json!({
+        "schema": "homeboy/cook-workspace-base-ancestry/v1",
+        "base": resolved_base.base,
+        "resolved_base": resolved_base.sha,
+        "destination_head": fingerprint.head,
+        "direction": direction,
+        "base_only_commits": behind,
+        "candidate_only_commits": ahead,
+        "next_action": "converge_destination_before_provider",
+    });
+    Err(error)
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can
@@ -6784,10 +6888,14 @@ fn materialize_pending_cook_workspace(
     };
     let mut identity = match resolve(options) {
         Ok(identity) => identity,
-        Err(error)
-            if provider_id(options).is_none()
-                && error.details["worktree_provider_lookup"] == "not_found" =>
-        {
+        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
+            agent_task_lifecycle::record_cook_progress_in_store(
+                lifecycle_store,
+                &options.initial_run_id,
+                "worktree_provider_ensure",
+                1,
+                Some("starting controller-owned provider workspace materialization"),
+            )?;
             let provision = provision_pending_cook_workspace(lifecycle_store, options, &config)?;
             // Pin the provider that performed the durable mutation. A later
             // continuation re-resolves this exact destination through its owner.

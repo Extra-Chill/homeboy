@@ -57,8 +57,7 @@ pub struct RunsProofOutput {
     pub fuzz: Option<FuzzProof>,
 }
 
-pub fn proof(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub fn proof(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     runs_service::require_run(&store, run_id)?;
     runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);

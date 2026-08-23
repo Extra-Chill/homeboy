@@ -105,6 +105,9 @@ pub struct AgentTaskFanoutPortfolioObservation {
 pub enum AgentTaskFanoutTrackerState {
     Open,
     Closed,
+    /// The recipe declared the tracker identity, but no forge observation is
+    /// available for its current state.
+    DeclaredUnobserved,
     #[default]
     Unknown,
 }
@@ -871,6 +874,26 @@ mod tests {
     }
 
     #[test]
+    fn declared_unobserved_tracker_preserves_identity_without_a_missing_tracker_blocker() {
+        let mut portfolio = AgentTaskFanoutPortfolio::new("declared-tracker", [child("child")]);
+        let mut state = observation("child");
+        state.tracker = AgentTaskFanoutTrackerState::DeclaredUnobserved;
+
+        let status = portfolio.reconcile([state], &IndependentFanoutDependencies);
+
+        assert_eq!(status.children[0].tracker_ref, "https://tracker/child");
+        assert_eq!(
+            status.children[0].tracker,
+            AgentTaskFanoutTrackerState::DeclaredUnobserved
+        );
+        assert!(status.children[0].blocker.is_none());
+        assert_eq!(
+            status.children[0].next_action,
+            AgentTaskFanoutPortfolioAction::ResumeFinalization
+        );
+    }
+
+    #[test]
     fn finding_fingerprints_retain_all_active_evidence_and_bound_recent_history() {
         let mut portfolio = AgentTaskFanoutPortfolio::new("bounded-findings", [child("child")]);
         for index in 0..150 {
@@ -1139,6 +1162,10 @@ mod tests {
 
         assert_eq!(wire(AgentTaskFanoutTrackerState::Open), "open");
         assert_eq!(wire(AgentTaskFanoutTrackerState::Closed), "closed");
+        assert_eq!(
+            wire(AgentTaskFanoutTrackerState::DeclaredUnobserved),
+            "declared_unobserved"
+        );
         assert_eq!(wire(AgentTaskFanoutTrackerState::Unknown), "unknown");
 
         assert_eq!(wire(AgentTaskFanoutProviderState::Pending), "pending");
