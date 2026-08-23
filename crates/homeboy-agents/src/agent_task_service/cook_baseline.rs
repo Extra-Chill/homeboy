@@ -301,6 +301,7 @@ pub(crate) fn materialize_follow_up_baseline_in_root(
 pub(crate) fn compare_gate_failures_to_verified_base(
     promotion: &mut AgentTaskPromotionReport,
     repository_root: &std::path::Path,
+    gate_workspace: &std::path::Path,
     base_sha: &str,
     timeout: std::time::Duration,
     mut checkpoint: impl FnMut(usize, usize) -> Result<()>,
@@ -318,6 +319,18 @@ pub(crate) fn compare_gate_failures_to_verified_base(
     if unresolved == 0 {
         return Ok(());
     }
+    let repository_root = repository_root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("canonicalize Cook gate repository root".to_string()),
+        )
+    })?;
+    let gate_workspace = gate_workspace.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("canonicalize Cook gate workspace".to_string()),
+        )
+    })?;
     let baseline_root = tempfile::tempdir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -325,11 +338,19 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         )
     })?;
     let baseline_path = baseline_root.path().join("base");
+    let gate_workspace_relative = gate_workspace.strip_prefix(&repository_root).map_err(|_| {
+        Error::validation_invalid_argument(
+            "gate_workspace",
+            "Cook gate workspace is outside its repository root",
+            Some(gate_workspace.display().to_string()),
+            None,
+        )
+    })?;
     let output = std::process::Command::new("git")
         .args(["worktree", "add", "--detach"])
         .arg(&baseline_path)
         .arg(base_sha)
-        .current_dir(repository_root)
+        .current_dir(&repository_root)
         .output()
         .map_err(|error| {
             Error::internal_io(
@@ -344,7 +365,36 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         ));
     }
     let comparison = (|| -> Result<()> {
-        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_path)?;
+        let canonical_baseline_path = baseline_path.canonicalize().map_err(|error| {
+            Error::validation_invalid_argument(
+                "gate_workspace",
+                format!("canonicalize Cook gate baseline root: {error}"),
+                Some(baseline_path.display().to_string()),
+                None,
+            )
+        })?;
+        let baseline_gate_workspace = homeboy_core::resolve_contained_local_path(
+            &canonical_baseline_path,
+            gate_workspace_relative,
+            "gate_workspace",
+        )?;
+        let baseline_gate_workspace = baseline_gate_workspace.canonicalize().map_err(|error| {
+            Error::validation_invalid_argument(
+                "gate_workspace",
+                format!("canonicalize Cook baseline component workspace: {error}"),
+                Some(baseline_gate_workspace.display().to_string()),
+                None,
+            )
+        })?;
+        if !baseline_gate_workspace.starts_with(&canonical_baseline_path) {
+            return Err(Error::validation_invalid_argument(
+                "gate_workspace",
+                "canonical Cook baseline component workspace escapes its baseline root",
+                Some(baseline_gate_workspace.display().to_string()),
+                None,
+            ));
+        }
+        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_gate_workspace)?;
         let mut compared = 0;
         for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
             if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some() {
@@ -371,7 +421,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     &homeboy_core::engine::invocation::InvocationRequirements::default(),
                 )?;
                 run_gate_command_with_timeout(
-                    &baseline_path,
+                    &baseline_gate_workspace,
                     index + 1,
                     &command,
                     gate.visibility,
@@ -503,7 +553,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
     let cleanup = std::process::Command::new("git")
         .args(["worktree", "remove", "--force"])
         .arg(&baseline_path)
-        .current_dir(repository_root)
+        .current_dir(&repository_root)
         .status()
         .map_err(|error| {
             Error::internal_io(
@@ -896,6 +946,7 @@ mod tests {
 
             let result = compare_gate_failures_to_verified_base(
                 &mut promotion,
+                temp.path(),
                 temp.path(),
                 &base,
                 timeout,
