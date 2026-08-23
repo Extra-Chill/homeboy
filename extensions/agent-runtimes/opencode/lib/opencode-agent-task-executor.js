@@ -1056,11 +1056,19 @@ function sessionMetadata(context = {}) {
 	if (context.sessionMetadata) {
 		return context.sessionMetadata;
 	}
-	const sessionId = openCodeSessionId(context.spawnResult?.stdout);
-	if (!sessionId || !isOpenCodeCommand(context.commandSpec)) {
+	const sessionIds = openCodeSessionIds(context.spawnResult?.stdout);
+	if (!isOpenCodeCommand(context.commandSpec) || sessionIds.length === 0) {
 		context.sessionMetadata = OPENCODE_SESSION_METADATA_ABSENT;
 		return context.sessionMetadata;
 	}
+	if (sessionIds.length !== 1) {
+		context.sessionMetadata = {
+			status: 'unavailable',
+			reason: 'OpenCode completion output contained conflicting session identifiers.',
+		};
+		return context.sessionMetadata;
+	}
+	const [sessionId] = sessionIds;
 	const result = spawnSync(context.commandSpec.command, [
 		...arrayValue(context.commandSpec.args),
 		'export',
@@ -1103,14 +1111,11 @@ function sessionMetadata(context = {}) {
 	return context.sessionMetadata;
 }
 
-function openCodeSessionId(stdout = '') {
-	for (const event of parseJsonObjectsFromText(stdout)) {
-		const sessionId = stringValue(event.sessionID || event.session_id || event.part?.sessionID);
-		if (sessionId) {
-			return sessionId;
-		}
-	}
-	return '';
+function openCodeSessionIds(stdout = '') {
+	return [...new Set(parseJsonObjectsFromText(stdout)
+		.flatMap((event) => [event.sessionID, event.session_id, event.part?.sessionID])
+		.map(stringValue)
+		.filter(Boolean))];
 }
 
 function parseOpenCodeExport(output = '') {
