@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.2] - 2026-08-23
+
+### Changed
+- open one observation store per HTTP request
+- open one observation store per `runs` invocation
+
+### Fixed
+- run `runner exec` against one observation store
+- reconcile runner-exec recovery through one store
+- persist resolved provider model provenance
+- recover orphaned retry replacements
+- preserve reconcile preflight evidence
+
 ## [0.355.1] - 2026-08-23
 
 ### Fixed
