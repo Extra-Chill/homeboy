@@ -57,6 +57,7 @@ homeboy_wp_codebox_resolve_bin() {
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
         [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.wpCodeboxBin // empty' 2>/dev/null || true)
     fi
     [ -n "$candidate" ] || candidate="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
 
@@ -315,6 +316,32 @@ homeboy_wp_codebox_resolved_bin_path() {
     printf '%s\n' "$bin"
 }
 
+# Keep shell runners on the same version, capability, and managed-runtime
+# identity gate as Node readiness. This validates the exact argv below instead
+# of resolving a second candidate after a caller has selected one.
+homeboy_wp_codebox_preflight_command() {
+    local script_dir
+    local resolver
+    local selection_module
+    local result
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    resolver="${script_dir}/agent-runtime-paths.cjs"
+    selection_module="$(node "${resolver}" "wp-codebox/lib/wp-codebox-runtime-selection.js")" || return 1
+    result="$(node - "${selection_module}" "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" <<'NODE'
+const { preflightWpCodeboxCommand } = require(process.argv[2]);
+const result = preflightWpCodeboxCommand(process.argv.slice(3));
+if (!result.ready) {
+    process.stdout.write(`WP Codebox ${result.reason}: required >=${result.required_version}, observed ${result.selected.version || 'unavailable'} at ${result.selected.path || 'no executable'}. Run ${result.remediation}.\n`);
+    process.exit(1);
+}
+NODE
+)" || {
+        [ -n "${result}" ] && printf '%s\n' "${result}" >&2
+        return 1
+    }
+}
+
 homeboy_wp_codebox_run_recipe() {
     local recipe_file="$1"
     local artifacts_dir="$2"
@@ -328,6 +355,7 @@ homeboy_wp_codebox_run_recipe() {
         bin="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || return 1
     fi
     homeboy_wp_codebox_set_command "$bin"
+    homeboy_wp_codebox_preflight_command || return 1
 
     case $- in
         *e*) had_errexit=1 ;;

@@ -102,15 +102,15 @@ try {
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/default/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/default/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wpCodeboxBin: '/path/request/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/request/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, runtime_bin: '/path/runtime/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/runtime/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/explicit/wp-codebox', executable: '' }),

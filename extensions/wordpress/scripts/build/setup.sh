@@ -12,6 +12,17 @@ set -euo pipefail
 
 EXTENSION_PATH="$(pwd)"
 
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        echo "WP Codebox source install requires shasum or sha256sum to bind the managed CLI." >&2
+        return 1
+    fi
+}
+
 install_wp_codebox() {
     write_github_env() {
         local name="$1"
@@ -438,7 +449,10 @@ EOF
     # Bind the built CLI bytes and checkout revision to this managed cache.
     # Runner readiness verifies both before it accepts the cache.
     local cli_sha256
-    cli_sha256="$(shasum -a 256 "${source_bin_path}" | awk '{print $1}')"
+    cli_sha256="$(sha256_file "${source_bin_path}")" || {
+        echo "Failed to hash built WP Codebox CLI: ${source_bin_path}" >&2
+        exit 1
+    }
     printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"${source_sha}\",\"cli_sha256\":\"${cli_sha256}\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "${repo_dir}/.homeboy-runtime-identity.json"
 
     probe_wp_codebox_runtime "${source_bin_path}" || {

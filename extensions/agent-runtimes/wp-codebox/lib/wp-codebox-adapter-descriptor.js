@@ -64,9 +64,8 @@ function wpCodeboxBin(options = {}) {
     managedWpCodeboxBin(env),
   ];
   return firstValue(
-    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : []),
     ...configuredCandidates,
-    ...(options.preferPackagedRuntime ? [] : packagedRuntimeCandidates),
+    ...packagedRuntimeCandidates,
     options.executable === undefined ? descriptor.executable : options.executable,
   );
 }
