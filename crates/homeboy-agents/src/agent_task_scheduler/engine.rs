@@ -1554,9 +1554,13 @@ pub(super) fn deferred_cleanup_action_artifact(
         "safe_next_action": "Wait for cleanup completion; mutable workspace recovery is intentionally deferred until provider exit.",
     });
     let content = serde_json::to_vec_pretty(&action).expect("cleanup action serializes");
-    std::fs::write(&path, &content).map_err(|error| HarvestError::ArtifactWrite {
-        path: path.clone(),
-        message: error.to_string(),
+    // The aggregate may expose this path as soon as this function returns, so
+    // publish only a complete descriptor.
+    write_deferred_cleanup_action(&path, &content).map_err(|error| {
+        HarvestError::ArtifactWrite {
+            path: path.clone(),
+            message: error.to_string(),
+        }
     })?;
     Ok(AgentTaskArtifact {
         schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -1592,15 +1596,34 @@ pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf
     }
 }
 
+fn write_deferred_cleanup_action(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .expect("cleanup action has a parent directory");
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .expect("cleanup action has a file name")
+            .to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&temporary, content)?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(super) fn complete_deferred_cleanup_recovery(
     path: &Path,
     outcome: &AgentTaskOutcome,
     cleanup: Result<(), String>,
-) {
-    let mut action = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read deferred cleanup descriptor: {error}"))?;
+    let mut action: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("cannot parse deferred cleanup descriptor: {error}"))?;
     let candidates = outcome
         .artifacts
         .iter()
@@ -1629,7 +1652,10 @@ pub(super) fn complete_deferred_cleanup_recovery(
                 serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
         }
     }
-    let _ = std::fs::write(path, serde_json::to_vec_pretty(&action).unwrap_or_default());
+    let content = serde_json::to_vec_pretty(&action)
+        .map_err(|error| format!("cannot serialize deferred cleanup receipt: {error}"))?;
+    write_deferred_cleanup_action(path, &content)
+        .map_err(|error| format!("cannot persist deferred cleanup receipt: {error}"))
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
@@ -2100,6 +2126,28 @@ mod executor_erasure_tests {
             calls.load(Ordering::SeqCst),
             2,
             "both the original and its clone must dispatch to the same executor"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_descriptor_replaces_only_complete_content() {
+        let directory = tempfile::tempdir().expect("descriptor directory");
+        let descriptor = directory.path().join("deferred-cleanup.json");
+        std::fs::write(&descriptor, b"old receipt").expect("seed descriptor");
+
+        write_deferred_cleanup_action(&descriptor, br#"{"status":"pending"}"#)
+            .expect("atomically publish descriptor");
+
+        assert_eq!(
+            std::fs::read(&descriptor).expect("published descriptor"),
+            br#"{"status":"pending"}"#
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("descriptor directory entries")
+                .count(),
+            1,
+            "temporary descriptor files must not be exposed"
         );
     }
 }

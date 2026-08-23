@@ -94,6 +94,26 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
         };
         let raw = match fs::read_to_string(path) {
             Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !outcome
+                    .diagnostics
+                    .iter()
+                    .any(|entry| entry.class == "agent_task.deferred_cleanup_descriptor_missing")
+                {
+                    outcome.diagnostics.push(AgentTaskDiagnostic {
+                        class: "agent_task.deferred_cleanup_descriptor_missing".to_string(),
+                        message: "deferred cleanup descriptor is missing; its workspace receipt cannot be reconciled".to_string(),
+                        data: json!({
+                            "path": path,
+                            "safe_next_action": format!(
+                                "homeboy agent-task diagnose {run_id} --full"
+                            ),
+                        }),
+                    });
+                    changed = true;
+                }
+                continue;
+            }
             Err(_) => continue,
         };
         let action_value: Value = match serde_json::from_str(&raw) {

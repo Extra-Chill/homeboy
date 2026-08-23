@@ -30,6 +30,61 @@ fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
     );
 }
 
+#[test]
+fn deferred_cleanup_missing_descriptor_is_persisted_as_actionable_diagnosis() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "deferred-cleanup-missing-descriptor";
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submit run");
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.status = AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "deferred-cleanup".to_string(),
+        kind: "cleanup_action".to_string(),
+        name: Some("deferred-cleanup.json".to_string()),
+        label: None,
+        role: Some("cleanup_action".to_string()),
+        semantic_key: None,
+        path: Some(
+            lifecycle_store
+                .artifact_root()
+                .join("agent-task/deferred-cleanup/missing.json")
+                .display()
+                .to_string(),
+        ),
+        url: None,
+        mime: Some("application/json".to_string()),
+        size_bytes: None,
+        sha256: None,
+        metadata: json!({ "run_id": run_id, "task_id": "task-a", "attempt": 1 }),
+    });
+    record_run_aggregate_in_store(&lifecycle_store, run_id, &plan, &aggregate)
+        .expect("persist timeout aggregate");
+
+    assert!(
+        reconcile_deferred_candidate_in_store(&lifecycle_store, run_id)
+            .expect("reconcile missing descriptor")
+    );
+    let reconciled = lifecycle_store
+        .read_aggregate(run_id)
+        .expect("read aggregate");
+    let diagnostic = reconciled.outcomes[0]
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.deferred_cleanup_descriptor_missing")
+        .expect("missing descriptor diagnosis");
+    assert_eq!(
+        diagnostic.data["safe_next_action"],
+        json!(format!("homeboy agent-task diagnose {run_id} --full"))
+    );
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). Cook alias projection is a decision made *across* records — which
 /// indexed attempt is latest, and which attempt owns the active adoption — so
