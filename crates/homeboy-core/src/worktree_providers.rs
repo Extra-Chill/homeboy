@@ -541,6 +541,24 @@ pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
     provider_id: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
+    let resolution = resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+        handle,
+        provider_id,
+        config,
+    )?;
+    validate_provider_handle(provider_id, &resolution.worktree, None, None)?;
+    Ok(resolution)
+}
+
+/// Resolve a workspace through one persisted provider without admitting its
+/// safety state. Exact-identity and safety attestation callers need this
+/// observation boundary so Cook can attribute an owned promoted candidate
+/// before the normal dirty-worktree policy decides admission.
+fn resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+    handle: &str,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
     let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
         Error::validation_invalid_argument(
             "worktree_provider",
@@ -591,7 +609,6 @@ pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
         annotate_provider_lookup_error(&mut error, provider_id, command, operation, "not_found");
         error
     })?;
-    validate_provider_handle(provider_id, &worktree, None, None)?;
     Ok(WorktreeProviderResolution {
         provider_id: provider_id.to_string(),
         worktree,
@@ -717,8 +734,11 @@ pub fn resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
         return Err(Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` must configure both resolve_identity and attest_safety"), Some(provider_id.to_string()), None));
     }
     let started = std::time::Instant::now();
-    let resolution =
-        resolve_apply_enabled_worktree_provider_by_id_from_config(handle, provider_id, config)?;
+    let resolution = resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+        handle,
+        provider_id,
+        config,
+    )?;
     let elapsed_ms = started.elapsed().as_millis();
     let token = compatibility_identity_token(&resolution);
     Ok(WorktreeProviderExactIdentity {
@@ -774,7 +794,7 @@ pub fn attest_apply_enabled_worktree_provider_safety_from_config(
         return Ok(safety);
     }
     let started = std::time::Instant::now();
-    let resolution = resolve_apply_enabled_worktree_provider_by_id_from_config(
+    let resolution = resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
         &identity.handle,
         &identity.provider_id,
         config,

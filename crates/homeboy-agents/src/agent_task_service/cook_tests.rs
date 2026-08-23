@@ -12399,6 +12399,18 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         homeboy_core::defaults::save_config(&config).expect("save provider config");
         crate::agent_task_candidate_baseline::register();
 
+        // Fanout coordinators re-resolve the destination from the identity
+        // persisted when their child was admitted; they do not retain a CWD.
+        options.source_worktree_path = None;
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "workspace_identity": homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+                &options.to_worktree,
+                "fixture",
+                &config,
+            )
+            .expect("persisted provider identity")
+        });
+
         assert!(
             tracked_promotion_continuation(&options).unwrap().is_some(),
             "a durably attributed gate-failed promotion re-enters without a route token"
