@@ -5577,7 +5577,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
 
 #[cfg(unix)]
 #[test]
-fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission() {
+fn pinned_missing_provider_ensures_canonical_repository_for_a_component_after_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -5630,13 +5630,25 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
                 .expect("git runs")
                 .success());
         }
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/blocks-engine.git",
+            ])
+            .status()
+            .expect("add canonical repository remote")
+            .success());
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let created = provider_dir.path().join("created");
         let provider = provider_dir.path().join("provider");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}'\n  ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = blocks-engine && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}'\n  ;;\nesac\n",
                 created.display(),
                 workspace.display(),
                 source.display(),
@@ -5708,7 +5720,7 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
             "handle": options.to_worktree,
             "worktree_provider_id": "fixture",
             "provision_intent": {
-                "repo": "fixture",
+                "repo": "blocks-engine",
                 "base": "main",
                 "head": "durable-ensure",
                 "task_url": "https://example.test/issues/12601",
@@ -5717,6 +5729,10 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
                 "purpose": "agent_task_cook",
                 "cleanup_policy": "remove_on_success",
             },
+        });
+        options.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "php-transformer",
+            "repository_name": "blocks-engine",
         });
 
         recipe_store

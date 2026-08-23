@@ -290,7 +290,8 @@ pub(crate) fn preview_cook(
                 "schema": "homeboy/agent-task-cook-preview/v1",
                 "mutates": false,
                 "resolved": {
-                    "repository": args.dispatch.repo,
+                    "repository": cook_provision_repository(&args),
+                    "component": args.dispatch.repo,
                     "repository_identity": args.repository_identity,
                     "worktree": args.to_worktree,
                     "base": args.base,
@@ -385,7 +386,8 @@ pub(crate) fn preview_cook(
             "schema": "homeboy/agent-task-cook-preview/v1",
             "mutates": false,
             "resolved": {
-                "repository": args.dispatch.repo,
+                "repository": cook_provision_repository(&args),
+                "component": args.dispatch.repo,
                 "repository_identity": args.repository_identity,
                 "worktree": args.to_worktree,
                 "base": args.base,
@@ -977,7 +979,7 @@ mod preview_tests {
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$5\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) test \"$3\" = blocks-engine || exit 9; printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$5\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
                     marker.display(),
                 ),
             )
@@ -1031,6 +1033,16 @@ mod preview_tests {
                 },
             );
             homeboy::core::defaults::save_config(&config).expect("save provider config");
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: "php-transformer".to_string(),
+                    aliases: vec!["blocks-engine".to_string()],
+                    local_path: temp.path().display().to_string(),
+                    remote_url: Some("https://github.com/example/blocks-engine.git".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("register monorepo component");
             let before = std::fs::read_dir(home).expect("read isolated home").count();
 
             let (preview, exit_code) = preview_cook(
@@ -1044,9 +1056,9 @@ mod preview_tests {
                     "--prompt",
                     "implement the issue",
                     "--repo",
-                    "fixture",
+                    "blocks-engine",
                     "--task-url",
-                    "https://example.test/owner/repo/issues/12890",
+                    "https://example.test/owner/blocks-engine/issues/12890",
                     "--no-finalize",
                 ]),
                 None,
@@ -1056,18 +1068,24 @@ mod preview_tests {
             assert_eq!(exit_code, 0);
             assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
             assert_eq!(preview["resolved"]["workspace"]["provider_id"], "fixture");
+            assert_eq!(preview["resolved"]["repository"], "blocks-engine");
+            assert_eq!(preview["resolved"]["component"], "php-transformer");
+            assert_eq!(
+                preview["resolved"]["workspace"]["intent"]["repo"],
+                "blocks-engine"
+            );
             assert_eq!(
                 preview["resolved"]["workspace"]["branch"],
-                "fix/issue-12890-repo"
+                "fix/issue-12890-blocks-engine"
             );
             assert_eq!(
                 preview["resolved"]["workspace"]["path"],
-                "/provider/planned/fixture@fix-issue-12890-repo"
+                "/provider/planned/php-transformer@fix-issue-12890-blocks-engine"
             );
             assert_eq!(preview["resolved"]["workspace"]["intent"]["base"], "main");
             assert_eq!(
                 preview["resolved"]["workspace"]["intent"]["head"],
-                "fix/issue-12890-repo"
+                "fix/issue-12890-blocks-engine"
             );
             assert!(!marker.exists(), "preview must not invoke ensure");
             assert_eq!(
@@ -2541,7 +2559,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "kind": "provider",
             "handle": to_worktree,
             "provision_intent": {
-                "repo": args.dispatch.repo,
+                "repo": cook_provision_repository(args),
                 "base": args.base,
                 "head": args.head,
                 "task_url": args.dispatch.task_url,
@@ -2638,7 +2656,7 @@ fn cook_workspace_create_intent(
                 "--to-worktree is required to create a missing Cook destination".to_string(),
             ])
         })?,
-        repo: args.dispatch.repo.clone().ok_or_else(|| {
+        repo: cook_provision_repository(args).ok_or_else(|| {
             homeboy::core::Error::validation_missing_argument(vec![
                 "--repo <repo> is required to create a missing --to-worktree destination"
                     .to_string(),
@@ -2661,6 +2679,18 @@ fn cook_workspace_create_intent(
             ])
         })?,
     })
+}
+
+/// Worktree providers operate on repository primaries, while Cook executes the
+/// selected component within the resulting checkout.
+fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
+    args.repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("repository_name"))
+        .and_then(Value::as_str)
+        .filter(|repository| !repository.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| args.dispatch.repo.clone())
 }
 
 fn cook_workspace_plan_identity(intent: &WorktreeProviderCreateIntent) -> Value {
