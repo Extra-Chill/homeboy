@@ -167,6 +167,12 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     // Reconciliation runs under the caller's child lock and writes the same
     // runs the caller already opened, so it shares the caller's roots (#7505).
     let store = ObservationStore::open_initialized_in_roots(roots)?;
+    // The checkpoint, promotion, and artifact-ref writes below used to each open
+    // their own ambient store, so a pass that read through these injected roots
+    // wrote through whatever the environment happened to name. Reads and writes
+    // in one reconciliation are the same rows, so they share one store (#7505).
+    let lifecycle_store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
@@ -263,8 +269,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             continue;
         }
         worker.renew(&store)?;
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-            &run.id, &snapshot,
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint_in_store(
+            &lifecycle_store,
+            &run.id,
+            &snapshot,
         )?;
         let declarations = run
             .metadata_json
@@ -300,7 +308,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                &lifecycle_store,
                 &run.id,
                 "artifact",
                 &declaration,
@@ -323,7 +332,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                &lifecycle_store,
                 &run.id,
                 "artifact_dir",
                 &declaration,
@@ -346,7 +356,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                &lifecycle_store,
                 &run.id,
                 "summary",
                 &declaration,
@@ -361,7 +372,11 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             .cloned()
             .collect::<Vec<_>>();
         worker.renew(&store)?;
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_in_store(
+            &lifecycle_store,
+            &run.id,
+            &retained,
+        )?;
         worker.renew(&store)?;
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
