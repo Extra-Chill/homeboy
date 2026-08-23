@@ -10,6 +10,7 @@ const {
 } = require('../../lib/opencode-runtime-manifest');
 
 const manifestPath = path.join(__dirname, '..', '..', 'opencode.json');
+const packagePath = path.join(__dirname, '..', '..', 'package.json');
 const manifestJson = `${JSON.stringify(runtimeManifest(), null, 2)}\n`;
 const command = process.argv[2] || '--print';
 
@@ -17,6 +18,11 @@ if (command === '--write') {
 	fs.writeFileSync(manifestPath, manifestJson);
 } else if (command === '--check') {
 	try {
+		assert.equal(
+			JSON.parse(fs.readFileSync(packagePath, 'utf8')).version,
+			runtimeManifest().version,
+			'OpenCode package and manifest versions must match so runtime installs refresh executable changes.'
+		);
 		assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, 'utf8')), runtimeManifest());
 	} catch {
 		process.stderr.write('agent-runtimes/opencode/opencode.json is out of date. Run `node scripts/agent/homeboy-opencode-runtime-manifest.cjs --write`.\n');
