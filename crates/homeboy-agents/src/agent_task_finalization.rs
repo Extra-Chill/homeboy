@@ -174,6 +174,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
     };
     let candidate_changed_files = normalize_changed_files(&changed_files);
+    if options.manual_finalization && !publish && !commit_required && push_required {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent",
+            "recoverable manual preflight requires an already-pushed candidate; push the candidate branch and rerun preflight",
+            None,
+            None,
+        ));
+    }
     if options.expected_candidate_sha.is_some() && (commit_required || push_required) {
         return Err(Error::validation_invalid_argument(
             "publication_intent",
