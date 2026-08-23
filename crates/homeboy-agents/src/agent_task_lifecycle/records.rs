@@ -29,6 +29,7 @@ pub(crate) const METADATA_KEY_RUNNER_LIVENESS: &str = "runner_liveness";
 pub(crate) const METADATA_KEY_RETRYABLE: &str = "retryable";
 pub(crate) const METADATA_KEY_RECLAIMED_STALE_RUNNING: &str = "reclaimed_stale_running";
 pub(crate) const METADATA_KEY_CANCELLED_STALE_RUNNING: &str = "cancelled_stale_running";
+pub(crate) const LOCAL_COOK_SUPERVISOR_LEASE_SECONDS: i64 = 30;
 
 /// Reconciled local ownership evidence for a running record.
 ///
@@ -594,6 +595,14 @@ impl AgentTaskRunRecord {
             return;
         }
 
+        // A local Cook retry records its bounded supervisor admission in the
+        // same write that makes the queued successor visible. The daemon job id
+        // arrives later, so do not classify that intentional interval as an
+        // ownerless runner.
+        if self.has_live_pending_local_cook_supervisor(chrono::Utc::now()) {
+            return;
+        }
+
         // A reverse-broker job may begin before the daemon's accepted job/PID
         // projection arrives. Its complete, unexpired submission intent remains
         // the authoritative owner during that narrow handoff window.
@@ -666,6 +675,34 @@ impl AgentTaskRunRecord {
 
     pub(crate) fn owner_process_is_running(&self) -> bool {
         self.local_owner_liveness() == LocalOwnerLiveness::Live
+    }
+
+    pub(crate) fn has_live_pending_local_cook_supervisor(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let supervisor = &self.metadata["local_cook_supervisor"];
+        let Some(started_at) = supervisor["lease_started_at"]
+            .as_str()
+            .and_then(parse_rfc3339)
+        else {
+            return false;
+        };
+        let Some(expires_at) = supervisor["lease_expires_at"]
+            .as_str()
+            .and_then(parse_rfc3339)
+        else {
+            return false;
+        };
+        supervisor["state"] == "pending"
+            && self.metadata["cook_id"]
+                .as_str()
+                .is_some_and(|cook_id| !cook_id.trim().is_empty())
+            && supervisor["pinned_run_id"] == self.run_id
+            && started_at <= now
+            && now < expires_at
+            && expires_at
+                <= started_at + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)
     }
 
     /// Reconcile every local ownership projection before a caller classifies a
@@ -1148,6 +1185,29 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&record).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(round_trip.lab_handoff, record.lab_handoff);
+    }
+
+    #[test]
+    fn pending_local_retry_supervisor_survives_reconciliation_before_job_projection() {
+        let lease_started_at = chrono::Utc::now();
+        let mut record = legacy_record(json!({
+            "cook_id": "cook",
+            "local_cook_supervisor": {
+                "state": "pending",
+                "pinned_run_id": "legacy-handoff",
+                "lease_started_at": lease_started_at.to_rfc3339(),
+                "lease_expires_at": (lease_started_at + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
+            }
+        }));
+        record.state = AgentTaskRunState::Running;
+
+        record.annotate_stale_running();
+
+        assert!(record.metadata.get(METADATA_KEY_STALE_RUNNING).is_none());
+        assert!(record
+            .metadata
+            .get(METADATA_KEY_STALE_RUNNING_REASON)
+            .is_none());
     }
 
     #[test]

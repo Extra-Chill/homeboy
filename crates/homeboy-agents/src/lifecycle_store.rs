@@ -829,6 +829,30 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    /// Commit the authoritative record/aggregate pair while the caller owns
+    /// this store's config lock. Artifact and workspace authority projection
+    /// must happen only after releasing that lock.
+    pub(crate) fn write_aggregate_and_record_locked_without_terminal_projection(
+        &self,
+        record: &AgentTaskRunRecord,
+        aggregate: &AgentTaskAggregate,
+    ) -> Result<AgentTaskRunRecord> {
+        let committed = write_record_with_aggregate_without_workspace_authority(
+            self,
+            record,
+            Some(aggregate.clone()),
+        )?;
+        #[cfg(test)]
+        if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
+            return Err(Error::internal_io(
+                "injected interruption after terminal lifecycle commit",
+                Some(record.run_id.clone()),
+            ));
+        }
+        self.write_aggregate(&record.run_id, aggregate)?;
+        Ok(committed)
+    }
+
     pub fn mutate_record(
         &self,
         run_id: &str,

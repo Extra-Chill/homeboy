@@ -7207,10 +7207,9 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
                 let run_id = options.initial_run_id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    crate::agent_task_service::retry(&run_id, None, false, false)
-                        .expect("concurrent retry converges")
-                        .record
-                        .run_id
+                    let retry = crate::agent_task_service::retry(&run_id, None, false, false)
+                        .expect("concurrent retry converges");
+                    (retry.record.run_id, retry.created)
                 })
             })
             .collect::<Vec<_>>();
@@ -7219,13 +7218,18 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
             .map(|retry| retry.join().expect("retry thread"))
             .collect::<Vec<_>>();
 
-        assert!(run_ids.iter().all(|run_id| run_id == &run_ids[0]));
+        assert!(run_ids.iter().all(|(run_id, _)| run_id == &run_ids[0].0));
+        assert_eq!(
+            run_ids.iter().filter(|(_, created)| *created).count(),
+            1,
+            "only the reservation owner may launch the local retry child"
+        );
         let recipe = super::super::load_recipe(&options.cook_id).expect("bound recipe");
         let index = agent_task_lifecycle::cook_index(&options.cook_id).expect("bound index");
         assert_eq!(recipe.attempts.len(), 2);
-        assert_eq!(recipe.attempts[1].run_id, run_ids[0]);
+        assert_eq!(recipe.attempts[1].run_id, run_ids[0].0.as_str());
         assert_eq!(index.attempts.len(), 2);
-        assert_eq!(index.latest_run_id, run_ids[0]);
+        assert_eq!(index.latest_run_id, run_ids[0].0.as_str());
         assert_eq!(
             agent_task_lifecycle::list_records()
                 .expect("durable lifecycle records")
