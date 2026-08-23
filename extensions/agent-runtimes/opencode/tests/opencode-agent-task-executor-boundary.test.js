@@ -681,6 +681,9 @@ if (process.argv[2] === 'export') {
   }
 } else {
   process.stdout.write(JSON.stringify({ type: 'step_start', sessionID: 'ses_default_model', part: { sessionID: 'ses_default_model' } }) + '\\n');
+  if (process.env.HOMEBOY_TEST_CONFLICT_SESSION === '1') {
+    process.stdout.write(JSON.stringify({ type: 'step_end', sessionID: 'ses_conflicting_model' }) + '\\n');
+  }
   process.exit(0);
 }
 `);
@@ -730,6 +733,27 @@ if (process.argv[2] === 'export') {
 		reason: 'OpenCode did not return a readable completed-session export.',
 	});
 	assert.equal(unavailableModelResult.metadata.model, undefined);
+	const conflictingSessionResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-conflicting-session-provenance',
+		workspace_path: preflightWorkspace,
+		artifacts_path: path.join(root, 'conflicting-session-artifacts'),
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				runtime_bin: provenanceOpenCode,
+				command_args: [],
+				runtime_env: { HOMEBOY_TEST_CONFLICT_SESSION: '1' },
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(conflictingSessionResult.status, 'succeeded', JSON.stringify(conflictingSessionResult.diagnostics));
+	assert.deepEqual(conflictingSessionResult.metadata.opencode_session, {
+		status: 'unavailable',
+		reason: 'OpenCode completion output contained conflicting session identifiers.',
+	});
+	assert.equal(conflictingSessionResult.metadata.model, undefined);
 
 	const scratchAttempts = [
 		{ id: 'run-2250-attempt-1', status: 0 },
