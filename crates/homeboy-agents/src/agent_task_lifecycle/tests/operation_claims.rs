@@ -282,7 +282,7 @@ fn failed_claim_preserves_diagnostic_and_is_reclaimable_by_explicit_continuation
         let key = "promote:failed";
         claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-failed", key, LEASE)
             .expect("claim");
-        fail_cook_operation_in_store(&test_lifecycle_store(), 
+        fail_cook_operation_in_store(&test_lifecycle_store(),
             "op-claim-failed",
             key,
             json!({"status":"failed","code":"ValidationInvalidArgument","message":"malformed response"}),
