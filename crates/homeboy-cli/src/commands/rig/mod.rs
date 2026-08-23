@@ -26,6 +26,7 @@ use crate::command_contract::{
     RIG_RUN_LAB_LABEL, RIG_SOURCE_MANAGEMENT_LAB_LABEL,
     RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON, RIG_UP_LAB_UNSUPPORTED_REASON,
 };
+use std::path::Path;
 
 #[derive(Args)]
 pub struct RigArgs {
@@ -483,7 +484,10 @@ fn rig_package_lint_root(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {
-    let outcome = rig::release_active_run_lease(rig_id, force)?;
+    // Boundary: this is the entry point for one unit of work, so the config
+    // root is resolved once here rather than inside the helpers below (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let outcome = rig::release_active_run_lease(roots.config(), rig_id, force)?;
     Ok((
         RigCommandOutput::ReleaseLock(RigReleaseLockOutput {
             command: "rig.release_lock",
@@ -534,7 +538,9 @@ fn install(
     all: bool,
     _reinstall: bool,
 ) -> CmdResult<RigCommandOutput> {
-    let result = rig::install(source, id, all)?;
+    // Boundary: one `homeboy rig install` is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let result = rig::install(roots.config(), source, id, all)?;
     Ok((
         RigCommandOutput::Install(RigInstallOutput {
             command: "rig.install",
@@ -572,6 +578,10 @@ fn install(
 }
 
 fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
+    // Boundary: this is the entry point for one unit of work, so the config
+    // root is resolved once here rather than inside the helpers below (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let config_root = roots.config();
     let report = match (rig_id, all) {
         (Some(_), true) => {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -581,8 +591,8 @@ fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
                 None,
             ))
         }
-        (Some(id), false) => rig::update_source_for_rig(id)?,
-        (None, true) => rig::update_all_sources()?,
+        (Some(id), false) => rig::update_source_for_rig(config_root, id)?,
+        (None, true) => rig::update_all_sources(config_root)?,
         (None, false) => {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "rig_id",
@@ -964,7 +974,9 @@ fn sync(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
 }
 
 fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
-    let source_update = refresh_rig_source_if_materialized(&args.rig_id)?;
+    // Boundary: one rig run is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let source_update = refresh_rig_source_if_materialized(roots.config(), &args.rig_id)?;
     let rig = rig::load(&args.rig_id)?;
     let sync_report = rig::run_sync(&rig, false)?;
     let bench_options = rig_run_bench_options(args);
@@ -1002,6 +1014,7 @@ fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
 }
 
 fn refresh_rig_source_if_materialized(
+    config_root: &Path,
     rig_id: &str,
 ) -> homeboy::core::Result<Option<rig::RigSourceUpdateResult>> {
     let Some(metadata) = rig::read_source_metadata(rig_id) else {
@@ -1010,7 +1023,7 @@ fn refresh_rig_source_if_materialized(
     if metadata.linked {
         return Ok(None);
     }
-    Ok(Some(rig::update_source_for_rig(rig_id)?))
+    Ok(Some(rig::update_source_for_rig(config_root, rig_id)?))
 }
 
 fn rig_run_bench_options(args: RigRunArgs) -> RigRunBenchOptions {

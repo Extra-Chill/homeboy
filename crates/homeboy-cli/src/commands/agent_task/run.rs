@@ -3612,7 +3612,7 @@ pub(crate) fn validate_cook_request_with_provenance(
     // Backend policy is an execution prerequisite. Resolve it before validating
     // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
     // an operator must fix first.
-    let dispatch = dispatch_args_for_cook(args);
+    let mut dispatch = dispatch_args_for_cook(args);
     let request = dispatch_service::resolve_dispatch_request(dispatch.clone().into())?;
     if args.no_finalize {
         if let Some(provenance) = provenance {
@@ -3641,10 +3641,16 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
-    validate_provider_evidence_inputs(
-        &args.provider_evidence_inputs,
-        args.dispatch.prompt.as_deref(),
-    )?;
+    // Resolve @file input before scanning its provider-visible content. The
+    // host path is an ingestion detail, not evidence. Stdin remains unread
+    // until execution so this preflight cannot consume its prompt bytes.
+    if dispatch.prompt.as_deref().is_some_and(|spec| {
+        spec.starts_with('@')
+            && homeboy::agents::agent_task_prompts::stored_prompt_ref_id(spec).is_none()
+    }) {
+        resolve_dispatch_prompt(&mut dispatch)?;
+    }
+    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
@@ -3991,6 +3997,33 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     ))
 }
 
+fn cook_component_workspace(
+    args: &AgentTaskCookArgs,
+    workspace: &Path,
+) -> homeboy::core::Result<PathBuf> {
+    let Some(component_id) = args.dispatch.repo.as_deref() else {
+        return Ok(workspace.to_path_buf());
+    };
+    let Some(component) = homeboy::core::component::registered_by_id(component_id)? else {
+        return Ok(workspace.to_path_buf());
+    };
+    let effective = homeboy::core::component::resolution::rebase_component_path_to_checkout(
+        &component, workspace,
+    );
+    if !effective.is_dir() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "component workspace",
+            format!(
+                "resolved component `{component_id}` is not present in Cook workspace: {}",
+                effective.display()
+            ),
+            Some(effective.display().to_string()),
+            None,
+        ));
+    }
+    Ok(effective)
+}
+
 pub(crate) fn record_cook_argument_provenance(
     plan: &mut AgentTaskPlan,
     provenance: &crate::cli_surface::CommandArgumentProvenance,
@@ -4206,6 +4239,26 @@ mod prompt_input_tests {
     }
 
     #[test]
+    fn relative_and_absolute_at_file_prompts_resolve_to_equivalent_bytes() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let file = tempfile::NamedTempFile::new_in(&cwd).expect("prompt file");
+        let body = "Preserve these prompt bytes.\n\n";
+        std::fs::write(file.path(), body).expect("write prompt");
+        let relative = file
+            .path()
+            .strip_prefix(&cwd)
+            .expect("prompt file is in the current directory");
+
+        let mut relative_args = dispatch_with_prompt(Some(&format!("@{}", relative.display())));
+        let mut absolute_args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
+        resolve_dispatch_prompt(&mut relative_args).expect("resolve relative @file prompt");
+        resolve_dispatch_prompt(&mut absolute_args).expect("resolve absolute @file prompt");
+
+        assert_eq!(relative_args.prompt, absolute_args.prompt);
+        assert_eq!(absolute_args.prompt.as_deref(), Some(body));
+    }
+
+    #[test]
     fn inline_prompt_is_unchanged() {
         let mut args = dispatch_with_prompt(Some("fix the flaky test"));
         resolve_dispatch_prompt(&mut args).expect("resolve inline prompt");
@@ -4243,7 +4296,7 @@ pub(crate) fn compile_cook_plan(
         provision.get("action").and_then(Value::as_str),
         Some("lookup_pending" | "attestation_pending" | "planned_create")
     );
-    let workspace = (!pending_lookup)
+    let requested_workspace = (!pending_lookup)
         .then(|| {
             provision
                 .get("path")
@@ -4251,12 +4304,12 @@ pub(crate) fn compile_cook_plan(
                 .map(str::to_string)
         })
         .flatten();
-    if workspace.is_none() && !pending_lookup {
+    if requested_workspace.is_none() && !pending_lookup {
         return Err(homeboy::core::Error::internal_unexpected(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
-    if !args.provider_evidence_inputs.is_empty() && workspace.is_none() {
+    if !args.provider_evidence_inputs.is_empty() && requested_workspace.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
             "provider evidence requires a bound Cook workspace",
@@ -4264,6 +4317,14 @@ pub(crate) fn compile_cook_plan(
             None,
         ));
     }
+    if let Some(workspace) = requested_workspace.as_deref() {
+        validate_cook_destination_identity(args, Path::new(workspace))?;
+    }
+    let workspace = requested_workspace
+        .as_deref()
+        .map(|workspace| cook_component_workspace(args, Path::new(workspace)))
+        .transpose()?
+        .map(|workspace| workspace.display().to_string());
     let mut dispatch = dispatch_args_for_cook(args);
     resolve_dispatch_prompt(&mut dispatch)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
@@ -4288,9 +4349,6 @@ pub(crate) fn compile_cook_plan(
         workspace.as_deref(),
         &projected_paths,
     )?;
-    if let Some(workspace) = workspace.as_deref() {
-        validate_cook_destination_identity(args, Path::new(workspace))?;
-    }
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -4310,6 +4368,15 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
+    if let (Some(requested), Some(effective)) =
+        (requested_workspace.as_deref(), workspace.as_deref())
+    {
+        plan.metadata["gate_workspace"] = serde_json::json!({
+            "requested_cwd": requested,
+            "effective_cwd": effective,
+            "component_id": args.dispatch.repo,
+        });
+    }
     if let Some(identity) = &args.repository_identity {
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
@@ -4409,20 +4476,25 @@ fn validate_provider_evidence_prompt(
     projected_paths: &std::collections::BTreeSet<String>,
 ) -> homeboy::core::Result<()> {
     let Some(prompt) = prompt else { return Ok(()) };
-    let undeclared = absolute_host_paths_in_provider_prompt(prompt)?
+    let undeclared = classified_absolute_host_paths_in_provider_prompt(prompt)?
         .into_iter()
-        .filter(|path| !is_projected_provider_evidence_path(path, projected_paths))
+        .filter(|path| !is_projected_provider_evidence_path(&path.path, projected_paths))
         .collect::<Vec<_>>();
     if !undeclared.is_empty() {
         let paths = undeclared
             .iter()
-            .map(|path| format!("`{path}`"))
+            .map(|path| format!("`{}` ({})", path.path, path.classification))
             .collect::<Vec<_>>()
             .join(", ");
+        let classification_evidence = undeclared
+            .iter()
+            .map(ClassifiedHostPath::diagnostic_evidence)
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
             format!("prompt names undeclared absolute evidence paths: {paths}"),
-            Some(undeclared.join(", ")),
+            Some(classification_evidence),
             Some(vec!["Declare each path with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()]),
         ));
     }
@@ -4431,11 +4503,39 @@ fn validate_provider_evidence_prompt(
 
 const MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES: usize = 256 * 1024;
 
+const MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES: usize = 160;
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ClassifiedHostPath {
+    path: String,
+    token: String,
+    classification: &'static str,
+}
+
+impl ClassifiedHostPath {
+    fn diagnostic_evidence(&self) -> String {
+        format!(
+            "path={} classification={} token={}",
+            self.path, self.classification, self.token
+        )
+    }
+}
+
 /// Extract concrete Unix absolute paths from the bounded provider prompt
-/// surface. A path must begin at a syntax boundary and contain at least two
-/// segments or resolve locally, so prose such as `core/html` and `/endpoint`
-/// is not evidence.
+/// surface. URL references and slash-separated concepts are excluded; host
+/// paths need an explicit file syntax, a recognized Unix root, or local
+/// filesystem resolution.
+#[cfg(test)]
 fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
+    Ok(classified_absolute_host_paths_in_provider_prompt(prompt)?
+        .into_iter()
+        .map(|path| path.path)
+        .collect())
+}
+
+fn classified_absolute_host_paths_in_provider_prompt(
+    prompt: &str,
+) -> homeboy::core::Result<Vec<ClassifiedHostPath>> {
     if prompt.len() > MAX_PROVIDER_PROMPT_PATH_SCAN_BYTES {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
@@ -4451,7 +4551,8 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
             continue;
         }
         let mut candidate = token;
-        if let Some(file) = token.find("file://") {
+        let file_url = token.find("file://");
+        if let Some(file) = file_url {
             let rest = &token[file + "file://".len()..];
             candidate = if rest.starts_with('/') {
                 rest
@@ -4483,18 +4584,101 @@ fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result
                     )
             });
             let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
-            let trimmed = path.trim_start_matches('/');
-            let segments = trimmed.split('/').count();
-            if path.starts_with('/')
-                && !trimmed.is_empty()
-                && (segments >= 2 || Path::new(path).exists())
-            {
-                paths.insert(path.to_string());
+            let prefix = (start > 0)
+                .then(|| candidate[..start].chars().next_back())
+                .flatten();
+            let assignment = prefix == Some('=');
+            let quoted_or_angle_path = matches!(prefix, Some('\'' | '"' | '`' | '<'));
+            if let Some(classification) = classify_absolute_host_path(
+                path,
+                file_url.is_some(),
+                assignment,
+                quoted_or_angle_path,
+            ) {
+                paths.insert(ClassifiedHostPath {
+                    path: path.to_string(),
+                    token: bounded_prompt_path_token(token),
+                    classification,
+                });
             }
             offset = start.saturating_add(path.len()).max(start + 1);
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn classify_absolute_host_path(
+    path: &str,
+    file_url: bool,
+    assignment: bool,
+    quoted_or_angle_path: bool,
+) -> Option<&'static str> {
+    let trimmed = path.trim_start_matches('/');
+    let root = trimmed.split('/').next()?;
+    if trimmed.is_empty() || path.contains('#') {
+        return None;
+    }
+    if file_url {
+        return Some("file-uri");
+    }
+    if assignment {
+        return Some("explicit-path-assignment");
+    }
+    if quoted_or_angle_path {
+        return Some("quoted-or-angle-path");
+    }
+    if matches!(
+        root,
+        "bin"
+            | "boot"
+            | "dev"
+            | "etc"
+            | "home"
+            | "lib"
+            | "lib64"
+            | "media"
+            | "mnt"
+            | "opt"
+            | "private"
+            | "proc"
+            | "root"
+            | "run"
+            | "sbin"
+            | "srv"
+            | "sys"
+            | "tmp"
+            | "usr"
+            | "var"
+            | "Users"
+            | "Volumes"
+            | "workspace"
+    ) {
+        return Some("unix-host-root");
+    }
+    if trimmed.contains('/') && Path::new(path).exists() {
+        return Some("existing-host-path");
+    }
+    if trimmed.contains('/')
+        && trimmed
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.contains('.') && !segment.starts_with('.'))
+    {
+        return Some("file-like-absolute-path");
+    }
+    None
+}
+
+fn bounded_prompt_path_token(token: &str) -> String {
+    if token.len() <= MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES {
+        return token.to_string();
+    }
+    let end = token
+        .char_indices()
+        .take_while(|(index, _)| *index < MAX_PROVIDER_PROMPT_PATH_DIAGNOSTIC_TOKEN_BYTES)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    format!("{}...", &token[..end])
 }
 
 fn is_projected_provider_evidence_path(
@@ -5280,6 +5464,52 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         );
         validate_provider_evidence_inputs(&[], Some(prompt))
             .expect("slash-delimited prose is not filesystem evidence");
+    }
+
+    #[test]
+    fn prompt_path_classifier_separates_host_paths_from_urls_references_and_concepts() {
+        for prompt in [
+            "See https://example.test/report#fragment.",
+            "Follow /#fragment.",
+            "Track /blocks-engine#1032 and issue #12991.",
+            "Preserve public/plan/report compatibility.",
+            "Use /page/report as a conceptual route.",
+        ] {
+            assert_eq!(
+                absolute_host_paths_in_provider_prompt(prompt).expect("classify accepted syntax"),
+                Vec::<String>::new(),
+                "{prompt}"
+            );
+            validate_provider_evidence_inputs(&[], Some(prompt))
+                .expect("URLs, references, and concepts are not host evidence");
+        }
+
+        let classified = classified_absolute_host_paths_in_provider_prompt(
+            "Read /private/evidence.json and run cat '/tmp/command-input.json'.",
+        )
+        .expect("classify host paths");
+        assert_eq!(
+            classified
+                .iter()
+                .map(|path| (path.path.as_str(), path.classification))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/private/evidence.json", "unix-host-root"),
+                ("/tmp/command-input.json", "quoted-or-angle-path"),
+            ]
+        );
+
+        let error = validate_provider_evidence_inputs(
+            &[],
+            Some("Read /private/evidence.json and run cat '/tmp/command-input.json'."),
+        )
+        .expect_err("Unix and quoted command paths require evidence");
+        let evidence = error.details["id"]
+            .as_str()
+            .expect("classification evidence");
+        assert!(evidence.contains("classification=unix-host-root token=/private/evidence.json"));
+        assert!(evidence
+            .contains("classification=quoted-or-angle-path token='/tmp/command-input.json'."));
     }
 
     #[test]

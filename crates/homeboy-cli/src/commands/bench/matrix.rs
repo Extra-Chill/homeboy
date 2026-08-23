@@ -49,8 +49,15 @@ fn prepare_rig_bench_context(
     source.spec = spec.clone();
     rig::preflight_effective_component_checkouts(&spec)?;
     let prepare_settings = bench_prepare_settings(args);
-    let lease =
-        rig::lease::acquire_active_run_lease_with_settings(&spec, "bench", &prepare_settings)?;
+    // Boundary: one rig bench run is one unit of work, and the lease must release
+    // into the same home it acquired from (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let lease = rig::lease::acquire_active_run_lease_with_settings(
+        roots.config(),
+        &spec,
+        "bench",
+        &prepare_settings,
+    )?;
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
         if !prepare.success {
             return Err(homeboy::core::Error::rig_pipeline_failed(

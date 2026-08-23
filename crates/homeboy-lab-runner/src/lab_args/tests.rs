@@ -1789,6 +1789,66 @@ mod materialize_specs_tests {
     }
 
     #[test]
+    fn cook_attestation_failure_reports_compared_identities_without_scratch_restore_advice() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let admitted = temp.path().join("admitted");
+        let replacement = temp.path().join("replacement");
+        std::fs::create_dir_all(admitted.join(".git")).expect("admitted workspace");
+        std::fs::create_dir_all(replacement.join(".git")).expect("replacement workspace");
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "controller-plan",
+            "tasks": [{
+                "task_id": "task-1",
+                "instructions": "test",
+                "executor": { "backend": "fixture" },
+                "workspace": { "root": replacement },
+                "metadata": {
+                    "cook_workspace_identity": {
+                        "canonical_path": admitted,
+                        "device": 1,
+                        "inode": 1,
+                        "git_representation": "directory"
+                    }
+                }
+            }]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-plan".to_string(),
+            plan,
+        ];
+
+        let error =
+            agent_task_specs::verify_cook_workspace_attestations_in_args(&args, temp.path())
+                .expect_err("replacement identity must not satisfy the admitted attestation");
+
+        assert_eq!(
+            error.details["identity_attestation"]["expected"]["canonical_path"],
+            serde_json::json!(admitted)
+        );
+        assert_eq!(
+            error.details["identity_attestation"]["observed"]["canonical_path"],
+            serde_json::json!(replacement.canonicalize().expect("canonical replacement"))
+        );
+        assert_eq!(
+            error.details["identity_attestation"]["compared_fields"]
+                .as_array()
+                .expect("compared fields")
+                .len(),
+            10
+        );
+        assert!(error.details["tried"]
+            .as_array()
+            .expect("recovery guidance")
+            .iter()
+            .all(|value| !value.as_str().unwrap_or_default().contains("Restore")));
+    }
+
+    #[test]
     fn controller_attempt_plan_ignores_truncated_legacy_tasks_json() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan = serde_json::json!({

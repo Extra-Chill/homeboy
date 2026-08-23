@@ -5,6 +5,7 @@ use serde::Serialize;
 use super::spec::{list, GitRef, StackPrEntry, StackProvenance, StackRequirements, StackSpec};
 use super::status::{count_revs, git_ref_exists};
 use homeboy_core::error::Result;
+use std::path::Path;
 
 /// A compatible installed stack that requires explicit operator selection.
 #[derive(Debug, Clone, Serialize)]
@@ -35,9 +36,9 @@ pub struct StackPreflight {
 ///
 /// Ranking is deterministic: declared base compatibility first, then the
 /// number of overlapping PR coordinates, and finally stack ID.
-pub fn discover(spec: &StackSpec) -> Result<Vec<StackCandidate>> {
+pub fn discover(config_root: &Path, spec: &StackSpec) -> Result<Vec<StackCandidate>> {
     let source_repositories = repositories(&spec.prs);
-    let mut candidates = list()?
+    let mut candidates = list(config_root)?
         .into_iter()
         .filter(|candidate| candidate.id != spec.id && candidate.component == spec.component)
         .filter_map(|candidate| {
@@ -96,7 +97,12 @@ pub fn discover(spec: &StackSpec) -> Result<Vec<StackCandidate>> {
 /// We stop only when a distinct-base candidate explicitly declares that it is
 /// compatible with this stack's base; that is actionable evidence that the
 /// operator may be using an obsolete stack definition.
-pub fn preflight(spec: &StackSpec, path: &str, base_ref: &str) -> Result<StackPreflight> {
+pub fn preflight(
+    config_root: &Path,
+    spec: &StackSpec,
+    path: &str,
+    base_ref: &str,
+) -> Result<StackPreflight> {
     let target_exists = git_ref_exists(path, &spec.target.branch);
     let (target_ahead, target_behind) = if target_exists {
         (
@@ -106,7 +112,7 @@ pub fn preflight(spec: &StackSpec, path: &str, base_ref: &str) -> Result<StackPr
     } else {
         (None, None)
     };
-    let candidates = discover(spec)?;
+    let candidates = discover(config_root, spec)?;
     let blocked = target_behind.unwrap_or_default() > 0
         && candidates
             .iter()

@@ -2349,7 +2349,6 @@ where
         metadata["runner_id"] = json!(runner_id);
         if let Some(execution_context) =
             homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::from_direct_daemon_child_environment(
-                &run_id,
                 runner_id,
             )?
         {
@@ -3670,6 +3669,66 @@ pub fn record_provider_execution_terminal_in_store(
     // The mutation is intentionally a no-op when cancellation or another
     // terminal writer won the race. That existing record is the durable outcome.
     Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
+}
+
+/// Attach stable, bounded provider stream references while the process is still
+/// running. Cancellation can win before the scheduler receives an outcome, so
+/// these references belong to the durable execution reservation rather than its
+/// eventual aggregate.
+pub fn record_provider_execution_runtime_evidence_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    stdout_uri: Option<String>,
+    stderr_uri: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        execution["runtime_evidence"] = json!({
+            "stdout": stdout_uri,
+            "stderr": stderr_uri,
+            "capture": "bounded_incremental",
+        });
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot attach runtime evidence to an unreserved provider execution",
+            Some(key),
+            None,
+        )
+    })
+}
+
+pub fn record_provider_execution_runtime_evidence(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    stdout_uri: Option<String>,
+    stderr_uri: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_runtime_evidence_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        stdout_uri,
+        stderr_uri,
+    )
 }
 
 // The ambient `has_active_provider_execution()` shim that used to sit here is gone;

@@ -300,6 +300,19 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn record_provider_execution_runtime_evidence(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        stdout_uri: Option<String>,
+        stderr_uri: Option<String>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_runtime_evidence_in_store(
+            self, run_id, task_id, attempt, stdout_uri, stderr_uri,
+        )
+    }
+
     pub(crate) fn record_provider_execution_cleanup_elapsed(
         &self,
         run_id: &str,

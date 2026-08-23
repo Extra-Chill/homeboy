@@ -599,9 +599,14 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
             rig::RigWorkloadKind::Trace,
         )?;
     }
+    // Boundary: one trace run is one unit of work, and the lease must release
+    // into the same home it acquired from (#7505).
+    let lease_roots = homeboy::core::paths::PathRoots::from_environment()?;
     let _lease = rig_context
         .as_ref()
-        .map(|context| rig::lease::acquire_active_run_lease(&context.rig_spec, "trace"))
+        .map(|context| {
+            rig::lease::acquire_active_run_lease(lease_roots.config(), &context.rig_spec, "trace")
+        })
         .transpose()?
         .flatten();
     let span_definitions = span_definitions_for_args(

@@ -2272,6 +2272,7 @@ mod tests {
             std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
                 .expect("create rig sources");
             homeboy_rig::install::write_source_metadata(
+                &homeboy_core::paths::homeboy().expect("config root"),
                 "studio-web-product-matrix",
                 &homeboy_rig::install::RigSourceMetadata {
                     source: checkout.display().to_string(),

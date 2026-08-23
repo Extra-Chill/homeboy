@@ -7,6 +7,7 @@
 use homeboy_core::error::Result;
 use homeboy_core::paths;
 use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
+use std::path::Path;
 
 const CONFIG: FsIndexLockConfig = FsIndexLockConfig::index("rig lease");
 
@@ -14,6 +15,6 @@ pub(super) type LeaseIndexLock = FsIndexLock;
 
 /// Block until the rig lease index lock is held. Released when the returned
 /// guard drops.
-pub(super) fn acquire() -> Result<LeaseIndexLock> {
-    FsIndexLock::acquire_in(&paths::rig_leases_dir()?, CONFIG)
+pub(super) fn acquire(config_root: &Path) -> Result<LeaseIndexLock> {
+    FsIndexLock::acquire_in(&paths::rig_leases_dir_in_root(config_root), CONFIG)
 }

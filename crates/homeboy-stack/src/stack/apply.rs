@@ -39,6 +39,7 @@ use super::candidates::{preflight, stale_stack_error, StackCandidate};
 use super::git::run_git;
 use super::pr_meta::{fetch_pr_meta, PrHead};
 use super::spec::{resolve_existing_component_path, StackPrEntry, StackSpec};
+use std::path::Path;
 
 /// Per-PR outcome from a single `apply` run.
 #[derive(Debug, Clone, Serialize)]
@@ -118,17 +119,26 @@ pub struct ApplyOutput {
 pub type RebaseOutput = ApplyOutput;
 
 /// Apply a stack spec: build `target` from `base + prs`.
-pub fn apply(spec: &StackSpec, conflict_policy: ConflictPolicy) -> Result<ApplyOutput> {
-    rebuild(spec, "apply", conflict_policy)
+pub fn apply(
+    config_root: &Path,
+    spec: &StackSpec,
+    conflict_policy: ConflictPolicy,
+) -> Result<ApplyOutput> {
+    rebuild(config_root, spec, "apply", conflict_policy)
 }
 
 /// Rebase a stack spec: rebuild `target` from `base + prs` without editing the
 /// stack spec, even when some listed PRs have merged upstream.
-pub fn rebase(spec: &StackSpec, conflict_policy: ConflictPolicy) -> Result<RebaseOutput> {
-    rebuild(spec, "rebase", conflict_policy)
+pub fn rebase(
+    config_root: &Path,
+    spec: &StackSpec,
+    conflict_policy: ConflictPolicy,
+) -> Result<RebaseOutput> {
+    rebuild(config_root, spec, "rebase", conflict_policy)
 }
 
 fn rebuild(
+    config_root: &Path,
     spec: &StackSpec,
     rerun_verb: &str,
     conflict_policy: ConflictPolicy,
@@ -146,7 +156,7 @@ fn rebuild(
     let _ = fetch_remote_branch(&path, &spec.target.remote, &spec.target.branch);
 
     let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
-    let preflight = preflight(spec, &path, &base_ref)?;
+    let preflight = preflight(config_root, spec, &path, &base_ref)?;
     if preflight.blocked {
         return Err(stale_stack_error(spec, &preflight));
     }
