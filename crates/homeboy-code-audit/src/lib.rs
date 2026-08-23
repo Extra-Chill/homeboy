@@ -54,6 +54,7 @@ mod signatures;
 mod source_locations;
 mod structural;
 pub(crate) mod test_mapping;
+mod test_quality;
 pub mod walker;
 
 mod doc_drift;
@@ -174,17 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn only_vacuous_test_keeps_all_vacuous_detector_families_enabled() {
+    fn only_vacuous_test_selects_test_coverage_as_its_single_owner() {
         let plan = AuditExecutionPlan::from_filters(&[AuditFinding::VacuousTest], &[]);
 
         assert!(
             plan.detector_enabled("test_coverage"),
-            "coverage detector also emits vacuous_test for mapped tests"
+            "test coverage owns both policy-driven and Rust test-quality vacuity findings"
         );
-        assert!(
-            plan.detector_enabled("test_topology"),
-            "test topology/test quality detector emits standalone vacuous_test findings"
-        );
+        assert!(!plan.detector_enabled("test_topology"));
     }
 
     #[test]

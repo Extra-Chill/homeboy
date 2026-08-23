@@ -901,30 +901,15 @@ pub fn record_replacement_gate_proof(
         ));
     }
     replacement.normalize_gate_outcome();
-    if replacement.status != AgentTaskPromotionStatus::Applied
-        || replacement.deterministic_gates.is_empty()
-        || replacement.verified_base.is_none()
-        || replacement.deterministic_gates.iter().any(|gate| {
-            gate.command.is_empty()
-                || gate.exit_code != 0
-                || gate.candidate_checkout.is_none()
-                || !replacement
-                    .command_evidence
-                    .iter()
-                    .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
-        })
-    {
-        return Err(Error::validation_invalid_argument(
-            "replacement_gate_proof",
-            "replacement proof requires every green gate to have matching zero-exit command evidence, plus candidate checkout and verified base",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
+    validate_replacement_proof_finalization_eligibility(run_id, &replacement)?;
+    validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
     let expected_candidate = original.provenance.get("candidate");
     let observed_candidate = replacement.provenance.get("candidate");
     let same_candidate = observed_candidate == expected_candidate
-        && (original.provenance.get("candidate_checkout").is_none()
+        && (original
+            .provenance
+            .get("candidate_checkout")
+            .is_none_or(Value::is_null)
             || replacement.provenance.get("candidate_checkout")
                 == original.provenance.get("candidate_checkout"));
     let drifted = serde_json::json!({
@@ -1044,6 +1029,162 @@ fn bounded_candidate_fingerprint(candidate: Option<&Value>) -> Value {
     })
 }
 
+/// Older failed promotions did not retain the checkout used by their gates.
+/// Their immutable candidate fingerprint remains sufficient to authenticate a
+/// replacement checkout, but only when its tree and candidate digest match.
+fn validate_legacy_replacement_candidate_checkout(
+    run_id: &str,
+    original: &AgentTaskPromotionReport,
+    replacement: &AgentTaskPromotionReport,
+) -> Result<()> {
+    if original
+        .provenance
+        .get("candidate_checkout")
+        .is_some_and(|checkout| !checkout.is_null())
+    {
+        return Ok(());
+    }
+    let failed = |predicate: &'static str| {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            format!("legacy replacement checkout is not proven: failed `{predicate}`"),
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] = serde_json::json!(predicate);
+        error
+    };
+    let fingerprint = original
+        .provenance
+        .pointer("/candidate/fingerprint")
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let head = fingerprint
+        .get("head")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let tree = fingerprint
+        .get("tree")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let sha256 = fingerprint
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let checkout = replacement
+        .provenance
+        .get("candidate_checkout")
+        .ok_or_else(|| failed("legacy_candidate_checkout"))?;
+    if checkout.get("tree").and_then(Value::as_str) != Some(tree)
+        || checkout.get("candidate_sha256").and_then(Value::as_str) != Some(sha256)
+    {
+        return Err(failed("legacy_candidate_checkout_fingerprint"));
+    }
+    if replacement.provenance.get("candidate") != original.provenance.get("candidate") {
+        return Err(failed("legacy_candidate_fingerprint"));
+    }
+    if let Some(adopted) = original
+        .provenance
+        .pointer("/adoption/candidate_ref")
+        .and_then(Value::as_str)
+    {
+        if adopted != head {
+            return Err(failed("legacy_candidate_adoption"));
+        }
+    }
+    Ok(())
+}
+
+/// Admission and recovery share the same gate facts: an accepted replacement
+/// must be able to hydrate a reviewer-runnable finalization dossier.
+fn validate_replacement_proof_finalization_eligibility(
+    run_id: &str,
+    replacement: &AgentTaskPromotionReport,
+) -> Result<()> {
+    let failed = |predicate: &'static str, gate_id: Option<&str>| {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            format!("replacement proof is not finalization-eligible: failed `{predicate}`"),
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] = serde_json::json!(predicate);
+        if let Some(gate_id) = gate_id {
+            error.details["gate_id"] = serde_json::json!(gate_id);
+        }
+        error
+    };
+
+    if replacement.status != AgentTaskPromotionStatus::Applied {
+        return Err(failed("applied_status", None));
+    }
+    if replacement.deterministic_gates.is_empty() {
+        return Err(failed("non_empty_deterministic_gates", None));
+    }
+    if replacement.verified_base.is_none() {
+        return Err(failed("verified_base", None));
+    }
+    if !replacement.finalization_eligible(false) {
+        return Err(failed("green_gate_status", None));
+    }
+    let candidate_checkout = replacement.provenance.get("candidate_checkout");
+    for gate in &replacement.deterministic_gates {
+        if gate.command.is_empty() {
+            return Err(failed("command", Some(&gate.id)));
+        }
+        if !replacement
+            .command_evidence
+            .iter()
+            .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
+        {
+            return Err(failed("matching_command_evidence", Some(&gate.id)));
+        }
+        if candidate_checkout.is_none()
+            || gate
+                .candidate_checkout
+                .as_ref()
+                .and_then(|checkout| serde_json::to_value(checkout).ok())
+                .as_ref()
+                != candidate_checkout
+        {
+            return Err(failed("candidate_checkout", Some(&gate.id)));
+        }
+    }
+    let visible_gates = replacement
+        .deterministic_gates
+        .iter()
+        .filter(|gate| gate.visibility == homeboy_core::gate::HomeboyGateVisibility::Visible)
+        .collect::<Vec<_>>();
+    if visible_gates.is_empty() {
+        return Err(failed("visibility", None));
+    }
+    let shell_gates = visible_gates
+        .iter()
+        .copied()
+        .filter(|gate| matches!(gate.command.as_slice(), [shell, flag, _] if shell == "sh" && flag == "-lc"))
+        .collect::<Vec<_>>();
+    if shell_gates.is_empty() {
+        return Err(failed("shell_command", None));
+    }
+    let candidate_bound_gates = shell_gates
+        .iter()
+        .copied()
+        .filter(|gate| replacement.has_visible_passed_gate_for_command(&gate.command[2]))
+        .collect::<Vec<_>>();
+    if candidate_bound_gates.is_empty() {
+        return Err(failed("candidate_checkout", None));
+    }
+    if !candidate_bound_gates
+        .iter()
+        .any(|gate| crate::agent_task_review_dossier::reviewer_runnable_command(&gate.command[2]))
+    {
+        return Err(failed("reviewer_runnable_command", None));
+    }
+    Ok(())
+}
+
 /// Execute corrected gates against the exact failed applied candidate and record
 /// the resulting #11290 replacement proof without replaying provider work or
 /// applying the patch again.
@@ -1150,6 +1291,21 @@ fn verify_replacement_gates_owned(
             Some(run_id.to_string()),
             None,
         ));
+    }
+    if !gates
+        .verify
+        .iter()
+        .any(|command| crate::agent_task_review_dossier::reviewer_runnable_command(command))
+    {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "replacement verification requires a reviewer-runnable visible gate before shell execution",
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] =
+            serde_json::json!("reviewer_runnable_command");
+        return Err(error);
     }
     let target_path = original.target.path.as_deref().or_else(|| {
         original.provenance.get("worktree_path").and_then(Value::as_str)
@@ -2482,6 +2638,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
         expected_candidate_sha: None,
+        verified_candidate_sha: None,
         protected_branches: options.protected_branches.clone(),
         draft_pr: options.draft_pr,
     })
@@ -2492,11 +2649,46 @@ pub fn persist_manual_finalization_intent(
     run_id: &str,
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
-    validate_manual_preflight_report(report, run_id)?;
+    let mut report = report.clone();
+    if crate::agent_task_lifecycle::persisted_status(run_id)?.state
+        == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+    {
+        report.manual_candidate_binding = Some(manual_candidate_binding(run_id, &report)?);
+    }
+    validate_manual_preflight_report(&report, run_id, false)?;
     agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
-        serde_json::to_value(report).expect("finalization report serializes"),
+        serde_json::to_value(&report).expect("finalization report serializes"),
     )
+}
+
+/// Persist the validated dossier created immediately before a direct manual
+/// publication. This retry form may still need to create its candidate commit.
+pub fn persist_manual_finalization_retry_intent(
+    run_id: &str,
+    report: &AgentTaskPrFinalizationReport,
+) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
+    validate_manual_preflight_report(report, run_id, true)?;
+    let record = agent_task_lifecycle::record_manual_finalization_intent(
+        run_id,
+        serde_json::to_value(report).expect("finalization report serializes"),
+    )?;
+    agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    else {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "direct manual publication retry requires a materialized Git candidate",
+            None,
+            None,
+        ));
+    };
+    agent_task_lifecycle::record_manual_finalization_retry_candidate(
+        run_id,
+        serde_json::to_value(fingerprint).expect("candidate fingerprint serializes"),
+    )?;
+    Ok(record)
 }
 
 /// Resolve the sole durable identity contract for explicit manual publication.
@@ -2519,6 +2711,18 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
                     None,
                 )
             })?;
+        if crate::agent_task_lifecycle::persisted_status(&run_id)?.state
+            == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        {
+            let candidate = crate::agent_task_lifecycle::select_cook_candidate(requested_id)?;
+            if candidate.incomplete
+                || candidate.selected_task_id.is_none()
+                || candidate.selected_artifact_id.is_none()
+            {
+                return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id), None));
+            }
+            return require_manual_finalization_run(&candidate.run_id);
+        }
         return require_manual_finalization_run(&run_id);
     }
 
@@ -2549,17 +2753,117 @@ fn require_manual_finalization_run(run_id: &str) -> Result<String> {
     if record.metadata["manual_finalization_identity"] == true {
         return Ok(run_id.to_string());
     }
+    if record.state == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable {
+        if record.acceptance.is_some() || record.metadata.get("acceptance_requirement").is_some() {
+            return Err(Error::validation_invalid_argument("acceptance", "candidate-recoverable manual finalization cannot replace a durable acceptance decision", Some(run_id.to_string()), None));
+        }
+        let cook_id = record.metadata["cook_id"].as_str().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "candidate-recoverable manual finalization requires a Cook-bound candidate",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let candidate = crate::agent_task_lifecycle::select_cook_candidate(cook_id)?;
+        if !candidate.incomplete
+            && candidate.run_id == run_id
+            && candidate.selected_task_id.is_some()
+            && candidate.selected_artifact_id.is_some()
+        {
+            return Ok(run_id.to_string());
+        }
+        return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id.to_string()), None));
+    }
     if record.lifecycle.execution.state
         != homeboy_core::run_lifecycle_record::RunExecutionState::Failed
     {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "manual finalization accepts an existing failed attempt or an unused ID for a new durable manual-finalization record",
+            "manual finalization accepts an existing failed attempt, the complete controller-selected candidate-recoverable attempt, or an unused ID for a new durable manual-finalization record",
             Some(run_id.to_string()),
             None,
         ));
     }
     Ok(run_id.to_string())
+}
+
+fn manual_candidate_binding(
+    run_id: &str,
+    report: &AgentTaskPrFinalizationReport,
+) -> Result<crate::agent_task_finalization::AgentTaskManualCandidateBinding> {
+    let record = crate::agent_task_lifecycle::persisted_status(run_id)?;
+    if record.state != crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        || record.acceptance.is_some()
+        || record.metadata.get("acceptance_requirement").is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "manual candidate binding requires an unblocked candidate-recoverable run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let cook_id = record.metadata["cook_id"].as_str().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "candidate-recoverable manual finalization requires a Cook-bound candidate",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let selection = crate::agent_task_lifecycle::select_cook_candidate(cook_id)?;
+    if selection.incomplete
+        || selection.run_id != run_id
+        || selection.selected_task_id.is_none()
+        || selection.selected_artifact_id.is_none()
+    {
+        return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id.to_string()), None));
+    }
+    let promotion = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "candidate-recoverable manual finalization requires a persisted replacement gate proof",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate = serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| Error::validation_invalid_argument("latest_promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None))?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    else {
+        return Err(Error::validation_invalid_argument("latest_promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None));
+    };
+    let model = record.lifecycle.provider_runtime.iter().rev().find_map(|runtime| runtime.metadata["model"].as_str()).filter(|model| !model.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires concrete provider model provenance", Some(run_id.to_string()), None))?;
+    let commit = report
+        .publication_proof
+        .git_identity
+        .as_ref()
+        .and_then(|identity| identity.commit_sha.as_deref())
+        .unwrap_or_default();
+    if promotion.source.run_id.as_deref() != Some(run_id)
+        || selection.selected_task_id.as_deref() != Some(promotion.source.task_id.as_str())
+        || promotion.provenance.get("replacement_gate_proof").is_none()
+        || !promotion.finalization_eligible(false)
+        || fingerprint.head != commit
+        || fingerprint.changed_files != report.changed_files
+        || report.evidence.ai_model.as_deref() != Some(model)
+        || report.review_dossier.ai_assistance.model != model
+        || promotion.gate_results != report.normalized_gate_results
+    {
+        return Err(Error::validation_invalid_argument("manual_finalization_intent", "manual finalization dossier does not match the selected candidate, model provenance, and replacement gate proof", Some(run_id.to_string()), None));
+    }
+    Ok(
+        crate::agent_task_finalization::AgentTaskManualCandidateBinding {
+            schema: crate::agent_task_finalization::AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA
+                .to_string(),
+            selection,
+            candidate: fingerprint,
+            source: promotion.source,
+            model: model.to_string(),
+            replacement_gate_proof: promotion.provenance["replacement_gate_proof"].clone(),
+            gates: promotion.gate_results,
+        },
+    )
 }
 
 /// Persist only a controller-published manual receipt bound to its preflight dossier.
@@ -2630,18 +2934,46 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        let finalization = manual_finalization_options(report)?;
-        let report = if preflight {
-            preflight_pr_with_backend(finalization, backend)?
+        let retryable = agent_task_lifecycle::status(&report.run_id)?.metadata
+            ["manual_finalization_retry"]
+            == true;
+        if retryable {
+            require_manual_retry_candidate(
+                &agent_task_lifecycle::status(&report.run_id)?,
+                &report.path,
+            )?;
+        }
+        let mut finalization = manual_finalization_options(report, retryable)?;
+        if retryable {
+            finalization.expected_candidate_sha = None;
+        }
+        let failure_run_id = finalization.run_id.clone();
+        let result = if preflight {
+            preflight_pr_with_backend(finalization, backend)
         } else {
-            finalize_pr_with_backend(finalization, backend)?
+            finalize_pr_with_backend(finalization, backend)
+        };
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                if !preflight {
+                    agent_task_lifecycle::record_manual_finalization_failure(
+                        &failure_run_id,
+                        &error,
+                    )?;
+                }
+                return Err(error);
+            }
         };
         let value = serde_json::to_value(&report).unwrap_or(Value::Null);
         if !preflight {
-            persist_manual_finalization_receipt(
+            if let Err(error) = persist_manual_finalization_receipt(
                 value["run_id"].as_str().unwrap_or_default(),
                 &report,
-            )?;
+            ) {
+                agent_task_lifecycle::record_manual_finalization_failure(&failure_run_id, &error)?;
+                return Err(error);
+            }
         }
         return Ok(value);
     }
@@ -2661,6 +2993,10 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
+    // A verified empty remediation is evidence about the already-applied
+    // candidate, not a replacement candidate. Recover the source promotion so
+    // an exact `--recover <remediation>` cannot hide that applied promotion.
+    let run_id = substantive_source_for_empty_remediation(&recipe, &run_id).unwrap_or(run_id);
     if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
         promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && promotion.changed_files.is_empty()
@@ -2912,6 +3248,7 @@ pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
                             .pointer("/cook_follow_up/source_run_id")
                             .and_then(Value::as_str)
                             == Some(source_run_id.as_str())
+                            && !is_empty_verified_remediation(&promotion)
                     })
             {
                 return Some(attempt.run_id.clone());
@@ -2919,6 +3256,49 @@ pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
         }
     }
     Some(source_run_id)
+}
+
+fn substantive_source_for_empty_remediation(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Option<String> {
+    let remediation = persisted_promotion_for_attempt(run_id).ok().flatten()?;
+    if !is_empty_verified_remediation(&remediation) {
+        return None;
+    }
+    let source_run_id = remediation
+        .provenance
+        .pointer("/cook_follow_up/source_run_id")
+        .and_then(Value::as_str)?;
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == source_run_id)
+        || canonical_cook_candidate(&recipe.cook_id)
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string))
+            .as_deref()
+            != Some(source_run_id)
+    {
+        return None;
+    }
+    persisted_promotion_for_attempt(source_run_id)
+        .ok()
+        .flatten()
+        .filter(|promotion| {
+            promotion.status == AgentTaskPromotionStatus::Applied
+                && !promotion.changed_files.is_empty()
+        })?;
+    Some(source_run_id.to_string())
+}
+
+fn is_empty_verified_remediation(promotion: &AgentTaskPromotionReport) -> bool {
+    promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
+        && promotion.changed_files.is_empty()
+        && promotion
+            .provenance
+            .pointer("/cook_follow_up/source_run_id")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| !run_id.is_empty())
 }
 
 /// Recover a standalone manual-finalization record. Unlike Cook attempts, a
@@ -2950,15 +3330,36 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         ));
     }
     let report = manual_finalization_intent_for_run(&record, run_id)?;
-    let finalization = manual_finalization_options(report)?;
-    let report = if preflight {
-        preflight_pr_with_backend(finalization, backend)?
+    let retryable = record.metadata["manual_finalization_retry"] == true;
+    if retryable {
+        require_manual_retry_candidate(&record, &report.path)?;
+    }
+    let mut finalization = manual_finalization_options(report, retryable)?;
+    if retryable {
+        // Direct publication first persisted this dossier before it attempted a
+        // mutation. It is safe to retry that original mutation after failure.
+        finalization.expected_candidate_sha = None;
+    }
+    let result = if preflight {
+        preflight_pr_with_backend(finalization, backend)
     } else {
-        finalize_pr_with_backend(finalization, backend)?
+        finalize_pr_with_backend(finalization, backend)
+    };
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if !preflight {
+                agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)?;
+            }
+            return Err(error);
+        }
     };
     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
     if !preflight {
-        persist_manual_finalization_receipt(run_id, &report)?;
+        if let Err(error) = persist_manual_finalization_receipt(run_id, &report) {
+            agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)?;
+            return Err(error);
+        }
     }
     Ok(value)
 }
@@ -3121,6 +3522,29 @@ fn manual_finalization_intent_for_run(
             None,
         ));
     }
+    let candidate_recoverable = crate::agent_task_lifecycle::persisted_status(run_id)?.state
+        == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+    if candidate_recoverable && report.manual_candidate_binding.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_intent",
+            "candidate-recoverable manual finalization intent has no controller candidate binding",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    if let Some(binding) = report.manual_candidate_binding.as_ref() {
+        if binding.schema
+            != crate::agent_task_finalization::AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA
+            || manual_candidate_binding(run_id, &report)? != *binding
+        {
+            return Err(Error::validation_invalid_argument(
+                "manual_finalization_intent",
+                "persisted manual finalization intent no longer matches the selected Cook candidate",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+    }
     Ok(report)
 }
 
@@ -3150,6 +3574,7 @@ fn valid_manual_finalization_receipt(
             binding,
             git_identity,
             intent_git_identity,
+            record,
         )
         && (!require_persisted_digest
             || (record.metadata["manual_finalization_receipt_digest"]
@@ -3185,8 +3610,12 @@ fn valid_manual_finalization_receipt(
         && report.finalization_outcome.publication_action == report.pr_action
         && report.finalization_outcome.publication_status == "review_ready"
         && report.finalization_outcome.published
-        && !report.finalization_outcome.committed
-        && !report.finalization_outcome.pushed
+        && (record
+            .metadata
+            .get("manual_finalization_retry_candidate")
+            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+            .is_some()
+            || (!report.finalization_outcome.committed && !report.finalization_outcome.pushed))
         && binding.candidate_sha == binding.remote_sha
         && binding.candidate_sha == binding.pr_head_sha
         && git_identity.commit_sha.as_deref() == Some(binding.candidate_sha.as_str())
@@ -3207,6 +3636,7 @@ fn receipt_matches_manual_preflight(
     binding: &crate::agent_task_finalization::AgentTaskPublicationBinding,
     git_identity: &homeboy_core::git::GitIdentityProof,
     intent_git_identity: &homeboy_core::git::GitIdentityProof,
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
     let mut receipt_dossier = receipt.review_dossier.clone();
     receipt_dossier
@@ -3233,13 +3663,77 @@ fn receipt_matches_manual_preflight(
             &receipt.publication_intent.target,
             &intent.publication_intent.target,
         )
-        && intent_git_identity.commit_sha.is_some()
-        && git_identity.commit_sha == intent_git_identity.commit_sha
-        && binding.candidate_sha
-            == intent_git_identity
-                .commit_sha
-                .as_deref()
-                .unwrap_or_default()
+        && (if let Some(candidate) = record
+            .metadata
+            .get("manual_finalization_retry_candidate")
+            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+        {
+            serde_json::from_value::<crate::agent_task_promotion::AgentTaskCandidateFingerprint>(
+                candidate.clone(),
+            )
+            .is_ok_and(|candidate| {
+                candidate.tree == binding.candidate_tree
+                    && candidate.changed_files == binding.changed_files
+            })
+        } else {
+            intent_git_identity.commit_sha.is_some()
+                && git_identity.commit_sha == intent_git_identity.commit_sha
+                && binding.candidate_sha
+                    == intent_git_identity
+                        .commit_sha
+                        .as_deref()
+                        .unwrap_or_default()
+        })
+}
+
+fn require_manual_retry_candidate(
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    path: &str,
+) -> Result<()> {
+    let expected = record
+        .metadata
+        .get("manual_finalization_retry_candidate")
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "manual_finalization_retry_candidate",
+                "retryable manual publication has no durable candidate fingerprint",
+                None,
+                None,
+            )
+        })?;
+    let expected: crate::agent_task_promotion::AgentTaskCandidateFingerprint =
+        serde_json::from_value(expected).map_err(|_| {
+            Error::validation_invalid_argument(
+                "manual_finalization_retry_candidate",
+                "retryable manual publication candidate fingerprint is invalid",
+                None,
+                None,
+            )
+        })?;
+    let actual = crate::agent_task_promotion::candidate_fingerprint(path)?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+        fingerprint: actual,
+    } = actual
+    else {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_retry_candidate",
+            "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
+            None,
+            None,
+        ));
+    };
+    // Hooks may stage the exact candidate before rejecting it. Bind semantic
+    // content and paths, not the transient staged/unstaged representation.
+    if actual.tree != expected.tree || actual.changed_files != expected.changed_files {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_retry_candidate",
+            "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn is_publication_base_observation(
@@ -3297,8 +3791,9 @@ fn same_preflight_publication_target(
 
 fn manual_finalization_options(
     report: AgentTaskPrFinalizationReport,
+    allow_uncommitted_candidate: bool,
 ) -> Result<AgentTaskPrFinalizationOptions> {
-    validate_manual_preflight_report(&report, &report.run_id)?;
+    validate_manual_preflight_report(&report, &report.run_id, allow_uncommitted_candidate)?;
     let target = &report.publication_intent.target;
     let path = target.path.clone().filter(|path| path == &report.path);
     let base = target.base.clone().filter(|base| base == &report.base);
@@ -3313,10 +3808,6 @@ fn manual_finalization_options(
         || base.is_none()
         || head.is_none()
         || verified_base_sha.as_deref().unwrap_or_default().is_empty()
-        || expected_candidate_sha
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty()
     {
         return Err(Error::validation_invalid_argument(
             "cook_finalization",
@@ -3345,6 +3836,7 @@ fn manual_finalization_options(
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: true,
         expected_candidate_sha,
+        verified_candidate_sha: None,
         protected_branches: vec![
             "main".to_string(),
             "master".to_string(),
@@ -3357,6 +3849,7 @@ fn manual_finalization_options(
 fn validate_manual_preflight_report(
     report: &AgentTaskPrFinalizationReport,
     run_id: &str,
+    allow_uncommitted_candidate: bool,
 ) -> Result<()> {
     if report.run_id != run_id {
         return Err(Error::validation_invalid_argument(
@@ -3403,12 +3896,13 @@ fn validate_manual_preflight_report(
             None,
         ));
     }
-    if report
-        .publication_proof
-        .git_identity
-        .as_ref()
-        .and_then(|identity| identity.commit_sha.as_deref())
-        .is_none_or(str::is_empty)
+    if !allow_uncommitted_candidate
+        && report
+            .publication_proof
+            .git_identity
+            .as_ref()
+            .and_then(|identity| identity.commit_sha.as_deref())
+            .is_none_or(str::is_empty)
     {
         return Err(Error::validation_invalid_argument(
             "publication_proof.git_identity.commit_sha",
@@ -4359,10 +4853,9 @@ pub fn cook_failure_context(
         &chronological_latest_run_id,
         recovery_legal,
         blocking_claim.is_some(),
-        provider_executions_consumed
-            < recipe.retry_budget["max_attempts"]
-                .as_u64()
-                .unwrap_or_default(),
+        record
+            .as_ref()
+            .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
         exact_checkpoint_candidate_mismatch(&diagnostic),
         ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
         record.as_ref().and_then(lab_handoff_runtime_recovery),
@@ -4492,7 +4985,7 @@ fn cook_recovery_actions(
     run_id: &str,
     recovery_legal: bool,
     blocking_claim: bool,
-    provider_retry_available: bool,
+    retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
     ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
@@ -4511,8 +5004,9 @@ fn cook_recovery_actions(
         | "green_no_finalize"
         | "intentional_no_change"
         | "execution_budget_exhausted"
-        | "retries_exhausted" => false,
-        "gate_failed" | "no_op_gate_failed" => provider_retry_available,
+        | "retries_exhausted"
+        | "pre_execution_failure" => false,
+        "gate_failed" | "no_op_gate_failed" => retry_admitted,
         _ => true,
     };
     let mut actions = vec![
@@ -4531,7 +5025,7 @@ fn cook_recovery_actions(
             command: super::cook_recovery_command(run_id, &["reconcile", run_id, "--dry-run"]),
         });
     }
-    if exact_checkpoint_candidate_mismatch {
+    if exact_checkpoint_candidate_mismatch && retry_admitted {
         // The checkpoint authenticates one exact destination candidate. A
         // replacement run preserves that immutable evidence without claiming it
         // can safely continue against a diverged worktree.
@@ -4555,6 +5049,11 @@ fn cook_recovery_actions(
                 ),
             }
         }));
+    } else if status == "pre_execution_failure" && retry_admitted {
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "retry".to_string(),
+            command: super::cook_recovery_command(run_id, &["retry", run_id, "--run"]),
+        });
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
@@ -4608,6 +5107,12 @@ mod recovery_action_tests {
                 vec!["status", "diagnose"],
             ),
             (
+                "pre_execution_failure",
+                true,
+                false,
+                vec!["status", "diagnose", "retry"],
+            ),
+            (
                 "verification_pending",
                 false,
                 false,
@@ -4649,7 +5154,10 @@ mod recovery_action_tests {
             );
             assert!(recovery.legal_actions.iter().all(|action| {
                 action.command.starts_with("homeboy agent-task ")
-                    && action.command.ends_with("cook-state-matrix-attempt-1")
+                    && (action.command.ends_with("cook-state-matrix-attempt-1")
+                        || action
+                            .command
+                            .ends_with("cook-state-matrix-attempt-1 --run"))
                     || action.command
                         == "homeboy agent-task status cook-state-matrix-attempt-1 --full"
             }));

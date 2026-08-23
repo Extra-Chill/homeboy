@@ -19,6 +19,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
   "platform": {},
   "structured_sidecars": {},
   "notification_transports": [],
+  "external_check_detail_resolvers": [],
   "materialization_source": {},
   "contract_producers": [],
   "commands": {},
@@ -49,6 +50,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
 - **`notification_transports`** (array): Declares versioned, extension-owned completion notification transports
+- **`external_check_detail_resolvers`** (array): Declares bounded, extension-owned hydration of failed external CI statuses
 - **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
 - **`contract_producers`** (array): Declares generic producer invocations Homeboy can call at explicit lifecycle phases
 - **`toolchain_readiness`** (array): Declares structured `program` plus `args` usability probes for execution admission. Public placement preflight reads runner-advertised capabilities and never executes these probes. A legacy `command` string is recognized only to return an `extension upgrade required` diagnostic and is never executed.
@@ -197,6 +199,57 @@ Extensions can declare which structured run-directory sidecars they emit. `struc
 - **`structured_sidecars.<name>.schema_version`** (string): Optional version of the sidecar payload contract.
 
 The generic `findings` and `producer.summary` names are the preferred contracts for normalized finding output and producer summaries. Legacy producer-specific names such as `lint.findings` can be declared during migration, but they use the same top-level declaration shape. Schema versions are read only from `structured_sidecars.<name>.schema_version`; nested producer fields such as `lint.findings_schema_version` do not declare sidecar contracts.
+
+## External Check Detail Resolvers
+
+`external_check_detail_resolvers` lets an extension hydrate a failed external CI
+status without teaching Homeboy about that provider. Every entry owns one exact,
+case-sensitive provider name and a versioned literal argv command.
+
+```json
+{
+  "external_check_detail_resolvers": [{
+    "schema": "homeboy/external-check-detail-resolver/v1",
+    "provider": "example-ci",
+    "command": ["bin/resolve-example-ci"],
+    "public_env": ["EXAMPLE_CI_ACCOUNT"],
+    "secret_env": ["EXAMPLE_CI_TOKEN"]
+  }]
+}
+```
+
+`command[0]` is a relative path resolved from the declaring extension directory;
+Homeboy sets that directory as the resolver working directory. It is executed
+directly, never through a shell, so repository working-directory binaries cannot
+be selected. Homeboy starts from an empty environment and projects only declared `public_env` and `secret_env`
+names that are available to the Homeboy process. Names must be valid environment
+identifiers and cannot appear in both lists. Resolver output is limited to 64 KiB;
+at most eight resolvers run per triage under one 20-second budget. The child owns
+its process group, so timeout, stdin, attach, and output failures terminate and
+reap the entire tree before diagnostics are returned.
+
+Homeboy writes one request on stdin:
+
+```json
+{"schema":"homeboy/external-check-detail-request/v1","provider":"example-ci","status":"failure","target_url":"https://ci.example.test/build/42"}
+```
+
+The target URL is bounded, strips fragments, query strings, and credentials, and is retained as
+the original evidence. A resolver writes exactly one response:
+
+```json
+{"schema":"homeboy/external-check-detail-response/v1","provider":"example-ci","build_id":"42","summary":"Compile failed","actions":["example-ci replay 42"],"artifact_refs":["https://ci.example.test/artifacts/42"],"log_refs":["https://ci.example.test/logs/42"]}
+```
+
+The response provider and schema must exactly match the declaration and contract.
+`build_id`, `artifact_refs`, and `log_refs` give operators stable provider build
+identity and bounded links to evidence. Homeboy redacts projected secret values
+and canonicalizes URLs in requests, responses, stderr, actions, and diagnostics.
+Unknown, ambiguous, malformed, unavailable, timed-out, and budget-exhausted
+resolvers preserve the source check and appear as resolver diagnostics. Multiple
+installed extensions that declare a provider are rejected as ambiguous before
+any secret is resolved. Provider names are unique within a manifest and across
+installed manifests; public and secret names are individually unique and disjoint.
 
 ## Notification transports
 

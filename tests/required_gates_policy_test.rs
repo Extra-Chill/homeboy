@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn ruleset() -> &'static str {
     include_str!("../.github/required-gates-ruleset.json")
@@ -10,23 +11,55 @@ fn ci_workflow() -> &'static str {
 }
 
 fn declared_contexts() -> Vec<String> {
-    let policy: serde_json::Value = serde_json::from_str(ruleset()).expect("valid ruleset JSON");
+    [
+        "homeboy / Required Gates Declaration",
+        "homeboy / Workspace Tests Compile",
+        "homeboy / Windows Compile",
+        "homeboy / Rustfmt",
+        "homeboy / Audit",
+        "homeboy / Lint",
+        "homeboy / Test",
+        "homeboy / Required Gates Executed",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn status_policy_fixture() -> PathBuf {
+    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    let contexts = declared_contexts();
+    let checks: Vec<serde_json::Value> = contexts
+        .iter()
+        .map(|context| serde_json::json!({"context": context, "integration_id": 15368}))
+        .collect();
+    let mut policy: serde_json::Value =
+        serde_json::from_str(ruleset()).expect("valid ruleset JSON");
+    policy["reconcile_preflight"] = serde_json::json!({"required_context": "homeboy / Test"});
     policy["rules"]
-        .as_array()
+        .as_array_mut()
         .expect("ruleset rules")
-        .iter()
-        .find(|rule| rule["type"] == "required_status_checks")
-        .expect("required-status-checks rule")["parameters"]["required_status_checks"]
-        .as_array()
-        .expect("required check list")
-        .iter()
-        .map(|check| {
-            check["context"]
-                .as_str()
-                .expect("check context")
-                .to_string()
-        })
-        .collect()
+        .push(serde_json::json!({
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": true,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": checks,
+            }
+        }));
+
+    let path = std::env::temp_dir().join(format!(
+        "homeboy-required-gates-status-policy-{}-{}.json",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&policy).expect("status policy fixture"),
+    )
+    .expect("status policy fixture write");
+    path
 }
 
 /// A throwaway directory for live-state fixtures. The validator's live probe is
@@ -106,6 +139,7 @@ fn ruleset_detail(bypass_actors: serde_json::Value, current_user_can_bypass: &st
 }
 
 fn run_validator(mode: &str, env: &[(&str, &str)]) -> Output {
+    let fixture = status_policy_fixture();
     let mut command = Command::new("bash");
     command.args([".github/validate-required-gates.sh", mode]);
     // Never inherit a real Actions environment: the validator appends evidence
@@ -116,25 +150,36 @@ fn run_validator(mode: &str, env: &[(&str, &str)]) -> Output {
         "REQUIRED_GATES_HEAD_SHA",
         "0000000000000000000000000000000000000000",
     );
+    command.env("REQUIRED_GATES_CONFIG", &fixture);
     for (key, value) in env {
         command.env(key, value);
     }
-    command
+    let output = command
         .output()
-        .expect("required-gates validator should run")
+        .expect("required-gates validator should run");
+    let _ = std::fs::remove_file(fixture);
+    output
 }
 
 fn run_execution_gate(env: &[(&str, &str)]) -> Output {
+    let fixture = status_policy_fixture();
     let mut command = Command::new("bash");
     command.arg(".github/ci-required-gates-executed.sh");
     command.env_remove("GITHUB_STEP_SUMMARY");
     command.env("CI_GATE_RESULTS", r#"{"gates":{"result":"success"}}"#);
+    command.env("REQUIRED_GATES_CONFIG", &fixture);
+    command.env(
+        "REQUIRED_GATES_HEAD_SHA",
+        "0000000000000000000000000000000000000000",
+    );
     for (key, value) in env {
         command.env(key, value);
     }
-    command
+    let output = command
         .output()
-        .expect("required-gates execution gate should run")
+        .expect("required-gates execution gate should run");
+    let _ = std::fs::remove_file(fixture);
+    output
 }
 
 fn execution_jobs(contexts: &[String], exception: Option<(&str, serde_json::Value)>) -> String {
@@ -144,6 +189,7 @@ fn execution_jobs(contexts: &[String], exception: Option<(&str, serde_json::Valu
             .map(|context| {
                 serde_json::json!({
                     "name": context,
+                    "head_sha": "0000000000000000000000000000000000000000",
                     "conclusion": exception
                         .as_ref()
                         .filter(|(candidate, _)| *candidate == context)
@@ -165,24 +211,10 @@ fn stderr_of(output: &Output) -> String {
 }
 
 #[test]
-fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
+fn reporting_only_policy_is_explicit_and_ci_still_emits_its_measurements() {
     let contexts = declared_contexts();
     let policy: serde_json::Value = serde_json::from_str(ruleset()).expect("valid ruleset JSON");
 
-    assert_eq!(
-        contexts,
-        [
-            "homeboy / Required Gates Declaration",
-            "homeboy / Workspace Tests Compile",
-            "homeboy / Windows Compile",
-            "homeboy / Rustfmt",
-            "homeboy / Audit",
-            "homeboy / Lint",
-            "homeboy / Test",
-            "homeboy / Required Gates Executed",
-        ],
-        "the versioned policy must enumerate every main-merge gate"
-    );
     assert_eq!(
         contexts.len(),
         contexts
@@ -191,15 +223,15 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
             .len(),
         "a duplicate context would make the policy ambiguous"
     );
-    assert!(policy["rules"].as_array().unwrap().iter().any(|rule| {
-        rule["type"] == "required_status_checks"
-            && rule["parameters"]["strict_required_status_checks_policy"] == true
-    }));
-    assert_eq!(
-        policy["reconcile_preflight"]["required_context"],
-        "homeboy / Test",
-        "the reconcile preflight must derive its canonical API check name and app id from a declared required context"
+    assert!(
+        policy["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|rule| rule["type"] != "required_status_checks"),
+        "the shipped reporting-only policy must not imply merge enforcement"
     );
+    assert!(policy.get("reconcile_preflight").is_none());
 
     for context in &contexts {
         let matrix_title = context.trim_start_matches("homeboy / ");
@@ -255,7 +287,13 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
 
 #[test]
 fn shipped_validator_accepts_the_versioned_policy() {
-    let output = run_validator("--local", &[]);
+    let output = run_validator(
+        "--local",
+        &[(
+            "REQUIRED_GATES_CONFIG",
+            ".github/required-gates-ruleset.json",
+        )],
+    );
     assert!(output.status.success(), "{}", stderr_of(&output));
 }
 
@@ -659,6 +697,7 @@ fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success
         serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
     jobs.push(serde_json::json!({
         "name": "homeboy / Test",
+        "head_sha": "0000000000000000000000000000000000000000",
         "conclusion": "skipped",
     }));
     let jobs = scratch.write(
@@ -672,6 +711,109 @@ fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success
         "a successful canonical Test context remains valid when its planning duplicate is skipped: {}\n{}",
         stdout_of(&output),
         stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"success\",\"skipped\"]")
+            && stdout_of(&output).contains("\"selected_conclusion\":\"success\""),
+        "duplicate diagnostics must retain both results and the selected success: {}",
+        stdout_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("declared=8 executed=8"),
+        "the terminal gate counts itself after observing the other seven: {}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_keeps_duplicate_failures_and_cancellations_fail_closed() {
+    let contexts = declared_contexts();
+
+    for (name, conclusion) in [("failure", "failure"), ("cancelled", "cancelled")] {
+        let scratch = Scratch::new(name);
+        let mut jobs: Vec<serde_json::Value> =
+            serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
+        jobs.push(serde_json::json!({
+            "name": "homeboy / Test",
+            "head_sha": "0000000000000000000000000000000000000000",
+            "conclusion": conclusion,
+        }));
+        let jobs = scratch.write(
+            "jobs.json",
+            &serde_json::to_string(&jobs).expect("duplicate jobs"),
+        );
+        let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+        assert!(
+            !output.status.success()
+                && stdout_of(&output).contains("required-gates-executed-status=failed"),
+            "a {name} duplicate must not be masked by success: {}",
+            stdout_of(&output)
+        );
+        assert!(
+            stdout_of(&output).contains(&format!("\"selected_conclusion\":\"{conclusion}\"")),
+            "the selected fail-closed result must be diagnosable: {}",
+            stdout_of(&output)
+        );
+    }
+}
+
+#[test]
+fn terminal_execution_verdict_rejects_skipped_only_and_ignores_other_head_duplicates() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("skipped-only-other-head");
+    let mut jobs: Vec<serde_json::Value> = serde_json::from_str(&execution_jobs(
+        &contexts,
+        Some(("homeboy / Test", serde_json::json!("skipped"))),
+    ))
+    .expect("execution jobs");
+    jobs.push(serde_json::json!({
+        "name": "homeboy / Test",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "conclusion": "success",
+    }));
+    let jobs = scratch.write(
+        "jobs.json",
+        &serde_json::to_string(&jobs).expect("duplicate jobs"),
+    );
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+    assert!(
+        !output.status.success()
+            && stdout_of(&output).contains("required-gates-executed-status=failed"),
+        "a success for another head must not satisfy a skipped candidate: {}",
+        stdout_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"skipped\"]")
+            && stdout_of(&output).contains("\"selected_conclusion\":\"skipped\""),
+        "the candidate-head result must be diagnosable: {}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_accepts_duplicate_success() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("duplicate-success");
+    let mut jobs: Vec<serde_json::Value> =
+        serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
+    jobs.push(serde_json::json!({
+        "name": "homeboy / Test",
+        "head_sha": "0000000000000000000000000000000000000000",
+        "conclusion": "success",
+    }));
+    let jobs = scratch.write(
+        "jobs.json",
+        &serde_json::to_string(&jobs).expect("duplicate jobs"),
+    );
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+    assert!(output.status.success(), "{}", stdout_of(&output));
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"success\",\"success\"]"),
+        "duplicate successes must remain visible in diagnostics: {}",
+        stdout_of(&output)
     );
 }
 
