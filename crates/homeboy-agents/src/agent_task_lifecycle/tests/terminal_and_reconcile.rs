@@ -3293,8 +3293,14 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
             1,
         )
         .expect("reserved");
-        record_provider_execution_terminal("owner-live-late-import", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "owner-live-late-import",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
 
         let record = status("owner-live-late-import").expect("status before aggregate import");
         assert_eq!(record.state, AgentTaskRunState::Running);
@@ -3445,8 +3451,14 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
             1,
         )
         .expect("reserved");
-        record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "owner-late-success",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3485,8 +3497,14 @@ fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
             1,
         )
         .expect("reserved");
-        record_provider_execution_terminal("provider-failed-no-owner", "task-a", 1, "failed")
-            .expect("provider failure recorded");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-no-owner",
+            "task-a",
+            1,
+            "failed",
+        )
+        .expect("provider failure recorded");
         rewrite_record_for_test("provider-failed-no-owner", |record| {
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
@@ -3527,8 +3545,14 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
             1,
         )
         .expect("reserved");
-        record_provider_execution_terminal("provider-failed-owner-dead", "task-a", 1, "failed")
-            .expect("provider failure recorded");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-owner-dead",
+            "task-a",
+            1,
+            "failed",
+        )
+        .expect("provider failure recorded");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3571,8 +3595,14 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
             1,
         )
         .expect("reserved");
-        record_provider_execution_terminal("cancel-race", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "cancel-race",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
 
         let deferred = cancel_run("cancel-race", Some("operator cancel"))
             .expect("cancellation defers to terminal provider");
@@ -3604,7 +3634,8 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
         cancel_run("provider-terminal-cancel-race", Some("stale owner"))
             .expect("cancellation recorded");
 
-        let terminal = record_provider_execution_terminal(
+        let terminal = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "provider-terminal-cancel-race",
             "task-a",
             1,
@@ -3634,7 +3665,8 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
         )
         .expect("reserved");
 
-        let error = record_provider_execution_terminal(
+        let error = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "invalid-provider-terminal-state",
             "task-a",
             1,
@@ -3658,7 +3690,8 @@ fn provider_terminalization_rejects_a_missing_execution_attempt() {
         let plan = test_plan();
         submit_plan(&plan, Some("missing-provider-terminal-attempt")).expect("submitted");
 
-        let error = record_provider_execution_terminal(
+        let error = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "missing-provider-terminal-attempt",
             "task-a",
             1,

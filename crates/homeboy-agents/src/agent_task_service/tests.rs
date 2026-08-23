@@ -416,7 +416,8 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
             0,
             "an existing reservation must be reconciled, never redispatched"
         );
-        agent_task_lifecycle::record_provider_execution_terminal(
+        agent_task_lifecycle::record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "provider-reservation",
             &task.task_id,
             1,

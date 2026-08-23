@@ -3743,26 +3743,6 @@ pub fn record_cook_terminal_result_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook terminal result was unchanged"))
 }
 
-/// Record the provider's terminal result before controller-owned patch
-/// harvesting. Harvesting can fail or be interrupted independently of the
-/// provider execution, so it must not leave this reservation running.
-pub fn record_provider_execution_terminal(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    state: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_with_model_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        state,
-        None,
-    )
-}
-
 pub fn record_provider_execution_terminal_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
