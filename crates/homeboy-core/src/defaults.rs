@@ -674,8 +674,9 @@ pub struct WorktreeProviderCommands {
     /// `{cleanup_policy}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure: Option<Vec<String>>,
-    /// Fast-forward one already-owned clean worktree to the immutable `{base}`
-    /// supplied by the caller. It also receives `{handle}`.
+    /// Atomically converge one already-owned clean worktree to immutable
+    /// `{base}`. It receives `{handle}` and the attested opaque `{identity}`, and
+    /// returns a `homeboy/worktree-provider-convergence/v1` evidence envelope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converge: Option<Vec<String>>,
     /// Read-only projection of an `ensure` request. It receives the same

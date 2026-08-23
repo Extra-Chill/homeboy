@@ -6525,9 +6525,19 @@ fn pin_initial_cook_workspace_base(options: &mut AgentTaskCookServiceOptions) ->
                 .and_then(|task| task.workspace.root.as_deref())
                 .map(std::path::Path::new)
         });
-    let Some(workspace) = workspace else {
+    let Some(workspace) = workspace.map(Path::to_path_buf) else {
         return Ok(());
     };
+    pin_cook_workspace_base_at(options, &workspace)
+}
+
+fn pin_cook_workspace_base_at(
+    options: &mut AgentTaskCookServiceOptions,
+    workspace: &Path,
+) -> Result<()> {
+    if options.task_base_sha.is_some() {
+        return Ok(());
+    }
     let Some(base) =
         crate::agent_task_promotion::capture_declared_base(workspace, Some(&options.base))?
     else {
@@ -6586,6 +6596,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 "provider_id": convergence.provider_id,
                 "handle": convergence.handle,
                 "path": convergence.path,
+                "provider_evidence": convergence.evidence,
             })))
         }
         Err(error) => Err(error),
@@ -6971,6 +6982,14 @@ fn materialize_pending_cook_workspace(
     effective_lookup_timeout_ms: Option<u64>,
 ) -> Result<()> {
     restore_legacy_cook_provision(&mut options.initial_plan)?;
+    if options.task_base_sha.is_none() {
+        options.task_base_sha = options
+            .initial_plan
+            .metadata
+            .pointer("/cook_workspace_base/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
     let provider_id = |options: &AgentTaskCookServiceOptions| {
         options
             .initial_plan
@@ -7089,6 +7108,10 @@ fn materialize_pending_cook_workspace(
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
+    // Deferred provider materialization has no checkout at initial recipe
+    // persistence. Capture and persist this immutable boundary before Cook can
+    // admit or dispatch the materialized destination.
+    pin_cook_workspace_base_at(options, &target)?;
     validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
     for task in &mut options.initial_plan.tasks {
         task.workspace.root = Some(target.display().to_string());
