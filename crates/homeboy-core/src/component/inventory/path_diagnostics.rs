@@ -96,8 +96,8 @@ pub(super) fn local_path_diagnostic_for(
 
 pub(super) fn stable_workspace_roots(path: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(home).join("Developer"));
+    if let Ok(home) = crate::paths::home_root() {
+        roots.push(home.join("Developer"));
     }
     if let Some(root) = stable_root_before_temp_marker(path) {
         roots.push(root);

@@ -18,7 +18,7 @@ use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunner
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tempfile::TempDir;
 
 struct TerminalSnapshotProvider {
@@ -27,6 +27,23 @@ struct TerminalSnapshotProvider {
 
 struct ServiceRunnerFixture {
     commands: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn with_strict_config_lock(test: impl FnOnce()) {
+    let _guard = CONFIG_LOCK_STRICT_TEST
+        .lock()
+        .expect("strict lock test guard");
+    std::env::set_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV, "1");
+    struct StrictLockEnv;
+    impl Drop for StrictLockEnv {
+        fn drop(&mut self) {
+            std::env::remove_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV);
+        }
+    }
+    let _env = StrictLockEnv;
+    test();
 }
 
 struct FixtureAcceptanceVerifier;
@@ -3729,6 +3746,63 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
     );
     assert_eq!(status.normalized_events[0].artifact_refs.len(), 1);
     assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
+}
+
+#[test]
+fn cancellation_wins_the_retry_pre_execution_failure_race() {
+    with_isolated_home(|_| {
+        let run_id = "cook-retry-cancellation-race";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submit retry reservation");
+        cancel_run(run_id, Some("operator cancellation")).expect("cancel retry");
+
+        let failure = record_pre_execution_failure_in_store(
+            &AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store"),
+            run_id,
+            &plan,
+            "local_retry_supervisor",
+            &Error::internal_unexpected("supervisor exited before execution"),
+        )
+        .expect("terminal arbitration preserves cancellation");
+
+        assert_eq!(failure.state, AgentTaskRunState::Cancelled);
+        assert!(failure.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
+fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
+    with_strict_config_lock(|| {
+        with_isolated_home(|_| {
+            let run_id = "cook-dead-retry-launcher-strict-attempt-2";
+            let plan = test_plan();
+            submit_plan(&plan, Some(run_id)).expect("persist retry reservation");
+
+            let store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let failed = record_pre_execution_failure_in_store(
+                &store,
+                run_id,
+                &plan,
+                "local_retry_supervisor",
+                &Error::internal_unexpected(
+                    "local Cook retry launcher exited before provider execution",
+                ),
+            )
+            .expect("strict lock must not re-enter during terminal persistence");
+
+            assert_eq!(failed.state, AgentTaskRunState::Failed);
+            assert_eq!(
+                store.read_aggregate(run_id).expect("aggregate").status,
+                AgentTaskAggregateStatus::Failed
+            );
+            assert_eq!(
+                store.read_record(run_id).expect("durable record").metadata["artifact_projection"]
+                    ["status"],
+                "complete"
+            );
+        })
+    });
 }
 
 #[test]

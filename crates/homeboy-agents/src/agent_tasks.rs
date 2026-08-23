@@ -302,6 +302,7 @@ pub mod gate {
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_cook_operation,
+        claim_local_cook_retry_launch_in_store,
         claim_next_eligible_queued_run_with_preflight_and_filter,
         claim_next_eligible_queued_run_with_preflight_and_filter_and_limit, claim_next_queued_run,
         complete_cook_operation, consume_unmaterialized_cook_replay_claim, cook_attempt_run_id,
@@ -322,8 +323,10 @@ pub mod lifecycle {
         record_detached_cook_handoff_child_in_store, record_detached_cook_handoff_parent,
         record_detached_cook_handoff_parent_in_store, record_detached_cook_supervisor,
         record_detached_cook_supervisor_in_store, record_detached_lab_run, record_health_summary,
-        record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
-        record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
+        record_lab_offload_phase, record_lab_offload_planned,
+        record_local_cook_retry_child_in_store, record_local_cook_retry_supervisor_in_store,
+        record_pre_dispatch_failure, record_pre_execution_failure,
+        record_pre_execution_failure_in_store, record_promotion, record_remote_dispatch_failure,
         record_run_aggregate, record_runner_job_identity, record_unmaterialized_cook_admission,
         recover_unmaterialized_cook_input_publication, register_acceptance_verifier,
         register_acceptance_verifier_from_config,
@@ -351,8 +354,9 @@ pub mod lifecycle {
         AgentTaskRunStatus, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
         AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome, ClaimOutcome,
         ControllerRuntimePruneResult, DetachedCookMaterializingAttempt, DetachedLabRunRecord,
-        LabOffloadProxyPlan, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
-        RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+        LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
+        RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
+        RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{

@@ -14,6 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
@@ -77,9 +79,17 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
     let current_exe = std::env::current_exe()
         .ok()
         .and_then(|path| path.canonicalize().ok());
+    let current_digest = super::current_binary_sha256().ok().flatten();
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
+        .filter_map(|line| {
+            parse_daemon_process_candidate_with_digest(
+                line,
+                jobs_path,
+                current_exe.as_deref(),
+                current_digest.as_deref(),
+            )
+        })
         .map(|mut candidate| {
             let process_store_fallback = match command_state_dir(&candidate.cmdline) {
                 CommandStateDir::Proven(_) => None,
@@ -279,10 +289,20 @@ fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>)
     (status.code(), None)
 }
 
+#[cfg(test)]
 fn parse_daemon_process_candidate(
     line: &str,
     jobs_path: &Path,
     current_exe: Option<&Path>,
+) -> Option<DaemonProcessCandidate> {
+    parse_daemon_process_candidate_with_digest(line, jobs_path, current_exe, None)
+}
+
+fn parse_daemon_process_candidate_with_digest(
+    line: &str,
+    jobs_path: &Path,
+    current_exe: Option<&Path>,
+    current_digest: Option<&str>,
 ) -> Option<DaemonProcessCandidate> {
     let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse().ok()?;
@@ -325,6 +345,9 @@ fn parse_daemon_process_candidate(
         pid,
         process_start_identity: process_start_identity(pid).ok().flatten(),
         executable: executable.clone(),
+        executable_digest: executable_matches
+            .then(|| current_digest.map(str::to_string))
+            .flatten(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
         durable_store_path: durable_store_path
@@ -1883,6 +1906,7 @@ pub fn reconcile_leaseless_orphans(
 pub fn reconcile_unleased_candidates(
     addr: &str,
     apply: bool,
+    review_token: Option<&str>,
     replacement_operation_id: Option<&str>,
 ) -> Result<DaemonCandidateReconciliationResult> {
     parse_bind_addr(addr)?;
@@ -1904,6 +1928,7 @@ pub fn reconcile_unleased_candidates(
                 candidates: status.process_candidates,
                 retired_pids: Vec::new(),
                 blocked_pids: Vec::new(),
+                review_token: None,
                 evidence: vec![format!("replayed replacement operation {operation_id}")],
                 replacement: Some(DaemonStartResult {
                     pid: state.pid,
@@ -1938,6 +1963,7 @@ pub fn reconcile_unleased_candidates(
         candidates,
         retired_pids: Vec::new(),
         blocked_pids: Vec::new(),
+        review_token: None,
         evidence: Vec::new(),
         replacement: None,
     };
@@ -1956,6 +1982,8 @@ pub fn reconcile_unleased_candidates(
     }
 
     let jobs_path = crate::paths::daemon_jobs_file()?;
+    let legacy_candidates = legacy_review_candidates(&result.candidates);
+    let legacy_review_token = legacy_review_token(&legacy_candidates);
     for candidate in &result.candidates {
         match candidate.ownership {
             DaemonProcessOwnership::Unrelated => evidence.push(format!(
@@ -1978,12 +2006,19 @@ pub fn reconcile_unleased_candidates(
                         TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_err()
                     });
                 if candidate.build_identity.is_some()
+                    && candidate.executable_digest.is_some()
                     && candidate.process_start_identity.is_some()
                     && candidate.startup_token.is_some()
                     && endpoint_unreachable
                 {
                     evidence.push(format!(
                         "pid {} is a proven orphan candidate: same store, current binary, exact startup token, and unreachable endpoint",
+                        candidate.pid
+                    ));
+                } else if legacy_candidates.len() == 1 && legacy_candidates[0].pid == candidate.pid
+                {
+                    evidence.push(format!(
+                        "pid {} is an attributable legacy zero-job candidate; review token is required before signaling",
                         candidate.pid
                     ));
                 } else {
@@ -1997,8 +2032,24 @@ pub fn reconcile_unleased_candidates(
         }
     }
     if !apply || !result.blocked_pids.is_empty() {
+        result.review_token = legacy_review_token;
         result.evidence = evidence;
         return Ok(result);
+    }
+
+    if let Some(expected_review_token) = legacy_review_token.as_deref() {
+        if review_token != Some(expected_review_token) {
+            result
+                .blocked_pids
+                .extend(legacy_candidates.iter().map(|candidate| candidate.pid));
+            result.review_token = Some(expected_review_token.to_string());
+            evidence.push(
+                "legacy candidate apply requires the exact review token from a prior preview"
+                    .to_string(),
+            );
+            result.evidence = evidence;
+            return Ok(result);
+        }
     }
 
     // A free owner lock is the final no-owner proof. An unreachable endpoint is
@@ -2022,7 +2073,7 @@ pub fn reconcile_unleased_candidates(
         if candidate.ownership != DaemonProcessOwnership::Owning {
             continue;
         }
-        let token = candidate.startup_token.as_deref().expect("proven token");
+        let token = candidate.startup_token.as_deref();
         let active_jobs = super::JobStore::active_count_at_path(&jobs_path)?;
         result.active_jobs = active_jobs;
         if active_jobs != 0 {
@@ -2055,13 +2106,15 @@ pub fn reconcile_unleased_candidates(
             ));
             continue;
         }
-        if !pid_has_ownership_token(candidate.pid, DAEMON_STARTUP_TOKEN_ENV, token)? {
-            result.blocked_pids.push(candidate.pid);
-            evidence.push(format!(
-                "pid {} changed startup-token environment ownership before apply and was not signaled",
-                candidate.pid
-            ));
-            continue;
+        if let Some(token) = token {
+            if !pid_has_ownership_token(candidate.pid, DAEMON_STARTUP_TOKEN_ENV, token)? {
+                result.blocked_pids.push(candidate.pid);
+                evidence.push(format!(
+                    "pid {} changed startup-token environment ownership before apply and was not signaled",
+                    candidate.pid
+                ));
+                continue;
+            }
         }
         let delivered = process.signal(SIGNAL_TERMINATE)?;
         if !delivered || process.wait_for_exit(super::FORCE_STOP_WAIT)? {
@@ -2091,10 +2144,63 @@ pub fn reconcile_unleased_candidates(
     Ok(result)
 }
 
+/// A legacy daemon predates startup tokens. It remains eligible only as one
+/// same-store, same-binary, zero-job process; all other candidate shapes stay
+/// fail-closed.
+#[cfg(target_os = "linux")]
+fn legacy_review_candidates(candidates: &[DaemonProcessCandidate]) -> Vec<&DaemonProcessCandidate> {
+    let owning = candidates
+        .iter()
+        .filter(|candidate| candidate.ownership == DaemonProcessOwnership::Owning)
+        .collect::<Vec<_>>();
+    if candidates
+        .iter()
+        .any(|candidate| candidate.ownership == DaemonProcessOwnership::Ambiguous)
+    {
+        return Vec::new();
+    }
+    owning
+        .into_iter()
+        .filter(|candidate| {
+            candidate.startup_token.is_none()
+                && candidate.build_identity.is_some()
+                && candidate.executable_digest.is_some()
+                && candidate.process_start_identity.is_some()
+                && candidate.bind_endpoint.is_some()
+                && candidate.durable_store_path.is_some()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_review_token(candidates: &[&DaemonProcessCandidate]) -> Option<String> {
+    (candidates.len() == 1).then(|| {
+        let candidate = candidates[0];
+        let mut hasher = Sha256::new();
+        for value in [
+            candidate.executable.as_str(),
+            candidate.executable_digest.as_deref().unwrap_or_default(),
+            candidate.durable_store_path.as_deref().unwrap_or_default(),
+            candidate.bind_endpoint.as_deref().unwrap_or_default(),
+            candidate.startup_token.as_deref().unwrap_or_default(),
+            &candidate
+                .process_start_identity
+                .as_ref()
+                .map(|identity| format!("{identity:?}"))
+                .unwrap_or_default(),
+        ] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        format!("legacy-v1:{:x}", hasher.finalize())
+    })
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn reconcile_unleased_candidates(
     _addr: &str,
     _apply: bool,
+    _review_token: Option<&str>,
     _replacement_operation_id: Option<&str>,
 ) -> Result<DaemonCandidateReconciliationResult> {
     Err(Error::validation_invalid_argument(
@@ -2111,7 +2217,7 @@ mod unleased_candidate_platform_tests {
 
     #[test]
     fn reconciliation_preflight_is_unsupported_without_pidfd() {
-        let error = reconcile_unleased_candidates("127.0.0.1:0", true, Some("operation"))
+        let error = reconcile_unleased_candidates("127.0.0.1:0", true, None, Some("operation"))
             .expect_err("non-Linux must reject candidate signaling before mutation");
 
         assert!(error.message.contains("requires Linux pidfd"));

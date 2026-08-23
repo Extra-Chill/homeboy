@@ -1272,8 +1272,8 @@ pub struct AgentTaskCookReport {
     pub terminal_failure_classification: Option<String>,
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
-    /// recipe was materialized. This intentionally contains no provider or gate
-    /// evidence; operators retrieve that through the listed diagnose command.
+    /// recipe was materialized. It may contain a bounded causal provider-command
+    /// projection; expanded evidence remains available through `diagnose`.
     pub failure_context: Option<AgentTaskCookFailureContext>,
 }
 
@@ -4084,9 +4084,7 @@ fn run_cook_reported(
                     )?;
                     record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
                 }
-                if error.retryable != Some(true)
-                    && record.metadata.get("pre_execution_failure").is_some()
-                {
+                if record.metadata.get("pre_execution_failure").is_some() {
                     return Ok(pre_execution_failure_report(
                         failure_options.cook_id.clone(),
                         vec![AgentTaskCookAttemptReport {
@@ -6553,7 +6551,7 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
         "candidate_only_commits": ahead,
         "next_action": "converge_destination_before_provider",
     });
-    Err(error)
+    Err(error.with_retryable(true))
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can

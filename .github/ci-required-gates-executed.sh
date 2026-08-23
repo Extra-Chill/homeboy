@@ -66,13 +66,15 @@
 #
 # REQUIRED_GATES_CONFIG overrides the declared-context payload;
 # REQUIRED_GATES_EXECUTED_JOBS substitutes a jobs-API payload file for the live
-# read; CI_GATE_RESULTS carries `toJSON(needs)`. All three make this runnable
-# without a network or a token.
+# read; REQUIRED_GATES_HEAD_SHA identifies the candidate the jobs must measure;
+# CI_GATE_RESULTS carries `toJSON(needs)`. All make this runnable without a
+# network or a token.
 
 set -euo pipefail
 
 config="${REQUIRED_GATES_CONFIG:-.github/required-gates-ruleset.json}"
 active="${CI_RUN_ACTIVE:-unknown}"
+head_sha="${REQUIRED_GATES_HEAD_SHA:-${GITHUB_SHA:-}}"
 
 if [ ! -f "${config}" ]; then
   echo "::error::required-gates execution check must run from the repository root"
@@ -83,6 +85,12 @@ fi
 if [ -z "${CI_GATE_RESULTS:-}" ]; then
   echo "::error::required-gates execution check requires CI_GATE_RESULTS=toJSON(needs)"
   echo "required-gates execution check requires CI_GATE_RESULTS=toJSON(needs)" >&2
+  exit 1
+fi
+
+if [ -z "${head_sha}" ]; then
+  echo "::error::required-gates execution check requires REQUIRED_GATES_HEAD_SHA"
+  echo "required-gates execution check requires REQUIRED_GATES_HEAD_SHA" >&2
   exit 1
 fi
 
@@ -164,19 +172,40 @@ if read_run_jobs; then
   # A skipped matrix job is reported under its UNEXPANDED name (#12573 observed
   # `${{ matrix.title }}`), so `homeboy / Audit` is simply absent rather than
   # present-and-skipped. Absent is therefore `not-executed`, which is exactly
-  # the verdict wanted: the context produced no measurement.
-  execution="$(jq -c --argjson required "${execution_contexts}" '
+  # the verdict wanted: the context produced no measurement. Jobs are scoped to
+  # the PR head because a matching context from another candidate is not proof
+  # that this candidate executed.
+  execution="$(jq -c --argjson required "${execution_contexts}" --arg head_sha "${head_sha}" '
     . as $jobs
     | [ $required[]
         | . as $context
-        | ($jobs | map(select(.name == $context))) as $matches
+        | ($jobs | map(select(.name == $context and .head_sha == $head_sha))) as $matches
         | {
             context: $context,
+            head_sha: $head_sha,
+            raw_conclusions: ($matches | map(.conclusion // "in-progress")),
             state: (
               if ($matches | length) == 0 then "not-executed"
+              # The workflow can emit a skipped planning job with the same
+              # display context as its successful aggregate job. Accept that
+              # exact duplicate shape, but retain fail-closed handling for
+              # every other non-success conclusion.
+              elif ($matches | any(.conclusion == "success"))
+                and ($matches | all(.conclusion == "success" or .conclusion == "skipped"))
+                then "success"
               elif ($matches | any(.conclusion != "success"))
                 then ($matches | map(.conclusion // "in-progress") | unique | join(","))
               else "success"
+              end
+            ),
+            selected_conclusion: (
+              if ($matches | length) == 0 then "not-executed"
+              elif ($matches | any(.conclusion == "success"))
+                and ($matches | all(.conclusion == "success" or .conclusion == "skipped"))
+                then "success"
+              elif ($matches | any(.conclusion != "success" and .conclusion != "skipped"))
+                then ($matches | map(select(.conclusion != "success" and .conclusion != "skipped") | .conclusion // "in-progress") | unique | join(","))
+              else "skipped"
               end
             )
           }
@@ -197,7 +226,9 @@ fi
 
 executed_count='unknown'
 if [ "${execution}" != 'unknown' ]; then
-  executed_count="$(jq '[.[] | select(.state != "not-executed")] | length' <<< "${execution}")"
+  # This terminal job is executing by definition. Its conclusion is enforced by
+  # GitHub after this script exits, so it is not part of the jobs observation.
+  executed_count="$(( $(jq '[.[] | select(.state != "not-executed")] | length' <<< "${execution}") + 1 ))"
 fi
 
 if [ "${execution}" = 'unknown' ]; then
@@ -215,6 +246,9 @@ fi
 # code — the same reason `validate-required-gates.sh` emits its enforcement basis
 # before its verdict.
 echo "::notice::required-gates-executed basis=needs-results+run-jobs run=${GITHUB_RUN_ID:-unknown} attempt=${GITHUB_RUN_ATTEMPT:-unknown} pr_state_active=${active} declared=${declared_count} executed=${executed_count} dependencies=${dependency_count} dependencies_skipped=${dependency_skipped} outcome=${outcome}"
+if [ "${execution}" != 'unknown' ]; then
+  echo "::notice::required-gates-executed contexts=$(jq -c '.' <<< "${execution}")"
+fi
 
 closure_note=''
 if [ "${active}" = 'false' ]; then
@@ -252,12 +286,12 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo
     echo "${headline}"
     echo
-    echo "| context | state |"
-    echo "| --- | --- |"
+    echo "| context | head SHA | raw conclusions | selected result | state |"
+    echo "| --- | --- | --- | --- | --- |"
     if [ "${execution}" = 'unknown' ]; then
-      jq -r '.[] | "| `\(.)` | `unverified` |"' <<< "${declared_contexts}"
+      jq -r '.[] | "| `\(.)` | `\(env.REQUIRED_GATES_HEAD_SHA)` | `unverified` | `unverified` | `unverified` |"' <<< "${declared_contexts}"
     else
-      jq -r '.[] | "| `\(.context)` | `\(.state)` |"' <<< "${execution}"
+      jq -r '.[] | "| `\(.context)` | `\(.head_sha)` | `\(.raw_conclusions | join(","))` | `\(.selected_conclusion)` | `\(.state)` |"' <<< "${execution}"
     fi
     echo
     echo "| dependency | result |"
