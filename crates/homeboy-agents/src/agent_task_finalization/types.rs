@@ -291,6 +291,15 @@ pub struct AgentTaskPrRef {
     pub is_draft: bool,
 }
 
+/// The safe state transition available if a PR binding drifts after mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskPrQuarantineCapability {
+    CloseNewPr,
+    PreserveExistingDraft,
+    ConvertExistingReadyPrToDraft,
+    Unsupported,
+}
+
 /// The complete Git candidate classification, determined before finalization
 /// mutates the worktree or remote.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +430,23 @@ pub trait AgentTaskPrFinalizationBackend {
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>>;
+    /// Re-reads the live candidate branch immediately before a GitHub mutation.
+    /// This is separate from post-mutation binding verification because a remote
+    /// writer can advance the branch between Homeboy's push and PR mutation.
+    fn verify_remote_candidate(
+        &mut self,
+        path: &str,
+        head: &str,
+        candidate_sha: &str,
+    ) -> Result<String>;
+    /// Declares the safe post-mutation state transition before the mutation is
+    /// admitted. A ready existing PR may only be updated when conversion to a
+    /// draft is supported.
+    fn quarantine_capability(
+        &mut self,
+        newly_created: bool,
+        was_draft: bool,
+    ) -> Result<AgentTaskPrQuarantineCapability>;
     fn create_pr(
         &mut self,
         path: &str,
@@ -446,4 +472,11 @@ pub trait AgentTaskPrFinalizationBackend {
         changed_files: &[String],
         pr: &AgentTaskPrRef,
     ) -> Result<AgentTaskPublicationBinding>;
+    /// Applies the safe transition declared by [`Self::quarantine_capability`].
+    fn quarantine_pr(
+        &mut self,
+        path: &str,
+        pr: &AgentTaskPrRef,
+        capability: AgentTaskPrQuarantineCapability,
+    ) -> Result<String>;
 }
