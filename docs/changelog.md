@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.3] - 2026-08-23
+
+### Fixed
+- bound full agent task evidence
+- share one store across directory-child promotion
+
 ## [0.355.2] - 2026-08-23
 
 ### Changed
