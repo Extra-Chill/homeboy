@@ -2030,7 +2030,7 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
 fn unmaterialized_cook_run_requires_resume_without_execution_or_mutation() {
     with_temp_home(|| {
         let run_id = "run-cli-unmaterialized-cook";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
             run_id,
             serde_json::json!({ "request_ref": "sha256:fixture" }),
             "blocked_runner_unavailable",

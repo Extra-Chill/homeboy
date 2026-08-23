@@ -2363,7 +2363,7 @@ fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
 fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection() {
     crate::test_support::with_isolated_home(|_| {
         let run_id = "controller-unmaterialized-cook";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
             run_id,
             serde_json::json!({ "request_ref": "sha256:fixture" }),
             "blocked_runner_unavailable",
