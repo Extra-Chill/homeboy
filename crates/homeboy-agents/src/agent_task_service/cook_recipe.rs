@@ -489,7 +489,6 @@ fn write_recipe_staging_file(directory: &Path, bytes: &[u8]) -> Result<PathBuf> 
     let staging = directory.join(format!(".recipe-{}.tmp", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
@@ -742,19 +741,6 @@ fn reached_freeze_boundary_in_store(
         }
     }
     Ok(reached)
-}
-
-fn ensure_correction_is_safe(
-    existing: &AgentTaskCookRecipe,
-    requested: &AgentTaskCookRecipe,
-    mismatches: &[&str],
-) -> Result<()> {
-    ensure_correction_is_safe_in_store(
-        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        existing,
-        requested,
-        mismatches,
-    )
 }
 
 /// [`ensure_correction_is_safe`] against an explicitly injected lifecycle root.
@@ -1374,27 +1360,6 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
 // The ambient `rearm_failed_terminal_continuation()` shim that used to sit
 // here is gone. It had no callers and was reachable only through the
 // `agent_tasks::lifecycle` facade, which nothing outside the crate used (#7505).
-
-/// [`rearm_failed_terminal_continuation`] against explicitly injected durable
-/// roots.
-///
-/// The rearm and the controller-failure clear are one operation across two
-/// store kinds: the queue entry hangs off the recipe store's data root while
-/// the cause lives in the lifecycle record. Both are parameters so the caller
-/// pairs them; resolving either one here would let a rearm recorded in one home
-/// leave the stale cause standing in the other (#7505).
-fn rearm_failed_terminal_continuation_in_store(
-    store: &CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<bool> {
-    let rearmed = store.enqueue_terminal_continuation_with_recovery(cook_id, run_id, true)?;
-    if rearmed && agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
-        agent_task_lifecycle::clear_cook_controller_failure_in_store(lifecycle_store, run_id)?;
-    }
-    Ok(rearmed)
-}
 
 pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
     Ok(claim_continuation_with_budget(usize::MAX)?.claim)
@@ -3204,78 +3169,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_recovery_rearms_failed_continuation_but_not_completed_work() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        let recipe = recipe();
-        store.persist_recipe(&recipe).unwrap();
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("materialize run record");
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        claim_next_from(&store)
-            .unwrap()
-            .unwrap()
-            .fail("wrong controller runtime")
-            .unwrap();
-
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Failed
-        );
-        assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
-        agent_task_lifecycle::record_cook_controller_failure_in_store(
-            &lifecycle_store,
-            "run",
-            &serde_json::json!({ "code": "controller.failure", "message": "stale" }),
-        )
-        .expect("persist controller failure");
-        assert!(rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
-        assert!(
-            agent_task_lifecycle::exact_record_in_store(&lifecycle_store, "run")
-                .expect("read rearmed record")
-                .metadata
-                .get("cook_controller_failure")
-                .is_none(),
-            "a durable rearm clears the stale controller cause before later terminal phases"
-        );
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .expect("explicit recovery rearmed the failed continuation");
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Claimed
-        );
-        assert_eq!(claim.continuation().retries, 0);
-        claim.complete().unwrap();
-
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Completed
-        );
-        assert!(!rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
-    }
-
-    #[test]
     fn targeted_recovery_claim_keeps_failed_work_owned_during_a_daemon_race() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
@@ -3323,78 +3216,6 @@ mod tests {
         let completed = claim_continuation_for_recovery_in_store(&store, "cook", "run")
             .expect_err("completed work cannot be rearmed");
         assert!(completed.message.contains("Completed"));
-    }
-
-    #[test]
-    fn recipe_only_recovery_rearms_a_failed_continuation_without_a_run_record() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        store.persist_recipe(&recipe()).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            store
-                .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(7))
-                .unwrap(),
-            7
-        );
-
-        let root = store.queue_root();
-        let hash = content_hash::sha256_hex(b"cook:run");
-        assert!(root.join(format!("{hash}.failed")).exists());
-        assert!(!root.join(format!("{hash}.completed")).exists());
-        assert!(fs::read_to_string(root.join(format!("{hash}.diagnostic")))
-            .unwrap()
-            .contains("status 7"));
-        assert!(rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
-        assert!(
-            !agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, "run").unwrap()
-        );
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
-    }
-
-    #[test]
-    fn runtime_mismatch_keeps_explicitly_rearmed_continuation_pending() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        let mut historical = recipe();
-        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
-        store.persist_recipe(&historical).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        claim_next_from(&store)
-            .unwrap()
-            .unwrap()
-            .fail("wrong controller runtime")
-            .unwrap();
-
-        rearm_failed_terminal_continuation_in_store(&store, &lifecycle_store, "cook", "run")
-            .unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .unwrap();
-        let error = store
-            .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
-            .unwrap_err();
-
-        assert_eq!(error.retryable, Some(true));
-        assert!(store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .is_some());
     }
 
     #[test]
@@ -3745,135 +3566,6 @@ mod tests {
             store.load_recipe(&changed.cook_id).unwrap().finalization["title"],
             "title"
         );
-    }
-
-    #[test]
-    fn recipe_correction_transitions_from_pre_provider_supersede_to_frozen_boundaries() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut original = reconstruct_options(&recipe()).expect("canonical options");
-            original.initial_run_id = "run-1".to_string();
-            persist_initial_recipe(&original).expect("persist original recipe");
-            crate::agent_task_lifecycle::submit_plan(&original.initial_plan, Some("run-1"))
-                .expect("materialize pre-provider attempt");
-            crate::agent_task_lifecycle::record_pre_execution_failure(
-                "run-1",
-                &original.initial_plan,
-                "provider_missing",
-                &Error::internal_unexpected("provider executable is unavailable"),
-            )
-            .expect("record pre-provider failure");
-
-            let mut corrected = original.clone();
-            corrected.initial_run_id = "run-2".to_string();
-            corrected.to_worktree = "corrected-target".to_string();
-            corrected.title = "Corrected Cook".to_string();
-            let superseded =
-                persist_initial_recipe(&corrected).expect("supersede pre-provider recipe");
-            assert_eq!(superseded.attempts.len(), 2);
-            assert_eq!(superseded.attempts[0].run_id, "run-1");
-            assert_eq!(superseded.attempts[1].run_id, "run-2");
-            let history = default_store()
-                .unwrap()
-                .recipe_path("cook")
-                .parent()
-                .unwrap()
-                .join("recipe-history");
-            let archived: AgentTaskCookRecipe = serde_json::from_slice(
-                &fs::read(history.join("0001.recipe.json")).expect("immutable recipe history"),
-            )
-            .expect("parse archived recipe");
-            assert_eq!(archived.attempts[0].run_id, "run-1");
-            let diff: Value = serde_json::from_slice(
-                &fs::read(history.join("0001.supersession.json")).expect("supersession diff"),
-            )
-            .expect("parse supersession diff");
-            assert_eq!(diff["replacement_attempt_run_id"], "run-2");
-            assert!(diff["changed_fields"]
-                .as_array()
-                .expect("changed fields")
-                .iter()
-                .any(|field| field == "finalization.to_worktree"));
-
-            crate::agent_task_lifecycle::submit_plan(&corrected.initial_plan, Some("run-2"))
-                .expect("materialize provider attempt");
-            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-            })
-            .expect("record provider execution");
-            let existing = load_recipe("cook").expect("load corrected recipe");
-            let mut source_corrected = existing.clone();
-            source_corrected.source_refs = vec!["corrected-source".to_string()];
-            let error = ensure_correction_is_safe(
-                &existing,
-                &source_corrected,
-                &recipe_mismatch_fields(&existing, &source_corrected),
-            )
-            .expect_err("authenticated candidate freezes source inputs");
-            assert!(error.message.contains("candidate execution"));
-            assert!(error.message.contains("source_refs"));
-
-            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"] =
-                    promotion_value("applied", serde_json::json!([]));
-            })
-            .expect("record applied promotion");
-            let mut destination_corrected = existing.clone();
-            destination_corrected.finalization["to_worktree"] = serde_json::json!("other-target");
-            let error = ensure_correction_is_safe(
-                &existing,
-                &destination_corrected,
-                &recipe_mismatch_fields(&existing, &destination_corrected),
-            )
-            .expect_err("applied promotion freezes destination inputs");
-            assert!(error.message.contains("promotion execution"));
-            assert!(error.message.contains("finalization.to_worktree"));
-
-            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"]["gate_results"] = serde_json::json!([]);
-            })
-            .expect("record empty gate projection");
-            let mut gate_corrected = existing.clone();
-            gate_corrected.gate_policy["verify"] = serde_json::json!(["corrected gate"]);
-            ensure_correction_is_safe(
-                &existing,
-                &gate_corrected,
-                &recipe_mismatch_fields(&existing, &gate_corrected),
-            )
-            .expect("empty gate arrays do not freeze gate policy");
-            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"]["deterministic_gates"] = serde_json::json!([
-                    { "id": "gate", "status": "succeeded", "command": [], "exit_code": 0 }
-                ]);
-            })
-            .expect("record gate execution");
-            let error = ensure_correction_is_safe(
-                &existing,
-                &gate_corrected,
-                &recipe_mismatch_fields(&existing, &gate_corrected),
-            )
-            .expect_err("executed gates freeze gate policy");
-            assert!(error.message.contains("gate execution"));
-            assert!(error.message.contains("gate_policy"));
-
-            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["cook_finalization"] =
-                    serde_json::json!({ "status": "review_ready" });
-            })
-            .expect("record finalization");
-            let mut finalization_corrected = existing;
-            finalization_corrected.finalization["title"] = serde_json::json!("Different title");
-            let error = ensure_correction_is_safe(
-                &load_recipe("cook").expect("load finalized recipe"),
-                &finalization_corrected,
-                &recipe_mismatch_fields(
-                    &load_recipe("cook").expect("load finalized recipe"),
-                    &finalization_corrected,
-                ),
-            )
-            .expect_err("finalization freezes finalization policy");
-            assert!(error.message.contains("finalization execution"));
-            assert!(error.message.contains("finalization"));
-        });
     }
 
     #[test]

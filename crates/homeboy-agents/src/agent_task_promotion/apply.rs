@@ -454,10 +454,6 @@ impl ExternalPromotionWorkspaceProvider {
         self.provenance.as_ref()
     }
 
-    pub(super) fn invocation(&self) -> Option<&CommandInvocation> {
-        self.invocation.as_ref()
-    }
-
     fn resolve_configured_fallback(
         &mut self,
         request: &AgentTaskPromotionApplyRequest,
@@ -694,7 +690,6 @@ pub(super) fn run_provider_command_with_timeout(
     // a timeout can reap descendants: killing only the direct child leaves an
     // escaped grandchild holding the stdout/stderr pipes, and the capture
     // threads then block until *it* exits, which defeats the timeout entirely.
-    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command_builder.process_group(0);

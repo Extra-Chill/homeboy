@@ -14,8 +14,7 @@ use super::apply::{
 };
 
 use super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider,
-    promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
+    normalize_promotion_patch, promote, resume_promoted_patch, select_patch_artifact,
     validate_artifact_content,
 };
 use super::types::{

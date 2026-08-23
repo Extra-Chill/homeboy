@@ -1538,15 +1538,6 @@ fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest
     }
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn spawn_output_reader<R>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,

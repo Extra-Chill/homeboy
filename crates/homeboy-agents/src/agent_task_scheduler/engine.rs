@@ -135,14 +135,6 @@ impl AgentTaskScheduler {
         )
     }
 
-    pub(crate) fn run_with_cancellation(
-        &self,
-        plan: AgentTaskPlan,
-        cancellation: AgentTaskCancellationToken,
-    ) -> AgentTaskAggregate {
-        self.run_with_cancellation_and_derived_cook_baseline(plan, cancellation, None)
-    }
-
     fn run_with_cancellation_and_derived_cook_baseline(
         &self,
         plan: AgentTaskPlan,

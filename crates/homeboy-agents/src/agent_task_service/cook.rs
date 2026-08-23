@@ -32,8 +32,6 @@ use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
-#[cfg(test)]
-use super::cook_baseline::materialize_follow_up_baseline;
 use super::cook_baseline::{
     compare_gate_failures_to_verified_base, cook_attempt_harvest_context,
     materialize_follow_up_baseline_in_root, materialize_initial_candidate_baseline,
@@ -43,8 +41,6 @@ use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget,
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
-#[cfg(test)]
-use super::cook_pre_execution::materialize_initial_cook_attempt_with_stores;
 use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
@@ -346,27 +342,6 @@ fn cook_deadline_report(
     report
 }
 
-/// Claim exactly one recipe continuation for a terminal run that never
-/// persisted an aggregate. The claim is on the interrupted run, so concurrent
-/// controllers converge before they can append competing recipe attempts.
-fn claim_pre_artifact_interruption_retry(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-) -> Result<Option<(u32, String)>> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    claim_pre_artifact_interruption_retry_with_stores(
-        (&recipe_store, &lifecycle_store),
-        cook_id,
-        attempt,
-        run_id,
-        plan,
-        false,
-    )
-}
-
 fn claim_pre_artifact_interruption_retry_with_stores(
     stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     cook_id: &str,
@@ -593,16 +568,6 @@ fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport
         None => format!("finalize:{run_id}"),
     }
 }
-
-/// Finalize a cook candidate under a durable exactly-once operation claim.
-///
-/// PR finalization performs its external effects (commit, push, `gh pr create`)
-/// and only then records the result. A controller crash after the PR is created
-/// but before the result is durable would open a second PR on restart. The claim
-/// closes it: reserve `finalize:<run_id>:<sha>` before the effect and complete it
-/// with the finalization result after it is durable. A resumed pass revalidates
-/// the existing PR idempotently, including its live Git and GitHub identities
-/// (#8357).
 
 fn finalize_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -1189,20 +1154,6 @@ pub fn authorize_cook_continue_route_with_artifact(
     )
 }
 
-fn has_cook_continue_route(options: &AgentTaskCookServiceOptions) -> bool {
-    agent_task_lifecycle::exact_record(&options.initial_run_id)
-        .ok()
-        .and_then(|record| record.metadata.get("cook_continue_route").cloned())
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|context| {
-            context.get("schema").and_then(Value::as_str) == Some(COOK_CONTINUE_ROUTE_SCHEMA)
-                && context.get("cook_id").and_then(Value::as_str) == Some(options.cook_id.as_str())
-                && context.get("run_id").and_then(Value::as_str)
-                    == Some(options.initial_run_id.as_str())
-        })
-}
-
 /// Provenance supplied when Homeboy adopts a candidate prepared outside its
 /// provider lifecycle.
 #[derive(Debug, Clone, Default)]
@@ -1251,8 +1202,8 @@ pub struct AgentTaskCookReport {
     pub terminal_failure_classification: Option<String>,
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
-    /// recipe was materialized. It may contain a bounded causal provider-command
-    /// projection; expanded evidence remains available through `diagnose`.
+    /// recipe was materialized. This intentionally contains no provider or gate
+    /// evidence; operators retrieve that through the listed diagnose command.
     pub failure_context: Option<AgentTaskCookFailureContext>,
 }
 
@@ -4100,7 +4051,9 @@ fn run_cook_reported(
                     )?;
                     record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
                 }
-                if record.metadata.get("pre_execution_failure").is_some() {
+                if error.retryable != Some(true)
+                    && record.metadata.get("pre_execution_failure").is_some()
+                {
                     return Ok(pre_execution_failure_report(
                         failure_options.cook_id.clone(),
                         vec![AgentTaskCookAttemptReport {
@@ -4168,19 +4121,6 @@ fn run_cook_reported(
         }
     }
     Ok(result)
-}
-
-/// Convert an error that occurs after recipe materialization into the normal
-/// Cook result contract. Errors before materialization still return unchanged:
-/// they have no durable identity and therefore no legal recovery command.
-fn durable_cook_error_report(
-    options: &AgentTaskCookServiceOptions,
-    error: Error,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    // The fully ambient entry point: it resolves the recipe root and holds no
-    // lifecycle store, so nothing is injected here and nothing is split.
-    durable_cook_error_report_with_store(&store, None, options, error)
 }
 
 /// The durable failure report, bound to the roots its caller owns.
@@ -5806,7 +5746,6 @@ fn run_cook_spine(
             compare_gate_failures_to_verified_base(
                 &mut promotion,
                 std::path::Path::new(&repository_root),
-                std::path::Path::new(&repository_root),
                 &base_sha,
                 options.gates.gate_timeout(),
                 |_compared, _total| Ok(()),
@@ -6875,7 +6814,7 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<O
         "candidate_only_commits": ahead,
         "next_action": "converge_destination_before_provider",
     });
-    Err(error.with_retryable(true))
+    Err(error)
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can

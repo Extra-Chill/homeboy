@@ -163,15 +163,6 @@ pub(crate) fn promotion_source_in_store(
         .map(|(raw, path)| (raw, Some(path)))
 }
 
-pub(crate) fn promote_attempt(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-) -> Result<AgentTaskPromotionReport> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    promote_attempt_in_store(&lifecycle_store, options, run_id)
-}
-
 pub(crate) fn promote_attempt_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
@@ -1654,13 +1645,6 @@ pub struct MovingBaseCookRecovery {
     pub base_movements: u32,
 }
 
-pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<MovingBaseCookRecovery>> {
-    let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    moving_base_recovery_for_run_with_stores(&recipe_store, &lifecycle_store, run_id)
-}
-
 pub(crate) fn moving_base_recovery_for_run_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -2427,25 +2411,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_stores(
     )
 }
 
-pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
-    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    finalize_or_load_cook_pr_with_backend_with_stores(
-        &store,
-        &lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        backend,
-    )
-}
-
 pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     B: AgentTaskPrFinalizationBackend,
 >(
@@ -2466,25 +2431,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     )?;
     lifecycle_store.record_cook_finalization(successful_run_id, finalization.clone())?;
     Ok(finalization)
-}
-
-pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
-    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    finalize_cook_pr_with_backend_with_stores(
-        &store,
-        &lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        backend,
-    )
 }
 
 pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizationBackend>(

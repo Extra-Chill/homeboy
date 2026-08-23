@@ -124,23 +124,6 @@ impl<'a> CookExecutionPreparation<'a> {
         )
     }
 
-    pub(crate) fn recover_for_adoption_with_admission(
-        &self,
-        cook_id: &str,
-        run_id: &str,
-        admit_runtime: impl FnOnce(&str) -> Result<Value>,
-        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
-    ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-        self.recover_for_adoption_with_runtime(
-            cook_id,
-            run_id,
-            None,
-            None,
-            admit_runtime,
-            reconcile_reserved_cancellation,
-        )
-    }
-
     pub(crate) fn recover_for_adoption_with_runtime(
         &self,
         cook_id: &str,
@@ -228,33 +211,6 @@ impl<'a> CookExecutionPreparation<'a> {
         )?;
         Ok(Some(record))
     }
-}
-
-/// Persist the controller-owned initial attempt before transport preparation so
-/// runner eligibility failures remain addressable through the cook alias.
-pub(crate) fn materialize_initial_cook_attempt(
-    options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, options)
-}
-
-/// Persist the controller-owned initial attempt through explicit recipe and
-/// lifecycle stores so the run record and Cook index always land beside the
-/// recipe's authority instead of the ambient environment.
-pub(crate) fn materialize_initial_cook_attempt_with_stores(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
-    materialize_initial_cook_attempt_with_store_and_lifecycle(
-        recipe_store,
-        lifecycle_store,
-        options,
-        false,
-    )
-    .map(|_| ())
 }
 
 pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
@@ -517,25 +473,6 @@ pub(crate) fn recover_recipe_attempt_with_stores(
 ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_with_runtime(
         cook_or_attempt_id,
-        Some(&store_admission_status(lifecycle_store)),
-        agent_task_lifecycle::execution_runner_id(),
-        production_runtime_admission(lifecycle_store),
-        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
-    )
-}
-
-/// Recover an adopted attempt through explicit recipe and lifecycle stores so
-/// the adoption record always lands beside the recipe's authority instead of
-/// the ambient environment.
-pub(crate) fn recover_adoption_attempt_with_stores(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_for_adoption_with_runtime(
-        cook_id,
-        run_id,
         Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
@@ -1322,97 +1259,5 @@ mod tests {
                 expected_plan
             );
         }
-    }
-
-    #[test]
-    fn paired_stores_isolate_identical_ids_across_split_recipe_and_lifecycle_roots() {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
-        assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
-
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
-
-        let cook_id = "split-root-cook";
-        let run_id = "split-root-run";
-        let attempt_plan = plan(cook_id, "split-root-materialization");
-        recipe_store
-            .persist_recipe(&recipe(cook_id, run_id, attempt_plan.clone()))
-            .expect("persist recipe in recipe root");
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&attempt_plan, run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit plan in lifecycle root");
-
-        materialize_initial_cook_attempt_with_stores(
-            &recipe_store,
-            &lifecycle_store,
-            &options_for(cook_id, run_id, attempt_plan),
-        )
-        .expect("materialize initial attempt through paired stores");
-
-        assert_eq!(
-            lifecycle_store
-                .read_cook_index(cook_id)
-                .expect("read cook index in lifecycle root")
-                .latest_run_id,
-            run_id
-        );
-        assert_eq!(
-            lifecycle_store
-                .read_record(run_id)
-                .expect("read run record in lifecycle root")
-                .run_id,
-            run_id
-        );
-        assert!(lifecycle_store
-            .run_dir(run_id)
-            .starts_with(lifecycle_context.data_dir()));
-        assert!(lifecycle_store
-            .cook_index_path(cook_id)
-            .starts_with(lifecycle_context.data_dir()));
-        assert!(recipe_store.recipe_exists(cook_id));
-
-        let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(run_id)
-            .expect("no run record in recipe root"));
-        assert!(!recipe_root_lifecycle_store.cook_index_exists(cook_id));
-        let lifecycle_root_recipe_store = CookRecipeStore::new(lifecycle_context.path_roots());
-        assert!(!lifecycle_root_recipe_store.recipe_exists(cook_id));
-
-        let retry_cook_id = "split-root-retry-cook";
-        let retry_run_id = "split-root-retry-run";
-        let retry_plan = plan(retry_cook_id, "split-root-retry-materialization");
-        recipe_store
-            .persist_recipe(&recipe(retry_cook_id, retry_run_id, retry_plan.clone()))
-            .expect("persist retry recipe in recipe root");
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&retry_plan, retry_run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit retry plan in lifecycle root");
-
-        materialize_cook_attempt_with_stores(
-            &recipe_store,
-            &lifecycle_store,
-            retry_cook_id,
-            retry_run_id,
-            &retry_plan,
-        )
-        .expect("materialize retry attempt through paired stores");
-
-        assert_eq!(
-            lifecycle_store
-                .read_cook_index(retry_cook_id)
-                .expect("read retry cook index in lifecycle root")
-                .latest_run_id,
-            retry_run_id
-        );
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(retry_run_id)
-            .expect("no retry run record in recipe root"));
-        assert!(!recipe_root_lifecycle_store.cook_index_exists(retry_cook_id));
     }
 }

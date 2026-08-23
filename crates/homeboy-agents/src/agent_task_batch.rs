@@ -3329,38 +3329,6 @@ mod tests {
             .is_err());
     }
 
-    fn request(task_id: &str) -> AgentTaskRequest {
-        AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: task_id.to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "test".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: None,
-                config: Value::Null,
-            },
-            instructions: "do it".to_string(),
-            inputs: Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace::default(),
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: Default::default(),
-            expected_artifacts: Vec::new(),
-            artifact_declarations: Vec::new(),
-            output_declarations: Vec::new(),
-            runtime_tools: Vec::new(),
-            metadata: Value::Null,
-        }
-    }
-
-    struct ArtifactExecutor;
-
     impl AgentTaskExecutorAdapter for ArtifactExecutor {
         fn execute(
             &self,

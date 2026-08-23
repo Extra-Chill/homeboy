@@ -272,14 +272,6 @@ impl Drop for CookFollowUpBaseline {
     }
 }
 
-pub(crate) fn materialize_follow_up_baseline(
-    promotion: &AgentTaskPromotionReport,
-    source_run_id: &str,
-    bound_task_id: &str,
-) -> Result<CookFollowUpBaseline> {
-    materialize_follow_up_baseline_at(promotion, None, None, source_run_id, bound_task_id)
-}
-
 pub(crate) fn materialize_follow_up_baseline_in_root(
     promotion: &AgentTaskPromotionReport,
     artifact_root: &std::path::Path,

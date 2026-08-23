@@ -29,11 +29,6 @@ pub(crate) struct ExecutorArtifactRootIdentity {
 }
 
 impl ExecutorArtifactRootIdentity {
-    pub(crate) fn capture(path: &Path) -> Result<Self> {
-        let finalized_root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
-        Self::capture_with_finalized_root(path, finalized_root)
-    }
-
     pub(super) fn capture_with_finalized_root(
         path: &Path,
         finalized_root: PathBuf,
@@ -90,7 +85,6 @@ impl ExecutorArtifactRootIdentity {
             })
         }
         #[cfg(not(unix))]
-        #[cfg(not(windows))]
         Ok(Self {
             path,
             finalized_root,

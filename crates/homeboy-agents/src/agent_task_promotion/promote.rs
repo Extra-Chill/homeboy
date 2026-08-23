@@ -2,9 +2,8 @@ use homeboy_engine_primitives::content_hash;
 use std::cell::RefCell;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -16,16 +15,6 @@ use crate::agent_task::{
 const CANONICAL_PATCH_CANDIDATE_LIMIT: usize = 16;
 const CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT: u64 = 256 * 1024;
 const CANONICAL_PATCH_BYTES_TOTAL_LIMIT: u64 = 1024 * 1024;
-const DECLARED_BASE_GIT_TIMEOUT: Duration = Duration::from_secs(10);
-const DECLARED_BASE_GIT_HEARTBEAT: Duration = Duration::from_secs(1);
-const PROXY_ENV_KEYS: [&str; 6] = [
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-];
 use crate::agent_task_gate::{
     AgentTaskGateCandidateCheckout, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
     AgentTaskGateVisibility,
@@ -128,16 +117,12 @@ pub fn promote_with_checkpoint(
     options: AgentTaskPromotionOptions,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
         &mut provider,
         &mut checkpoint,
-        &observation_store,
+        None,
     )?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
@@ -164,7 +149,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
         options,
         &mut provider,
         &mut checkpoint,
-        observation_store,
+        Some(observation_store),
     )?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
@@ -189,18 +174,7 @@ pub fn resume_promoted_patch(
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
-    // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    resume_promoted_patch_internal(
-        options,
-        target_path,
-        previous,
-        &observation_store,
-        false,
-        None,
-    )
+    resume_promoted_patch_internal(options, target_path, previous, None, false, None)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -213,7 +187,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         options,
         target_path,
         previous,
-        observation_store,
+        Some(observation_store),
         false,
         None,
     )
@@ -232,7 +206,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
         options,
         target_path,
         previous,
-        observation_store,
+        Some(observation_store),
         true,
         gate_workspace,
     )
@@ -242,7 +216,7 @@ fn resume_promoted_patch_internal(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
     replacement_gates: bool,
     gate_workspace: Option<&Path>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -618,25 +592,6 @@ fn verify_patch_is_present(
     Ok(report)
 }
 
-pub(crate) fn promote_with_provider(
-    options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
-) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
-}
-
-pub(super) fn promote_with_provider_and_checkpoint(
-    options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
-    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-) -> Result<AgentTaskPromotionReport> {
-    // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, &observation_store)
-}
-
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     options: AgentTaskPromotionOptions,
@@ -644,14 +599,19 @@ pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, observation_store)
+    promote_with_provider_and_checkpoint_internal(
+        options,
+        provider,
+        checkpoint,
+        Some(observation_store),
+    )
 }
 
 fn promote_with_provider_and_checkpoint_internal(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<AgentTaskPromotionReport> {
     emit_promotion_progress(
         "apply",
@@ -1197,19 +1157,9 @@ fn gate_feedback_baseline_for_artifact(
     Ok(baseline)
 }
 
-/// Replace a runner-local baseline path with the controller artifact-store
-/// identity before a follow-up can reuse a dirty destination. Older baselines
-/// without source identity retain their existing strict path/hash contract.
-pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
-    // One call is one unit of work, so the store resolves once here rather
-    // than at each projection lookup inside (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    bind_gate_feedback_baseline_internal(baseline, &observation_store)
-}
-
 fn bind_gate_feedback_baseline_internal(
     baseline: Option<Value>,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<Option<Value>> {
     let Some(mut baseline) = baseline else {
         return Ok(None);
@@ -1274,15 +1224,27 @@ fn bind_gate_feedback_baseline_internal(
                 None,
             )
         })?;
-    let projection = crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
-        observation_store,
-        &run_id,
-        &task_id,
-        &artifact_id,
-        &kind,
-        &sha256,
-        None,
-    )?;
+    let projection = match observation_store {
+        Some(store) => {
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
+                store,
+                &run_id,
+                &task_id,
+                &artifact_id,
+                &kind,
+                &sha256,
+                None,
+            )?
+        }
+        None => crate::agent_task_lifecycle::verified_controller_artifact_projection(
+            &run_id,
+            &task_id,
+            &artifact_id,
+            &kind,
+            &sha256,
+            None,
+        )?,
+    };
     let (record_id, _) = projection
     .ok_or_else(|| Error::validation_invalid_argument(
         "gate_feedback_candidate_baseline",
@@ -1473,85 +1435,13 @@ mod declared_base_tests {
         )
         .is_empty());
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_base_transport_failure_is_retryable_and_preserves_redacted_proxy_requirements() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fixture_dir = tempfile::tempdir().expect("fixture directory");
-        let git = fixture_dir.path().join("git");
-        std::fs::write(
-            &git,
-            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access remote: Failed to connect to proxy' >&2\nexit 1\n",
-        )
-        .expect("write Git fixture");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fixture executable");
-
-        let error = capture_declared_base_with_git_and_timeout(
-            fixture_dir.path(),
-            Some("main"),
-            git.to_str().expect("utf8 fixture path"),
-            &[(
-                "HTTPS_PROXY".to_string(),
-                "socks5://proxy.example.test:8080".to_string(),
-            )],
-            Duration::from_millis(250),
-        )
-        .expect_err("transport failure");
-
-        assert_eq!(error.retryable, Some(true));
-        assert_eq!(error.code.as_str(), "internal.unexpected");
-        assert_eq!(
-            error.details["git_base_preflight"]["retry_disposition"],
-            "retryable_transport_failure"
-        );
-        assert_eq!(
-            error.details["git_base_preflight"]["required_environment"],
-            json!(["HTTPS_PROXY"])
-        );
-        assert!(!error.details.to_string().contains("proxy.example.test"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_base_transport_preflight_respects_its_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fixture_dir = tempfile::tempdir().expect("fixture directory");
-        let git = fixture_dir.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 2\n").expect("write Git fixture");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fixture executable");
-
-        let started = std::time::Instant::now();
-        let error = capture_declared_base_with_git_and_timeout(
-            fixture_dir.path(),
-            Some("main"),
-            git.to_str().expect("utf8 fixture path"),
-            &[],
-            Duration::from_millis(100),
-        )
-        .expect_err("bounded transport timeout");
-
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(error.retryable, Some(true));
-        assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
-    }
 }
 
 fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     artifact: Option<&AgentTaskArtifact>,
@@ -1764,13 +1654,18 @@ pub(super) fn retain_committed_changes_artifact(
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
-    // The caller resolves one store for the whole promotion; this projection
-    // is written against that store rather than re-resolving the environment
-    // partway through a promotion already in flight (#7505).
-    store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<Option<PathBuf>> {
     let Some(run_id) = options.source_run_id.as_deref() else {
         return Ok(None);
+    };
+    let ambient_store;
+    let store = match observation_store {
+        Some(store) => store,
+        None => {
+            ambient_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+            &ambient_store
+        }
     };
     if store.get_run(run_id)?.is_none() {
         return Ok(None);
@@ -2319,46 +2214,28 @@ pub(crate) fn capture_declared_base(
     worktree_path: &Path,
     base_ref: Option<&str>,
 ) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
-    capture_declared_base_with_git_and_timeout(
-        worktree_path,
-        base_ref,
-        "git",
-        &transport_environment(),
-        DECLARED_BASE_GIT_TIMEOUT,
-    )
-}
-
-fn capture_declared_base_with_git_and_timeout(
-    worktree_path: &Path,
-    base_ref: Option<&str>,
-    git: &str,
-    environment: &[(String, String)],
-    timeout: Duration,
-) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
     let Some(base_ref) = base_ref.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    let observed = run_declared_base_git(
-        worktree_path,
-        git,
-        &[
+    let observed = Command::new("git")
+        .args([
             "ls-remote",
             "--heads",
             "origin",
             &format!("refs/heads/{base_ref}"),
-        ],
-        environment,
-        base_ref,
-        "resolve",
-        timeout,
-    )?;
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !observed.status.success() {
-        return Err(declared_base_git_failure(
-            base_ref,
-            "resolve",
-            &observed.stderr,
-            environment,
-            timeout,
+        return Err(Error::validation_invalid_argument(
+            "base_ref",
+            format!(
+                "could not capture declared base `{base_ref}` before promotion gates: {}",
+                String::from_utf8_lossy(&observed.stderr).trim()
+            ),
+            None,
+            None,
         ));
     }
     let sha = String::from_utf8_lossy(&observed.stdout)
@@ -2376,39 +2253,25 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
-    let fetch = run_declared_base_git(
-        worktree_path,
-        git,
-        &[
+    let fetch = Command::new("git")
+        .args([
             "fetch",
             "--no-tags",
             "--no-write-fetch-head",
             "origin",
             &sha,
-        ],
-        environment,
-        base_ref,
-        "fetch",
-        timeout,
-    )?;
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !fetch.status.success() {
-        return Err(declared_base_git_failure(
-            base_ref,
-            "fetch",
-            &fetch.stderr,
-            environment,
-            timeout,
-        ));
+        return Err(Error::validation_invalid_argument("base_ref", format!("could not materialize observed declared base `{base_ref}` at {sha}; retry promotion: {}", String::from_utf8_lossy(&fetch.stderr).trim()), None, None));
     }
-    let output = run_declared_base_git(
-        worktree_path,
-        git,
-        &["rev-parse", "--verify", &format!("{sha}^{{commit}}")],
-        environment,
-        base_ref,
-        "verify",
-        timeout,
-    )?;
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{sha}^{{commit}}")])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !output.status.success() {
         return Err(Error::validation_invalid_argument(
             "base_ref",
@@ -2421,150 +2284,6 @@ fn capture_declared_base_with_git_and_timeout(
         base: base_ref.to_string(),
         sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
     }))
-}
-
-fn transport_environment() -> Vec<(String, String)> {
-    PROXY_ENV_KEYS
-        .iter()
-        .filter_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|value| ((*key).to_string(), value))
-        })
-        .collect()
-}
-
-fn run_declared_base_git(
-    worktree_path: &Path,
-    git: &str,
-    args: &[&str],
-    environment: &[(String, String)],
-    base_ref: &str,
-    phase: &str,
-    timeout: Duration,
-) -> Result<Output> {
-    let mut command = Command::new(git);
-    command
-        .args(args)
-        .current_dir(worktree_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Make the controller-owned child boundary explicit. Durable evidence
-        // records only variable names, never proxy credentials or URLs.
-        .envs(environment.iter().map(|(key, value)| (key, value)));
-    homeboy_core::engine::command::isolate_process_tree(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        declared_base_transport_error(
-            base_ref,
-            phase,
-            format!("could not start Git base preflight: {error}"),
-            environment,
-            timeout,
-        )
-    })?;
-    let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
-        &mut child,
-        homeboy_core::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
-        timeout,
-        DECLARED_BASE_GIT_HEARTBEAT,
-        || false,
-        |_, _| Ok(()),
-    )
-    .map_err(|error| {
-        declared_base_transport_error(
-            base_ref,
-            phase,
-            format!("could not supervise Git base preflight: {error}"),
-            environment,
-            timeout,
-        )
-    })?;
-    if supervised.termination
-        != homeboy_core::engine::command::SupervisedCommandTermination::Completed
-    {
-        return Err(declared_base_transport_error(
-            base_ref,
-            phase,
-            format!(
-                "Git base preflight exceeded its {} second deadline",
-                timeout.as_secs()
-            ),
-            environment,
-            timeout,
-        ));
-    }
-    Ok(supervised.output.into_output())
-}
-
-fn declared_base_git_failure(
-    base_ref: &str,
-    phase: &str,
-    stderr: &[u8],
-    environment: &[(String, String)],
-    timeout: Duration,
-) -> Error {
-    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
-    if is_git_transport_failure(&stderr) {
-        return declared_base_transport_error(
-            base_ref,
-            phase,
-            format!("Git base preflight failed: {stderr}"),
-            environment,
-            timeout,
-        );
-    }
-    Error::validation_invalid_argument(
-        "base_ref",
-        format!("could not capture declared base `{base_ref}` before promotion gates: {stderr}"),
-        None,
-        None,
-    )
-}
-
-fn declared_base_transport_error(
-    base_ref: &str,
-    phase: &str,
-    problem: String,
-    environment: &[(String, String)],
-    timeout: Duration,
-) -> Error {
-    let names = environment.iter().map(|(key, _)| key).collect::<Vec<_>>();
-    let mut error = Error::internal_unexpected(format!(
-        "transient Git transport failure while {phase}ing declared base `{base_ref}`: {problem}"
-    ))
-    .with_retryable(true);
-    error.details["field"] = Value::String("base_ref".to_string());
-    error.details["git_base_preflight"] = json!({
-        "schema": "homeboy/git-base-preflight/v1",
-        "base_ref": base_ref,
-        "phase": phase,
-        "timeout_ms": timeout.as_millis() as u64,
-        "retry_disposition": "retryable_transport_failure",
-        "required_environment": names,
-    });
-    error.hints.push(homeboy_error::Hint {
-        message: "Retry Cook after restoring the controller's network/proxy environment; provider execution has not started.".to_string(),
-    });
-    error
-}
-
-fn is_git_transport_failure(stderr: &str) -> bool {
-    let stderr = stderr.to_ascii_lowercase();
-    [
-        "unable to access",
-        "couldn't connect",
-        "could not resolve host",
-        "connection timed out",
-        "connection refused",
-        "network is unreachable",
-        "proxy",
-        "tls",
-        "ssl",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
 }
 
 fn status_for_report(dry_run: bool, has_gate_failure: bool) -> AgentTaskPromotionStatus {
@@ -2905,7 +2624,7 @@ pub(crate) fn select_patch_artifact(
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<AgentTaskArtifact> {
     let canonical =
         canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
@@ -2955,10 +2674,7 @@ pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
-    // One call is one unit of work, so the store resolves once here rather
-    // than at each projection lookup inside (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    canonical_recoverable_patch_artifacts_internal(outcome, options, &observation_store)
+    canonical_recoverable_patch_artifacts_internal(outcome, options, None)
 }
 
 pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
@@ -2966,13 +2682,13 @@ pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
     options: &AgentTaskPromotionOptions,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
-    canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)
+    canonical_recoverable_patch_artifacts_internal(outcome, options, Some(observation_store))
 }
 
 fn canonical_recoverable_patch_artifacts_internal(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome
         .artifacts
@@ -3123,16 +2839,19 @@ fn resolve_artifact_path(
     task_id: &str,
     source_run_id: Option<&str>,
     source_path: Option<&Path>,
-    observation_store: &homeboy_core::observation::ObservationStore,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<PathBuf> {
     if let Some(run_id) = source_run_id {
-        let projected =
-            crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
-                observation_store,
-                run_id,
-                task_id,
-                artifact,
-            )?;
+        let projected = match observation_store {
+            Some(store) => {
+                crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
+                    store, run_id, task_id, artifact,
+                )?
+            }
+            None => crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+                run_id, task_id, artifact,
+            )?,
+        };
         if let Some(projected) = projected {
             return Ok(projected);
         }

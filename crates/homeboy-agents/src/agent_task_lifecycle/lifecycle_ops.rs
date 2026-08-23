@@ -406,6 +406,17 @@ pub fn submit_plan_in_store(
     )
 }
 
+/// Persist the parent for a locally detached Cook before the detached process
+/// has prepared its first attempt. The parent uses the Cook ID itself, so the
+/// normal Cook-index alias takes over automatically once that attempt exists.
+///
+/// An empty plan is intentional: this record owns only the handoff lifecycle,
+/// while the detached Cook persists the immutable execution plan and attempt.
+pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_handoff_parent_in_store(&lifecycle_store, cook_id)
+}
+
 /// Persist a detached Cook's handoff parent inside an explicitly rooted store.
 ///
 /// Both admission guards read the store the parent is written into. The alias
@@ -460,6 +471,22 @@ pub fn record_detached_cook_handoff_parent_in_store(
         0,
         Some("waiting for the detached Cook to materialize its first attempt"),
     )
+}
+
+/// Persist a detached Cook while its Lab destination is not yet admissible.
+///
+/// The binding is deliberately assembled by the CLI from identities, immutable
+/// input references, and secret-free replay arguments. It never contains secret
+/// values or a redacted receipt that cannot replay. Reusing the Cook id for a
+/// different request is rejected before any destination can be provisioned.
+pub fn record_unmaterialized_cook_admission(
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_unmaterialized_cook_admission_in_store(&lifecycle_store, cook_id, binding, state, reason)
 }
 
 /// Create a complete detached parent and immutable admission binding in the
@@ -597,15 +624,6 @@ fn unmaterialized_admission_value(
             "resume_trigger": "daemon-tick-or-runner-admission-event",
         },
     })
-}
-
-/// An unmaterialized admission has no executable task plan. It can progress
-/// only through its fenced admission reconciler.
-pub fn is_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
-    record
-        .metadata
-        .get("unmaterialized_cook_admission")
-        .is_some_and(Value::is_object)
 }
 
 pub fn record_unmaterialized_cook_admission_in_store(
@@ -864,7 +882,6 @@ pub fn recover_unmaterialized_cook_input_publication_in_store(
                 fs::create_dir_all(parent).map_err(|error| {
                     Error::internal_io(error.to_string(), Some(parent.display().to_string()))
                 })?;
-                #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(
@@ -1078,6 +1095,13 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     Ok(updated.unwrap_or(current))
 }
 
+/// Reject detached Cook work after the pre-spawn parent has been cancelled.
+/// The child reads this durable fence independently of launcher liveness.
+pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    require_detached_cook_handoff_fence_open_in_store(&lifecycle_store, cook_id)
+}
+
 /// Read the durable cancellation fence from an explicitly rooted store.
 ///
 /// The fence is a field on the handoff parent record, not a separate marker
@@ -1109,6 +1133,17 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
         ));
     }
     Ok(())
+}
+
+/// Attach the child identity only after it has been spawned. Cancellation uses
+/// this durable identity to stop preparation before an attempt exists.
+pub fn record_detached_cook_handoff_child(
+    cook_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_handoff_child_in_store(&lifecycle_store, cook_id, pid, start_identity)
 }
 
 /// Attach the spawned child's identity inside an explicitly rooted store.
@@ -1151,6 +1186,12 @@ pub fn record_detached_cook_handoff_child_in_store(
         true
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Persist the daemon job that supervises this locally launched Cook.
+pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_supervisor_in_store(&lifecycle_store, cook_id, job_id)
 }
 
 /// Persist the supervising daemon job inside an explicitly rooted store.
@@ -1406,6 +1447,23 @@ pub fn record_local_cook_retry_child_in_store(
     Ok(())
 }
 
+/// Reserve the first attempt identity before its lifecycle record is submitted.
+///
+/// The record and Cook index are separate durable writes. This reservation keeps
+/// a supervisor that observes the child exit after the record write from
+/// terminalizing the handoff between those writes.
+pub fn reserve_detached_cook_handoff_materialization(
+    cook_id: &str,
+    attempt_run_id: &str,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reserve_detached_cook_handoff_materialization_in_store(
+        &lifecycle_store,
+        cook_id,
+        attempt_run_id,
+    )
+}
+
 /// Reserve a detached Cook's first attempt within its explicitly selected
 /// lifecycle roots.
 pub fn reserve_detached_cook_handoff_materialization_in_store(
@@ -1461,6 +1519,14 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
         ));
     }
     Ok(())
+}
+
+/// Cancel a submitted first child when its reserved handoff parent was
+/// cancelled before the Cook index could be published. The reservation is the
+/// durable link that keeps this otherwise-unindexed record reachable.
+pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str) -> Result<bool> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(&lifecycle_store, cook_id)
 }
 
 pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
@@ -1865,7 +1931,18 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
-/// `transition_execution_placement_for_continuation` against an explicitly
+/// Replace a failed pre-provider attempt's placement with an explicitly
+/// authorized local continuation. The immutable Cook recipe remains the source
+/// of work; this records only the next execution's routing authority.
+pub fn transition_execution_placement_for_continuation(
+    run_id: &str,
+    replacement: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    transition_execution_placement_for_continuation_in_store(&lifecycle_store, run_id, replacement)
+}
+
+/// [`transition_execution_placement_for_continuation`] against an explicitly
 /// rooted lifecycle store.
 pub fn transition_execution_placement_for_continuation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -1979,13 +2056,6 @@ pub fn normalize_local_execution_placement_in_store(
 
 #[cfg(test)]
 mod execution_placement_tests {
-
-    /// Tests are the entry point for their own unit of work, so the store
-    /// resolves once here (#7505).
-    fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle store")
-    }
     use super::*;
     use homeboy_lab_runner_contract::{
         EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
@@ -2043,363 +2113,6 @@ mod execution_placement_tests {
             },
         )
     }
-
-    #[test]
-    fn explicit_local_continuation_replaces_only_pre_provider_auto_lab_placement() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut plan = super::super::tests::test_plan();
-            let lab = decision();
-            let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-                lab.policy_id,
-                lab.policy_revision,
-                lab.identity,
-                Placement::Auto,
-                ExecutionPlacementRequirement::Either,
-                EffectiveExecutionPlacement::Lab,
-                lab.runner,
-                ExecutionPlacementFallback {
-                    local_allowed: true,
-                    reason: None,
-                },
-                lab.override_authorization,
-            );
-            plan.metadata = json!({ "execution_placement_decision": prior });
-            submit_plan_with_runtime_admission(&plan, Some("local-continuation"), |_| {
-                Ok(json!({}))
-            })
-            .expect("submit routed Lab attempt");
-            record_pre_execution_failure(
-                "local-continuation",
-                &plan,
-                "lab_handoff_preacceptance",
-                &Error::internal_unexpected("Lab disconnected before provider start"),
-            )
-            .expect("record pre-provider failure");
-
-            let replacement = local_continuation(&prior);
-            let mut stale_identity = prior.identity.clone();
-            stale_identity.candidate = Some("candidate-b".to_string());
-            let stale = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-                prior.policy_id.clone(),
-                prior.policy_revision.clone(),
-                stale_identity,
-                Placement::Local,
-                ExecutionPlacementRequirement::Either,
-                EffectiveExecutionPlacement::Local,
-                None,
-                ExecutionPlacementFallback {
-                    local_allowed: false,
-                    reason: None,
-                },
-                ExecutionPlacementOverrideAuthorization {
-                    authorized: true,
-                    authority: Some("operator --placement local".to_string()),
-                },
-            );
-            transition_execution_placement_for_continuation_in_store(
-                &test_lifecycle_store(),
-                "local-continuation",
-                stale,
-            )
-            .expect_err("a stale placement decision is rejected");
-            transition_execution_placement_for_continuation_in_store(
-                &test_lifecycle_store(),
-                "local-continuation",
-                replacement.clone(),
-            )
-            .expect("explicit local continuation is authorized");
-
-            let record = status("local-continuation").expect("read transitioned attempt");
-            assert_eq!(
-                record.metadata["execution_placement_decision"]["decision_id"],
-                replacement.decision_id
-            );
-            assert_eq!(
-                record.metadata["execution_placement_transition"]["prior_decision_id"],
-                prior.decision_id
-            );
-            assert_eq!(
-                load_controller_plan("local-continuation")
-                    .expect("read transitioned controller plan")
-                    .metadata["execution_placement_decision"]["decision_id"],
-                replacement.decision_id
-            );
-            assert_eq!(
-                record.metadata["transport_admission_reset"]["replacement_decision_id"],
-                replacement.decision_id
-            );
-            transition_execution_placement_for_continuation_in_store(
-                &test_lifecycle_store(),
-                "local-continuation",
-                replacement,
-            )
-            .expect_err("the placement transition cannot mint another admission reset");
-        });
-    }
-
-    #[test]
-    fn explicit_local_continuation_rejects_lab_required_policy() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut plan = super::super::tests::test_plan();
-            let prior = decision();
-            plan.metadata = json!({ "execution_placement_decision": prior });
-            submit_plan_with_runtime_admission(&plan, Some("lab-only-continuation"), |_| {
-                Ok(json!({}))
-            })
-            .expect("submit Lab-required attempt");
-            record_pre_execution_failure(
-                "lab-only-continuation",
-                &plan,
-                "lab_handoff_preacceptance",
-                &Error::internal_unexpected("Lab disconnected before provider start"),
-            )
-            .expect("record pre-provider failure");
-
-            let error = transition_execution_placement_for_continuation_in_store(
-                &test_lifecycle_store(),
-                "lab-only-continuation",
-                local_continuation(&prior),
-            )
-            .expect_err("Lab-required policy fails closed");
-            assert!(error.message.contains("non-Lab-required"));
-            assert_eq!(
-                status("lab-only-continuation")
-                    .expect("read unchanged attempt")
-                    .metadata["execution_placement_decision"]["decision_id"],
-                prior.decision_id
-            );
-        });
-    }
-
-    #[test]
-    fn durable_plan_status_and_verified_outcome_keep_one_decision_identity() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut plan = super::super::tests::test_plan();
-            let placement = decision();
-            plan.metadata = json!({ "execution_placement_decision": placement });
-            let record = submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| {
-                Ok(json!({ "runtime": "test" }))
-            })
-            .expect("submit plan");
-            assert_eq!(
-                record.metadata["execution_placement_decision"]["decision_id"],
-                decision().decision_id
-            );
-            record_execution_placement_outcome(
-                "placement-run",
-                decision()
-                    .outcome(EffectiveExecutionPlacement::Lab, Some("lab-a".to_string()))
-                    .expect("Lab is authorized"),
-            )
-            .expect("record verified outcome");
-            let status = status("placement-run").expect("status");
-            assert_eq!(
-                status.metadata["execution_placement_outcome"]["decision_id"],
-                decision().decision_id
-            );
-        });
-    }
-
-    #[test]
-    fn a_plan_without_a_routing_decision_persists_a_canonical_local_one() {
-        // The originating defect in #11600: an explicitly local Cook submitted
-        // a plan that had never been routed anywhere, so nothing wrote a
-        // canonical decision and `execution_placement_decision` stayed null.
-        // Retry then could not decode the owner of the run it was recovering.
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let plan = super::super::tests::test_plan();
-            let record = submit_plan_with_runtime_admission(&plan, Some("local-run"), |_| {
-                Ok(json!({ "runtime": "test" }))
-            })
-            .expect("submit plan");
-
-            let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
-                serde_json::from_value(record.metadata["execution_placement_decision"].clone())
-                    .expect("a controller-local run records a decodable canonical decision");
-            assert_eq!(decision.selected, EffectiveExecutionPlacement::Local);
-            assert!(decision.runner.is_none());
-            assert!(decision.permits_local_execution());
-
-            // The whole point of recording it: the local outcome now verifies.
-            record_execution_placement_outcome(
-                "local-run",
-                decision
-                    .outcome(EffectiveExecutionPlacement::Local, None)
-                    .expect("a controller-local decision authorizes a local outcome"),
-            )
-            .expect("record verified local outcome");
-        });
-    }
-
-    #[test]
-    fn a_null_decision_is_normalized_to_the_routing_decision_that_verified_it() {
-        // Records written before the canonical decision existed carry a null.
-        // That is missing evidence, not a contradiction — adopting the routing
-        // decision in hand (and saying so) is what makes an older local run
-        // recoverable instead of a dead end (#11600).
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let plan = super::super::tests::test_plan();
-            submit_plan_with_runtime_admission(&plan, Some("legacy-run"), |_| Ok(json!({})))
-                .expect("submit plan");
-            let mut record = store::read_record("legacy-run").expect("read record");
-            record.metadata["execution_placement_decision"] = Value::Null;
-            store::write_record(&record).expect("write legacy record");
-
-            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
-                "lab-route-contract",
-                "v1",
-                ExecutionPlacementIdentity {
-                    repository: "homeboy".to_string(),
-                    workspace: "/workspace/homeboy".to_string(),
-                    task: "legacy-task".to_string(),
-                    candidate: None,
-                    base: None,
-                },
-                Placement::Local,
-            );
-
-            assert!(
-                normalize_missing_execution_placement_decision("legacy-run", &routed)
-                    .expect("normalize legacy record"),
-                "a null decision is adopted"
-            );
-            assert!(
-                !normalize_missing_execution_placement_decision("legacy-run", &routed)
-                    .expect("normalize is idempotent"),
-                "an already-canonical decision is never overwritten"
-            );
-
-            let record = store::read_record("legacy-run").expect("read normalized record");
-            assert_eq!(
-                record.metadata["execution_placement_decision"]["decision_id"],
-                json!(routed.decision_id)
-            );
-            assert_eq!(
-                record.metadata["execution_placement_normalized"]["adopted_decision_id"],
-                json!(routed.decision_id)
-            );
-            record_execution_placement_outcome(
-                "legacy-run",
-                routed
-                    .outcome(EffectiveExecutionPlacement::Local, None)
-                    .expect("local outcome"),
-            )
-            .expect("a normalized record accepts its verified local outcome");
-        });
-    }
-
-    #[test]
-    fn a_submission_stamp_is_superseded_by_the_routing_decision_that_verified_it() {
-        // The stamp exists so a purely local run has an owner. It is derived,
-        // not routed, so when routing later produces its own decision for the
-        // same run the routed one wins — otherwise the stamp would collide with
-        // the outcome it was introduced to make recordable.
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let plan = super::super::tests::test_plan();
-            submit_plan_with_runtime_admission(&plan, Some("stamped-run"), |_| Ok(json!({})))
-                .expect("submit plan");
-            let stamped = store::read_record("stamped-run").expect("read record");
-            assert_eq!(
-                stamped.metadata["execution_placement_decision"]["policy_id"],
-                json!(homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID)
-            );
-
-            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
-                "lab-route-contract",
-                "v1",
-                ExecutionPlacementIdentity {
-                    repository: "homeboy".to_string(),
-                    workspace: "/workspace/homeboy".to_string(),
-                    task: "routed-task".to_string(),
-                    candidate: None,
-                    base: None,
-                },
-                Placement::Local,
-            );
-            assert!(
-                normalize_missing_execution_placement_decision("stamped-run", &routed)
-                    .expect("supersede the submission stamp")
-            );
-            record_execution_placement_outcome(
-                "stamped-run",
-                routed
-                    .outcome(EffectiveExecutionPlacement::Local, None)
-                    .expect("local outcome"),
-            )
-            .expect("the routed decision now owns the record");
-        });
-    }
-
-    #[test]
-    fn stale_or_contradictory_outcomes_fail_closed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut plan = super::super::tests::test_plan();
-            plan.metadata = json!({ "execution_placement_decision": decision() });
-            submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
-                .expect("submit plan");
-            let error = record_execution_placement_outcome(
-                "placement-run",
-                homeboy_lab_runner_contract::ExecutionPlacementOutcome {
-                    decision_id: "stale".to_string(),
-                    effective: EffectiveExecutionPlacement::Local,
-                    runner_id: None,
-                },
-            )
-            .expect_err("reject contradictory outcome");
-            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        });
-    }
-
-    #[test]
-    fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // One store for the whole test: both normalizations and the record
-            // they read must name one installation.
-            let store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
-            let plan = super::super::tests::test_plan();
-            let record =
-                submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
-                    .expect("submit plan");
-
-            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
-                .expect("submission stamp remains authoritative");
-            let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
-                serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
-                    .expect("controller-local submission records a canonical decision");
-            assert!(submission_decision.is_submission_stamp());
-            assert_eq!(
-                submission_decision.selected,
-                EffectiveExecutionPlacement::Local
-            );
-            assert!(submission_decision.permits_local_execution());
-            assert!(normalized
-                .metadata
-                .get("execution_placement_normalization")
-                .is_none());
-            assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
-
-            let mut plan = plan;
-            plan.metadata = json!({ "execution_placement_decision": decision() });
-            let record =
-                submit_plan_with_runtime_admission(&plan, Some("placement-projection-run"), |_| {
-                    Ok(json!({}))
-                })
-                .expect("submit plan with placement decision");
-            let mut legacy_record = store::read_record(&record.run_id).expect("durable record");
-            legacy_record
-                .ensure_metadata_object()
-                .remove("execution_placement_decision");
-            store::write_record(&legacy_record).expect("remove legacy record projection");
-
-            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
-                .expect("explicit plan decision is restored");
-            assert_eq!(
-                normalized.metadata["execution_placement_decision"]["decision_id"],
-                decision().decision_id
-            );
-        });
-    }
 }
 
 pub(crate) trait RuntimeAdmissionEvidence {
@@ -2416,31 +2129,6 @@ impl RuntimeAdmissionEvidence for Value {
     fn runtime(&self) -> Value {
         self.clone()
     }
-}
-
-/// Persist the run identity before controller admission so an admission failure
-/// remains inspectable and retryable through the normal lifecycle commands.
-pub(crate) fn submit_plan_with_runtime_admission<F, A>(
-    plan: &AgentTaskPlan,
-    requested_run_id: Option<&str>,
-    admit_runtime: F,
-) -> Result<AgentTaskRunRecord>
-where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let admission_status =
-        crate::agent_task_service::cook_pre_execution::store_admission_status(&lifecycle_store);
-    submit_plan_with_runtime_admission_in_store(
-        &lifecycle_store,
-        plan,
-        requested_run_id,
-        execution_runner_id(),
-        None,
-        Some(&admission_status),
-        admit_runtime,
-    )
 }
 
 // `submit_plan_with_runtime_admission_on_runner_with_metadata` lived here. Its
@@ -3030,6 +2718,12 @@ pub fn load_plan_for_execution_in_store(
     lifecycle_store.read_controller_plan_for_execution(&run_id)
 }
 
+/// Validate a queued lifecycle's pinned controller without scheduling provider work.
+pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    validate_controller_runtime_in_store(&lifecycle_store, run_id)
+}
+
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
 /// store.
 ///
@@ -3212,6 +2906,16 @@ fn migrate_record_controller_runtime_in_store(
     Ok(())
 }
 
+/// Repair only the executable artifact named by durable controller provenance.
+pub fn recover_controller_runtime(
+    run_id: &str,
+    artifact: Option<&std::path::Path>,
+    source: Option<&std::path::Path>,
+) -> Result<Value> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    recover_controller_runtime_in_store(&lifecycle_store, run_id, artifact, source)
+}
+
 /// Repair a run's pinned controller executable against an explicitly rooted
 /// store.
 ///
@@ -3330,6 +3034,18 @@ pub fn mark_running_in_store(
 pub enum ProviderExecutionReservation {
     Acquired,
     AlreadyReserved,
+}
+
+/// Durably reserve one provider execution before the scheduler blocks on the
+/// backend. A resumed controller must reconcile an existing reservation rather
+/// than dispatching the same `(task_id, attempt)` a second time.
+pub fn reserve_provider_execution(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    attempt: u32,
+) -> Result<ProviderExecutionReservation> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
 }
 
 pub fn reserve_provider_execution_in_store(
@@ -3752,6 +3468,45 @@ pub fn record_cook_terminal_result_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook terminal result was unchanged"))
 }
 
+/// Record the provider's terminal result before controller-owned patch
+/// harvesting. Harvesting can fail or be interrupted independently of the
+/// provider execution, so it must not leave this reservation running.
+pub fn record_provider_execution_terminal(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        None,
+    )
+}
+
+/// Record a terminal provider result with its normalized concrete model.
+pub fn record_provider_execution_terminal_with_model(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+    model: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        model,
+    )
+}
+
 pub fn record_provider_execution_terminal_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3912,6 +3667,24 @@ pub fn has_active_provider_execution_in_store(
                 .iter()
                 .any(|execution| execution["state"] == json!("running"))
         }))
+}
+
+/// Record the controller time spent after a provider returned and before its
+/// terminal outcome was fully harvested and finalized.
+pub fn record_provider_execution_cleanup_elapsed(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    elapsed_ms: u64,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_cleanup_elapsed_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        elapsed_ms,
+    )
 }
 
 pub fn record_provider_execution_cleanup_elapsed_in_store(
@@ -4465,6 +4238,12 @@ fn trusted_plan_environment_variables(plan: &AgentTaskPlan) -> Vec<String> {
     names.into_iter().take(16).collect()
 }
 
+/// Re-arm a quarantined record by exact durable run ID after its provenance is repaired.
+pub fn rearm_quarantined_run(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    rearm_quarantined_run_in_store(&lifecycle_store, run_id)
+}
+
 /// Re-arm a quarantined record inside an explicitly rooted store.
 ///
 /// This is the clearing half of the quarantine pair, and it has to read and
@@ -4499,6 +4278,13 @@ pub fn rearm_quarantined_run_in_store(
                 None,
             )
         })
+}
+
+/// Quarantine one exact queued run without changing its lifecycle state or
+/// removing any evidence. It can only return through `rearm_quarantined_run`.
+pub fn quarantine_queued_run_exact(run_id: &str, reason: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    quarantine_queued_run_exact_in_store(&lifecycle_store, run_id, reason)
 }
 
 /// Quarantine one exact queued run inside an explicitly rooted store.
@@ -5515,7 +5301,17 @@ pub fn run_record_exists_readonly_in_store(
     lifecycle_store.record_exists_readonly(&sanitize_run_id(run_id))
 }
 
-/// `run_record_exists_resolved` against explicitly injected durable lifecycle
+/// Whether a durable run record exists for `run_id` after the same resolution
+/// `retry` applies (a cook id resolves to its latest run). The plain
+/// `run_record_exists` is an exact-match check, so a resolvable id (e.g. a cook
+/// id) reports absent even though `retry` would succeed — which previously made
+/// the Lab retry handoff silently fall through and ship an unrunnable
+/// `agent-task retry <id>` to a runner with no such record (#8390).
+pub fn run_record_exists_resolved(run_id: &str) -> Result<bool> {
+    store::record_exists(&resolve_run_id(run_id)?)
+}
+
+/// [`run_record_exists_resolved`] against explicitly injected durable lifecycle
 /// roots.
 pub fn run_record_exists_resolved_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -6341,6 +6137,15 @@ pub fn aggregate_source_in_store(
     })?;
     let path = lifecycle_store.aggregate_path(&record.run_id);
     Ok((raw, path))
+}
+
+pub fn record_cook_attempt(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<AgentTaskCookIndex> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_attempt_in_store(&lifecycle_store, cook_id, attempt, run_id)
 }
 
 pub fn record_cook_attempt_in_store(
@@ -7693,6 +7498,16 @@ pub fn record_manual_finalization_failure(
         Some(record) => Ok(record),
         None => store::read_record(&run_id),
     }
+}
+
+/// Checkpoint controller-owned recovery after a promoted, green candidate loses
+/// its publication base. The terminal provider result remains untouched.
+pub fn record_cook_moving_base_recovery(
+    run_id: &str,
+    recovery: Value,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_moving_base_recovery_in_store(&lifecycle_store, run_id, recovery)
 }
 
 pub fn record_cook_moving_base_recovery_in_store(

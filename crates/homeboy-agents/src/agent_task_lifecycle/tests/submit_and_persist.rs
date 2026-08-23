@@ -412,38 +412,6 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
     assert!(status.metadata.get("stale_running_reason").is_none());
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::fail_next_record_write_for_test`
-/// arms a process-global `AtomicBool` in `lifecycle_store`, not a per-store
-/// flag. The hermetic home's global mutex is the only thing serializing that
-/// fault injection against every peer test, so rooting this would arm a
-/// one-shot write failure that some *other* test could consume.
-#[test]
-fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
-    with_isolated_home(|_| {
-        let source_id = "retry-atomic-source";
-        let retry_id = "retry-atomic-successor";
-        submit_plan(&test_plan(), Some(source_id)).expect("submit source");
-
-        // The former implementation had a durable submitted record at this
-        // point, then wrote `retry_of` separately. The first record write now
-        // includes retry provenance, so an interruption leaves no successor
-        // visible to the indexed lookup at all.
-        store::fail_next_record_write_for_test();
-        assert!(retry(source_id, Some(retry_id)).is_err());
-        assert!(!run_record_exists(retry_id).expect("retry remains absent"));
-        assert!(store::read_retry_successors(source_id)
-            .expect("indexed retry lookup")
-            .is_empty());
-
-        let retry = retry(source_id, Some(retry_id)).expect("retry after failed first write");
-        let successors = store::read_retry_successors(source_id).expect("indexed retry lookup");
-        assert_eq!(successors.len(), 1);
-        assert_eq!(successors[0].run_id, retry_id);
-        assert_eq!(successors[0].metadata["retry_of"], source_id);
-        assert_eq!(retry.metadata["retry_of"], source_id);
-    });
-}
-
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The lineage decision this test makes — "is a successor already
 /// active?" — is a scan of the store's own records, so it is only evidence of

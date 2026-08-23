@@ -331,19 +331,6 @@ impl AgentTaskLifecycleStore {
         )
     }
 
-    pub(crate) fn record_provider_execution_runtime_evidence(
-        &self,
-        run_id: &str,
-        task_id: &str,
-        attempt: u32,
-        stdout_uri: Option<String>,
-        stderr_uri: Option<String>,
-    ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_ops::record_provider_execution_runtime_evidence_in_store(
-            self, run_id, task_id, attempt, stdout_uri, stderr_uri,
-        )
-    }
-
     pub(crate) fn record_provider_execution_cleanup_elapsed(
         &self,
         run_id: &str,
@@ -1054,10 +1041,6 @@ fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {
         })
 }
 
-pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
-    write_aggregate_in_store(&default_store()?, run_id, aggregate)
-}
-
 pub(super) fn write_aggregate_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -1577,16 +1560,6 @@ fn read_records_in_store(
 /// is the threshold at which "this is a runaway, not a lineage" becomes true.
 const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
 
-/// Read every retry successor of `source_run_id`.
-///
-/// Callers treat an empty or non-matching result as "no reservation exists"
-/// and then create one, so a truncated lineage would silently double-book a
-/// retry. The page is therefore read with an explicit truncation signal and a
-/// truncated lineage fails loudly rather than answering wrongly (#11177).
-pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    read_retry_successors_in_store(&default_store()?, source_run_id)
-}
-
 /// The store-rooted counterpart of [`read_retry_successors`], reading this
 /// store's own observation database instead of the ambient one.
 ///
@@ -1608,17 +1581,6 @@ pub(super) fn read_retry_successors_in_store(
         )));
     }
     page.runs.iter().map(record_from_run).collect()
-}
-
-pub(super) fn read_records_with_health_bounded(
-    limit: usize,
-) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    default_store()?.read_records_with_health_bounded(limit)
-}
-
-pub(super) fn read_all_records_with_health(
-) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    default_store()?.read_all_records_with_health()
 }
 
 fn records_with_health(

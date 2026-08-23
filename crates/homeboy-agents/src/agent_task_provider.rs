@@ -137,9 +137,6 @@ use outcome_normalization::{
     surface_provider_run_result_diagnostics,
 };
 #[cfg(test)]
-use resolution::{
-    discover_agent_task_executor_providers, provider_requires_cwd_git_checkout_with_providers,
-    select_provider_by_backend,
-};
+use resolution::select_provider_by_backend;
 #[cfg(test)]
 use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};

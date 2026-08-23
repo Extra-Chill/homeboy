@@ -262,37 +262,6 @@ fn expected_agent_runtime_provider_refs(
     Ok(expected)
 }
 
-struct ParsedAgentTaskExecutorProviderCatalog {
-    providers: Vec<AgentTaskExecutorProvider>,
-    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-}
-
-fn parse_agent_task_executor_provider_catalog(
-    values: &[Value],
-    runtime_id: &str,
-    extension_id: Option<&str>,
-    path: Option<&str>,
-) -> ParsedAgentTaskExecutorProviderCatalog {
-    let mut providers = Vec::new();
-    let mut diagnostics = Vec::new();
-    for value in values {
-        match serde_json::from_value(value.clone()) {
-            Ok(provider) => providers.push(provider),
-            Err(error) => diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_task_executor_provider.parse_failed".to_string(),
-                message: error.to_string(),
-                runtime_id: Some(runtime_id.to_string()),
-                extension_id: extension_id.map(str::to_string),
-                path: path.map(str::to_string),
-            }),
-        }
-    }
-    ParsedAgentTaskExecutorProviderCatalog {
-        providers,
-        diagnostics,
-    }
-}
-
 /// Agent-task implementation of core's extension provider-discovery validator.
 struct ExtensionProviderDiscoveryValidatorImpl;
 

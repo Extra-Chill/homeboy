@@ -269,15 +269,6 @@ fn validate_adoption_parent_lineage(
     Ok(())
 }
 
-fn git_commit_parents(cwd: &Path, revision: &str) -> Result<Vec<String>> {
-    let output = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", revision])?;
-    Ok(output
-        .split_whitespace()
-        .skip(1)
-        .map(str::to_string)
-        .collect())
-}
-
 fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
