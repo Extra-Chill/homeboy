@@ -19,13 +19,13 @@ use std::path::PathBuf;
 
 use crate::Result;
 
-/// Supplies the controller-runtime pin paths still referenced by nonterminal
-/// durable agent-task records.
+/// Supplies the controller-runtime executable paths still referenced by
+/// nonterminal durable agent-task records.
 pub trait ControllerPinReferenceProvider: Send + Sync {
-    /// Return every pinned-executable path referenced by an agent-task record
-    /// whose state still retains its pin (queued, running, or recoverable).
-    /// Returned paths are raw record references; the caller filters them to the
-    /// content-addressed pins it owns.
+    /// Return every originating and pinned executable path referenced by an
+    /// agent-task record whose state still retains its runtime (queued, running,
+    /// or recoverable). Returned paths are raw record references; callers
+    /// select the paths they own or need to protect.
     fn referenced_controller_pins(&self) -> Result<Vec<PathBuf>>;
 }
 
@@ -48,9 +48,9 @@ homeboy_engine_primitives::provider_registry! {
     with: fn with_provider,
 }
 
-/// The controller-runtime pins still referenced by nonterminal agent-task
-/// records, via the registered provider (or an empty set when the agent-task
-/// subsystem is absent).
+/// The controller-runtime executables still referenced by nonterminal
+/// agent-task records, via the registered provider (or an empty set when the
+/// agent-task subsystem is absent).
 pub(crate) fn referenced_controller_pins() -> Result<Vec<PathBuf>> {
     with_provider(|p| p.referenced_controller_pins())
 }

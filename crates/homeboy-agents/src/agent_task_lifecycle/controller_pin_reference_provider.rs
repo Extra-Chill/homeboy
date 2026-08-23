@@ -17,8 +17,9 @@ use homeboy_core::controller_pin_reference::{
 };
 use homeboy_core::Result;
 
-/// JSON pointer to a record's originating controller-runtime pinned executable.
+/// JSON pointers to a record's originating controller-runtime executables.
 /// Mirrors core's `CONTROLLER_RUNTIME_METADATA_KEY` layout.
+const ORIGINATING_EXECUTABLE_POINTER: &str = "/controller_runtime/originating/executable";
 const PINNED_EXECUTABLE_POINTER: &str = "/controller_runtime/originating/pinned_executable";
 
 struct AgentTaskControllerPinReferenceProvider;
@@ -34,13 +35,15 @@ impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider 
             if !state_retains_pin(&record) {
                 continue;
             }
-            if let Some(path) = record
-                .metadata
-                .pointer(PINNED_EXECUTABLE_POINTER)
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-            {
-                referenced.push(path);
+            for pointer in [ORIGINATING_EXECUTABLE_POINTER, PINNED_EXECUTABLE_POINTER] {
+                if let Some(path) = record
+                    .metadata
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                {
+                    referenced.push(path);
+                }
             }
         }
         Ok(referenced)

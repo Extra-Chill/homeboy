@@ -313,6 +313,38 @@ pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
     retention_report_with_references_at(&runtime_root()?, &referenced, SystemTime::now())
 }
 
+/// Return executables selected by a durable recovery record or the current
+/// controller generation. These paths can live in a source checkout as well as
+/// the content-addressed runtime store, so repository artifact cleanup uses this
+/// projection to avoid removing a selected recovery executable.
+pub fn protected_executables() -> Result<Vec<PathBuf>> {
+    let mut protected: BTreeSet<_> = crate::controller_pin_reference::referenced_controller_pins()?
+        .into_iter()
+        .collect();
+    let active = runtime_root()?.join(ACTIVE_GENERATION_FILE);
+    if active.exists() {
+        let value = fs::read_to_string(&active).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read active controller generation".to_string()),
+            )
+        })?;
+        let runtime: Value = serde_json::from_str(&value).map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some("parse active controller generation".to_string()),
+                None,
+            )
+        })?;
+        for pointer in ["/originating/executable", "/originating/pinned_executable"] {
+            if let Some(path) = runtime.pointer(pointer).and_then(Value::as_str) {
+                protected.insert(PathBuf::from(path));
+            }
+        }
+    }
+    Ok(protected.into_iter().collect())
+}
+
 fn retention_report_with_references_at(
     root: &Path,
     referenced: &[PathBuf],
