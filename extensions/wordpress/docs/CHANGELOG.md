@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.36.1] - 2026-08-23
+
+### Fixed
+- normalize bounded PHPUnit output reads
+
 ## [3.36.0] - 2026-08-22
 
 ### Added
