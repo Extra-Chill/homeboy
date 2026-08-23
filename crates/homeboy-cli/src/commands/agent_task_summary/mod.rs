@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
@@ -117,22 +117,34 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         .provider_executions
         .unwrap_or_else(|| status_attempted_task_count(payload));
     let metrics = code_production_metrics(payload);
-    let state = string_value(payload, &["cook", "state"]).unwrap_or_else(|| {
-        effective_run_state(
-            raw_state,
-            tasks_attempted,
-            metrics.candidate_state,
-            metrics.candidate_scan_degraded,
-        )
-    });
+    let candidate_state = status_scope_candidate(payload).unwrap_or(metrics.candidate_state);
+    let state = string_value(payload, &["cook", "state"])
+        .or_else(|| string_value(payload, &["status_scope", "cook", "finalization", "status"]))
+        .or_else(|| string_value(payload, &["status_scope", "cook", "completion", "state"]))
+        .unwrap_or_else(|| {
+            effective_run_state(
+                raw_state,
+                tasks_attempted,
+                candidate_state,
+                metrics.candidate_scan_degraded,
+            )
+        });
     let completion = cook_completion_summary(payload);
-    let cook = cook_outcome_summary(payload, state, metrics.candidate_state, completion.as_ref());
+    let cook = cook_outcome_summary(payload, state, candidate_state, completion.as_ref());
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
     let mut lines = vec!["Agent task status".to_string()];
     if let Some(cook) = cook.as_ref() {
         lines.extend(cook.lines());
+        if let Some(scope) = payload.get("status_scope") {
+            let queried_state = string_value(scope, &["queried_attempt", "candidate", "state"])
+                .unwrap_or("unknown");
+            let queried_run = string_value(scope, &["queried_attempt", "run_id"]).unwrap_or(run_id);
+            lines.push(format!(
+                "Queried attempt candidate: {queried_state} (run {queried_run})"
+            ));
+        }
         lines.push(format!("Run: {run_id}"));
         lines.push("Provider/task evidence:".to_string());
     } else {
@@ -177,6 +189,7 @@ struct CookOutcomeSummary<'a> {
     candidate_state: CandidateState,
     gate_state: Option<&'a str>,
     completion: Option<&'a CookCompletionSummary<'a>>,
+    candidate_context: String,
 }
 
 impl CookOutcomeSummary<'_> {
@@ -192,7 +205,11 @@ impl CookOutcomeSummary<'_> {
             .unwrap_or("unknown");
         let mut lines = vec![
             format!("Cook outcome: {}", self.state),
-            format!("Candidate: {candidate} ({})", self.candidate_state.as_str()),
+            format!(
+                "Candidate: {candidate} ({}; {})",
+                self.candidate_state.as_str(),
+                self.candidate_context
+            ),
             format!("Gates: {}", self.gate_state.unwrap_or("not_run")),
             format!("PR finalization: {finalization}"),
         ];
@@ -226,7 +243,8 @@ fn cook_outcome_summary<'a>(
     completion: Option<&'a CookCompletionSummary<'a>>,
 ) -> Option<CookOutcomeSummary<'a>> {
     let cook = value_at(payload, &["cook"]).filter(|cook| !cook.is_null());
-    if cook.is_none() && completion.is_none() {
+    let scoped_cook = value_at(payload, &["status_scope", "cook"]).filter(|cook| !cook.is_null());
+    if cook.is_none() && scoped_cook.is_none() && completion.is_none() {
         return None;
     }
     Some(CookOutcomeSummary {
@@ -246,7 +264,32 @@ fn cook_outcome_summary<'a>(
         candidate_state,
         gate_state: string_value(payload, &["execution_states", "gate", "state"]),
         completion,
+        candidate_context: status_scope_candidate_context(payload),
     })
+}
+
+fn status_scope_candidate(payload: &Value) -> Option<CandidateState> {
+    let scope = payload.get("status_scope")?;
+    (string_value(scope, &["cook", "selection", "status"]) == Some("selected")).then(|| {
+        classify_candidates(&json!({
+            "canonical_candidate": scope.pointer("/cook/selection/candidate").unwrap_or(&Value::Null),
+        }))
+        .state()
+    })
+}
+
+fn status_scope_candidate_context(payload: &Value) -> String {
+    let Some(scope) = payload.get("status_scope") else {
+        return "legacy canonical".to_string();
+    };
+    match string_value(scope, &["cook", "selection", "status"]).unwrap_or("unavailable") {
+        "selected" => format!(
+            "Cook-wide selected candidate run {}",
+            string_value(scope, &["cook", "selection", "run_id"]).unwrap_or("unknown")
+        ),
+        "none" => "Cook-wide selection: none".to_string(),
+        _ => "Cook-wide selection: unavailable".to_string(),
+    }
 }
 
 /// The Cook-level publication facts, projected from the `cook_completion`
@@ -274,12 +317,14 @@ impl CookCompletionSummary<'_> {
 }
 
 fn cook_completion_summary(payload: &Value) -> Option<CookCompletionSummary<'_>> {
-    let completion = value_at(payload, &["cook_completion"])?;
+    let completion = value_at(payload, &["cook_completion"])
+        .or_else(|| value_at(payload, &["status_scope", "cook", "completion"]))?;
     Some(CookCompletionSummary {
         state: string_value(completion, &["state"]).unwrap_or("unknown"),
         finalization_state: string_value(payload, &["execution_states", "finalization", "state"])
             .or_else(|| string_value(payload, &["cook_finalization", "status"]))
-            .or_else(|| string_value(payload, &["metadata", "cook_finalization", "status"])),
+            .or_else(|| string_value(payload, &["metadata", "cook_finalization", "status"]))
+            .or_else(|| string_value(payload, &["status_scope", "cook", "finalization", "status"])),
         finalization_requested: value_at(completion, &["finalization_requested"])
             .and_then(Value::as_bool)
             .unwrap_or(false),
@@ -298,7 +343,8 @@ fn cook_pr_url(payload: &Value) -> Option<&str> {
     let url = string_value(payload, &["pr_url"])
         .or_else(|| receipt_pr_url(payload, &["cook_finalization"]))
         .or_else(|| receipt_pr_url(payload, &["metadata", "cook_finalization"]))
-        .or_else(|| receipt_pr_url(payload, &["finalization"]))?
+        .or_else(|| receipt_pr_url(payload, &["finalization"]))
+        .or_else(|| receipt_pr_url(payload, &["status_scope", "cook", "finalization"]))?
         .trim();
     (!url.is_empty()).then_some(url)
 }
@@ -1350,7 +1396,7 @@ mod tests {
 
         assert!(
             summary.starts_with(
-                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted)\nGates: passed\nPR finalization: finalization_failed"
+                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
             ),
             "{summary}"
         );
@@ -1395,10 +1441,91 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
         assert!(summary.starts_with(
-            "Agent task status\nCook outcome: review_ready\nCandidate: yes (finalized)\nGates: passed\nPR finalization: finalized\nPull request: https://example.test/pull/1"
+            "Agent task status\nCook outcome: review_ready\nCandidate: yes (finalized; legacy canonical)\nGates: passed\nPR finalization: finalized\nPull request: https://example.test/pull/1"
         ));
         assert!(summary.contains("Pull request: https://example.test/pull/1\n"));
         assert!(summary.contains("Next: homeboy agent-task review agent-task-finalized\n"));
+    }
+
+    #[test]
+    fn status_summary_separates_selected_cook_candidate_from_cancelled_retry() {
+        let payload = json!({
+            "run_id": "retry-run",
+            "state": "cancelled",
+            "tasks": [],
+            "artifact_refs": [],
+            "cook": { "state": "review_ready", "publication": "completed" },
+            "canonical_candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} },
+            "cook_completion": { "candidate_produced": true, "finalization_requested": true, "pr_finalized": true, "state": "pr_finalized" },
+            "status_scope": {
+                "schema": "homeboy/agent-task-status-scope/v1",
+                "queried_attempt": { "run_id": "retry-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} } },
+                "cook": { "selection": { "status": "selected", "run_id": "historical-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "finalized", "counts": {}, "scan": {} } } }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains(
+            "Candidate: yes (finalized; Cook-wide selected candidate run historical-run)"
+        ));
+        assert!(summary.contains("Queried attempt candidate: unknown (run retry-run)"));
+    }
+
+    #[test]
+    fn status_command_payload_without_cook_evidence_keeps_the_ordinary_summary() {
+        let payload = json!({
+            "run_id": "ordinary-run",
+            "state": "queued",
+            "tasks": [],
+            "artifact_refs": []
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.starts_with("Agent task status\nStatus: queued\nRun: ordinary-run\n"));
+        assert!(!summary.contains("Cook outcome:"), "{summary}");
+        assert!(!summary.contains("Queried attempt candidate:"), "{summary}");
+    }
+
+    #[test]
+    fn bridge_status_summary_uses_scope_without_legacy_cook_fields() {
+        let payload = json!({
+            "run_id": "retry-run",
+            "state": "cancelled",
+            "tasks": [],
+            "artifact_refs": [],
+            "status_scope": {
+                "schema": "homeboy/agent-task-status-scope/v1",
+                "queried_attempt": { "run_id": "retry-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} } },
+                "cook": {
+                    "selection": { "status": "selected", "run_id": "historical-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "finalized", "counts": {}, "scan": {} } },
+                    "completion": { "scope": "cook", "candidate_produced": true, "finalization_requested": true, "pr_finalized": true, "state": "pr_finalized" },
+                    "finalization": { "status": "review_ready", "pr_url": "https://example.test/pull/12971" }
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(
+            summary.contains("Cook outcome: review_ready\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(
+                "Candidate: yes (finalized; Cook-wide selected candidate run historical-run)"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Queried attempt candidate: unknown (run retry-run)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Pull request: https://example.test/pull/12971\n"),
+            "{summary}"
+        );
     }
 
     #[test]
