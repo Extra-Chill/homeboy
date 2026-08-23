@@ -69,8 +69,8 @@ pub(crate) fn is_table_mode(args: &RunsCompareArgs) -> bool {
     args.format == RunsCompareFormat::Table
 }
 
-pub(crate) fn run_markdown(args: RunsCompareArgs) -> CmdResult<String> {
-    let (output, exit_code) = compare_runs(args)?;
+pub(crate) fn run_markdown(store: &ObservationStore, args: RunsCompareArgs) -> CmdResult<String> {
+    let (output, exit_code) = compare_runs(store, args)?;
     match output {
         RunsOutput::Compare(output) => Ok((render_compare_table(&output), exit_code)),
         _ => Err(Error::validation_invalid_argument(
@@ -82,8 +82,10 @@ pub(crate) fn run_markdown(args: RunsCompareArgs) -> CmdResult<String> {
     }
 }
 
-pub(super) fn compare_runs(args: RunsCompareArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+pub(super) fn compare_runs(
+    store: &ObservationStore,
+    args: RunsCompareArgs,
+) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 1000);
     let runs = store.list_runs(RunListFilter {
         kind: Some(args.kind.clone()),
@@ -270,6 +272,14 @@ fn fmt_metric(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use super::*;
     use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
@@ -351,16 +361,19 @@ mod tests {
                 .finish_run(&other.id, RunStatus::Pass, None)
                 .expect("finish trace");
 
-            let (output, _) = compare_runs(RunsCompareArgs {
-                kind: "bench".to_string(),
-                component_id: Some("studio".to_string()),
-                rig: Some("studio-bfb".to_string()),
-                scenario_id: Some("site-build".to_string()),
-                status: None,
-                metrics: vec!["total_elapsed_ms".to_string(), "p95_ms".to_string()],
-                limit: 20,
-                format: RunsCompareFormat::Json,
-            })
+            let (output, _) = compare_runs(
+                &test_store(),
+                RunsCompareArgs {
+                    kind: "bench".to_string(),
+                    component_id: Some("studio".to_string()),
+                    rig: Some("studio-bfb".to_string()),
+                    scenario_id: Some("site-build".to_string()),
+                    status: None,
+                    metrics: vec!["total_elapsed_ms".to_string(), "p95_ms".to_string()],
+                    limit: 20,
+                    format: RunsCompareFormat::Json,
+                },
+            )
             .expect("compare");
 
             let RunsOutput::Compare(output) = output else {

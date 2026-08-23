@@ -73,10 +73,10 @@ pub struct CategoryDistributionValue {
 }
 
 pub(crate) fn runs_distribution(
+    store: &ObservationStore,
     args: RunsDistributionArgs,
     command: &'static str,
 ) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
     let limit = args.limit.clamp(1, 1000);
     let runs = store
         .list_runs(RunListFilter {
@@ -211,6 +211,14 @@ fn scalar_metadata_label(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The observation store the enclosing isolated home installs.
+    ///
+    /// A test is the entry point for its own unit of work, so opening once here
+    /// is a boundary open, not an ambient one inside production code (#7505).
+    fn test_store() -> homeboy::core::observation::ObservationStore {
+        homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
+    }
     use super::*;
 
     use homeboy::core::observation::{NewRunRecord, RunStatus};
@@ -519,7 +527,8 @@ mod tests {
     }
 
     fn distribution_output(args: RunsDistributionArgs) -> RunsDistributionOutput {
-        let (output, _) = runs_distribution(args, "runs.distribution").expect("distribution");
+        let (output, _) =
+            runs_distribution(&test_store(), args, "runs.distribution").expect("distribution");
         let RunsOutput::Distribution(output) = output else {
             panic!("expected distribution output");
         };

@@ -103,14 +103,13 @@ impl WatchPoller for StorePoller<'_> {
     }
 }
 
-pub(crate) fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn watch_run(store: &ObservationStore, args: RunsWatchArgs) -> CmdResult<RunsOutput> {
     let interval = parse_duration(&args.interval)?;
     let timeout = (!args.forever)
         .then(|| parse_duration(&args.timeout))
         .transpose()?;
     let config = WatchConfig { interval, timeout };
 
-    let store = ObservationStore::open_initialized()?;
     let poller = StorePoller { store: &store };
 
     let started = Instant::now();
