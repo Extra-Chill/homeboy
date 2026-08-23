@@ -3,8 +3,7 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskEvidenceRef,
-    AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskLimits, AgentTaskOutcomeStatus,
     AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
     AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
     AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
@@ -14,9 +13,9 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;

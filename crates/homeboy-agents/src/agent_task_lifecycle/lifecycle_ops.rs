@@ -1808,63 +1808,10 @@ pub fn normalize_local_execution_placement_in_store(
 
 #[cfg(test)]
 mod execution_placement_tests {
-    use super::*;
     use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
         ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
     };
-
-    fn decision() -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-            "test-policy",
-            "1",
-            ExecutionPlacementIdentity {
-                repository: "repo".to_string(),
-                workspace: "workspace".to_string(),
-                task: "task".to_string(),
-                candidate: Some("candidate-a".to_string()),
-                base: Some("base-a".to_string()),
-            },
-            Placement::Lab,
-            ExecutionPlacementRequirement::Lab,
-            EffectiveExecutionPlacement::Lab,
-            Some(ExecutionPlacementRunnerSelection {
-                runner_id: "lab-a".to_string(),
-                source: RunnerSelectionSource::Explicit,
-            }),
-            ExecutionPlacementFallback {
-                local_allowed: false,
-                reason: None,
-            },
-            ExecutionPlacementOverrideAuthorization {
-                authorized: false,
-                authority: None,
-            },
-        )
-    }
-
-    fn local_continuation(
-        prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
-    ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-            prior.policy_id.clone(),
-            prior.policy_revision.clone(),
-            prior.identity.clone(),
-            Placement::Local,
-            ExecutionPlacementRequirement::Either,
-            EffectiveExecutionPlacement::Local,
-            None,
-            ExecutionPlacementFallback {
-                local_allowed: false,
-                reason: None,
-            },
-            ExecutionPlacementOverrideAuthorization {
-                authorized: true,
-                authority: Some("operator --placement local".to_string()),
-            },
-        )
-    }
 }
 
 pub(crate) trait RuntimeAdmissionEvidence {

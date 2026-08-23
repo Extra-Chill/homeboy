@@ -1,4 +1,4 @@
-use super::common::{request, script};
+use super::common::request;
 use super::*;
 
 #[test]

@@ -796,38 +796,6 @@ mod tests {
         )
     }
 
-    fn options_for(
-        cook_id: &str,
-        run_id: &str,
-        initial_plan: AgentTaskPlan,
-    ) -> AgentTaskCookServiceOptions {
-        AgentTaskCookServiceOptions {
-            cook_id: cook_id.to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan,
-            to_worktree: format!("fixture@{cook_id}"),
-            source_worktree_path: None,
-            provider_command: None,
-            provider_invocation: None,
-            gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            max_attempts: 1,
-            no_finalize: true,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: None,
-            head: None,
-            title: "Paired-store materialization".to_string(),
-            commit_message: "test".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: Vec::new(),
-            ai_tool: "test".to_string(),
-            ai_model: None,
-            ai_used_for: "test".to_string(),
-            attempt_dispatcher: None,
-            harvest_context: Default::default(),
-        }
-    }
-
     #[test]
     fn explicit_preparations_recover_identical_recipe_ids_in_parallel() {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();

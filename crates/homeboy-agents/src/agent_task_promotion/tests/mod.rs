@@ -3,40 +3,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::apply::{
-    preflight_configured_workspace_provider_with_config, run_provider_command,
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 
-use super::promote::{
-    normalize_promotion_patch, promote, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
-};
 use super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
+    AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
-use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
-};
+use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
-use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::{
-    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
-    WorktreeProviderListResultMapping,
-};
-use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use homeboy_core::{Error, Result};
 
 pub(super) const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -223,17 +206,6 @@ pub(super) fn sha256_hex(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub(super) fn record_controller_projection(
-    run_id: &str,
-    task_id: &str,
-    artifact_id: &str,
-    contents: &str,
-) -> PathBuf {
-    let store =
-        homeboy_core::observation::ObservationStore::open_initialized().expect("observation store");
-    record_controller_projection_in_store(&store, run_id, task_id, artifact_id, contents)
-}
-
 pub(super) fn record_controller_projection_in_store(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
@@ -328,75 +300,6 @@ pub(super) fn write_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) 
     (source_path, source)
 }
 
-pub(super) fn write_empty_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
-    let patch_path = temp.path().join("empty.patch");
-    std::fs::write(&patch_path, "").expect("write empty patch");
-    let source_path = temp.path().join("outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-1",
-        "status": "succeeded",
-        "artifacts": [{
-            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-            "id": "patch",
-            "kind": "patch",
-            "path": "empty.patch",
-            "size_bytes": 0,
-            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }]
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write source");
-    (source_path, source)
-}
-
-pub(super) fn recoverable_patch_source(
-    temp: &tempfile::TempDir,
-    patch_count: usize,
-) -> (PathBuf, String) {
-    let artifacts = (0..patch_count)
-        .map(|index| {
-            let name = format!("candidate-{index}.patch");
-            let patch = if index == 2 {
-                VALID_PATCH
-                    .replace("a/src/lib.rs", "a/workspace/repo@recoverable/src/lib.rs")
-                    .replace("b/src/lib.rs", "b/workspace/repo@recoverable/src/lib.rs")
-            } else {
-                VALID_PATCH.to_string()
-            };
-            std::fs::write(temp.path().join(&name), &patch).expect("write candidate patch");
-            serde_json::json!({
-                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-                "id": format!("candidate-{index}"),
-                "kind": if index == 0 { "patch" } else { "git-diff" },
-                "path": name,
-                "size_bytes": patch.len(),
-                "sha256": sha256_hex(&patch),
-                "metadata": {
-                    "role": "patch",
-                    "run_id": "recoverable-run",
-                    "task_id": "task-1",
-                    "producer_attempt": 1,
-                    "base_ref": "base-fingerprint",
-                    "provider_backend": "provider",
-                    "repository_identity": "repository-identity",
-                    "workspace_identity": "workspace-identity"
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let source_path = temp.path().join("recoverable-outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-1",
-        "status": "candidate_recoverable",
-        "artifacts": artifacts
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write recoverable source");
-    (source_path, source)
-}
-
 pub(super) fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -428,70 +331,6 @@ pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionOptions 
         provider_command: None,
         provider_invocation: None,
     }
-}
-
-pub(super) fn adopted_commit_options(
-    temp: &tempfile::TempDir,
-    repo: &Path,
-    base: String,
-    candidate_ref: String,
-    gates: VerifyGateOptions,
-) -> AgentTaskPromotionOptions {
-    let source_path = temp.path().join("adoption-outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "adoption-task",
-        "status": "succeeded",
-        "artifacts": []
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write adoption outcome");
-    AgentTaskPromotionOptions {
-        source,
-        source_run_id: Some("adoption-run".to_string()),
-        source_path: Some(source_path),
-        source_worktree_path: Some(repo.to_path_buf()),
-        // The immutable task base is the candidate contract; this fixture does
-        // not configure a remote branch snapshot for finalization.
-        base_ref: None,
-        task_base_sha: Some(base),
-        candidate_ref: Some(candidate_ref),
-        to_worktree: "repo@adopted".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates,
-        provider_command: None,
-        provider_invocation: None,
-    }
-}
-
-pub(super) fn adopted_commit_repo() -> (tempfile::TempDir, PathBuf, String, String) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("create repo");
-    git(&repo, &["init"]);
-    git(&repo, &["config", "user.email", "agent@example.test"]);
-    git(&repo, &["config", "user.name", "Agent"]);
-    git(&repo, &["checkout", "-b", "main"]);
-    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
-    git(&repo, &["add", "lib.rs"]);
-    git(&repo, &["commit", "-m", "base"]);
-    let base = git_head(&repo, "HEAD");
-    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
-    git(&repo, &["commit", "-am", "candidate"]);
-    let candidate = git_head(&repo, "HEAD");
-    (temp, repo, base, candidate)
-}
-
-pub(super) fn git_head(cwd: &Path, reference: &str) -> String {
-    let output = Command::new("git")
-        .args(["rev-parse", reference])
-        .current_dir(cwd)
-        .output()
-        .expect("resolve git ref");
-    assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 mod part_a;
