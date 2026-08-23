@@ -4,6 +4,20 @@ use super::*;
 use crate::agent_task_review_dossier::{AgentTaskPublicContract, AgentTaskPublicContractEvidence};
 use homeboy_core::git::GitIdentityProof;
 
+pub const AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA: &str =
+    "homeboy/agent-task-manual-candidate-binding/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskManualCandidateBinding {
+    pub schema: String,
+    pub selection: crate::agent_task_lifecycle::AgentTaskCookCandidateSelection,
+    pub candidate: crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+    pub source: crate::agent_task_promotion::AgentTaskPromotionSource,
+    pub model: String,
+    pub replacement_gate_proof: serde_json::Value,
+    pub gates: Vec<HomeboyGateResult>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateResult {
     pub name: String,
@@ -44,6 +58,8 @@ pub struct AgentTaskPrFinalizationReport {
     pub acceptance: Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>,
     pub review_dossier: AgentTaskReviewDossier,
     pub manual_finalization: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_candidate_binding: Option<AgentTaskManualCandidateBinding>,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }
