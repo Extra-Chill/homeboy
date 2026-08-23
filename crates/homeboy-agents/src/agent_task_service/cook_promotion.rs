@@ -691,6 +691,30 @@ pub(crate) fn promote_or_load_attempt_in_store(
     options: &AgentTaskCookServiceOptions,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    let aggregate = lifecycle_store.read_aggregate(run_id)?;
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_model",
+                "Cook promotion has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if concrete_provider_model(outcome.selected_model()).is_none() {
+        return Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook promotion requires a concrete executed model",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             let target_path = promotion.target.path.as_deref().or_else(|| {

@@ -3642,7 +3642,33 @@ pub fn record_provider_execution_terminal(
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_in_store(&lifecycle_store, run_id, task_id, attempt, state)
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        None,
+    )
+}
+
+/// Record a terminal provider result with its normalized concrete model.
+pub fn record_provider_execution_terminal_with_model(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+    model: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_with_model_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        model,
+    )
 }
 
 pub fn record_provider_execution_terminal_in_store(
@@ -3651,6 +3677,24 @@ pub fn record_provider_execution_terminal_in_store(
     task_id: &str,
     attempt: u32,
     state: &str,
+) -> Result<AgentTaskRunRecord> {
+    record_provider_execution_terminal_with_model_in_store(
+        lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        state,
+        None,
+    )
+}
+
+pub fn record_provider_execution_terminal_with_model_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+    model: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     if !matches!(
         state,
@@ -3693,6 +3737,9 @@ pub fn record_provider_execution_terminal_in_store(
             return false;
         }
         execution["state"] = json!(state);
+        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+            execution["model"] = json!(model);
+        }
         execution["finished_at"] = json!(now_timestamp());
         found = true;
         true

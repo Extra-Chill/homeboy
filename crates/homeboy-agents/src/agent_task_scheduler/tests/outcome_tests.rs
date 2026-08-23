@@ -37,6 +37,48 @@ fn provider_reported_model_is_retained_separately_from_requested_and_resolved_mo
 }
 
 #[test]
+fn configured_model_becomes_actual_when_runtime_omits_provenance() {
+    let mut request = request("task-1");
+    request.metadata = json!({
+        "model_selection": { "selected": "openai/gpt-5.6-sol" }
+    });
+    let mut outcome = outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded);
+    outcome.artifacts.push(AgentTaskArtifact {
+        kind: "patch".to_string(),
+        metadata: json!({}),
+        ..Default::default()
+    });
+
+    crate::agent_task_scheduler::engine::persist_resolved_provider_model(&mut outcome, &request);
+
+    assert_eq!(outcome.selected_model(), Some("openai/gpt-5.6-sol"));
+    assert_eq!(
+        outcome.metadata["model_identity"]["provider_reported"],
+        json!(null)
+    );
+    assert_eq!(
+        outcome.artifacts[0].metadata["provider_model"],
+        json!("openai/gpt-5.6-sol")
+    );
+}
+
+#[test]
+fn runtime_reported_model_wins_over_conflicting_dispatch_selection() {
+    let mut request = request("task-1");
+    request.executor.model = Some("openai/gpt-5.6-terra".to_string());
+    let mut outcome = outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded);
+    outcome.metadata = json!({ "model": "openai/gpt-5.6-sol" });
+
+    crate::agent_task_scheduler::engine::persist_resolved_provider_model(&mut outcome, &request);
+
+    assert_eq!(outcome.selected_model(), Some("openai/gpt-5.6-sol"));
+    assert_eq!(
+        outcome.metadata["model_identity"]["attempted"],
+        json!("openai/gpt-5.6-terra")
+    );
+}
+
+#[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
     let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusExecutor));
 
