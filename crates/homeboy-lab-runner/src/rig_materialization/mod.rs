@@ -1272,6 +1272,7 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::Arc;
 
@@ -1319,6 +1320,124 @@ mod tests {
             resources: Default::default(),
             policy: homeboy_core::server::RunnerPolicy::default(),
         }
+    }
+
+    #[test]
+    fn sync_lab_offload_rigs_materializes_relative_file_source_from_declared_worktree() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let worktree = home.path().join("declared-worktree");
+            let rig_file = worktree.join("rigs/fixture-matrix/rig.json");
+            std::fs::create_dir_all(rig_file.parent().expect("rig parent")).expect("rig parent");
+            // Keep this package out of the primary-source branch so the test
+            // exercises installed relative metadata.
+            std::fs::write(&rig_file, r#"{"id":"unrelated-rig"}"#).expect("rig file");
+            std::fs::write(worktree.join("shared-template.txt"), "snapshot me")
+                .expect("worktree dependency");
+
+            let installed_source = homeboy_rig::install::RigSourceMetadata {
+                source: "rigs/fixture-matrix/rig.json".to_string(),
+                source_root: Some("rigs/fixture-matrix/rig.json".to_string()),
+                package_path: "rigs/fixture-matrix/rig.json".to_string(),
+                rig_path: "rigs/fixture-matrix/rig.json".to_string(),
+                discovery_path: Some("rigs/fixture-matrix".to_string()),
+                source_revision: None,
+                source_ref: None,
+                source_dirty: false,
+                source_content_hash: None,
+                linked: true,
+                materialized: false,
+            };
+            std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
+                .expect("rig sources");
+            homeboy_rig::install::write_source_metadata("fixture-matrix", &installed_source)
+                .expect("source metadata");
+
+            let install_record = home.path().join("installed-source.txt");
+            let command = home.path().join("fake-homeboy");
+            std::fs::write(
+                &command,
+                "#!/bin/sh\ncase \"$1 $2\" in\n  'rig sources') printf '%s' '{\"data\":{\"report\":{\"sources\":[]}}}' ;;\n  'rig install') printf '%s' \"$3\" > \"$HOMEBOY_TEST_INSTALL_SOURCE\"; printf '%s' '{\"data\":{\"installed\":[{\"id\":\"fixture-matrix\",\"path\":\"/runner/rigs/fixture-matrix\"}]}}' ;;\nesac\n",
+            )
+            .expect("fake homeboy");
+            std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake homeboy executable");
+
+            let mut runner = local_runner();
+            runner.id = "relative-rig-source".to_string();
+            runner.workspace_root =
+                Some(home.path().join("runner-workspaces").display().to_string());
+            runner.settings.homeboy_path = Some(command.display().to_string());
+            runner.env.insert(
+                "HOMEBOY_TEST_INSTALL_SOURCE".to_string(),
+                install_record.display().to_string(),
+            );
+            homeboy_core::config::save(&runner).expect("save runner");
+            let remote_cwd = home.path().join("runner-cwd");
+            std::fs::create_dir_all(&remote_cwd).expect("runner cwd");
+            let remote_cwd = remote_cwd.display().to_string();
+
+            let primary_snapshot = homeboy_core::source_snapshot::collect_local(
+                &runner.id,
+                &worktree,
+                Some(&remote_cwd),
+                "primary",
+            );
+            let synced = sync_lab_offload_rigs(
+                &runner.id,
+                &command.display().to_string(),
+                &remote_cwd,
+                &format!("{remote_cwd}/.homeboy/rig-registry"),
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "fixture-matrix".to_string(),
+                ],
+                LabOffloadPrimaryRigSource {
+                    local_path: &worktree.display().to_string(),
+                    remote_path: &remote_cwd,
+                    source_snapshot: &primary_snapshot,
+                    workspace_snapshot_identity: "primary-snapshot",
+                },
+            )
+            .expect("sync installed relative rig source");
+
+            let [sync] = synced.as_slice() else {
+                panic!("one installed rig source should sync");
+            };
+            assert_eq!(sync.source_kind, LabOffloadRigSyncSource::InstalledMetadata);
+            assert_eq!(
+                sync.package_source.source_root,
+                worktree.canonicalize().unwrap().display().to_string()
+            );
+            assert!(sync
+                .package_source
+                .install_source
+                .ends_with("/rigs/fixture-matrix"));
+            assert_eq!(
+                std::fs::read_to_string(&install_record).expect("recorded install source"),
+                sync.package_source.install_source
+            );
+            let snapshot_root = sync
+                .source_snapshot
+                .remote_path
+                .as_deref()
+                .expect("snapshot path");
+            assert!(Path::new(snapshot_root)
+                .join("shared-template.txt")
+                .is_file());
+            assert!(Path::new(snapshot_root)
+                .join("rigs/fixture-matrix/rig.json")
+                .is_file());
+            assert!(!sync.workload_hashes.workspace_snapshot_identity.is_empty());
+            let evidence = serde_json::to_value(sync).expect("sync evidence");
+            assert_eq!(evidence["source_kind"], "installed_metadata");
+            assert_eq!(
+                evidence["package_source"]["install_source"].as_str(),
+                Some(sync.package_source.install_source.as_str())
+            );
+            assert!(evidence["source_snapshot"]["snapshot_hash"].is_string());
+        });
     }
 
     fn local_bare_stack_fixture() -> (tempfile::TempDir, homeboy_rig::LabStackSpec, String) {

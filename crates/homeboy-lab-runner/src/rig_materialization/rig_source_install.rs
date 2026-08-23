@@ -70,6 +70,32 @@ pub(super) fn resolve_installed_rig_source(
         None
     };
 
+    let declared_source = if source_is_relative {
+        canonical_source_path(rig_id, "source root", source_root, declared_root.as_deref())?
+    } else {
+        canonical_source_path(rig_id, "source root", source_root, None)?
+    };
+    let package_path = canonical_source_path(
+        rig_id,
+        "package path",
+        package_path,
+        declared_root.as_deref(),
+    )?;
+
+    if declared_source.is_file() && package_path != declared_source {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its installed package path differs from the declared rig.json source root"
+            ),
+            Some(package_path.display().to_string()),
+            Some(vec![format!(
+                "declared rig.json source root: {}",
+                declared_source.display()
+            )]),
+        ));
+    }
+
     let source_root = if source_is_relative {
         // Materialize the declared worktree so package dependencies and
         // templates outside a nested rig directory remain available.
@@ -78,15 +104,9 @@ pub(super) fn resolve_installed_rig_source(
             .expect("relative source requires declared root")
             .clone()
     } else {
-        canonical_source_path(rig_id, "source root", source_root, None)?
+        declared_source
     };
     let source_root = source_directory(source_root);
-    let package_path = canonical_source_path(
-        rig_id,
-        "package path",
-        package_path,
-        declared_root.as_deref(),
-    )?;
     let package_path = package_directory(rig_id, package_path)?;
 
     if !package_path.starts_with(&source_root) {
@@ -533,6 +553,7 @@ mod tests {
     #[test]
     fn relative_rig_source_rejects_missing_package_file() {
         let worktree = tempfile::tempdir().expect("worktree");
+        std::fs::create_dir_all(worktree.path().join("rigs/fixture-matrix")).expect("source root");
         let error = resolve_installed_rig_source(
             "fixture-matrix",
             Some("rigs/fixture-matrix"),
@@ -542,6 +563,29 @@ mod tests {
         .expect_err("missing package file rejects");
 
         assert!(error.message.contains("package path does not exist"));
+    }
+
+    #[test]
+    fn file_valued_source_root_rejects_sibling_package() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let declared_rig = worktree.path().join("rigs/fixture-matrix/rig.json");
+        let sibling_rig = worktree.path().join("rigs/other/rig.json");
+        std::fs::create_dir_all(declared_rig.parent().expect("declared parent"))
+            .expect("declared parent");
+        std::fs::create_dir_all(sibling_rig.parent().expect("sibling parent"))
+            .expect("sibling parent");
+        std::fs::write(&declared_rig, "{}").expect("declared rig");
+        std::fs::write(&sibling_rig, "{}").expect("sibling rig");
+
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/fixture-matrix/rig.json"),
+            "rigs/other/rig.json",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("file-valued source root must not authorize sibling packages");
+
+        assert!(error.message.contains("differs from the declared rig.json"));
     }
 
     #[test]
