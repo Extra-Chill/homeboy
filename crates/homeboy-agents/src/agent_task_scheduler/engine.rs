@@ -853,6 +853,11 @@ impl AgentTaskScheduler {
                     }
                     let mut outcome = result.outcome;
                     let provider_completed_at = result.completed_at;
+                    attach_candidate_adoption_provenance(
+                        &mut outcome,
+                        running_task.adoption.as_ref(),
+                    );
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Some(run_id) = running_task.run_id.as_deref() {
                         let terminal_state = match outcome.status {
                             AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
@@ -864,18 +869,20 @@ impl AgentTaskScheduler {
                             _ => "failed",
                         };
                         let terminal = match self.lifecycle_store.as_ref() {
-                            Some(store) => store.record_provider_execution_terminal(
+                            Some(store) => store.record_provider_execution_terminal_with_model(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 terminal_state,
+                                outcome.selected_model(),
                             ),
                             None => {
-                                crate::agent_task_lifecycle::record_provider_execution_terminal(
+                                crate::agent_task_lifecycle::record_provider_execution_terminal_with_model(
                                     run_id,
                                     &outcome.task_id,
                                     result.attempt,
                                     terminal_state,
+                                    outcome.selected_model(),
                                 )
                             }
                         };
@@ -895,16 +902,15 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
-                    attach_candidate_adoption_provenance(
-                        &mut outcome,
-                        running_task.adoption.as_ref(),
-                    );
-                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
                         outcome = committed_harvest_failure(outcome, error);
                     }
+                    // Harvest can add Homeboy-generated patch artifacts after the
+                    // provider result was normalized. Keep their provenance tied
+                    // to the same concrete model as the canonical outcome.
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
@@ -1411,7 +1417,18 @@ pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
 ) {
-    let provider_reported = outcome.selected_model().map(str::to_string);
+    // A second normalization pass runs after patch harvest. Once the first pass
+    // supplied a configured fallback in `metadata.model`, retain the original
+    // runtime-report boundary instead of mistaking that fallback for a report.
+    let provider_reported = outcome.metadata["model_identity"]["provider_reported"]
+        .as_str()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            (!outcome.metadata["model_identity"].is_object())
+                .then(|| outcome.selected_model().map(str::to_string))
+                .flatten()
+        });
     let requested = request.metadata["model_selection"]["requested"]
         .as_str()
         .filter(|model| !model.trim().is_empty())
@@ -1420,7 +1437,16 @@ pub(crate) fn persist_resolved_provider_model(
         .executor
         .model()
         .filter(|model| !model.trim().is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            request.metadata["model_selection"]["selected"]
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+        });
+    // A runtime report is execution fact. When the runtime omits it, the
+    // dispatch-selected model is the only concrete identity available.
+    let actual = provider_reported.clone().or_else(|| resolved.clone());
     if !outcome.metadata.is_object() {
         outcome.metadata = serde_json::json!({});
     }
@@ -1439,11 +1465,21 @@ pub(crate) fn persist_resolved_provider_model(
             // Retained for consumers of the previous outcome metadata shape.
             "resolved": resolved,
             "provider_reported": provider_reported,
-            "actual": provider_reported,
+            "actual": actual,
         }),
     );
-    if let Some(actual) = provider_reported {
+    if let Some(actual) = actual {
         metadata.insert("model".to_string(), serde_json::json!(actual));
+    }
+    let actual = outcome.selected_model().map(str::to_string);
+    for artifact in &mut outcome.artifacts {
+        if artifact.kind != "patch" && artifact.role.as_deref() != Some("patch") {
+            continue;
+        }
+        if !artifact.metadata.is_object() {
+            artifact.metadata = serde_json::json!({});
+        }
+        artifact.metadata["provider_model"] = serde_json::json!(actual);
     }
 }
 

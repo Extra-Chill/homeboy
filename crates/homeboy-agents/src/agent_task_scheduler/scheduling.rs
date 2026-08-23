@@ -1381,7 +1381,10 @@ impl AgentTaskScheduleSupport {
                 .map(str::to_string)
                 .or_else(|| request.executor.model().map(str::to_string)),
             attempted_model: request.executor.model().map(str::to_string),
-            candidate_producing_model: outcome.selected_model().map(str::to_string),
+            candidate_producing_model: outcome.metadata["model_identity"]["provider_reported"]
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string),
             status: outcome.status,
             failure_classification: outcome.failure_classification,
             summary: outcome.summary.clone(),

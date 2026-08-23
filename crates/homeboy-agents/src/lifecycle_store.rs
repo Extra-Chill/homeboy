@@ -303,6 +303,19 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn record_provider_execution_terminal_with_model(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        state: &str,
+        model: Option<&str>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_terminal_with_model_in_store(
+            self, run_id, task_id, attempt, state, model,
+        )
+    }
+
     pub(crate) fn record_provider_execution_runtime_evidence(
         &self,
         run_id: &str,
