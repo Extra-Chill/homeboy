@@ -97,6 +97,7 @@ pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;
 pub mod external_check_detail_resolver;
+pub mod external_storage_retention;
 pub mod fuzz_config;
 pub mod manifest;
 pub mod manifest_action_config;
@@ -121,6 +122,12 @@ pub use external_check_detail_resolver::{
     ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
     EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
+};
+pub use external_storage_retention::{
+    ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
+    ExternalStorageReclaimResult, ExternalStorageRequest, ExternalStorageResourceClass,
+    ExternalStorageRetentionConfig, ExternalStorageRetentionProviderConfig,
+    DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS, EXTERNAL_STORAGE_RETENTION_SCHEMA,
 };
 pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{

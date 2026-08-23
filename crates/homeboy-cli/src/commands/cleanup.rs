@@ -78,7 +78,7 @@ struct AutomaticRetentionControllerOutput {
 /// bytes by hand, and they arrive at hundreds of megabytes each (#11073). It is
 /// bounded by an age floor, a byte ceiling, and the scan limit, and it can only
 /// ever reach a directory whose owning process is gone.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
     CleanupCategoryArg::WorktreeProviders,
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
@@ -89,6 +89,7 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
     CleanupCategoryArg::ControllerRuntimes,
     CleanupCategoryArg::RemoteLabWorkspaces,
     CleanupCategoryArg::RunnerBinaryCaches,
+    CleanupCategoryArg::ExternalStorage,
 ];
 
 /// Categories held out of the unattended pass on purpose, with the reason.
@@ -1406,6 +1407,14 @@ const WORKTREE_PROVIDERS_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy cleanup worktrees --all-providers --apply",
     };
 
+const EXTERNAL_STORAGE_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "external_storage",
+        include_arg: "external-storage",
+        dry_run_command: "homeboy cleanup --include external-storage",
+        apply_command: "homeboy cleanup --include external-storage --apply",
+    };
+
 const PERSISTED_RUN_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "persisted_run_artifacts",
@@ -2181,6 +2190,43 @@ fn cleanup_inventory_with_deadline(
         );
     }
 
+    if selected.includes(CleanupCategoryArg::ExternalStorage) {
+        isolate_cleanup_category(
+            &mut categories,
+            EXTERNAL_STORAGE_METADATA,
+            apply,
+            None,
+            None,
+            || {
+                let output = cleanup::cleanup_external_storage_from_extensions(
+                    cleanup::ExternalStorageCleanupOptions {
+                        apply,
+                        min_age_days: policy.terminal_run_days.max(0) as u64,
+                        limit: policy.scan_limit(),
+                        evidence_limit: if args.full {
+                            policy.scan_limit()
+                        } else {
+                            OutputBudget::COLLECTION.max_items
+                        },
+                    },
+                )?;
+                category_from_output(
+                    EXTERNAL_STORAGE_METADATA,
+                    apply,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.candidate_count,
+                        applied_count: output.applied_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.estimated_bytes,
+                        reclaimed_bytes: output.reclaimed_bytes,
+                    },
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
+    }
+
     let candidate_count = categories
         .iter()
         .map(|category| category.candidate_count)
@@ -2305,6 +2351,7 @@ fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
         CleanupCategoryArg::SharedCargoTargets => "shared-cargo-targets",
         CleanupCategoryArg::ControllerRuntimes => "controller-runtimes",
         CleanupCategoryArg::LeakedTestHomes => "leaked-test-homes",
+        CleanupCategoryArg::ExternalStorage => "external-storage",
     }
 }
 

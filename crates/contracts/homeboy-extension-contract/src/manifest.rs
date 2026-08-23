@@ -12,6 +12,7 @@ use crate::autofix_config::*;
 use crate::ci_config::*;
 use crate::extension_contract_producer::*;
 use crate::external_check_detail_resolver::*;
+use crate::external_storage_retention::*;
 use crate::fuzz_config::*;
 use crate::manifest_action_config::*;
 use crate::manifest_artifact_cleanup::*;
@@ -108,6 +109,13 @@ pub struct ExtensionManifest {
     /// extension only declares what is reconstructable.
     #[serde(default, skip_serializing_if = "ArtifactCleanupConfig::is_empty")]
     pub artifact_cleanup: ArtifactCleanupConfig,
+    /// Provider-owned external runtime storage. Unlike `artifact_cleanup`,
+    /// providers discover paths outside checkouts and perform native reclaim.
+    #[serde(
+        default,
+        skip_serializing_if = "ExternalStorageRetentionConfig::is_empty"
+    )]
+    pub external_storage_retention: ExternalStorageRetentionConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deps: Option<DepsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
