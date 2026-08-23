@@ -1,22 +1,20 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine;
 use homeboy_core::api_jobs::{
-    Job, JobStatus, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup,
-    RunnerJobLifecycleMetadata,
+    Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata,
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
-use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;
 
 use super::super::broker_http;
 use super::super::evidence::mirror_reverse_broker_evidence;
-use super::super::{Runner, RunnerJob};
+use super::super::Runner;
 
 #[allow(unused_imports)]
 use super::*;
@@ -265,318 +263,95 @@ pub(super) fn exec_via_reverse_broker(
     let job_value = data
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("reverse broker submit returned no job"))?;
-    let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
+    let job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    if let Some(run_id) = run_id.as_deref() {
-        // The broker has accepted this job. Persist that boundary before local
-        // follow-up work can fail, preserving the authoritative remote identity.
-        let binding = if !run_id_owns_generic_exec {
-            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
-                &homeboy_core::lab_contract::RunnerJobIdentity::new(
-                    run_id,
-                    &runner.id,
-                    job.id.to_string(),
-                ),
-                &cwd,
-                &command,
-            )
-            .map(|_| ())
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
-                &cwd,
-                &command,
-            )
-            .map(|_| ())
-        };
-        binding.map_err(|error| {
-            super::accepted_handoff_persistence_error(error, &runner.id, &job.id.to_string())
-        })?;
-    }
-    persist_runner_execution_transition(
-        &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "reverse_broker")
-            .with_job_id(job.id.to_string())
-            .with_path_materialization_plan(path_materialization_plan.clone())
-            .with_orchestration_provenance(orchestration_target_provenance(
-                runner,
-                None,
-                Some(&source_snapshot),
-                &[],
-            ))
-            .with_next_actions(runner_execution_next_actions(
-                &runner.id,
-                &job.id.to_string(),
-            )),
-        &cwd,
-        &command,
-    )?;
-    let persisted_run_id = mirror_evidence
-        .then(|| {
-            persist_lab_offload_handoff_run(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                run_id.as_deref(),
-                Some(broker_url),
-            )
-        })
-        .flatten();
-    validate_generic_exec_mirror_run_id(
-        run_id_owns_generic_exec,
-        run_id.as_deref(),
-        persisted_run_id.as_deref(),
-    )?;
-    if detach_after_handoff {
-        return Ok(detached_handoff_output(
+    return complete_submitted_runner_job(
+        SubmittedRunnerJobFlow {
             runner,
-            RunnerExecMode::ReverseBroker,
-            cwd,
-            command,
-            source_snapshot,
-            job,
-            path_materialization_plan,
-            require_paths,
-            run_id,
-            persisted_run_id,
-        ));
-    }
-
-    let deadline = Instant::now() + runner_exec_wait_timeout();
-    let mut reported_progress_sequence = 0;
-    while !matches!(
-        job.status,
-        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-    ) {
-        if Instant::now() >= deadline {
-            let events = fetch_daemon_events(&client, broker_url, &job.id.to_string())
-                .map(|events| {
-                    redact_runner_job_events(&events, &redaction_env, &redaction_secret_env_names)
-                })
-                .unwrap_or_default();
-            return Err(daemon_job_wait_timeout(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                &events,
-                "reverse runner job",
-                true,
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        let job_id = job.id.to_string();
-        job = fetch_daemon_job_resilient(&client, broker_url, &job_id).map_err(|err| {
-            terminal_runner_poll_failure(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                "reverse_broker",
-                path_materialization_plan.as_ref(),
-                &source_snapshot,
-                &require_paths,
-                persisted_run_id.as_deref(),
-                None,
-                err,
-            )
-        })?;
-        if let Ok(events) = fetch_daemon_events(&client, broker_url, &job_id) {
-            let events =
-                redact_runner_job_events(&events, &redaction_env, &redaction_secret_env_names);
-            super::daemon::record_and_report_promotion_progress_frames(
-                run_id.as_deref(),
-                &job_id,
-                &events,
-                &mut reported_progress_sequence,
-            );
-        }
-    }
-    let events = redact_runner_job_events(
-        &fetch_daemon_events(&client, broker_url, &job.id.to_string())?,
-        &redaction_env,
-        &redaction_secret_env_names,
-    );
-    super::daemon::record_and_report_promotion_progress_frames(
-        run_id.as_deref(),
-        &job.id.to_string(),
-        &events,
-        &mut reported_progress_sequence,
-    );
-
-    let RunnerJobResultFields {
-        result,
-        stdout,
-        stderr,
-        metrics,
-        capture,
-        exit_code,
-    } = runner_job_result_fields(
-        &events,
-        job.status,
-        &redaction_env,
-        &redaction_secret_env_names,
-    );
-    let terminal_snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
-        job: job.clone(),
-        events: events.clone(),
-    };
-    if run_id_owns_generic_exec {
-        if let Some(run_id) = run_id.as_deref() {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-                run_id,
-                &terminal_snapshot,
-            )?;
-        }
-    }
-    let mirror = if mirror_evidence {
-        let request = crate::evidence::MirrorEvidenceRequest::new(
-            runner,
-            &cwd,
-            &command,
-            &job,
-            &events,
-            &result,
-            run_id.as_deref(),
-            lab_runner_workload
-                .as_ref()
-                .and_then(|workload| workload.notification_route.as_ref()),
-        );
-        let request = if run_id_owns_generic_exec {
-            request.with_generic_runner_exec_run()
-        } else {
-            request
-        };
-        mirror_reverse_broker_evidence(crate::evidence::ReverseBrokerEvidenceContext {
-            request,
-            broker_url,
-        })
-        .map_err(|error| {
-            if run_id_owns_generic_exec {
-                if let Some(run_id) = run_id.as_deref() {
-                    let _ =
-                        homeboy_agents::agent_task_lifecycle::record_runner_exec_projection_failure(
-                            run_id,
-                            &terminal_snapshot,
-                            &error,
-                        );
-                }
-            }
-            error
-        })?
-    } else {
-        None
-    };
-    let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
-    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
-    validate_generic_exec_mirror_run_id(
-        run_id_owns_generic_exec,
-        run_id.as_deref(),
-        mirror_run_id.as_deref(),
-    )?;
-    fire_runner_direct_notification(
-        run_id.as_deref(),
-        &job,
-        lab_runner_workload
-            .as_ref()
-            .and_then(|workload| workload.notification_route.as_ref()),
-    );
-    let artifacts = mirror
-        .as_ref()
-        .map(|evidence| crate::evidence::controller_artifact_metadata(&evidence.runs))
-        .transpose()?
-        .unwrap_or_default();
-    let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
-
-    if print_handoff_output {
-        print_lab_offload_handoff(
-            &runner.id,
-            Some(&cwd),
-            &job.id.to_string(),
-            mirror_run_id.as_deref(),
-            DaemonJobHandoffState::Terminal(job.status),
-        );
-    }
-
-    let runner_job = RunnerJob::from_job(&runner.id, "broker", &command, Some(cwd.clone()), &job);
-    let mut runner_result = runner_result(
-        Some(&job),
-        exit_code,
-        &stdout,
-        &stderr,
-        mirror_run_id.as_deref(),
-        mutation_artifacts.clone(),
-    );
-    runner_result.artifact_refs = artifacts
-        .iter()
-        .map(crate::session::runner_artifact_ref_from_metadata)
-        .collect();
-    let provenance_extensions = required_extensions_for_command(
-        &command,
-        &super::super::workload::merge_lab_runner_workload_required_extensions(
-            Vec::new(),
-            lab_runner_workload.as_ref(),
-        ),
-    );
-    let handoff = lab_runner_handoff(
-        runner,
-        "reverse_broker",
-        Some(runner_job.clone()),
-        Some(runner_result.clone()),
-    );
-    let execution_record = runner_execution_record_for_output(
-        runner,
-        "reverse_broker",
-        exit_code,
-        Some(job.id.to_string()),
-        mirror_run_id.clone(),
-        Some(&source_snapshot),
-        path_materialization_plan,
-        &require_paths,
-        &provenance_extensions,
-        &artifacts,
-        Some(&runner_result),
-    );
-    persist_runner_execution_transition(&execution_record, &cwd, &command)?;
-
-    Ok((
-        RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: runner.id.clone(),
-            dry_run: false,
             mode: RunnerExecMode::ReverseBroker,
-            argv: redact_argv(&command),
-            remote_cwd: cwd,
-            exit_code,
-            stdout,
-            stderr,
-            source_snapshot: Some(source_snapshot.clone()),
-            job_id: Some(job.id.to_string()),
-            job: Some(job),
-            runner_job: Some(runner_job),
-            job_events: Some(events),
-            mirror_run_id,
-            patch,
-            mutation_artifacts,
-            artifacts,
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics,
-            capture,
-            execution_record: Some(execution_record),
-            runner_result: Some(runner_result),
-            handoff: Some(handoff),
-            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
+            transport: "reverse_broker",
+            runner_job_transport: "broker",
+            timeout_label: "reverse runner job",
+            cwd: cwd.clone(),
+            command: command.clone(),
+            redaction_env: &redaction_env,
+            secret_env_names: &redaction_secret_env_names,
+            source_snapshot: source_snapshot.clone(),
+            path_materialization_plan: path_materialization_plan.clone(),
+            require_paths: require_paths.clone(),
+            lab_runner_workload: lab_runner_workload.clone(),
+            run_id: run_id.clone(),
+            run_id_owns_generic_exec,
+            detach_after_handoff,
+            mirror_evidence,
+            print_handoff_output,
+            handoff_endpoint: Some(broker_url),
         },
-        exit_code,
-    ))
+        job,
+        |_| Ok(()),
+        |current| {
+            fetch_daemon_job_resilient(&client, broker_url, &current.id.to_string()).map_err(
+                |err| {
+                    terminal_runner_poll_failure(
+                        runner,
+                        &cwd,
+                        &command,
+                        current,
+                        "reverse_broker",
+                        path_materialization_plan.as_ref(),
+                        &source_snapshot,
+                        &require_paths,
+                        None,
+                        None,
+                        err,
+                    )
+                },
+            )
+        },
+        |job_id| fetch_daemon_events(&client, broker_url, job_id),
+        |job, events, result| {
+            let request = crate::evidence::MirrorEvidenceRequest::new(
+                runner,
+                &cwd,
+                &command,
+                job,
+                events,
+                result,
+                run_id.as_deref(),
+                lab_runner_workload
+                    .as_ref()
+                    .and_then(|workload| workload.notification_route.as_ref()),
+            );
+            let request = if run_id_owns_generic_exec {
+                request.with_generic_runner_exec_run()
+            } else {
+                request
+            };
+            mirror_reverse_broker_evidence(crate::evidence::ReverseBrokerEvidenceContext {
+                request,
+                broker_url,
+            })
+            .and_then(|evidence| {
+                evidence
+                    .map(|evidence| {
+                        Ok(MirroredJobEvidence {
+                            run_id: evidence.run.id,
+                            patch: evidence.patch,
+                            artifacts: crate::evidence::controller_artifact_metadata(
+                                &evidence.runs,
+                            )?,
+                        })
+                    })
+                    .transpose()
+            })
+        },
+        || Ok(()),
+        |_, _| Ok(()),
+    );
 }
 
 /// Preserve file-backed argv values past controller cleanup. Values are content

@@ -175,404 +175,168 @@ pub(super) fn exec_via_daemon(
     let job_value = body
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("daemon exec returned no job"))?;
-    let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
+    let job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
-    if let Some(run_id) = run_id.as_deref() {
-        // `/exec` has accepted the job. Bind this fact before any local
-        // bookkeeping can fail so a later error never misclassifies an accepted
-        // handoff as a controller-only pre-handoff failure.
-        let binding = if !run_id_owns_generic_exec {
-            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
-                &homeboy_core::lab_contract::RunnerJobIdentity::new(
-                    run_id,
-                    &runner.id,
-                    job.id.to_string(),
-                ),
-                &cwd,
-                &command,
-            )
-            .map(|_| ())
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
-                &cwd,
-                &command,
-            )
-            .map(|_| ())
-        };
-        binding.map_err(|error| {
-            super::accepted_handoff_persistence_error(error, &runner.id, &job.id.to_string())
-        })?;
-    }
-    if let Some(session) = accepted_session.as_ref() {
-        // Persist the endpoint selected at admission before any controller-side
-        // wait or evidence work can fail. Follow-up operations route by this
-        // durable job identity while an older generation drains.
-        super::super::generation_store::record_job(&runner.id, session, &job.id.to_string())?;
-        if let Some(durable_run_id) = run_id.as_deref() {
-            super::super::generation_store::record_job_run(
-                &runner.id,
-                session,
-                &job.id.to_string(),
-                durable_run_id,
-            )?;
-        }
-    }
-    persist_runner_execution_transition(
-        &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
-            .with_job_id(job.id.to_string())
-            .with_path_materialization_plan(path_materialization_plan.clone())
-            .with_orchestration_provenance(orchestration_target_provenance(
-                runner,
-                None,
-                Some(&source_snapshot),
-                &[],
-            ))
-            .with_next_actions(runner_execution_next_actions(
-                &runner.id,
-                &job.id.to_string(),
-            )),
-        &cwd,
-        &command,
-    )?;
-    // One store for the whole foreground lease: claim, every renewal, and the
-    // release. Each step used to open its own, which split the lease's identity
-    // across three independent reads of process state -- a claim taken in one
-    // home and released against another leaves the source stuck `running` with
-    // nothing alive holding it (#7505).
-    //
-    // The renewal also sits inside the `while !job.status.is_terminal()` poll
-    // below, so a five-minute daemon exec opened SQLite and walked the
-    // migration ladder roughly 1,500 times to renew a lease it already held.
-    // The lease below and the evidence mirror further down describe the same
-    // run, so one resolution serves both rather than each reading the
-    // environment on its own (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let lease_store = run_id
         .as_deref()
         .map(|_| ObservationStore::open_initialized_in_roots(&roots))
         .transpose()?;
-    let foreground_source_lease = run_id
-        .as_deref()
-        .map(|run_id| {
-            let token = uuid::Uuid::new_v4().to_string();
-            let store = lease_store
-                .as_ref()
-                .expect("lease store is opened whenever run_id is present");
-            if !store.claim_running_runner_exec_recovery_source(
-                run_id,
-                "foreground-runner-exec",
-                &token,
-                &job.id.to_string(),
-            )? {
-                return Err(runner_exec_source_claim_error(
-                    store,
-                    run_id,
+    let foreground_source_lease = std::cell::RefCell::new(None);
+    let daemon_endpoint = std::cell::RefCell::new(local_url.to_string());
+    return complete_submitted_runner_job(
+        SubmittedRunnerJobFlow {
+            runner,
+            mode: RunnerExecMode::Daemon,
+            transport: "daemon",
+            runner_job_transport: "daemon",
+            timeout_label: "runner daemon job",
+            cwd: cwd.clone(),
+            command: command.clone(),
+            redaction_env: &env,
+            secret_env_names: &secret_env_names,
+            source_snapshot: source_snapshot.clone(),
+            path_materialization_plan: path_materialization_plan.clone(),
+            require_paths: require_paths.clone(),
+            lab_runner_workload: lab_runner_workload.clone(),
+            run_id: run_id.clone(),
+            run_id_owns_generic_exec,
+            detach_after_handoff,
+            mirror_evidence,
+            print_handoff_output,
+            handoff_endpoint: None,
+        },
+        job,
+        |job| {
+            if let Some(session) = accepted_session.as_ref() {
+                super::super::generation_store::record_job(
+                    &runner.id,
+                    session,
                     &job.id.to_string(),
-                )?);
-            }
-            Ok::<_, Error>((run_id.to_string(), token))
-        })
-        .transpose()?;
-    let persisted_run_id = mirror_evidence
-        .then(|| {
-            persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref(), None)
-        })
-        .flatten();
-    validate_generic_exec_mirror_run_id(
-        run_id_owns_generic_exec,
-        run_id.as_deref(),
-        persisted_run_id.as_deref(),
-    )?;
-    if detach_after_handoff {
-        return Ok(detached_handoff_output(
-            runner,
-            RunnerExecMode::Daemon,
-            cwd,
-            command,
-            source_snapshot,
-            job,
-            path_materialization_plan,
-            require_paths,
-            run_id,
-            persisted_run_id,
-        ));
-    }
-
-    let deadline = Instant::now() + runner_exec_wait_timeout();
-    let mut daemon_endpoint = local_url.to_string();
-    let mut reported_progress_sequence = 0;
-    while !job.status.is_terminal() {
-        if Instant::now() >= deadline {
-            let events = fetch_daemon_events(&client, &daemon_endpoint, &job.id.to_string())
-                .map(|events| redact_runner_job_events(&events, &env, &secret_env_names))
-                .unwrap_or_default();
-            record_and_report_promotion_progress_frames(
-                run_id.as_deref(),
-                &job.id.to_string(),
-                &events,
-                &mut reported_progress_sequence,
-            );
-            return Err(daemon_job_wait_timeout(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                &events,
-                "runner daemon job",
-                true,
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        if let Some((run_id, token)) = &foreground_source_lease {
-            let _ = lease_store
-                .as_ref()
-                .expect("lease store is opened whenever a lease is held")
-                .renew_running_runner_exec_source_lease(run_id, token)?;
-        }
-        let job_id = job.id.to_string();
-        let (refreshed_job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
-            &client,
-            &daemon_endpoint,
-            &job_id,
-            || refreshed_daemon_endpoint(&runner.id, &job_id, accepted_daemon_identity.as_deref()),
-        )
-        .map_err(|err| {
-            terminal_runner_poll_failure(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                "daemon",
-                path_materialization_plan.as_ref(),
-                &source_snapshot,
-                &require_paths,
-                persisted_run_id.as_deref(),
-                accepted_daemon_identity.as_deref(),
-                err,
-            )
-        })?;
-        daemon_endpoint = refreshed_endpoint;
-        job = refreshed_job;
-        if let Ok(events) = fetch_daemon_events(&client, &daemon_endpoint, &job_id) {
-            let events = redact_runner_job_events(&events, &env, &secret_env_names);
-            record_and_report_promotion_progress_frames(
-                run_id.as_deref(),
-                &job_id,
-                &events,
-                &mut reported_progress_sequence,
-            );
-        }
-    }
-    let job_id = job.id.to_string();
-    let mut events = match fetch_daemon_events(&client, &daemon_endpoint, &job_id) {
-        Ok(events) => redact_runner_job_events(&events, &env, &secret_env_names),
-        Err(err) => {
-            return Err(lab_terminal_result_transport_error(
-                runner, &cwd, &command, &job, err,
-            ))
-        }
-    };
-    record_and_report_promotion_progress_frames(
-        run_id.as_deref(),
-        &job_id,
-        &events,
-        &mut reported_progress_sequence,
-    );
-    append_agent_task_lifecycle_workload_event(
-        &mut events,
-        lab_runner_workload.as_ref(),
-        &runner.id,
-        &job_id,
-    )?;
-    append_agent_task_dispatch_handoff_workload_event(
-        &mut events,
-        lab_runner_workload.as_ref(),
-        &runner.id,
-        &job_id,
-    );
-
-    let RunnerJobResultFields {
-        result,
-        stdout,
-        stderr,
-        metrics,
-        capture,
-        exit_code,
-    } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
-
-    let terminal_snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
-        job: job.clone(),
-        events: events.clone(),
-    };
-    if run_id_owns_generic_exec {
-        if let Some(run_id) = run_id.as_deref() {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-                run_id,
-                &terminal_snapshot,
-            )?;
-        }
-    }
-    let mirror = if mirror_evidence {
-        let request = crate::evidence::MirrorEvidenceRequest::new(
-            runner,
-            &cwd,
-            &command,
-            &job,
-            &events,
-            &result,
-            run_id.as_deref(),
-            lab_runner_workload
-                .as_ref()
-                .and_then(|workload| workload.notification_route.as_ref()),
-        );
-        let request = if run_id_owns_generic_exec {
-            request.with_generic_runner_exec_run()
-        } else {
-            request
-        };
-        mirror_daemon_evidence(request, &roots).map_err(|error| {
-            if run_id_owns_generic_exec {
-                if let Some(run_id) = run_id.as_deref() {
-                    let _ =
-                        homeboy_agents::agent_task_lifecycle::record_runner_exec_projection_failure(
-                            run_id,
-                            &terminal_snapshot,
-                            &error,
-                        );
+                )?;
+                if let Some(durable_run_id) = run_id.as_deref() {
+                    super::super::generation_store::record_job_run(
+                        &runner.id,
+                        session,
+                        &job.id.to_string(),
+                        durable_run_id,
+                    )?;
                 }
             }
-            error
-        })?
-    } else {
-        None
-    };
-    if let Some((run_id, token)) = &foreground_source_lease {
-        let _ = lease_store
-            .as_ref()
-            .expect("lease store is opened whenever a lease is held")
-            .release_running_runner_exec_source_lease(run_id, token)?;
-    }
-    let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
-    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
-    validate_generic_exec_mirror_run_id(
-        run_id_owns_generic_exec,
-        run_id.as_deref(),
-        mirror_run_id.as_deref(),
-    )?;
-    fire_runner_direct_notification(
-        run_id.as_deref(),
-        &job,
-        lab_runner_workload
-            .as_ref()
-            .and_then(|workload| workload.notification_route.as_ref()),
+            if let Some(run_id) = run_id.as_deref() {
+                let token = uuid::Uuid::new_v4().to_string();
+                let store = lease_store
+                    .as_ref()
+                    .expect("lease store is opened whenever run_id is present");
+                if !store.claim_running_runner_exec_recovery_source(
+                    run_id,
+                    "foreground-runner-exec",
+                    &token,
+                    &job.id.to_string(),
+                )? {
+                    return Err(runner_exec_source_claim_error(
+                        store,
+                        run_id,
+                        &job.id.to_string(),
+                    )?);
+                }
+                *foreground_source_lease.borrow_mut() = Some((run_id.to_string(), token));
+            }
+            Ok(())
+        },
+        |current| {
+            if let Some((run_id, token)) = foreground_source_lease.borrow().as_ref() {
+                lease_store
+                    .as_ref()
+                    .expect("lease store is opened whenever a lease is held")
+                    .renew_running_runner_exec_source_lease(run_id, token)?;
+            }
+            let job_id = current.id.to_string();
+            let (refreshed, endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+                &client,
+                &daemon_endpoint.borrow(),
+                &job_id,
+                || {
+                    refreshed_daemon_endpoint(
+                        &runner.id,
+                        &job_id,
+                        accepted_daemon_identity.as_deref(),
+                    )
+                },
+            )
+            .map_err(|err| {
+                terminal_runner_poll_failure(
+                    runner,
+                    &cwd,
+                    &command,
+                    current,
+                    "daemon",
+                    path_materialization_plan.as_ref(),
+                    &source_snapshot,
+                    &require_paths,
+                    None,
+                    accepted_daemon_identity.as_deref(),
+                    err,
+                )
+            })?;
+            *daemon_endpoint.borrow_mut() = endpoint;
+            Ok(refreshed)
+        },
+        |job_id| fetch_daemon_events(&client, &daemon_endpoint.borrow(), job_id),
+        |job, events, result| {
+            let request = crate::evidence::MirrorEvidenceRequest::new(
+                runner,
+                &cwd,
+                &command,
+                job,
+                events,
+                result,
+                run_id.as_deref(),
+                lab_runner_workload
+                    .as_ref()
+                    .and_then(|workload| workload.notification_route.as_ref()),
+            );
+            let request = if run_id_owns_generic_exec {
+                request.with_generic_runner_exec_run()
+            } else {
+                request
+            };
+            mirror_daemon_evidence(request, &roots).and_then(|evidence| {
+                evidence
+                    .map(|evidence| {
+                        Ok(MirroredJobEvidence {
+                            run_id: evidence.run.id,
+                            patch: evidence.patch,
+                            artifacts: crate::evidence::controller_artifact_metadata(
+                                &evidence.runs,
+                            )?,
+                        })
+                    })
+                    .transpose()
+            })
+        },
+        || {
+            if let Some((run_id, token)) = foreground_source_lease.borrow_mut().take() {
+                lease_store
+                    .as_ref()
+                    .expect("lease store is opened whenever a lease is held")
+                    .release_running_runner_exec_source_lease(&run_id, &token)?;
+            }
+            Ok(())
+        },
+        |job, artifacts| {
+            if let Some(session) = accepted_session.as_ref() {
+                super::super::generation_store::record_job_artifacts(
+                    &runner.id,
+                    session,
+                    &job.id.to_string(),
+                    artifacts.iter().map(|artifact| artifact.id.clone()),
+                )?;
+            }
+            Ok(())
+        },
     );
-    let artifacts = mirror
-        .as_ref()
-        .map(|evidence| crate::evidence::controller_artifact_metadata(&evidence.runs))
-        .transpose()?
-        .unwrap_or_default();
-    if let Some(session) = accepted_session.as_ref() {
-        super::super::generation_store::record_job_artifacts(
-            &runner.id,
-            session,
-            &job_id,
-            artifacts.iter().map(|artifact| artifact.id.clone()),
-        )?;
-    }
-    let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
-    if print_handoff_output {
-        print_lab_offload_handoff(
-            &runner.id,
-            Some(&cwd),
-            &job.id.to_string(),
-            mirror_run_id.as_deref(),
-            DaemonJobHandoffState::Terminal(job.status),
-        );
-    }
-
-    let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
-    let mut runner_result = runner_result(
-        Some(&job),
-        exit_code,
-        &stdout,
-        &stderr,
-        mirror_run_id.as_deref(),
-        mutation_artifacts.clone(),
-    );
-    runner_result.artifact_refs = artifacts
-        .iter()
-        .map(crate::session::runner_artifact_ref_from_metadata)
-        .collect();
-    let provenance_extensions = required_extensions_for_command(
-        &command,
-        &super::super::workload::merge_lab_runner_workload_required_extensions(
-            Vec::new(),
-            lab_runner_workload.as_ref(),
-        ),
-    );
-    let handoff = lab_runner_handoff(
-        runner,
-        "daemon",
-        Some(runner_job.clone()),
-        Some(runner_result.clone()),
-    );
-    let execution_record = runner_execution_record_for_output(
-        runner,
-        "daemon",
-        exit_code,
-        Some(job.id.to_string()),
-        mirror_run_id.clone(),
-        Some(&source_snapshot),
-        path_materialization_plan,
-        &require_paths,
-        &provenance_extensions,
-        &artifacts,
-        Some(&runner_result),
-    );
-    persist_runner_execution_transition(&execution_record, &cwd, &command)?;
-    let mut output = RunnerExecOutput {
-        variant: "exec",
-        command: "runner.exec",
-        runner_id: runner.id.clone(),
-        dry_run: false,
-        mode: RunnerExecMode::Daemon,
-        argv: redact_argv(&command),
-        remote_cwd: cwd,
-        exit_code,
-        stdout,
-        stderr,
-        source_snapshot: Some(source_snapshot.clone()),
-        job_id: Some(job.id.to_string()),
-        job: Some(job),
-        runner_job: Some(runner_job),
-        job_events: Some(events),
-        mirror_run_id: mirror_run_id.clone(),
-        patch,
-        mutation_artifacts,
-        artifacts,
-        promoted_outputs: Vec::new(),
-        structured_summaries: Vec::new(),
-        metrics,
-        capture,
-        execution_record: Some(execution_record),
-        runner_result: Some(runner_result),
-        handoff: Some(handoff),
-        diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
-    };
-    for hint in result
-        .get("diagnostic_hints")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-    {
-        append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
-    }
-    Ok((output, exit_code))
 }
 
 pub(super) fn record_and_report_promotion_progress_frames(
@@ -2449,7 +2213,7 @@ pub(crate) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .and_then(|event| event.data.clone())
 }
 
-fn append_agent_task_lifecycle_workload_event(
+pub(super) fn append_agent_task_lifecycle_workload_event(
     events: &mut Vec<JobEvent>,
     lab_runner_workload: Option<&LabRunnerWorkload>,
     runner_id: &str,
@@ -2498,7 +2262,7 @@ fn append_agent_task_lifecycle_workload_event(
 /// failure, it just means the controller's retained output fallback runs. This
 /// is the opposite of the run-plan path, where a malformed aggregate is a hard
 /// error because the controller has no other source for it.
-fn append_agent_task_dispatch_handoff_workload_event(
+pub(super) fn append_agent_task_dispatch_handoff_workload_event(
     events: &mut Vec<JobEvent>,
     lab_runner_workload: Option<&LabRunnerWorkload>,
     runner_id: &str,

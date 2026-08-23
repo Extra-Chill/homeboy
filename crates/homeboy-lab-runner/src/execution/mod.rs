@@ -59,6 +59,7 @@ mod daemon_api;
 mod extension_parity;
 mod failure;
 mod handoff;
+mod job_flow;
 mod paths;
 mod policy;
 mod process;
@@ -88,6 +89,7 @@ pub(crate) use daemon_api::{
 };
 use failure::*;
 use handoff::*;
+use job_flow::*;
 use paths::*;
 use process::*;
 use redaction::*;
