@@ -1,5 +1,5 @@
 use homeboy_engine_primitives::content_hash;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -125,6 +125,7 @@ const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 16 * 1024;
 // preflight deliberately overestimates so it can reject before allocating a
 // command proportional to the manifest.
 const INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES: usize = 4 * 1024;
+const SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
 
 pub(crate) fn snapshot_identity(
     local_path: &Path,
@@ -1926,8 +1927,95 @@ pub(super) fn validate_snapshot_stability(
         "workspace_snapshot",
         source,
         Some(staging_output),
-        "source and staged snapshot manifests differ; refusing a mixed snapshot",
+        &format!(
+            "source and staged snapshot manifests differ; refusing a mixed snapshot; {}",
+            snapshot_manifest_difference(before, staged, after)
+        ),
     ))
+}
+
+fn snapshot_manifest_difference(
+    before: &SnapshotStableManifest,
+    staged: &SnapshotStableManifest,
+    after: &SnapshotStableManifest,
+) -> String {
+    let mut differences = Vec::new();
+    append_snapshot_manifest_difference("source-to-staged", before, staged, &mut differences);
+    append_snapshot_manifest_difference("staged-to-current", staged, after, &mut differences);
+    if differences.is_empty() {
+        "content identities differ outside the bounded manifest metadata".to_string()
+    } else {
+        format!(
+            "bounded differing entries (up to {SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT}): {}",
+            differences.join(", ")
+        )
+    }
+}
+
+fn append_snapshot_manifest_difference(
+    label: &str,
+    expected: &SnapshotStableManifest,
+    actual: &SnapshotStableManifest,
+    differences: &mut Vec<String>,
+) {
+    let expected_entries = expected
+        .inventory
+        .entries
+        .iter()
+        .map(|entry| (&entry.path, entry))
+        .collect::<BTreeMap<_, _>>();
+    let actual_entries = actual
+        .inventory
+        .entries
+        .iter()
+        .map(|entry| (&entry.path, entry))
+        .collect::<BTreeMap<_, _>>();
+    let paths = expected_entries
+        .keys()
+        .chain(actual_entries.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for path in paths {
+        if differences.len() == SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT {
+            return;
+        }
+        match (expected_entries.get(path), actual_entries.get(path)) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) => differences.push(format!(
+                "{label}:{path} ({})",
+                snapshot_manifest_entry_difference(expected, actual)
+            )),
+            (Some(_), None) => differences.push(format!("{label}:{path} (missing)")),
+            (None, Some(_)) => differences.push(format!("{label}:{path} (unexpected)")),
+            (None, None) => unreachable!("entry key came from one manifest"),
+        }
+    }
+    if differences.is_empty() && expected.content_identity != actual.content_identity {
+        differences.push(format!("{label}:content identity changed"));
+    }
+}
+
+fn snapshot_manifest_entry_difference(
+    expected: &WorkspaceContentManifestEntry,
+    actual: &WorkspaceContentManifestEntry,
+) -> String {
+    let mut fields = Vec::new();
+    if expected.kind != actual.kind {
+        fields.push("kind");
+    }
+    if expected.sha256 != actual.sha256 {
+        fields.push("sha256");
+    }
+    if expected.bytes != actual.bytes {
+        fields.push("bytes");
+    }
+    if expected.owner_executable != actual.owner_executable {
+        fields.push("owner_executable");
+    }
+    if fields.is_empty() {
+        fields.push("metadata");
+    }
+    format!("changed fields: {}", fields.join(", "))
 }
 
 /// One controller-side input and its corresponding private staging output.
@@ -2017,17 +2105,14 @@ pub(super) fn materialize_snapshot_stage(
         )
     })?;
     let inputs = snapshot_manifest_tar_input(manifest);
-    // Root-anchored exclusions have already shaped the manifest. Passing them
-    // to tar again would make a root-only exclusion match nested paths.
-    let archive_excludes = excludes
-        .iter()
-        .filter(|pattern| !pattern.starts_with("./"))
-        .cloned()
-        .collect::<Vec<_>>();
+    // The manifest selects root inputs only. Tar still recurses through each
+    // selected directory, so every exclusion, including a root-anchored nested
+    // path, must be applied during archive construction.
+    let archive_excludes = excludes;
     let source_archive = format!(
         "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - --null -T -",
         src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(&archive_excludes),
+        exclude = tar_exclude_args(archive_excludes),
     );
     let command = format!(
         "({inputs}) | {source_archive} | tar --no-xattrs -C {stage} -xf - && root={root} && stage={stage} && export root stage && find \"$stage\" -type l -exec sh -c {resolve} sh {{}} \\;",
@@ -2035,7 +2120,7 @@ pub(super) fn materialize_snapshot_stage(
         root = shell::quote_arg(&local_path.display().to_string()),
         resolve = shell::quote_arg(&format!(
             "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
-            tar_exclude_args(&archive_excludes)
+            tar_exclude_args(archive_excludes)
         )),
     );
     run_shell_command(&command, "construct workspace snapshot staging").map_err(|error| {
