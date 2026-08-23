@@ -1269,7 +1269,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "homeboy-cli",
  "homeboy-core",
  "homeboy-rig",
  "serde",
