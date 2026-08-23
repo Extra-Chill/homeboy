@@ -1768,6 +1768,45 @@ mod tests {
     }
 
     #[test]
+    fn attaching_a_child_preserves_an_exited_before_handoff_terminal_parent() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-exited-before-child-attachment";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist handoff parent");
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "detached Cook exited before materializing its first attempt",
+            )
+            .expect("terminalize handoff before delayed child attachment");
+
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn child for delayed attachment");
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_child(
+                cook_id,
+                child.id(),
+                detached_child_start_identity(child.id()).expect("capture child identity"),
+            )
+            .expect("read terminal handoff parent");
+            terminate_and_reap_detached_child(&mut child);
+
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "failed"
+            );
+        });
+    }
+
+    #[test]
     fn an_explicit_cook_id_cannot_overwrite_a_non_handoff_run() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "existing-non-handoff-run";
