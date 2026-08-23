@@ -324,11 +324,15 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
     if !lifecycle_store.record_exists(run_id)? {
-        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
-            lifecycle_store,
-            cook_id,
-            run_id,
-        )?;
+        // The detached handoff placeholder only owns first-attempt admission.
+        // Once indexed, later attempts derive ownership from the Cook index.
+        if !agent_task_lifecycle::cook_index_exists_in_store(lifecycle_store, cook_id)? {
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                lifecycle_store,
+                cook_id,
+                run_id,
+            )?;
+        }
         let submission = match admission_status {
             Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
                 plan,
