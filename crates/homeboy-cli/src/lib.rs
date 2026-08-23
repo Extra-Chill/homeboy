@@ -46,6 +46,6 @@ pub mod help_topics;
 // layer's `crate::test_support::*` call sites are unchanged. Available only in
 // test builds (core exposes it via its `test-support` feature, which this crate
 // enables as a dev-dependency).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use homeboy_core::test_support;

@@ -125,7 +125,7 @@ pub fn sync_workspace_in_roots(
             excludes.push(pattern.clone());
         }
     }
-    for pattern in homeboy_core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+    for pattern in homeboy_core::source_snapshot::policy_for_path(&local_path).sync_excludes {
         if !excludes.contains(&pattern) {
             excludes.push(pattern);
         }
@@ -854,7 +854,7 @@ pub fn update_workspace(
             excludes.push(pattern.clone());
         }
     }
-    for pattern in homeboy_core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+    for pattern in homeboy_core::source_snapshot::policy_for_path(&local_path).sync_excludes {
         if !excludes.contains(&pattern) {
             excludes.push(pattern);
         }
@@ -1055,7 +1055,7 @@ pub fn reuse_compatible_snapshot_workspace(
             excludes.push(pattern.clone());
         }
     }
-    for pattern in homeboy_core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+    for pattern in homeboy_core::source_snapshot::policy_for_path(&local_path).sync_excludes {
         if !excludes.contains(&pattern) {
             excludes.push(pattern);
         }

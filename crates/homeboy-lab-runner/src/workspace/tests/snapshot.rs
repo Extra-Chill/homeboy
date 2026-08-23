@@ -148,6 +148,7 @@ use crate::workspace::types::{
 use crate::workspace::util::git_output;
 
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SOURCE_SYNC_EXCLUDES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
 fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
@@ -969,6 +970,90 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
             .join("build.tsbuildinfo")
             .exists());
     });
+}
+
+#[test]
+fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
+    let _source_sync_excludes_guard = SOURCE_SYNC_EXCLUDES_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("source sync excludes lock");
+    let previous = std::env::var_os("HOMEBOY_SOURCE_SYNC_EXCLUDES");
+    std::env::set_var(
+        "HOMEBOY_SOURCE_SYNC_EXCLUDES",
+        "./docs/superpowers/plans/**",
+    );
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("clean DMC-managed worktree");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::create_dir_all(source.path().join("docs")).expect("docs directory");
+        fs::write(source.path().join("docs/README.md"), "tracked docs\n").expect("tracked docs");
+        fs::write(source.path().join("Cargo.toml"), "[workspace]\n").expect("worktree marker");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "clean source"]);
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-late-dmc-context","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let injected_context = source
+            .path()
+            .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md");
+        let injected_context_for_hook = injected_context.clone();
+        let _hook = register_after_snapshot_directory_discovery_hook(
+            source.path().join("docs"),
+            move || {
+                fs::create_dir_all(
+                    injected_context_for_hook
+                        .parent()
+                        .expect("context parent directory"),
+                )
+                .expect("inject DMC context directory");
+                fs::write(&injected_context_for_hook, "late DMC context\n")
+                    .expect("inject DMC context file");
+            },
+        );
+
+        let (output, exit_code) = sync_workspace(
+            "lab-late-dmc-context",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                ..Default::default()
+            },
+        )
+        .expect("late configured context must remain outside the snapshot");
+
+        assert_eq!(exit_code, 0);
+        assert!(output
+            .excludes
+            .contains(&"./docs/superpowers/plans/**".to_string()));
+        assert!(
+            injected_context.is_file(),
+            "fixture injected context after discovery"
+        );
+        assert!(Path::new(&output.remote_path)
+            .join("docs/README.md")
+            .is_file());
+        assert!(
+            !Path::new(&output.remote_path)
+                .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md")
+                .exists(),
+            "the injected context must be absent from the staged and materialized manifests"
+        );
+    });
+    match previous {
+        Some(value) => std::env::set_var("HOMEBOY_SOURCE_SYNC_EXCLUDES", value),
+        None => std::env::remove_var("HOMEBOY_SOURCE_SYNC_EXCLUDES"),
+    }
 }
 
 #[test]
