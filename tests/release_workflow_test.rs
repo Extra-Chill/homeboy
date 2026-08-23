@@ -2055,14 +2055,20 @@ fn release_dry_run_establishes_its_branch_instead_of_claiming_release_head() {
 /// The release check parses the current extension manifests before the
 /// downstream build job exists. It must therefore run the candidate Homeboy
 /// contract, not the latest published binary, which may predate those manifests.
+/// Planning is read-only, so optimizing that short-lived binary only extends the
+/// serial release path without strengthening this compatibility proof.
 #[test]
-fn release_dry_run_bootstraps_with_the_candidate_binary() {
+fn release_dry_run_bootstraps_a_dev_profile_candidate_binary() {
     let check = job_section(release_workflow(), "check");
     let dry_run = release_step_block(check, "name: Dry-run release check");
 
     assert!(
         dry_run.contains("source: '.'"),
         "the self-release check must build the candidate before installing current extensions"
+    );
+    assert!(
+        dry_run.contains("source-build-profile: dev"),
+        "read-only release planning must not pay for release-profile optimization"
     );
     assert!(
         !dry_run.contains("version:"),

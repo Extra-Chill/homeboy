@@ -184,6 +184,10 @@ jobs:
         uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
+          # Planning is read-only and executes for seconds after compilation.
+          # Keep candidate-binary manifest compatibility without paying for
+          # release-profile optimization before the real build job.
+          source-build-profile: dev
           commands: release
           expected-commands: review audit,review lint,review test
           args: --skip-checks=audit,lint,test
