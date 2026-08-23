@@ -6404,7 +6404,14 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
         let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
-        if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+        // A persisted identity must still be fresh, non-primary, and pushed.
+        // Its only admissible dirty state is authenticated below against this
+        // attempt's persisted promoted-candidate fingerprint.
+        if !safety.fresh
+            || safety.unpushed
+            || identity.primary
+            || (safety.dirty && continuation.is_none())
+        {
             return Err(Error::validation_invalid_argument(
                 "to_worktree",
                 "provider safety attestation is not current and safe for Cook execution",
