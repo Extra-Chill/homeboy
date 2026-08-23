@@ -351,16 +351,21 @@ runs:
       with:
         toolchain: ${{ inputs.rust-toolchain }}
 
-    - name: Cache cargo (source build)
+    - name: Resolve source Cargo cache
+      id: source-cargo-cache
       if: inputs.binary-path == '' && inputs.source != ''
+      shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source }}
+      run: bash ${{ github.action_path }}/scripts/setup/resolve-source-cargo-cache.sh
+
+    - name: Cache cargo (source build)
+      if: steps.source-cargo-cache.outputs.enabled == 'true'
       uses: actions/cache@v5
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          ${{ inputs.source }}/target
-        key: ${{ runner.os }}-cargo-source-${{ hashFiles(format('{0}/Cargo.lock', inputs.source)) }}
-        restore-keys: ${{ runner.os }}-cargo-source-
+        path: ${{ steps.source-cargo-cache.outputs.paths }}
+        key: ${{ runner.os }}-cargo-build-${{ steps.source-cargo-cache.outputs.fingerprint }}
+        restore-keys: ${{ runner.os }}-cargo-build-
 
     - name: Build from source
       id: source-build
@@ -446,6 +451,22 @@ runs:
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
         PORTABLE_EXTENSION: ${{ steps.read-config.outputs.portable-extension }}
       run: bash ${{ github.action_path }}/scripts/setup/detect-runtime-env.sh
+
+    - name: Resolve extension CI cache
+      id: extension-cache
+      shell: bash
+      env:
+        COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
+        PORTABLE_EXTENSION: ${{ steps.read-config.outputs.portable-extension }}
+      run: bash ${{ github.action_path }}/scripts/setup/resolve-extension-cache.sh
+
+    - name: Restore extension CI cache
+      if: steps.extension-cache.outputs.enabled == 'true'
+      uses: actions/cache@v5
+      with:
+        path: ${{ steps.extension-cache.outputs.paths }}
+        key: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-quality-${{ steps.extension-cache.outputs.fingerprint }}
+        restore-keys: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-quality-
 
     - name: Setup PHP
       if: steps.detect-env.outputs.portable-php != ''

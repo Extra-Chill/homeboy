@@ -220,8 +220,6 @@ jobs:
     needs: plan
     if: '!inputs.contract-probe'
     runs-on: ubuntu-latest
-    outputs:
-      cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -234,21 +232,28 @@ jobs:
         with:
           toolchain: ${{ inputs.rust-toolchain }}
 
-      - name: Resolve candidate cargo cache key
-        id: cargo-cache-key
+      - name: Resolve candidate Cargo cache
+        id: cargo-cache
         if: hashFiles('Cargo.lock') != ''
-        run: echo "key=${RUNNER_OS}-cargo-ci-${{ hashFiles('Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+        run: |
+          lock_digest="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          fingerprint="$(printf 'Cargo.lock:%s\n' "${lock_digest}" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "key=${RUNNER_OS}-cargo-build-${fingerprint}"
+            echo "paths<<HOMEBOY_CACHE_PATHS"
+            echo "${HOME}/.cargo/registry"
+            echo "${HOME}/.cargo/git"
+            echo "target"
+            echo "HOMEBOY_CACHE_PATHS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo
-        if: steps.cargo-cache-key.outputs.key != ''
+        if: steps.cargo-cache.outputs.key != ''
         uses: actions/cache@v5
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache-key.outputs.key }}
-          restore-keys: ${{ runner.os }}-cargo-ci-
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
+          restore-keys: ${{ runner.os }}-cargo-build-
 
       - name: Build candidate Homeboy binary
         if: inputs.build-command != ''
@@ -460,16 +465,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Restore candidate cargo cache
-        if: needs.binary.outputs.cargo-cache-key != ''
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ needs.binary.outputs.cargo-cache-key }}
-
       - name: Check out Homeboy Action
         uses: actions/checkout@v6
         with:
@@ -588,16 +583,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-
-      - name: Restore candidate cargo cache
-        if: needs.binary.outputs.cargo-cache-key != ''
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ needs.binary.outputs.cargo-cache-key }}
 
       - uses: actions/checkout@v6
         with:
