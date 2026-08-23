@@ -401,10 +401,34 @@ pub fn record_runner_exec_terminal_checkpoint(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<()> {
+    record_runner_exec_terminal_checkpoint_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_terminal_checkpoint`].
+///
+/// This is a read-modify-write of one observation row: the row is read,
+/// its `kind` is checked, its metadata is mutated, and it is written back.
+/// Read and write are the same row, so they have to be the same
+/// installation (#7505).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`]
+/// rather than the lifecycle opener, because the ambient body used
+/// `ObservationStore::open_initialized()` and the two differ in startup
+/// artifact maintenance. Rooting through the lifecycle opener would change
+/// behaviour, not just its home.
+pub fn record_runner_exec_terminal_checkpoint_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<()> {
     if !snapshot.job.status.is_terminal() {
         return Ok(());
     }
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_maintained()?;
     let run_id = sanitize_run_id(run_id);
     let Some(mut run) = store.get_run(&run_id)? else {
         return Ok(());
@@ -466,7 +490,31 @@ pub fn record_runner_exec_artifact_refs(
     run_id: &str,
     artifacts: &[homeboy_core::observation::ArtifactRecord],
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    record_runner_exec_artifact_refs_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        artifacts,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_artifact_refs`].
+///
+/// This is a read-modify-write of one observation row: the row is read,
+/// its `kind` is checked, its metadata is mutated, and it is written back.
+/// Read and write are the same row, so they have to be the same
+/// installation (#7505).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`]
+/// rather than the lifecycle opener, because the ambient body used
+/// `ObservationStore::open_initialized()` and the two differ in startup
+/// artifact maintenance. Rooting through the lifecycle opener would change
+/// behaviour, not just its home.
+pub fn record_runner_exec_artifact_refs_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let run_id = sanitize_run_id(run_id);
     let Some(mut run) = store.get_run(&run_id)? else {
         return Ok(());
@@ -512,7 +560,35 @@ pub fn record_runner_exec_declaration_promotion(
     declaration: &str,
     artifacts: &[homeboy_core::observation::ArtifactRecord],
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    record_runner_exec_declaration_promotion_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        role,
+        declaration,
+        artifacts,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_declaration_promotion`].
+///
+/// This is a read-modify-write of one observation row: the row is read,
+/// its `kind` is checked, its metadata is mutated, and it is written back.
+/// Read and write are the same row, so they have to be the same
+/// installation (#7505).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`]
+/// rather than the lifecycle opener, because the ambient body used
+/// `ObservationStore::open_initialized()` and the two differ in startup
+/// artifact maintenance. Rooting through the lifecycle opener would change
+/// behaviour, not just its home.
+pub fn record_runner_exec_declaration_promotion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    role: &str,
+    declaration: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let run_id = sanitize_run_id(run_id);
     let Some(mut run) = store.get_run(&run_id)? else {
         return Ok(());
