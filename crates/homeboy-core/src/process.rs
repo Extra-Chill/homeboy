@@ -158,10 +158,14 @@ pub struct ProcessContainment {
 
 /// The result of best-effort containment cleanup. Linux process scopes use an
 /// inherited environment marker rather than a kernel-enforced boundary, so an
-/// escaped descendant can remove the marker before it is discovered.
+/// escaped descendant can remove the marker before it is discovered. That blind
+/// spot is real, but it is invisible to marker discovery by construction —
+/// callers detect it through the pipes such a descendant keeps open, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessContainmentCleanup {
     pub forced: bool,
+    /// True when no run-owned process is known to remain. An empty scope is the
+    /// goal state of cleanup, so it reads as complete rather than as a failure.
     pub complete: bool,
     /// Non-fatal evidence collected while confirming cleanup. This is separate
     /// from `detail` so unrelated host-process metadata cannot turn a verified
@@ -1273,16 +1277,24 @@ fn scope_cleanup_report(
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    let complete = !targets.pids.is_empty() && survivors.pids.is_empty();
+    // An empty scope is the state cleanup exists to produce, so it cannot also
+    // be cleanup's failure signal. Every command whose processes exited leaves
+    // discovery with nothing to find, and that is indistinguishable from a
+    // descendant that escaped by unsetting HOMEBOY_PROCESS_SCOPE. Treating the
+    // two alike reported "an escaped descendant may have removed
+    // HOMEBOY_PROCESS_SCOPE" on every clean short-lived command (#13128).
+    //
+    // A marker-dropping escapee is caught where it leaves real evidence
+    // instead: it inherits this command's stdout/stderr, so `run_local_command`
+    // sees the pipes stay open after teardown and fails the command there.
+    // Marker discovery cannot see it at all, and claiming otherwise only
+    // produced noise.
+    let complete = survivors.pids.is_empty();
     let detail = (!complete).then(|| {
-        if !survivors.pids.is_empty() {
-            format!(
-                "process-scope cleanup confirmed run-owned survivors: {}",
-                join_pids(&survivors.pids)
-            )
-        } else {
-            "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
-        }
+        format!(
+            "process-scope cleanup confirmed run-owned survivors: {}",
+            join_pids(&survivors.pids)
+        )
     });
     ProcessContainmentCleanup {
         forced,
@@ -1808,7 +1820,10 @@ mod tests {
 
     #[test]
     fn scope_cleanup_keeps_unreadable_same_owner_environments_as_diagnostics() {
-        let omitted = scope_cleanup_report(
+        // A scope that is already empty when teardown starts is the ordinary
+        // end state of every command whose processes exited. It must report
+        // clean and say nothing (#13128).
+        let drained = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: Vec::new(),
                 unreadable_environments: 0,
@@ -1819,11 +1834,9 @@ mod tests {
             },
             false,
         );
-        assert!(!omitted.complete);
-        assert!(omitted
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("no marker-owned process")));
+        assert!(drained.complete);
+        assert_eq!(drained.detail, None);
+        assert_eq!(drained.diagnostic, None);
 
         let unreadable = scope_cleanup_report(
             LinuxScopeDiscovery {
