@@ -1,7 +1,16 @@
 use super::SshClient;
+use crate::engine::command::{
+    wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
+    SupervisedCommandHeartbeat, DEFAULT_CAPTURE_LIMIT_BYTES,
+};
 use crate::server::ssh_args::{client_option_args, shell_join_args, SshArgOptions, SshPortFlag};
 use serde::Serialize;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
+
+const TRANSFER_HEARTBEAT_QUIET_AFTER: Duration = Duration::from_secs(5);
+const TRANSFER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const TRANSFER_HEARTBEAT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration for a file transfer operation.
 pub struct TransferConfig {
@@ -32,6 +41,8 @@ pub struct TransferOutput {
     pub method: String,
     pub direction: String,
     pub recursive: bool,
+    /// Effective recursive scope, including sync's directory-contents behavior.
+    pub scope: String,
     pub compress: bool,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,10 +66,19 @@ fn transfer_output(
         method: method.into(),
         direction: direction.into(),
         recursive: config.recursive,
+        scope: transfer_scope(config).to_string(),
         compress: config.compress,
         success,
         error,
         dry_run,
+    }
+}
+
+fn transfer_scope(config: &TransferConfig) -> &'static str {
+    match (config.recursive, config.directory_contents) {
+        (true, true) => "recursive directory contents",
+        (true, false) => "recursive path",
+        (false, _) => "single path",
     }
 }
 
@@ -417,14 +437,17 @@ fn execute_plan(
         log_status!("transfer", "Method: {}", plan.method);
     }
 
-    let output = match &plan.backend {
+    let mut command = match &plan.backend {
         TransferBackend::Scp { args } => {
-            Command::new("scp").args(args).stdin(Stdio::null()).output()
+            let mut command = Command::new("scp");
+            command.args(args);
+            command
         }
-        TransferBackend::Shell { command } => Command::new("sh")
-            .args(["-c", command])
-            .stdin(Stdio::null())
-            .output(),
+        TransferBackend::Shell { command } => {
+            let mut process = Command::new("sh");
+            process.args(["-c", command]);
+            process
+        }
     };
 
     let backend_label = match plan.backend {
@@ -432,41 +455,193 @@ fn execute_plan(
         TransferBackend::Shell { .. } => "transfer",
     };
 
-    match output {
+    let source = bounded_identity(&effective_source(config));
+    let destination = bounded_identity(&effective_destination(config));
+    let scope = transfer_scope(config);
+    match run_transfer_command(&mut command, |elapsed| {
+        eprintln!(
+            "[transfer] phase=transferring elapsed={}s source={} destination={} scope={}",
+            elapsed.as_secs(),
+            source,
+            destination,
+            scope
+        );
+    }) {
         Ok(out) => {
             let success = out.status.success();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
             if !success {
-                eprintln!("[transfer] Failed: {}", stderr);
+                let detail = bounded_detail(stderr.trim());
+                eprintln!(
+                    "[transfer] phase=failed source={} destination={} scope={} detail={}; destination may be partial; retry: {}",
+                    source,
+                    destination,
+                    scope,
+                    detail,
+                    retry_command(config),
+                );
             } else {
                 log_status!("transfer", "Complete");
             }
 
+            let error = (!success).then(|| {
+                format!(
+                    "{}; destination may be partial; retry: {}",
+                    bounded_detail(stderr.trim()),
+                    retry_command(config)
+                )
+            });
+
+            Ok((
+                transfer_output(config, plan.method, plan.direction, success, error, false),
+                if success { 0 } else { 1 },
+            ))
+        }
+        Err(e) => {
+            let error = format!(
+                "Failed to execute {backend_label}: {e}; destination may be partial; retry: {}",
+                retry_command(config)
+            );
+            eprintln!(
+                "[transfer] phase=failed source={} destination={} scope={}; destination may be partial; retry: {}",
+                source,
+                destination,
+                scope,
+                retry_command(config),
+            );
             Ok((
                 transfer_output(
                     config,
                     plan.method,
                     plan.direction,
-                    success,
-                    if success { None } else { Some(stderr) },
+                    false,
+                    Some(error),
                     false,
                 ),
-                if success { 0 } else { 1 },
+                1,
             ))
         }
-        Err(e) => Ok((
-            transfer_output(
-                config,
-                plan.method,
-                plan.direction,
-                false,
-                Some(format!("Failed to execute {}: {}", backend_label, e)),
-                false,
-            ),
-            1,
-        )),
     }
+}
+
+fn effective_destination(config: &TransferConfig) -> String {
+    config.destination.clone()
+}
+
+fn bounded_identity(value: &str) -> String {
+    bounded_text(value, 160)
+}
+
+fn bounded_detail(value: &str) -> String {
+    bounded_text(value, 1024)
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    let mut value = value.replace(['\n', '\r'], " ");
+    if value.len() > limit {
+        let mut end = limit - 3;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+        value.push_str("...");
+    }
+    value
+}
+
+fn run_transfer_command(
+    command: &mut Command,
+    heartbeat: impl FnMut(Duration),
+) -> std::io::Result<crate::engine::command::BoundedCommandOutput> {
+    run_transfer_command_with_policy(
+        command,
+        TRANSFER_HEARTBEAT_QUIET_AFTER,
+        TRANSFER_HEARTBEAT_INTERVAL,
+        TRANSFER_HEARTBEAT_POLL_INTERVAL,
+        heartbeat,
+    )
+}
+
+fn run_transfer_command_with_policy(
+    command: &mut Command,
+    quiet_after: Duration,
+    interval: Duration,
+    poll_interval: Duration,
+    mut heartbeat: impl FnMut(Duration),
+) -> std::io::Result<crate::engine::command::BoundedCommandOutput> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let guard = ControllerChildGuard::prepare(command)?;
+    let mut child = command.spawn()?;
+    guard.attach(&child)?;
+    let mut schedule = TransferHeartbeatSchedule::new(quiet_after);
+    let output = wait_with_bounded_output_supervised_with_progress(
+        &mut child,
+        DEFAULT_CAPTURE_LIMIT_BYTES,
+        Duration::MAX,
+        None,
+        poll_interval,
+        || false,
+        |progress| {
+            if schedule.due(&progress, interval) {
+                heartbeat(progress.elapsed);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(output.output)
+}
+
+#[derive(Debug)]
+struct TransferHeartbeatSchedule {
+    next: Duration,
+}
+
+impl TransferHeartbeatSchedule {
+    fn new(quiet_after: Duration) -> Self {
+        Self { next: quiet_after }
+    }
+
+    fn due(&mut self, heartbeat: &SupervisedCommandHeartbeat, interval: Duration) -> bool {
+        if heartbeat.elapsed < self.next {
+            return false;
+        }
+        self.next = heartbeat.elapsed.saturating_add(interval);
+        true
+    }
+}
+
+fn retry_command(config: &TransferConfig) -> String {
+    let command = if config.directory_contents {
+        "sync"
+    } else {
+        "copy"
+    };
+    let mut parts = vec![
+        "homeboy".to_string(),
+        "file".to_string(),
+        command.to_string(),
+        shell_quote(&config.source),
+        shell_quote(&config.destination),
+    ];
+    if config.recursive && !config.directory_contents {
+        parts.push("--recursive".to_string());
+    }
+    if config.compress {
+        parts.push("--compress".to_string());
+    }
+    for exclude in &config.exclude {
+        parts.push("--exclude".to_string());
+        parts.push(shell_quote(exclude));
+    }
+    parts.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn scp_args(client: &SshClient) -> Vec<String> {
@@ -497,11 +672,17 @@ fn ssh_shell_args(client: &SshClient) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::process::Command;
+    use std::time::Duration;
 
     use crate::server::{self, Server};
     use crate::test_support::with_isolated_home;
 
-    use super::{parse_target, scp_args, transfer, TransferConfig, TransferTarget};
+    use super::{
+        bounded_detail, bounded_identity, execute_plan, parse_target, retry_command,
+        run_transfer_command_with_policy, scp_args, transfer, transfer_scope, TransferBackend,
+        TransferConfig, TransferPlan, TransferTarget,
+    };
     use crate::server::{ManagedSshSession, SshClient};
 
     fn save_server(id: &str) {
@@ -660,5 +841,111 @@ mod tests {
         }));
         assert!(args.contains(&"ControlMaster=no".to_string()));
         assert!(!args.contains(&"-S".to_string()));
+    }
+
+    #[test]
+    fn recursive_sync_scope_and_retry_command_preserve_effective_intent() {
+        let config = TransferConfig {
+            source: "local dir's contents".to_string(),
+            destination: "prod:/var/www/site".to_string(),
+            recursive: true,
+            directory_contents: true,
+            compress: true,
+            dry_run: false,
+            exclude: vec!["cache files".to_string()],
+        };
+
+        assert_eq!(transfer_scope(&config), "recursive directory contents");
+        assert_eq!(
+            retry_command(&config),
+            "homeboy file sync 'local dir'\\''s contents' 'prod:/var/www/site' --compress --exclude 'cache files'"
+        );
+    }
+
+    #[test]
+    fn transfer_identity_is_single_line_and_bounded() {
+        let identity = bounded_identity(&format!("source\n{}", "x".repeat(200)));
+
+        assert!(!identity.contains('\n'));
+        assert!(identity.ends_with("..."));
+        assert!(identity.len() <= 160);
+    }
+
+    #[test]
+    fn transfer_failure_detail_is_single_line_and_bounded() {
+        let detail = super::bounded_detail(&format!("failed\r\n{}", "x".repeat(2000)));
+
+        assert!(!detail.contains(['\r', '\n']));
+        assert!(detail.ends_with("..."));
+        assert!(detail.len() <= 1024);
+    }
+
+    #[test]
+    fn bounded_transfer_text_preserves_utf8_boundaries() {
+        let identity = bounded_identity(&format!("{}ézzz", "a".repeat(156)));
+        let detail = bounded_detail(&format!("{}ézzz", "a".repeat(1020)));
+
+        assert!(identity.is_char_boundary(identity.len()));
+        assert!(identity.ends_with("..."));
+        assert!(identity.len() <= 160);
+        assert!(detail.is_char_boundary(detail.len()));
+        assert!(detail.ends_with("..."));
+        assert!(detail.len() <= 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_runner_heartbeats_and_bounds_noisy_failure_output() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "sleep 0.04; yes noisy-transfer-output | head -c 5000000 >&2; exit 7",
+        ]);
+        let mut heartbeats = Vec::new();
+
+        let output = run_transfer_command_with_policy(
+            &mut command,
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+            |elapsed| heartbeats.push(elapsed),
+        )
+        .expect("supervise noisy transfer command");
+
+        assert!(!output.status.success());
+        assert!(!heartbeats.is_empty());
+        assert!(heartbeats[0] >= Duration::from_millis(10));
+        assert!(output.capture.stderr.truncated);
+        assert!(output.stderr.len() <= super::DEFAULT_CAPTURE_LIMIT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_plan_preserves_lossy_non_utf8_failure_diagnostics() {
+        let config = TransferConfig {
+            source: "local/source".to_string(),
+            destination: "prod:/remote/destination".to_string(),
+            recursive: false,
+            directory_contents: false,
+            compress: false,
+            dry_run: false,
+            exclude: Vec::new(),
+        };
+        let plan = TransferPlan {
+            method: "fixture".to_string(),
+            direction: "push".to_string(),
+            backend: TransferBackend::Shell {
+                command: "printf '\\377backend failure' >&2; exit 7".to_string(),
+            },
+        };
+
+        let (output, code) = execute_plan(&config, plan).expect("execute transfer plan");
+
+        assert_eq!(code, 1);
+        assert!(!output.success);
+        let error = output.error.expect("failure diagnostic");
+        assert!(error.contains('\u{fffd}'));
+        assert!(error.contains("backend failure"));
+        assert!(error.contains("retry: homeboy file copy"));
     }
 }
