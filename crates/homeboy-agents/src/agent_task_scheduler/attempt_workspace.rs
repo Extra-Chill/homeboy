@@ -877,7 +877,6 @@ fn sha256_hex(contents: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Digest;
     use std::fs;
     use std::process::Command;
 

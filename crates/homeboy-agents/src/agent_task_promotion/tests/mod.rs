@@ -7,14 +7,12 @@ use sha2::{Digest, Sha256};
 
 use super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 
-use super::promote::validate_artifact_content;
 use super::types::{
-    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport,
-    AgentTaskPromotionNotification, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
     AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
     AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
@@ -22,8 +20,6 @@ use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
-use crate::agent_task_scheduler::AgentTaskPlan;
-use homeboy_core::defaults::WorktreeProviderListResultMapping;
 use homeboy_core::{Error, Result};
 
 pub(super) const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";

@@ -1,6 +1,6 @@
 use super::common::{request, script};
 use super::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn git(cwd: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")

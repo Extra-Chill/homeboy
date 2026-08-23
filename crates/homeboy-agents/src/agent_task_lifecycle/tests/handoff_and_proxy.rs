@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskLimits,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle,
     AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
     AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
     AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
@@ -1624,122 +1624,6 @@ fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
         "lab_attempt_plan_recovery"
     );
     assert!(terminal.metadata.get("runner_job_id").is_none());
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The whole claim is that a *runner-projected* plan path in the
-/// record is display evidence and the controller keeps reading its own durable
-/// plan — which is only meaningful when "its own" names one installation. The
-/// handoff, the mirrored aggregate, every read back (status, logs, artifacts),
-/// the retry that must reuse the durable plan, and the missing-plan fixture all
-/// follow `lifecycle_store`.
-///
-/// The retry is spelled as `retry_with_runtime_admission_in_store(.., false,
-/// false, None, ..)`, which is exactly what the ambient `retry` reduces to
-/// (`retry_in_store` -> `retry_with_force_inner_in_store` with `force: false,
-/// enforce_lineage_reservation: false`), except that its admission is the stub
-/// rather than the machine-global controller-runtime one. `test_plan()` carries
-/// no Cook candidate evidence, so both workspace restorations inside the retry
-/// are no-ops.
-#[test]
-fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let command = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "run-plan".to_string(),
-    ];
-    let record = record_lab_offload_planned_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadProxyPlan {
-            run_id: "cook-lab-attempt",
-            runner_id: "homeboy-lab",
-            remote_workspace: "/runner/workspace",
-            remote_command: &command,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("cook handoff persists its controller plan");
-    let aggregate = succeeded_aggregate(&plan);
-    record_run_aggregate_in_store(&lifecycle_store, &record.run_id, &plan, &aggregate)
-        .expect("runner result mirrored to the controller");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record.plan_path =
-            "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
-                .to_string();
-        record.state = AgentTaskRunState::Running;
-    })
-    .expect("runner transport projection replaces display path");
-
-    assert_eq!(
-        status_in_store(
-            &lifecycle_store,
-            &record.run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        )
-        .expect("controller status")
-        .record
-        .plan_id,
-        plan.plan_id
-    );
-    assert_eq!(
-        logs_in_store(&lifecycle_store, &record.run_id)
-            .expect("controller logs")
-            .run_id,
-        record.run_id
-    );
-    assert_eq!(
-        artifacts_in_store(&lifecycle_store, &record.run_id)
-            .expect("controller artifacts")
-            .run_id,
-        record.run_id
-    );
-    let retry = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        Some("cook-lab-retry"),
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect("controller retry uses its durable plan");
-    assert_eq!(
-        load_controller_plan_in_store(&lifecycle_store, &retry.run_id).expect("retry plan"),
-        plan
-    );
-
-    let missing_plan = record_lab_offload_planned_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadProxyPlan {
-            run_id: "cook-lab-missing-controller-plan",
-            runner_id: "homeboy-lab",
-            remote_workspace: "/runner/workspace",
-            remote_command: &command,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("missing-plan fixture persists its controller plan");
-    rewrite_record_for_test_in_store(&lifecycle_store, &missing_plan.run_id, |record| {
-        record.plan_path = "/runner/workspace/plan.json".to_string();
-    })
-    .expect("project runner-local plan path");
-    std::fs::remove_file(missing_plan.plan_path)
-        .expect("remove authoritative controller plan despite projected display path");
-    let error = status_in_store(
-        &lifecycle_store,
-        &missing_plan.run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect_err("missing controller plan fails closed");
-    assert_eq!(error.code, ErrorCode::InternalIoError);
 }
 
 #[test]

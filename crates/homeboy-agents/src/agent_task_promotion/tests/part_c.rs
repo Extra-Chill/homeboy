@@ -2,17 +2,14 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    run_provider_command, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    ExternalPromotionWorkspaceProvider, TrustedUnpushedCandidateDestination,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    run_provider_command, AgentTaskPromotionApplyRequest, ExternalPromotionWorkspaceProvider,
+    TrustedUnpushedCandidateDestination, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
-use super::super::promote::{
-    normalize_promotion_patch, promote, select_patch_artifact, validate_artifact_content,
-};
+use super::super::promote::{normalize_promotion_patch, promote, select_patch_artifact};
 use super::super::types::{
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
 use crate::agent_task::{
@@ -22,12 +19,8 @@ use crate::agent_task::{
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::WorktreeProviderListResultMapping;
 use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
-use homeboy_core::Result;
 use serde_json::Value;
-use sha2::Digest;
-use std::path::Path;
 
 #[test]
 fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {

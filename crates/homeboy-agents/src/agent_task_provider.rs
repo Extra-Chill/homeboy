@@ -123,9 +123,7 @@ use catalog::{
     component_default_backend, validate_provider_runner_readiness_for_backend_with_providers,
 };
 #[cfg(test)]
-use command_runner::{
-    provider_command_env, render_provider_command_display, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
-};
+use command_runner::{provider_command_env, render_provider_command_display};
 #[cfg(test)]
 use fixtures::fixture_artifact;
 #[cfg(test)]

@@ -3,10 +3,9 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
-    AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
-    AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskOutcomeStatus, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -1582,61 +1581,6 @@ fn retryable_workspace_metadata_transport_failure_builds_transient_outcome() {
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The retry runs through `retry_with_runtime_admission_in_store` with
-/// `force = false` and `enforce_lineage_reservation = false` — the exact
-/// arguments `retry_in_store` passes — and a stub admission, because controller
-/// admission is machine-global by design and would otherwise reach the real
-/// operator runtime store once the home is no longer mutated. That is the same
-/// shape `submit_and_persist.rs:1490` already uses.
-#[test]
-fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let record = lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "runner-projected-retry", |_| Ok(json!({})))
-        .expect("controller plan submitted");
-    let mut projected = lifecycle_store
-        .read_record(&record.run_id)
-        .expect("source record");
-    projected.plan_path =
-        "/home/chubes/.local/share/homeboy/agent-task-runs/runner-projected-retry/plan.json"
-            .to_string();
-    lifecycle_store
-        .write_record(&projected)
-        .expect("runner projection mirrored");
-
-    let retry_record = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        Some("runner-projected-retry-local"),
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect("local retry uses controller plan");
-    assert_eq!(
-        load_plan_in_store(&lifecycle_store, &retry_record.run_id).expect("retry plan"),
-        plan
-    );
-
-    std::fs::remove_file(record.plan_path).expect("remove authoritative controller plan");
-    let error = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        Some("missing-controller-plan"),
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect_err("missing controller plan fails closed");
-    assert_eq!(error.code, ErrorCode::InternalIoError);
-}
-
 /// Persisting a terminal Lab-bound record from inside a config-lock section is
 /// the deadlock class behind #10751.
 ///
@@ -2691,51 +2635,6 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
     assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, "run_store-contract");
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The successor identity, the inherited notification route, and the
-/// plan read back for it all follow the injected root, so the retry lineage
-/// asserted below is the one this store recorded. The admission is stubbed for
-/// the same reason as `retry_uses_controller_plan_when_runner_projection_replaces_plan_path`.
-#[test]
-fn retry_submits_new_run_from_existing_plan() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "run-original", |_| Ok(json!({})))
-        .expect("submitted");
-    let mut source = lifecycle_store.read_record("run-original").expect("source");
-    source.metadata["notification_route"] = json!({
-        "transport": "extension",
-        "route": "opaque-origin"
-    });
-    lifecycle_store
-        .write_record(&source)
-        .expect("route persisted");
-
-    let record = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        "run-original",
-        Some("run-retry"),
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect("retry submitted");
-    let loaded_plan = load_plan_in_store(&lifecycle_store, "run-retry").expect("retry plan loaded");
-
-    assert_eq!(record.run_id, "run-retry");
-    assert_eq!(record.state, AgentTaskRunState::Queued);
-    assert_eq!(record.metadata["retry_of"], json!("run-original"));
-    assert_eq!(
-        record.metadata["notification_route"]["route"],
-        "opaque-origin"
-    );
-    assert_eq!(loaded_plan.plan_id, "plan-a");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

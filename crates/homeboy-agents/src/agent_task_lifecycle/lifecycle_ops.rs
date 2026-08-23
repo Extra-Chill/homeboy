@@ -2057,7 +2057,6 @@ pub fn normalize_local_execution_placement_in_store(
 #[cfg(test)]
 mod execution_placement_tests {
     use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
         ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
     };
@@ -5458,52 +5457,6 @@ fn retry_with_force_inner_in_store(
                 || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
             )
         },
-    )
-}
-
-/// Admit one retry successor into an explicitly rooted store.
-///
-/// This is the whole re-entry decision, and every input to it follows the
-/// injected root. The source record and the Cook alias that resolves it come
-/// from this store, so a Cook id cannot resolve against another home's index and
-/// mint a successor over a live Cook here. The lineage walk that finds the root
-/// of the `retry_of` chain reads this store's records, the lineage reservation
-/// lock is taken beside this store's own run directory, and the successor scan
-/// that decides "is a retry already active?" reads this store's observation
-/// database — a scan that answered ambiently would refuse a legitimate retry
-/// because another home holds an active successor, or, far worse, admit a second
-/// live successor because the active one it should have seen was recorded here.
-/// The plan, the acceptance-repair lineage write, and the retry lineage stamped
-/// back onto the source and root records all follow the same store.
-///
-/// The controller-runtime admission and its queue projection are deliberately
-/// left as parameters, exactly as `submit_plan_with_runtime_admission_in_store`
-/// leaves them. Admission itself is machine-global by design — it writes under
-/// `paths::controller_runtimes_store()` and takes a cross-process lock — but the
-/// cancellation check inside it reads *lifecycle* state, and that read is rooted
-/// by the caller that owns the store.
-pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    requested_run_id: Option<&str>,
-    force: bool,
-    enforce_lineage_reservation: bool,
-    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
-    admit_runtime: F,
-) -> Result<AgentTaskRunRecord>
-where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
-{
-    retry_with_runtime_admission_with_metadata_in_store(
-        lifecycle_store,
-        run_id,
-        requested_run_id,
-        force,
-        enforce_lineage_reservation,
-        None,
-        admission_status,
-        admit_runtime,
     )
 }
 

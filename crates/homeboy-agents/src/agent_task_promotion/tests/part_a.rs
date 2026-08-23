@@ -3,30 +3,24 @@
 
 use super::super::apply::{
     preflight_configured_workspace_provider_with_config, run_provider_command,
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionApplyRequest, ExternalPromotionWorkspaceProvider,
+    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider_and_checkpoint_in_observation_store,
-    retain_committed_changes_artifact, validate_artifact_content,
+    retain_committed_changes_artifact,
 };
 use super::super::types::{
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
-use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::{HomeboyConfig, WorktreeProviderListResultMapping};
+use homeboy_core::defaults::HomeboyConfig;
 use homeboy_core::worktree::{self};
-use homeboy_core::Result;
 use serde_json::Value;
-use sha2::Digest;
-use std::path::Path;
 
 #[test]
 fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {

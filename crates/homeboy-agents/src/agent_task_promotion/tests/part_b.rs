@@ -3,7 +3,6 @@
 
 use super::super::apply::{
     run_provider_command, run_provider_command_with_timeout, AgentTaskPromotionApplyRequest,
-    AgentTaskPromotionWorkspace, AgentTaskPromotionWorkspaceProvider,
     ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
     AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
@@ -12,24 +11,16 @@ use super::super::promote::{
     validate_artifact_content,
 };
 use super::super::types::{
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
-use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-};
+use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA};
 use crate::agent_task_gate::{
-    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
-use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::WorktreeProviderListResultMapping;
-use homeboy_core::Result;
 use serde_json::Value;
-use sha2::Digest;
-use std::path::Path;
 use std::process::Command;
 
 #[test]

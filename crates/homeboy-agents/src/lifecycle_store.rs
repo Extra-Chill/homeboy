@@ -1441,12 +1441,6 @@ pub(super) fn confirm_cook_notification_in_store(
     write_private_json(&delivered_path, marker)
 }
 
-/// Release a provisional claim after a non-delivery so a later terminal
-/// observer can retry it.
-pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
-    release_cook_notification_claim_in_store(&default_store()?, cook_id)
-}
-
 /// Release a provisional claim beside the injected store's own Cook index.
 ///
 /// This removes the marker `claim_cook_notification_in_store` created, so it

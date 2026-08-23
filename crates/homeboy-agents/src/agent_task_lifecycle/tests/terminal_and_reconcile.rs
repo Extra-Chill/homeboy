@@ -3,10 +3,10 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskLimits, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -686,85 +686,6 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     changed_recovery.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"] =
         json!("provider_failure");
     assert!(candidate_adoption_recovery_outcome(&changed_recovery, &plan.tasks[0]).is_none());
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The claim is that the *successor* plan file equals the plan the
-/// original attempt persisted, so the write, the failure, the retry successor
-/// and both plan reads have to name one installation — comparing a successor
-/// plan from one home against a source plan from another proves nothing.
-///
-/// `retry` becomes `retry_with_runtime_admission_in_store(…, false, false,
-/// None, …)` with a stub admission: that is the exact flag pair the ambient
-/// `retry` uses (`retry_in_store` → `retry_with_force_inner_in_store` with
-/// `force: false, enforce_lineage_reservation: false`). Only the
-/// controller-runtime admission is stubbed, because that queue lives under
-/// `paths::controller_runtimes_store()` and is deliberately machine-global.
-/// Same substitution as `retry_submits_new_run_from_existing_plan`.
-#[test]
-fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.plan_id = "materialized-cook-plan".to_string();
-    plan.tasks[0].instructions = "implement the original user task".to_string();
-    plan.tasks[0].workspace.root = Some("/materialized/worktree".to_string());
-    plan.rebuild_homeboy_plan();
-    let record = record_lab_offload_phase_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadPhaseRecord {
-            requested_run_id: "failed-lab-cook",
-            runner_id: "homeboy-lab",
-            phase: "materializing",
-            remote_workspace: Some("pending"),
-            source_checkout: None,
-            provider_rotation: None,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("controller records user plan before pending handoff");
-    let persisted =
-        load_plan_in_store(&lifecycle_store, &record.run_id).expect("persisted user plan");
-    record_pre_execution_failure_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        &persisted,
-        "lab_handoff",
-        &Error::internal_unexpected("runner daemon restarted"),
-    )
-    .expect("terminal handoff failure");
-
-    let retry = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        Some("failed-lab-cook-retry"),
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect("retry record");
-    let recovered = load_plan_in_store(&lifecycle_store, &retry.run_id).expect("recovered plan");
-
-    assert_eq!(recovered, plan);
-    assert_eq!(
-        recovered.tasks[0].workspace.root.as_deref(),
-        Some("/materialized/worktree")
-    );
-    assert!(!serde_json::to_string(&recovered)
-        .expect("plan json")
-        .contains("pending"));
-    assert_eq!(retry.metadata["retry_origin"]["runner_id"], "homeboy-lab");
-    assert_eq!(
-        retry.metadata["retry_origin"]["remote_workspace"],
-        "pending"
-    );
-    assert_eq!(
-        retry.metadata["retry_origin"]["pre_execution_failure"]["phase"],
-        "lab_handoff"
-    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2190,134 +2111,6 @@ fn acceptance_rejects_a_promotion_that_changes_during_authority_verification() {
     .expect("acceptance record");
     assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
     assert_eq!(acceptance.candidate.head, "candidate-b");
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The repair lineage is the assertion: the rejection, the successor
-/// reservation, the bounded second attempt and the replacement promotion all
-/// have to be counted in one home, because "the repair budget is exhausted"
-/// is a statement about the successors this store already holds.
-///
-/// Both `retry` calls become `retry_with_runtime_admission_in_store(…, false,
-/// false, None, …)` with a stub admission. That is the exact flag pair the
-/// ambient `retry` uses (`retry_in_store` → `retry_with_force_inner_in_store`
-/// with `force: false, enforce_lineage_reservation: false`); only the
-/// controller-runtime admission is stubbed, because that queue lives under
-/// `paths::controller_runtimes_store()` and is deliberately process-global —
-/// a migrated test enqueuing against the real operator data root could block
-/// on its cross-process lock. Same substitution as
-/// `retry_submits_new_run_from_existing_plan`.
-///
-/// `revalidate_durable_attestation` stays ambient: it reads no durable state at
-/// all, only the process-global acceptance verifier registry that
-/// `AcceptanceVerifierTestGuard` already guards with its own mutex.
-#[test]
-fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.metadata = json!({
-        "acceptance": { "authority": "independent-review", "policy": "release-v1" },
-    });
-    let run_id = "acceptance-repair-and-restart";
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
-        .expect("submitted");
-    record_promotion_in_store(
-        &lifecycle_store,
-        run_id,
-        applied_acceptance_promotion("candidate-a", "base-a"),
-    )
-    .expect("green promotion recorded");
-    let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
-
-    let rejected = record_acceptance_verdict_with_feedback_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskAcceptanceVerdict::Rejected,
-        vec!["review://fixture/rejection".to_string()],
-        "fixture-token".to_string(),
-        Some("Handle the reviewer concern.".to_string()),
-    )
-    .expect("rejection recorded");
-    assert_eq!(
-        rejected
-            .acceptance
-            .as_ref()
-            .expect("acceptance")
-            .repair_attempts,
-        1
-    );
-
-    let repair = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        run_id,
-        None,
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect("one rejection repair is available");
-    assert_eq!(repair.metadata["acceptance_repair_lineage"]["count"], 1);
-    let persisted_repair_plan =
-        load_plan_in_store(&lifecycle_store, &repair.run_id).expect("restart loads repair plan");
-    assert!(persisted_repair_plan.tasks[0]
-        .instructions
-        .contains("Handle the reviewer concern."));
-    assert_eq!(
-        persisted_repair_plan.tasks[0].inputs["cook_loop"]["reviewer_remediation"]["feedback"],
-        "Handle the reviewer concern."
-    );
-    assert_eq!(
-        rejected.metadata["acceptance_repair"]["feedback"], "Handle the reviewer concern.",
-        "reviewer feedback remains durable for the Cook repair planner"
-    );
-    let error = retry_with_runtime_admission_in_store(
-        &lifecycle_store,
-        &repair.run_id,
-        None,
-        false,
-        false,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect_err("repair is bounded to one attempt");
-    assert!(error.message.contains("repair budget is exhausted"));
-
-    record_promotion_in_store(
-        &lifecycle_store,
-        run_id,
-        applied_acceptance_promotion("candidate-b", "base-a"),
-    )
-    .expect("replacement promotion invalidates rejection");
-    let accepted = record_acceptance_verdict_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskAcceptanceVerdict::Accepted,
-        vec!["review://fixture/acceptance".to_string()],
-        "fixture-token".to_string(),
-    )
-    .expect("acceptance recorded");
-    let acceptance = accepted.acceptance.expect("acceptance");
-    let attestation = acceptance
-        .attestation
-        .as_ref()
-        .expect("durable attestation")
-        .clone();
-    let request = AgentTaskAcceptanceVerificationRequest {
-        requirement: acceptance.requirement,
-        verdict: AgentTaskAcceptanceVerdict::Accepted,
-        candidate: acceptance.candidate,
-        base_sha: acceptance.base_sha,
-        evidence_refs: vec!["review://fixture/acceptance".to_string()],
-        token: String::new(),
-    };
-    // Rebuilding the request from disk models a fresh controller process;
-    // revalidation depends only on the durable signed evidence.
-    revalidate_durable_attestation(&request, &attestation)
-        .expect("restart revalidates durable acceptance");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

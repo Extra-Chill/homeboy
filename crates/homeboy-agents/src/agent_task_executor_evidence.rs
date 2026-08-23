@@ -463,11 +463,9 @@ fn push_unique_evidence_ref(outcome: &mut AgentTaskOutcome, evidence_ref: AgentT
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
         AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use serde_json::Map;
     use std::sync::Mutex;
 
     static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());

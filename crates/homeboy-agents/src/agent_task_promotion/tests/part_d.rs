@@ -2,26 +2,22 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
+    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
-use super::super::promote::{normalize_promotion_patch, validate_artifact_content};
+use super::super::promote::normalize_promotion_patch;
 use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
-    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
+    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
-use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
-use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::defaults::{
     HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
     WorktreeProviderListResultMapping,
 };
-use homeboy_core::Result;
 use serde_json::Value;
-use sha2::Digest;
 use std::path::PathBuf;
 
 #[test]

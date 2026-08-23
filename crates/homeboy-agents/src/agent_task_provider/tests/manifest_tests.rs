@@ -1,6 +1,5 @@
 use super::common::{request, script};
 use super::*;
-use crate::agent_task::AgentTaskOutputEvidenceRelationship;
 
 #[test]
 fn provider_capability_contract_exports_core_owned_schema_ids() {
