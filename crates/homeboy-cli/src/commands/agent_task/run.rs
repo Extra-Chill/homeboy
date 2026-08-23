@@ -4644,9 +4644,9 @@ impl ClassifiedHostPath {
 }
 
 /// Extract concrete Unix absolute paths from the bounded provider prompt
-/// surface. URL references and slash-separated concepts are excluded; host
-/// paths need an explicit file syntax, a recognized Unix root, or local
-/// filesystem resolution.
+/// surface. URL references, quoted examples, code, and slash-separated
+/// concepts are excluded; host paths need an explicit file syntax, an
+/// explicit assignment, or a recognized Unix root.
 #[cfg(test)]
 fn absolute_host_paths_in_provider_prompt(prompt: &str) -> homeboy::core::Result<Vec<String>> {
     Ok(classified_absolute_host_paths_in_provider_prompt(prompt)?
@@ -4668,72 +4668,108 @@ fn classified_absolute_host_paths_in_provider_prompt(
     }
 
     let mut paths = std::collections::BTreeSet::new();
-    for token in prompt.split_whitespace() {
-        if token.contains("://") && !token.contains("file://") {
+    let mut fenced = false;
+    for line in prompt.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
             continue;
         }
-        let mut candidate = token;
-        let file_url = token.find("file://");
-        if let Some(file) = file_url {
-            let rest = &token[file + "file://".len()..];
-            candidate = if rest.starts_with('/') {
-                rest
-            } else {
-                rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
-            };
+        if fenced || line.starts_with('\t') || line.starts_with("    ") {
+            continue;
         }
-        let mut offset = 0;
-        while offset < candidate.len() {
-            let Some(relative) = candidate[offset..].find('/') else {
-                break;
-            };
-            let start = offset + relative;
-            if start != 0
-                && !matches!(
-                    candidate[..start].chars().next_back(),
-                    Some('=' | ':' | '(' | '[' | '{' | '<' | '\'' | '"' | '`')
-                )
-            {
-                offset = start + 1;
+        for token in line.split_whitespace() {
+            if token.contains("://") && !token.contains("file://") {
                 continue;
             }
-            let path = &candidate[start..];
-            let end = path.find(|character: char| {
-                character.is_whitespace()
-                    || matches!(
-                        character,
-                        '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
-                    )
-            });
-            let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
-            let prefix = (start > 0)
-                .then(|| candidate[..start].chars().next_back())
-                .flatten();
-            let assignment = prefix == Some('=');
-            let quoted_or_angle_path = matches!(prefix, Some('\'' | '"' | '`' | '<'));
-            if let Some(classification) = classify_absolute_host_path(
-                path,
-                file_url.is_some(),
-                assignment,
-                quoted_or_angle_path,
-            ) {
-                paths.insert(ClassifiedHostPath {
-                    path: path.to_string(),
-                    token: bounded_prompt_path_token(token),
-                    classification,
-                });
+            let mut candidate = token;
+            let file_url = token.find("file://");
+            if let Some(file) = file_url {
+                if slash_is_quoted(token, file) {
+                    continue;
+                }
+                let rest = &token[file + "file://".len()..];
+                candidate = if rest.starts_with('/') {
+                    rest
+                } else {
+                    rest.find('/').map(|offset| &rest[offset..]).unwrap_or("")
+                };
             }
-            offset = start.saturating_add(path.len()).max(start + 1);
+            let mut offset = 0;
+            while offset < candidate.len() {
+                let Some(relative) = candidate[offset..].find('/') else {
+                    break;
+                };
+                let start = offset + relative;
+                if slash_is_quoted(candidate, start) {
+                    offset = start + 1;
+                    continue;
+                }
+                if start != 0
+                    && !matches!(
+                        candidate[..start].chars().next_back(),
+                        Some('=' | ':' | '(' | '[' | '{' | '<')
+                    )
+                {
+                    offset = start + 1;
+                    continue;
+                }
+                let path = &candidate[start..];
+                let end = path.find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(
+                            character,
+                            '\'' | '"' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?'
+                        )
+                });
+                let path = path[..end.unwrap_or(path.len())].trim_end_matches('.');
+                let prefix = (start > 0)
+                    .then(|| candidate[..start].chars().next_back())
+                    .flatten();
+                let assignment = prefix == Some('=');
+                if let Some(classification) =
+                    classify_absolute_host_path(path, file_url.is_some(), assignment)
+                {
+                    paths.insert(ClassifiedHostPath {
+                        path: path.to_string(),
+                        token: bounded_prompt_path_token(token),
+                        classification,
+                    });
+                }
+                offset = start.saturating_add(path.len()).max(start + 1);
+            }
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn slash_is_quoted(token: &str, offset: usize) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    for character in token[..offset].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if matches!(character, '\'' | '"' | '`') {
+            quote = if quote == Some(character) {
+                None
+            } else if quote.is_none() {
+                Some(character)
+            } else {
+                quote
+            };
+        }
+    }
+    quote.is_some()
 }
 
 fn classify_absolute_host_path(
     path: &str,
     file_url: bool,
     assignment: bool,
-    quoted_or_angle_path: bool,
 ) -> Option<&'static str> {
     let trimmed = path.trim_start_matches('/');
     let root = trimmed.split('/').next()?;
@@ -4745,9 +4781,6 @@ fn classify_absolute_host_path(
     }
     if assignment {
         return Some("explicit-path-assignment");
-    }
-    if quoted_or_angle_path {
-        return Some("quoted-or-angle-path");
     }
     if matches!(
         root,
@@ -4776,17 +4809,6 @@ fn classify_absolute_host_path(
             | "workspace"
     ) {
         return Some("unix-host-root");
-    }
-    if trimmed.contains('/') && Path::new(path).exists() {
-        return Some("existing-host-path");
-    }
-    if trimmed.contains('/')
-        && trimmed
-            .rsplit('/')
-            .next()
-            .is_some_and(|segment| segment.contains('.') && !segment.starts_with('.'))
-    {
-        return Some("file-like-absolute-path");
     }
     None
 }
@@ -5550,12 +5572,11 @@ mod provider_evidence_tests {
     }
 
     #[test]
-    fn scans_absolute_paths_across_provider_prompt_syntaxes() {
+    fn scans_explicit_absolute_paths_across_provider_prompt_syntaxes() {
         for prompt in [
             "Read file:///private/evidence.json",
             "evidence=/private/evidence.json",
             "[evidence](/private/evidence.json)",
-            "Read '/private/evidence.json', please.",
             "See </private/evidence.json>.",
         ] {
             let error = validate_provider_evidence_inputs(&[], Some(prompt))
@@ -5607,7 +5628,7 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         }
 
         let classified = classified_absolute_host_paths_in_provider_prompt(
-            "Read /private/evidence.json and run cat '/tmp/command-input.json'.",
+            "Read /private/evidence.json and set input=/tmp/command-input.json.",
         )
         .expect("classify host paths");
         assert_eq!(
@@ -5617,26 +5638,26 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
                 .collect::<Vec<_>>(),
             vec![
                 ("/private/evidence.json", "unix-host-root"),
-                ("/tmp/command-input.json", "quoted-or-angle-path"),
+                ("/tmp/command-input.json", "explicit-path-assignment"),
             ]
         );
 
         let error = validate_provider_evidence_inputs(
             &[],
-            Some("Read /private/evidence.json and run cat '/tmp/command-input.json'."),
+            Some("Read /private/evidence.json and set input=/tmp/command-input.json."),
         )
         .expect_err("Unix and quoted command paths require evidence");
         let evidence = error.details["id"]
             .as_str()
             .expect("classification evidence");
         assert!(evidence.contains("classification=unix-host-root token=/private/evidence.json"));
-        assert!(evidence
-            .contains("classification=quoted-or-angle-path token='/tmp/command-input.json'."));
+        assert!(evidence.contains(
+            "classification=explicit-path-assignment token=input=/tmp/command-input.json."
+        ));
     }
 
     #[test]
-    #[cfg(unix)]
-    fn scans_an_existing_single_segment_root_path() {
+    fn scans_a_recognized_single_segment_root_path() {
         assert_eq!(
             absolute_host_paths_in_provider_prompt("Read /tmp.").expect("scan real path"),
             vec!["/tmp".to_string()]
@@ -5754,29 +5775,45 @@ Evidence=file:///private/three.json path=/private/four.json.
         assert!(error.message.contains("//private/two.json"));
         assert!(error.message.contains("/private/three.json"));
         assert!(error.message.contains("/private/four.json"));
-        assert!(error.message.contains("/also/not-evidence"));
+        assert!(!error.message.contains("/also/not-evidence"));
         assert!(!error.message.contains("`/`"));
         assert!(!error.message.contains("// not evidence"));
     }
 
     #[test]
-    fn prompt_path_scanner_handles_embedded_json_quotes_angles_and_local_file_urls() {
+    fn prompt_path_scanner_ignores_quoted_examples_and_scans_explicit_local_paths() {
         let paths = absolute_host_paths_in_provider_prompt(
-            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///file/url.json //double/path.md / // https://example.com/ignore/me"#,
+            r#"{"input":"/json/path.md"} '< /quoted/path.txt >' < /private/angle/path.rs > key=/assigned/path.toml file://localhost/local/file.json file:///private/file-url.json //private/double/path.md / // https://example.com/ignore/me"#,
         )
         .expect("scan bounded prompt");
 
         assert_eq!(
             paths,
             vec![
-                "//double/path.md",
-                "/angle/path.rs",
+                "//private/double/path.md",
                 "/assigned/path.toml",
-                "/file/url.json",
-                "/json/path.md",
                 "/local/file.json",
-                "/quoted/path.txt",
+                "/private/angle/path.rs",
+                "/private/file-url.json",
             ]
+        );
+    }
+
+    #[test]
+    fn ignores_endpoint_repository_and_code_path_vocabulary() {
+        let prompt = r#"
+Route requests through /response, /startup, /sw.js, and /wp-codebox.
+Use core/html, direct/staged, and model/tool for Extra-Chill/homeboy.
+`/private/inline-example.json`, "/tmp/quoted-example.json", and "file:///tmp/quoted.json" are examples.
+    let path = "/private/indented-code.json";
+```
+let path = "/private/fenced-code.json";
+```
+"#;
+
+        assert_eq!(
+            absolute_host_paths_in_provider_prompt(prompt).expect("scan technical prose"),
+            Vec::<String>::new()
         );
     }
 

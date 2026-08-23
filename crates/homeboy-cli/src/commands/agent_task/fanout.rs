@@ -7256,7 +7256,7 @@ fi
     #[test]
     fn dry_run_and_live_plan_reject_the_same_undeclared_prompt_path() {
         let mut args = cook_batch_args();
-        args.prompt_template = Some("Compare before/after results for {issue_ref}.".to_string());
+        args.prompt_template = Some("Read /private/results.json for {issue_ref}.".to_string());
 
         let dry_run = build_static_cook_batch_plan(&args)
             .expect_err("dry-run must validate undeclared prompt paths");
