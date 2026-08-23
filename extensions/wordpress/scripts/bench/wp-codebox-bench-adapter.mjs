@@ -3,6 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+
+const requireFromHere = createRequire(import.meta.url);
+const { requireAgentRuntimeModule } = requireFromHere('../lib/agent-runtime-paths.cjs');
+const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 const settings = json(process.env.HOMEBOY_SETTINGS_JSON, {});
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
@@ -28,6 +33,15 @@ const options = clean({
   prepareSteps: settings.wordpress_runtime_prepare_steps,
   postSteps: settings.wordpress_runtime_post_steps,
 });
+const runtime = preflightWpCodeboxRuntime({ env: process.env, settings });
+if (!runtime.ready) {
+  throw new Error(`WP Codebox runtime preflight failed: ${runtime.reason}; required >=${runtime.required_version}, observed ${runtime.selected.version || 'unavailable'} at ${runtime.selected.path || 'no executable'}. Run ${runtime.remediation}.`);
+}
+const invocation = wpCodeboxCommand(runtime.selected.path);
+const commandPreflight = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { env: process.env });
+if (!commandPreflight.ready) {
+  throw new Error(`WP Codebox command preflight failed: ${commandPreflight.reason}; required >=${commandPreflight.required_version}, observed ${commandPreflight.selected.version || 'unavailable'} at ${commandPreflight.selected.path || 'no executable'}. Run ${commandPreflight.remediation}.`);
+}
 
 try {
   await writeFile(optionsPath, `${JSON.stringify(options)}\n`);
@@ -44,7 +58,7 @@ try {
 }
 
 function run(args, capture = false) {
-  const result = spawnSync(process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', args, { cwd: componentPath, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+  const result = spawnSync(invocation.command, [...invocation.args, ...args], { cwd: componentPath, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
   if (result.error) throw result.error;
   if (capture && result.stdout) process.stdout.write(result.stdout);
   if (capture && result.stderr) process.stderr.write(result.stderr);

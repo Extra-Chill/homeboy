@@ -20,11 +20,17 @@ const capturePath = path.join(root, 'capture.json');
 const recipeFile = path.join(root, 'recipe.json');
 const artifactsDir = path.join(root, 'artifacts');
 const outputFile = path.join(root, 'output', 'wp-codebox-output.json');
+const managedInstall = path.join(root, 'managed');
+const managedSource = path.join(managedInstall, 'source');
+const managedBin = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
 
 fs.writeFileSync(recipeFile, JSON.stringify({ schema: 'wp-codebox/workspace-recipe/v1' }));
 fs.writeFileSync(fixtureBin, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 fs.writeFileSync(process.env.FIXTURE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2) }, null, 2));
 if (process.env.FIXTURE_FAIL) {
   process.stdout.write(JSON.stringify({ ok: false, failure: true }));
@@ -79,7 +85,9 @@ async function waitForReaped(pids, timeoutMs = 5000) {
   assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/env/wp-codebox', HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: fixtureBin }) } }), '/env/wp-codebox');
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: '{"wp_codebox_bin":"/bin/wp-codebox"}' }), { wp_codebox_bin: '/bin/wp-codebox' });
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: 'not json' }), {});
-  assert.throws(() => wpCodeboxBin({ env: {} }), /WP Codebox binary is not configured/);
+  // Canonical selection may supply an installed runtime when no explicit pin is
+  // present; execution still performs the exact-command preflight below.
+  assert.equal(typeof wpCodeboxBin({ env: {} }), 'string');
   assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.cjs'), { command: process.execPath, args: ['/tmp/wp-codebox.cjs'] });
   assert.deepEqual(wpCodeboxCommand('wp-codebox'), { command: 'wp-codebox', args: [] });
   assert.deepEqual(
@@ -112,6 +120,54 @@ async function waitForReaped(pids, timeoutMs = 5000) {
   ]);
   const capture = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
   assert.deepEqual(capture.argv, ['recipe-run', '--recipe', recipeFile, '--artifacts', artifactsDir, '--fixture', '--json']);
+
+  // Managed selection is provenance-checked before execution. This fixture is
+  // a real immutable-style source checkout with a matching identity record.
+  fs.mkdirSync(path.dirname(managedBin), { recursive: true });
+  fs.copyFileSync(fixtureBin, managedBin);
+  fs.chmodSync(managedBin, 0o755);
+  require('node:child_process').spawnSync('git', ['init', '-q'], { cwd: managedSource });
+  require('node:child_process').spawnSync('git', ['add', '.'], { cwd: managedSource });
+  require('node:child_process').spawnSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture'], { cwd: managedSource });
+  const managedSha = require('node:child_process').spawnSync('git', ['rev-parse', 'HEAD'], { cwd: managedSource, encoding: 'utf8' }).stdout.trim();
+  const managedDigest = require('node:crypto').createHash('sha256').update(fs.readFileSync(managedBin)).digest('hex');
+  fs.writeFileSync(path.join(managedSource, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: managedSha, cli_sha256: managedDigest, required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+  await runWpCodeboxRecipe({
+    recipeFile,
+    artifactsDir,
+    outputFile,
+    env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall, FIXTURE_CAPTURE_PATH: capturePath },
+  });
+
+  fs.appendFileSync(managedBin, '\n// tampered\n');
+  await assert.rejects(
+    runWpCodeboxRecipe({ recipeFile, artifactsDir, outputFile, env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall, FIXTURE_CAPTURE_PATH: capturePath } }),
+    /wp_codebox_managed_source_identity_invalid/
+  );
+
+  fs.mkdirSync(path.join(managedInstall, 'source.update-lock'));
+  await assert.rejects(
+    runWpCodeboxRecipe({ recipeFile, artifactsDir, outputFile, env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall, FIXTURE_CAPTURE_PATH: capturePath } }),
+    /wp_codebox_managed_updating/
+  );
+  // An explicit pin remains usable while an unrelated managed update holds its
+  // lock; it is still subjected to the exact-command capability preflight.
+  await runWpCodeboxRecipe({
+    recipeFile,
+    artifactsDir,
+    outputFile,
+    wpCodeboxBin: fixtureBin,
+    env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall, FIXTURE_CAPTURE_PATH: capturePath },
+  });
+  fs.rmSync(path.join(managedInstall, 'source.update-lock'), { recursive: true });
+  // The helper accepts the selector's alternate configured pin inputs too.
+  await runWpCodeboxRecipe({
+    recipeFile,
+    artifactsDir,
+    outputFile,
+    runtime_bin: fixtureBin,
+    env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall, FIXTURE_CAPTURE_PATH: capturePath },
+  });
 
   await assert.rejects(
     runWpCodeboxRecipe({

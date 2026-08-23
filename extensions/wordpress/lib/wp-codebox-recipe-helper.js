@@ -22,13 +22,33 @@ const DEFAULT_KILL_GRACE_MS = 5000;
  * Internal dependencies
  */
 const {
-  homeboySettings,
-  wpCodeboxCommand,
+	homeboySettings,
+	wpCodeboxCommand,
 } = require('./wp-codebox-resolver');
-const { createCodeboxClient } = require('./codebox-client');
+const { requireAgentRuntimeModule } = require('../scripts/lib/agent-runtime-paths.cjs');
+const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, selectWpCodeboxRuntime, wpCodeboxCommand: runtimeCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 function wpCodeboxBin(options = {}) {
-  return createCodeboxClient(options).identity().bin;
+  const env = { ...process.env, ...(options.env || {}) };
+  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
+  const selected = selectWpCodeboxRuntime({ ...options, env, settings }).selected.path;
+  if (!selected) throw new Error('WP Codebox binary is not configured. Set wp_codebox_bin or HOMEBOY_WP_CODEBOX_BIN.');
+  return selected;
+}
+
+function canonicalWpCodeboxRuntime(options = {}) {
+  const env = { ...process.env, ...(options.env || {}) };
+  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
+  const runtime = preflightWpCodeboxRuntime({ ...options, env, settings });
+  if (!runtime.ready) {
+    throw new Error(`WP Codebox runtime preflight failed: ${runtime.reason}; required >=${runtime.required_version}, observed ${runtime.selected.version || 'unavailable'} at ${runtime.selected.path || 'no executable'}. Run ${runtime.remediation}.`);
+  }
+  const invocation = runtimeCommand(runtime.selected.path);
+  const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env, settings });
+  if (!command.ready) {
+    throw new Error(`WP Codebox command preflight failed: ${command.reason}; required >=${command.required_version}, observed ${command.selected.version || 'unavailable'} at ${command.selected.path || 'no executable'}. Run ${command.remediation}.`);
+  }
+  return { ...runtime, invocation };
 }
 
 function recipeEventName(name, options = {}) {
@@ -311,6 +331,7 @@ async function runWpCodeboxRecipe({
   signal,
   timeoutMs,
   killGraceMs,
+  ...runtimeOptions
 } = {}) {
   if (!recipeFile) {
     throw new Error('runWpCodeboxRecipe requires recipeFile.');
@@ -325,8 +346,8 @@ async function runWpCodeboxRecipe({
   }
 
   const eventOptions = { eventSource, eventPrefix };
-  const identity = createCodeboxClient({ wp_codebox_bin: explicitWpCodeboxBin || bin, env }).identity();
-  const { command, args } = identity.invocation;
+  const runtime = canonicalWpCodeboxRuntime({ ...runtimeOptions, wp_codebox_bin: explicitWpCodeboxBin || bin || runtimeOptions.wp_codebox_bin, env });
+  const { command, args } = runtime.invocation;
   const commandArgs = [
     ...args,
     WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
