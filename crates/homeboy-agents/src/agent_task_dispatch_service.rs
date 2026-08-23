@@ -129,6 +129,9 @@ pub struct DispatchCoreInputs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskDispatchRequest {
     pub prompt: Option<String>,
+    /// The CLI captured this prompt from a structured source already. Treat it
+    /// as literal task text rather than parsing it as another source spec.
+    pub prompt_is_literal: bool,
     pub tasks: Vec<String>,
     pub cwd: Option<String>,
     pub workspace: Option<String>,
@@ -345,6 +348,7 @@ fn dispatch_report(
 #[derive(Debug, Clone, Default)]
 pub struct AgentTaskDispatchCommand {
     pub prompt: Option<String>,
+    pub prompt_is_literal: bool,
     pub tasks: Vec<String>,
     pub cwd: Option<String>,
     pub workspace: Option<String>,
@@ -666,6 +670,7 @@ fn resolve_dispatch_request_with_sources(
 
     Ok(AgentTaskDispatchRequest {
         prompt: command.prompt,
+        prompt_is_literal: command.prompt_is_literal,
         tasks: command.tasks,
         cwd: command.cwd,
         workspace: command.workspace,
@@ -757,6 +762,7 @@ mod tests {
         };
         let request = AgentTaskDispatchRequest {
             prompt: Some("Cook the task.".to_string()),
+            prompt_is_literal: false,
             tasks: Vec::new(),
             cwd: None,
             workspace: None,

@@ -664,7 +664,8 @@ fn run_materialized_provider_command_once_contained(
     // baseline replacement. A component-relative cwd is resolved only after
     // that identity is established, so nested packages execute correctly in
     // both the original worktree and isolated retry baselines.
-    let cwd = match request.request.workspace.root.as_deref() {
+    let attestation_root = request.request.workspace.root.as_deref().map(PathBuf::from);
+    let cwd = match attestation_root.as_deref() {
         Some(root) => match homeboy_core::resolve_contained_local_path(
             root,
             request
@@ -690,8 +691,12 @@ fn run_materialized_provider_command_once_contained(
         },
         None => provider_cwd,
     };
-    let cwd_identity = cwd.as_deref().map(workspace_identity).transpose();
-    let cwd_identity = match cwd_identity {
+    let attestation_identity = attestation_root
+        .as_deref()
+        .or(cwd.as_deref())
+        .map(workspace_identity)
+        .transpose();
+    let attestation_identity = match attestation_identity {
         Ok(identity) => identity,
         Err(message) => {
             return failure_outcome(
@@ -821,7 +826,7 @@ fn run_materialized_provider_command_once_contained(
             .or_else(|| request.request.metadata.get("cook_workspace_identity"))
         {
             let identity_match = crate::agent_task_workspace_identity::workspace_attestation_match(
-                &cwd,
+                attestation_root.as_deref().unwrap_or(&cwd),
                 attestation,
             );
             if identity_match
@@ -843,18 +848,24 @@ fn run_materialized_provider_command_once_contained(
                     } else {
                         "provider workspace no longer matches its Cook attempt identity attestation; refusing execution".to_string()
                     },
-                    json!({ "provider": provider.id, "workspace": cwd }),
+                    json!({ "provider": provider.id, "workspace": attestation_root.as_deref().unwrap_or(&cwd), "execution_cwd": cwd }),
                 );
             }
         }
-        if workspace_identity(&cwd).as_ref().ok() != cwd_identity.as_ref() {
+        if attestation_root
+            .as_deref()
+            .or(Some(&cwd))
+            .and_then(|path| workspace_identity(path).ok())
+            .as_ref()
+            != attestation_identity.as_ref()
+        {
             return failure_outcome(
                 request,
                 AgentTaskOutcomeStatus::ProviderError,
                 AgentTaskFailureClassification::InvalidInput,
                 "agent_task.workspace_identity_changed",
                 "provider workspace changed after validation; refusing execution".to_string(),
-                json!({ "provider": provider.id, "workspace": cwd }),
+                json!({ "provider": provider.id, "workspace": attestation_root.as_deref().unwrap_or(&cwd), "execution_cwd": cwd }),
             );
         }
         command_builder.current_dir(cwd);

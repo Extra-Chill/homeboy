@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[test]
-fn cook_rejects_empty_prompt_stdin_before_destination_or_provider_preflight() {
+fn cook_rejects_empty_whitespace_padded_prompt_stdin_before_destination_or_provider_preflight() {
     let output = Command::new(homeboy_bin())
         .args([
             "--placement",
@@ -11,7 +11,7 @@ fn cook_rejects_empty_prompt_stdin_before_destination_or_provider_preflight() {
             "agent-task",
             "cook",
             "--prompt",
-            "-",
+            " \t-\n ",
             "--backend",
             "fixture",
             "--no-finalize",
@@ -37,7 +37,7 @@ fn cook_rejects_empty_prompt_stdin_before_destination_or_provider_preflight() {
 }
 
 #[test]
-fn cook_snapshots_multiline_stdin_once_in_the_durable_recipe() {
+fn cook_snapshots_multiline_whitespace_padded_stdin_once_in_the_durable_recipe() {
     let home = tempfile::tempdir().expect("home");
     let source = tempfile::tempdir().expect("source checkout");
     git(source.path(), &["init"]);
@@ -72,7 +72,7 @@ fn cook_snapshots_multiline_stdin_once_in_the_durable_recipe() {
             "--run-id",
             "stdin-snapshot",
             "--prompt",
-            "-",
+            " \t-\n ",
             "--backend",
             "fixture",
             "--repo",
@@ -112,14 +112,14 @@ fn cook_snapshots_multiline_stdin_once_in_the_durable_recipe() {
     );
     assert_eq!(
         recipe["attempts"][0]["plan"]["tasks"][0]["metadata"]["prompt_source"],
+        " \t-\n "
+    );
+    assert_eq!(
+        recipe["attempts"][0]["plan"]["metadata"]["prompt_input_v1"]["source"],
         "stdin"
     );
     assert_eq!(
-        recipe["attempts"][0]["plan"]["metadata"]["prompt_input"]["source"],
-        "stdin"
-    );
-    assert_eq!(
-        recipe["attempts"][0]["plan"]["metadata"]["prompt_input"]["sha256"],
+        recipe["attempts"][0]["plan"]["metadata"]["prompt_input_v1"]["sha256"],
         format!(
             "sha256:{}",
             homeboy_engine_primitives::content_hash::sha256_hex(prompt.as_bytes())

@@ -1812,7 +1812,7 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
         let linked = homeboy::core::test_support::bounded_output(command);
         assert!(linked.status.success(), "{linked:?}");
         let workspace = workspace.display().to_string();
-        let cook = Cli::parse_from([
+        let mut cook = Cli::parse_from([
             "homeboy",
             "agent-task",
             "cook",
@@ -1821,7 +1821,7 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
             // `--goal` frames the work and `--prompt` is its one source.
             // Pairing `--goal` with `--task` is a rejected conflict (#10070).
             "--prompt",
-            "Repair the Lab Cook compiler",
+            "-",
             "--cwd",
             &workspace,
             "--to-worktree",
@@ -1832,6 +1832,20 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
             "--run-id",
             "cook-lab-goal-task",
         ]);
+        let Commands::AgentTask(agent_task) = &mut cook.command else {
+            panic!("agent-task command");
+        };
+        let crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) =
+            &mut agent_task.command
+        else {
+            panic!("Cook command");
+        };
+        cook_args.prompt_snapshot = Some(crate::commands::agent_task::args::CookPromptSnapshot {
+            content: "@/does/not/exist\n\t".to_string(),
+            source: "stdin".to_string(),
+            sha256: "sha256:fixture".to_string(),
+            size_bytes: "@/does/not/exist\n\t".len(),
+        });
 
         let plan = materialize_agent_task_cook_plan(&cook, None)
             .expect("materialize Lab Cook plan")
@@ -1839,7 +1853,9 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
         assert_eq!(plan.metadata["cook_goal"], "Preserve one provider cell");
-        assert_eq!(plan.tasks[0].instructions, "Repair the Lab Cook compiler");
+        assert_eq!(plan.tasks[0].instructions, "@/does/not/exist\n\t");
+        assert_eq!(plan.tasks[0].metadata["prompt_source"], "-");
+        assert_eq!(plan.metadata["prompt_input_v1"]["source"], "stdin");
         assert_eq!(
             plan.tasks[0].metadata["cook_goal"],
             "Preserve one provider cell"
