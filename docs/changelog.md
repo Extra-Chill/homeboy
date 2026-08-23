@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.1] - 2026-08-23
+
+### Fixed
+- bind ruleset preflight to Actions
+- audit required gates ruleset drift
+- restore nextest shard parallelism
+- preserve pre-provider ownership
+- reap descendants before stream drain
+- preserve tracked nested build sources
+- return snapshot stability failure
+- stabilize snapshot manifests
+
 ## [0.355.0] - 2026-08-23
 
 ### Added
