@@ -277,7 +277,7 @@ pub use execution::{
     daemon_api_get, daemon_api_post, exec, finish_scheduled_terminal_runner_exec_recovery,
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
     promote_runner_exec_artifacts, promote_runner_exec_artifacts_in_store,
-    promote_runner_exec_summaries, promote_runner_exec_summaries_in_store, promoted_output,
+    promote_runner_exec_summaries_in_store, promoted_output,
     reconcile_runner_generation_after_evidence,
     record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,

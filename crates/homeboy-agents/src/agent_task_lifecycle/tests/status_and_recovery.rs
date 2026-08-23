@@ -22,6 +22,13 @@ use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+/// The tests below drive the store-rooted lifecycle entry points. Resolving the
+/// store once here keeps the ambient lookup in a single place instead of at
+/// every call site, and lets the ambient wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 #[test]
 fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
     assert_eq!(
@@ -1102,7 +1109,8 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
                 durable_plan: None,
             })
             .expect("record Lab admission");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1290,7 +1298,8 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
                 durable_plan: None,
             })
             .expect("record Lab admission");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1353,7 +1362,8 @@ fn preparing_crash_never_submits_or_queries_the_runner() {
             durable_plan: None,
         })
         .expect("planned handoff");
-        record_lab_offload_submission_intent(
+        record_lab_offload_submission_intent_in_store(
+            &test_lifecycle_store(),
             "preparing-crash",
             "homeboy-lab",
             "/runner/workspace/homeboy",
@@ -1399,7 +1409,8 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                 durable_plan: None,
             })
             .expect("planned handoff");
-            record_lab_offload_submission_intent(
+            record_lab_offload_submission_intent_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
@@ -1466,7 +1477,8 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             durable_plan: None,
         })
         .expect("planned absent handoff");
-        record_lab_offload_submission_intent(
+        record_lab_offload_submission_intent_in_store(
+            &test_lifecycle_store(),
             "absent-after-deadline",
             "homeboy-lab",
             "/runner/workspace/homeboy",

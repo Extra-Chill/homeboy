@@ -21,6 +21,13 @@ use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use tempfile::TempDir;
 
+/// The tests below drive the store-rooted lifecycle entry points. Resolving the
+/// store once here keeps the ambient lookup in a single place instead of at
+/// every call site, and lets the ambient wrappers be deleted (#7505).
+fn test_lifecycle_store() -> AgentTaskLifecycleStore {
+    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+}
+
 struct TerminalSnapshotProvider {
     snapshot: Mutex<Option<homeboy_core::api_jobs::RunnerJobLogSnapshot>>,
 }
@@ -465,7 +472,8 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
             durable_plan: None,
         })
         .expect("controller proxy");
-        record_lab_offload_submission_intent(
+        record_lab_offload_submission_intent_in_store(
+            &test_lifecycle_store(),
             "intent-before-post",
             "homeboy-lab",
             "/runner/workspace/repo",

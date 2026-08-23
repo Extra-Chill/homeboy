@@ -4352,20 +4352,6 @@ pub fn claim_next_eligible_queued_run_with_preflight_in_store(
     )
 }
 
-/// Claim the oldest eligible queued record that matches a caller-owned scope.
-/// Records outside the scope are not inspected, quarantined, or allowed to
-/// delay admission for targeted work.
-pub fn claim_next_eligible_queued_run_with_preflight_and_filter(
-    include: impl Fn(&AgentTaskRunRecord) -> bool,
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
-) -> Result<AgentTaskQueuedRunClaim> {
-    claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
-        include,
-        MAX_QUEUE_ADMISSION_RECORDS,
-        preflight,
-    )
-}
-
 /// Scoped, preflighted admission against an explicitly rooted store, using the
 /// same default admission budget as the ambient pair.
 pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
