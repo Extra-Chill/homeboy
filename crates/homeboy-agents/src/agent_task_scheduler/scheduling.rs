@@ -688,20 +688,20 @@ impl AgentTaskScheduleSupport {
 
             let mut task = running.remove(index);
             if let Some(run_id) = task.run_id.as_deref() {
-                let _ = match lifecycle_store {
-                    Some(store) => store.record_provider_execution_terminal(
+                // The timeout terminal record belongs to the same exactly-once
+                // sequence as the reservation this task holds, so it is written
+                // only through the store the caller resolved. Falling back to the
+                // environment here could record the timeout in a different
+                // installation than the one holding the reservation, which is the
+                // divergence this record exists to close (#7505).
+                if let Some(store) = lifecycle_store {
+                    let _ = store.record_provider_execution_terminal(
                         run_id,
                         &task.task_id,
                         task.attempt,
                         "timed_out",
-                    ),
-                    None => crate::agent_task_lifecycle::record_provider_execution_terminal(
-                        run_id,
-                        &task.task_id,
-                        task.attempt,
-                        "timed_out",
-                    ),
-                };
+                    );
+                }
             }
             let mut outcome =
                 deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");

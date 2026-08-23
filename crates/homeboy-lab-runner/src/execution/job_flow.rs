@@ -48,10 +48,19 @@ pub(super) struct SubmittedRunnerJobFlow<'a> {
     clippy::too_many_arguments,
     reason = "Transport hooks keep HTTP and lease semantics outside the shared lifecycle."
 )]
-pub(super) fn complete_submitted_runner_job<Accepted, Poll, Events, Mirror, AfterEvents, Finalize>(
+pub(super) fn complete_submitted_runner_job<
+    Accepted,
+    AfterHandoff,
+    Poll,
+    Events,
+    Mirror,
+    AfterEvents,
+    Finalize,
+>(
     flow: SubmittedRunnerJobFlow<'_>,
     mut job: Job,
     mut accepted: Accepted,
+    mut after_handoff: AfterHandoff,
     mut poll: Poll,
     mut events: Events,
     mirror: Mirror,
@@ -60,8 +69,9 @@ pub(super) fn complete_submitted_runner_job<Accepted, Poll, Events, Mirror, Afte
 ) -> Result<(RunnerExecOutput, i32)>
 where
     Accepted: FnMut(&Job) -> Result<()>,
+    AfterHandoff: FnMut(&Job) -> Result<()>,
     Poll: FnMut(&Job) -> Result<Job>,
-    Events: FnMut(&str) -> Result<Vec<JobEvent>>,
+    Events: FnMut(&Job) -> Result<Vec<JobEvent>>,
     Mirror: FnOnce(&Job, &[JobEvent], &serde_json::Value) -> Result<Option<MirroredJobEvidence>>,
     AfterEvents: FnMut() -> Result<()>,
     Finalize: FnMut(&Job, &[JobArtifactMetadata]) -> Result<()>,
@@ -132,6 +142,7 @@ where
         flow.run_id.as_deref(),
         persisted_run_id.as_deref(),
     )?;
+    after_handoff(&job)?;
     if flow.detach_after_handoff {
         return Ok(detached_handoff_output(
             flow.runner,
@@ -152,7 +163,7 @@ where
     while !job.status.is_terminal() {
         let job_id = job.id.to_string();
         if Instant::now() >= deadline {
-            let events = events(&job_id)
+            let events = events(&job)
                 .map(|events| {
                     redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names)
                 })
@@ -175,7 +186,7 @@ where
         }
         std::thread::sleep(Duration::from_millis(200));
         job = poll(&job)?;
-        if let Ok(events) = events(&job_id) {
+        if let Ok(events) = events(&job) {
             let events =
                 redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names);
             record_and_report_promotion_progress_frames(
@@ -187,7 +198,7 @@ where
         }
     }
     let job_id = job.id.to_string();
-    let mut job_events = events(&job_id).map(|events| {
+    let mut job_events = events(&job).map(|events| {
         redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names)
     })?;
     record_and_report_promotion_progress_frames(

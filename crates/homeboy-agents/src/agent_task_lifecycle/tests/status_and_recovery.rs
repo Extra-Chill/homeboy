@@ -962,8 +962,13 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         })
         .expect("project wrong hash pin");
         let before_hash = status(&record.run_id).expect("record before wrong hash");
-        let hash_error = recover_controller_runtime(&record.run_id, Some(&artifact), None)
-            .expect_err("wrong hash rejected");
+        let hash_error = recover_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            &record.run_id,
+            Some(&artifact),
+            None,
+        )
+        .expect_err("wrong hash rejected");
         assert!(hash_error.message.contains("hash mismatch"));
         assert_eq!(
             status(&record.run_id).expect("record after wrong hash"),
@@ -981,8 +986,13 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         })
         .expect("project wrong identity pin");
         let before_identity = status(&record.run_id).expect("record before wrong identity");
-        let identity_error = recover_controller_runtime(&record.run_id, Some(&artifact), None)
-            .expect_err("wrong identity rejected");
+        let identity_error = recover_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            &record.run_id,
+            Some(&artifact),
+            None,
+        )
+        .expect_err("wrong identity rejected");
         assert!(identity_error.message.contains("build identity mismatch"));
         assert_eq!(
             status(&record.run_id).expect("record after wrong identity"),
@@ -2875,7 +2885,8 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
             },
         )
         .expect("legacy stored");
-        let legacy = reconcile_record_health(false).expect("legacy migrated");
+        let legacy = reconcile_record_health_in_store(&test_lifecycle_store(), false)
+            .expect("legacy migrated");
         assert_eq!(legacy.migrated, 1);
         let legacy_record = status("legacy-record").expect("legacy loaded");
         assert_eq!(legacy_record.schema, schemas::RUN);
@@ -2889,20 +2900,22 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
             record.lifecycle.execution.state = RunExecutionState::Succeeded;
         })
         .expect("conflict stored");
-        let dry_run = reconcile_record_health(true).expect("conflict dry run");
+        let dry_run = reconcile_record_health_in_store(&test_lifecycle_store(), true)
+            .expect("conflict dry run");
         assert_eq!(
             dry_run.records[0].reason,
             AgentTaskRecordHealthReason::ConflictingProjections
         );
         assert_eq!(dry_run.records[0].action, "would-quarantine");
-        let applied = reconcile_record_health(false).expect("conflict quarantined");
+        let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
+            .expect("conflict quarantined");
         assert_eq!(applied.quarantined, 1);
         let health =
             record_health_summary_in_store(&test_lifecycle_store()).expect("quarantine health");
         assert_eq!(health.conflicting, 1);
         assert_eq!(health.quarantined, 1);
         assert_eq!(
-            reconcile_record_health(false)
+            reconcile_record_health_in_store(&test_lifecycle_store(), false)
                 .expect("repeat no-op")
                 .considered,
             0
@@ -2949,7 +2962,8 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
         let health =
             record_health_summary_in_store(&test_lifecycle_store()).expect("health report");
         assert_eq!(health.malformed, 1);
-        let report = reconcile_record_health(false).expect("quarantine malformed state");
+        let report = reconcile_record_health_in_store(&test_lifecycle_store(), false)
+            .expect("quarantine malformed state");
         assert_eq!(report.quarantined, 1);
         assert_eq!(
             report.records[0].reason,

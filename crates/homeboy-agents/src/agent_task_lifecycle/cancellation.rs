@@ -1071,13 +1071,21 @@ fn terminalize_running_provider_executions(
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
 
     #[test]
     fn cancellation_fence_rejects_a_cook_index_published_after_cancellation() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-index-switch-during-cancel";
-            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), cook_id)
+                .expect("persist handoff parent");
             let attempt_id = "cook-index-switch-during-cancel-attempt-1";
             let plan = AgentTaskPlan::new("index-switch-attempt", Vec::new());
             submit_plan(&plan, Some(attempt_id)).expect("persist attempt");
@@ -1085,8 +1093,9 @@ mod tests {
 
             assert_eq!(cancelled.run_id, cook_id);
             assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-            let error = record_cook_attempt(cook_id, 1, attempt_id)
-                .expect_err("cancelled handoff fence rejects late Cook index publication");
+            let error =
+                record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
+                    .expect_err("cancelled handoff fence rejects late Cook index publication");
             assert_eq!(
                 error.code,
                 homeboy_core::ErrorCode::ValidationInvalidArgument
@@ -1100,18 +1109,26 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-reservation-switch-during-cancel";
             let attempt_id = "cook-reservation-switch-during-cancel-attempt-1";
-            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
-            reserve_detached_cook_handoff_materialization(cook_id, attempt_id)
-                .expect("reserve materializing attempt");
+            record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), cook_id)
+                .expect("persist handoff parent");
+            reserve_detached_cook_handoff_materialization_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                attempt_id,
+            )
+            .expect("reserve materializing attempt");
             cancel_run(cook_id, None).expect("cancel handoff before child submission");
             let plan = AgentTaskPlan::new("reserved-index-switch-attempt", Vec::new());
             submit_plan(&plan, Some(attempt_id)).expect("persist attempt");
 
-            record_cook_attempt(cook_id, 1, attempt_id)
+            record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
                 .expect("reserved child remains publishable after cancellation");
             assert!(
-                cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
-                    .expect("cancel submitted reserved child"),
+                cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+                    &test_lifecycle_store(),
+                    cook_id
+                )
+                .expect("cancel submitted reserved child"),
                 "the reservation reaches the child that was not present during parent cancellation"
             );
             assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
@@ -1122,8 +1139,11 @@ mod tests {
                 AgentTaskRunState::Cancelled
             );
             assert!(
-                !cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
-                    .expect("replaying queued-child cancellation"),
+                !cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+                    &test_lifecycle_store(),
+                    cook_id
+                )
+                .expect("replaying queued-child cancellation"),
                 "a replayed cancellation is a no-op after the queued child terminalizes"
             );
         });
@@ -1134,9 +1154,14 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-terminal-index-publication-race";
             let attempt_id = "cook-terminal-index-publication-race-attempt-1";
-            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
-            reserve_detached_cook_handoff_materialization(cook_id, attempt_id)
-                .expect("reserve materializing attempt");
+            record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), cook_id)
+                .expect("persist handoff parent");
+            reserve_detached_cook_handoff_materialization_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                attempt_id,
+            )
+            .expect("reserve materializing attempt");
             submit_plan(
                 &AgentTaskPlan::new("terminal-index-publication-race-attempt", Vec::new()),
                 Some(attempt_id),
@@ -1149,7 +1174,7 @@ mod tests {
             .expect("terminalize attempt before index publication");
 
             install_after_initial_cancellation_for_test(move || {
-                record_cook_attempt(cook_id, 1, attempt_id)
+                record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
                     .expect("publish terminal reserved child during cancellation");
             });
             let cancelled = cancel_run(cook_id, None)
@@ -1170,9 +1195,14 @@ mod tests {
             ] {
                 let cook_id = format!("cook-terminal-reservation-{suffix}");
                 let attempt_id = format!("{cook_id}-attempt-1");
-                record_detached_cook_handoff_parent(&cook_id).expect("persist handoff parent");
-                reserve_detached_cook_handoff_materialization(&cook_id, &attempt_id)
-                    .expect("reserve materializing attempt");
+                record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), &cook_id)
+                    .expect("persist handoff parent");
+                reserve_detached_cook_handoff_materialization_in_store(
+                    &test_lifecycle_store(),
+                    &cook_id,
+                    &attempt_id,
+                )
+                .expect("reserve materializing attempt");
                 submit_plan(
                     &AgentTaskPlan::new(format!("{suffix}-attempt"), Vec::new()),
                     Some(&attempt_id),
@@ -1183,7 +1213,7 @@ mod tests {
                     true
                 })
                 .expect("terminalize reserved child");
-                record_cook_attempt(&cook_id, 1, &attempt_id)
+                record_cook_attempt_in_store(&test_lifecycle_store(), &cook_id, 1, &attempt_id)
                     .expect("publish terminal child as the Cook alias");
 
                 for _ in 0..2 {
@@ -1217,7 +1247,8 @@ mod tests {
     fn cancellation_never_signals_a_pid_with_a_mismatched_start_identity() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-pid-reuse-safety";
-            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), cook_id)
+                .expect("persist handoff parent");
             let mut child = std::process::Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
@@ -1225,8 +1256,13 @@ mod tests {
             let identity = homeboy_core::process::process_start_identity(child.id())
                 .expect("inspect child identity")
                 .expect("child identity is present");
-            record_detached_cook_handoff_child(cook_id, child.id(), identity)
-                .expect("persist child identity");
+            record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                child.id(),
+                identity,
+            )
+            .expect("persist child identity");
             store::mutate_record(cook_id, |record| {
                 record.metadata["detached_cook_handoff"]["child_start_identity"] =
                     json!({ "platform": "linux", "starttime_ticks": 0 });
@@ -1249,10 +1285,15 @@ mod tests {
     fn cancelled_pre_spawn_fence_blocks_an_unattached_child_before_materialization() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-launcher-died-before-child-attachment";
-            record_detached_cook_handoff_parent(cook_id).expect("persist pre-spawn parent");
+            record_detached_cook_handoff_parent_in_store(&test_lifecycle_store(), cook_id)
+                .expect("persist pre-spawn parent");
             cancel_run(cook_id, None).expect("cancel parent after launcher loss");
 
-            assert!(require_detached_cook_handoff_fence_open(cook_id).is_err());
+            assert!(require_detached_cook_handoff_fence_open_in_store(
+                &test_lifecycle_store(),
+                cook_id
+            )
+            .is_err());
             assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
             assert!(
                 !run_record_exists(&cook_attempt_run_id(cook_id, 1))

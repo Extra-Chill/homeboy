@@ -166,7 +166,7 @@ fn cleanup_process_group(
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
         match containment.cleanup_with_grace(Duration::from_millis(200), false) {
-            Ok(cleanup) if cleanup.complete => return None,
+            Ok(cleanup) if cleanup.complete => return cleanup.diagnostic,
             Ok(cleanup) => return cleanup.detail,
             Err(error) => {
                 cleanup_process_group_fallback(pgid);

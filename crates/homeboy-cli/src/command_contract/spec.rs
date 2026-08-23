@@ -391,7 +391,6 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
 const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const TRIAGE_DANGEROUS_FLAGS: &[&str] = &["--auto-merge"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];

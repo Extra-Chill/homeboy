@@ -1238,6 +1238,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
+    /// A test is the entry point for its own unit of work, so resolving once
+    /// here is a boundary resolution (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy_core::paths::homeboy().expect("config root")
+    }
+
     #[test]
     fn old_daemon_evidence_refusal_precedes_workspace_sync() {
         let synced = Cell::new(false);
@@ -1507,7 +1513,7 @@ mod tests {
             git(component_checkout.path(), &["add", "."]);
             git(component_checkout.path(), &["commit", "-m", "component"]);
             let component_ref = git_output(component_checkout.path(), &["rev-parse", "HEAD"]);
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("jetpack-api-route-inventory.json"),

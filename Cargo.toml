@@ -60,6 +60,7 @@ homeboy-product-identity = { path = "crates/homeboy-product-identity" }
 homeboy-cli = { path = "crates/homeboy-cli" }
 homeboy-core = { path = "crates/homeboy-core" }
 homeboy-lab-contract = { path = "crates/contracts/homeboy-lab-contract" }
+homeboy-triage = { path = "crates/homeboy-triage" }
 
 # Core library dependencies
 base64 = "0.22"

@@ -25,6 +25,17 @@ use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
+/// A typed command package installed by a product composition root.
+///
+/// The base CLI owns common globals and response envelopes, while capability
+/// crates own their Clap grammar and execution. Keeping this boundary here lets
+/// a kernel-only CLI build omit product capabilities entirely.
+pub trait CliCapability: Sync {
+    fn name(&self) -> &'static str;
+    fn command(&self) -> Command;
+    fn run(&self, matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)>;
+}
+
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
 const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD";
@@ -32,6 +43,7 @@ const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBAC
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
+    capabilities: &'static [&'static dyn CliCapability],
 }
 
 struct ExtensionCliCommand {
@@ -381,8 +393,13 @@ pub fn register_all_providers(
 
 impl CliRuntime {
     pub fn new() -> Self {
+        Self::with_capabilities(&[])
+    }
+
+    pub fn with_capabilities(capabilities: &'static [&'static dyn CliCapability]) -> Self {
         Self {
             extension_discovery: OnceLock::new(),
+            capabilities,
         }
     }
 
@@ -537,6 +554,23 @@ impl CliRuntime {
             .cloned();
         crate::core::set_artifact_root_override(artifact_root_override.clone());
 
+        if let Some((capability, capability_matches)) = self.capability_matches(&matches) {
+            if let Some(path) = output_file.as_deref() {
+                if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
+                    return exit;
+                }
+            }
+            let (json_result, exit_code) =
+                output::map_cmd_result_to_json(capability.run(capability_matches));
+            output_runtime::emit_json_result_for_identity(
+                json_result,
+                output_file.as_deref(),
+                exit_code,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
+
         if let Some(extension_cmd) = self.try_parse_extension_cli_command(&matches) {
             if let Some(path) = output_file.as_deref() {
                 if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
@@ -653,6 +687,16 @@ impl CliRuntime {
                     return std::process::ExitCode::from(2);
                 }
             }
+        }
+
+        if let Err(err) = guard_cook_runtime_compatibility(&cli, &normalized) {
+            output_runtime::emit_json_result_for_identity(
+                Err(err),
+                output_file.as_deref(),
+                2,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(2);
         }
 
         match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
@@ -838,7 +882,23 @@ impl CliRuntime {
 
     fn build_augmented_command(&self) -> Command {
         let discovery = self.extension_discovery();
-        build_augmented_command(&discovery.info, &discovery.health)
+        let mut command = build_augmented_command(&discovery.info, &discovery.health);
+        for capability in self.capabilities {
+            command = command.subcommand(capability.command());
+        }
+        command
+    }
+
+    fn capability_matches<'a>(
+        &'a self,
+        matches: &'a ArgMatches,
+    ) -> Option<(&'a dyn CliCapability, &'a ArgMatches)> {
+        let (name, sub_matches) = matches.subcommand()?;
+        self.capabilities
+            .iter()
+            .copied()
+            .find(|capability| capability.name() == name)
+            .map(|capability| (capability, sub_matches))
     }
 
     fn try_parse_extension_cli_command(&self, matches: &ArgMatches) -> Option<ExtensionCliCommand> {
@@ -863,6 +923,50 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+/// Durable Cook must not create a recipe under a runtime that the existing
+/// update policy has already proven incompatible with the allowed stable.
+/// Preview stays read-only and deliberately does not acquire this admission.
+fn guard_cook_runtime_compatibility(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<()> {
+    let is_durable_cook = matches!(
+        &cli.command,
+        Commands::AgentTask(agent_task)
+            if matches!(
+                &agent_task.command,
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) if !cook.preview
+            )
+    );
+    if !is_durable_cook {
+        return Ok(());
+    }
+    let controller = homeboy_product_identity::build_identity();
+    let Some(stable) =
+        homeboy_upgrade::upgrade::update_check::incompatible_allowed_stable(&controller.display)
+    else {
+        return Ok(());
+    };
+    let replay = homeboy_core::engine::shell::quote_args(normalized_args);
+    let recovery = format!("homeboy upgrade && {replay}");
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "runtime_set",
+        format!(
+            "Durable Cook refused before preview or materialization because installed controller `{}` cannot satisfy the declared runtime contracts for latest allowed stable `{}`",
+            controller.display, stable.version
+        ),
+        Some(controller.display),
+        Some(vec![recovery.clone()]),
+    );
+    error.details["runtime_set"] = serde_json::json!({
+        "latest_allowed_stable": stable.version,
+        "required_contracts": stable.compatibility.map(|compatibility| compatibility.required_contracts),
+        "recovery_command": recovery,
+        "preserved_invocation": replay,
+    });
+    Err(error)
 }
 
 fn schedule_runner_exec_recovery() {
@@ -2534,6 +2638,13 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use clap::Parser;
     use sha2::{Digest, Sha256};
@@ -2641,7 +2752,8 @@ mod tests {
     fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "hot-unmaterialized-resume";
-            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission(
+            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 serde_json::json!({
                     "request_ref": "sha256:resume",

@@ -59,6 +59,10 @@ pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
 pub use gate::{evaluate_gates, normalized_gate_results, BenchGate, BenchGateOp, BenchGateResult};
 pub use homeboy_extension_contract::bench_artifact::BenchArtifact;
+pub use homeboy_extension_contract::bench_stage::{
+    verify_stage_reuse, BenchStageArtifact, BenchStageEvidence, BenchStageInvalidation,
+    BenchStageReuse,
+};
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{

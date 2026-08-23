@@ -2,6 +2,12 @@ use super::*;
 use crate::core::error::ErrorCode;
 use std::fs;
 
+/// A test is the entry point for its own unit of work, so resolving once
+/// here is a boundary resolution (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::homeboy().expect("config root")
+}
+
 fn set_rig_resources(home: &tempfile::TempDir, rig_id: &str, resources: serde_json::Value) {
     let rig_path = home
         .path()
@@ -69,8 +75,6 @@ fn run_single_rig_bench_without_resources_does_not_create_lease() {
         assert!(crate::rig::lease::active_run_leases(home.path())
             .expect("list active leases")
             .is_empty());
-        assert!(!crate::core::paths::rig_leases_dir()
-            .expect("lease dir path")
-            .exists());
+        assert!(!crate::core::paths::rig_leases_dir_in_root(&test_config_root()).exists());
     });
 }

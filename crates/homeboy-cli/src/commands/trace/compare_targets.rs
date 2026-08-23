@@ -958,10 +958,15 @@ mod tests {
     use homeboy::core::component::ScopedExtensionConfig;
     use homeboy::core::observation::ObservationStore;
 
+    /// A test is the entry point for its own unit of work, so resolving once
+    /// here is a boundary resolution (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy_core::paths::homeboy().expect("config root")
+    }
+
     fn set_trace_rig_resources(rig_id: &str, resources: serde_json::Value) {
-        let rig_path = homeboy::core::paths::rigs()
-            .expect("rig dir")
-            .join(format!("{rig_id}.json"));
+        let rig_path =
+            homeboy::core::paths::rigs_in_root(&test_config_root()).join(format!("{rig_id}.json"));
         let mut rig_json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&rig_path).expect("read rig"))
                 .expect("parse rig");
@@ -1030,7 +1035,7 @@ mod tests {
     fn compare_target_component_uses_rig_declared_component() {
         crate::test_support::with_isolated_home(|_| {
             let component_dir = tempfile::TempDir::new().expect("component dir");
-            let rig_dir = homeboy::core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy::core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("trace-lab.json"),
@@ -1077,7 +1082,7 @@ mod tests {
     fn compare_target_component_uses_single_rig_component_by_default() {
         crate::test_support::with_isolated_home(|_| {
             let component_dir = tempfile::TempDir::new().expect("component dir");
-            let rig_dir = homeboy::core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy::core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("single-trace-lab.json"),

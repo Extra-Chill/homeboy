@@ -911,7 +911,7 @@ mod tests {
     }
 
     fn write_rig_lease(lease: RigRunLease) {
-        let dir = homeboy::core::paths::rig_leases_dir().expect("rig leases dir");
+        let dir = homeboy::core::paths::rig_leases_dir_in_root(&test_config_root());
         std::fs::create_dir_all(&dir).expect("create lease dir");
         std::fs::write(
             dir.join(format!("{}.json", lease.rig_id)),

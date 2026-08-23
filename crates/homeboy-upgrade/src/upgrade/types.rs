@@ -408,4 +408,6 @@ mod tests {
 #[derive(Deserialize)]
 pub(super) struct GitHubRelease {
     pub(super) tag_name: String,
+    #[serde(default)]
+    pub(super) body: String,
 }

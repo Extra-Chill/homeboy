@@ -1543,14 +1543,7 @@ fn claim_continuation_for_from(
     }))
 }
 
-/// Read the durable state of one exact continuation after reclaiming abandoned
-/// claims. Callers use this to distinguish work owned by another consumer from
-/// completed work and an explicitly recoverable failure.
-pub fn continuation_state(cook_id: &str, run_id: &str) -> Result<CookContinuationState> {
-    continuation_state_in_store(&default_store()?, cook_id, run_id)
-}
-
-/// [`continuation_state`] against an explicitly injected recipe store. Every
+/// `continuation_state` against an explicitly injected recipe store. Every
 /// path this reads hangs off that store's own queue root.
 pub fn continuation_state_in_store(
     store: &CookRecipeStore,
@@ -1583,17 +1576,7 @@ pub fn continuation_state_in_store(
     Ok(CookContinuationState::Absent)
 }
 
-/// Atomically claim an existing failed continuation for explicit operator
-/// recovery. Unlike the generic queue path, this never exposes the selected
-/// work as pending for a background consumer to steal between rearm and claim.
-pub fn claim_continuation_for_recovery(
-    cook_id: &str,
-    run_id: &str,
-) -> Result<Option<ClaimedCookContinuation>> {
-    claim_continuation_for_recovery_in_store(&default_store()?, cook_id, run_id)
-}
-
-/// [`claim_continuation_for_recovery`] against an explicitly injected recipe
+/// `claim_continuation_for_recovery` against an explicitly injected recipe
 /// store.
 ///
 /// The recipe membership check and the atomic failed-to-claimed rename are one

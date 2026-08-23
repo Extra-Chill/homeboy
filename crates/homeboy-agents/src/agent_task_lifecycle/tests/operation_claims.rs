@@ -11,10 +11,17 @@ use serde_json::json;
 
 use super::*;
 use crate::agent_task_lifecycle::{
-    claim_cook_operation, complete_cook_operation, fail_cook_operation, operation_claim,
-    operation_lease_is_active, ClaimOutcome, ClaimState,
+    operation_claim, operation_lease_is_active, ClaimOutcome, ClaimState,
 };
 use homeboy_core::test_support::with_isolated_home;
+
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
 
 const LEASE: Duration = Duration::from_secs(300);
 
@@ -27,13 +34,24 @@ fn first_claim_is_acquired_and_second_pass_sees_lease_held() {
     with_isolated_home(|_| {
         seed_run("op-claim-1");
         assert_eq!(
-            claim_cook_operation("op-claim-1", "promote:abc", LEASE).expect("first claim"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-1",
+                "promote:abc",
+                LEASE
+            )
+            .expect("first claim"),
             ClaimOutcome::Acquired
         );
         // A concurrent pass with a still-fresh lease must not repeat the effect.
         assert_eq!(
-            claim_cook_operation("op-claim-1", "promote:abc", LEASE)
-                .expect("second observes lease"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-1",
+                "promote:abc",
+                LEASE
+            )
+            .expect("second observes lease"),
             ClaimOutcome::LeaseHeld
         );
     });
@@ -43,13 +61,19 @@ fn first_claim_is_acquired_and_second_pass_sees_lease_held() {
 fn resubmitting_a_plan_preserves_its_live_operation_claim() {
     with_isolated_home(|_| {
         seed_run("op-claim-resubmit");
-        claim_cook_operation("op-claim-resubmit", "retry:attempt-2", LEASE)
-            .expect("reserve retry dispatch");
+        claim_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-resubmit",
+            "retry:attempt-2",
+            LEASE,
+        )
+        .expect("reserve retry dispatch");
 
         // A dispatcher may submit the same durable plan while executing its
         // claimed handoff. That write must not erase exactly-once ownership.
         submit_plan(&test_plan(), Some("op-claim-resubmit")).expect("resubmit plan");
-        complete_cook_operation(
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
             "op-claim-resubmit",
             "retry:attempt-2",
             json!({"dispatched_run_id": "attempt-2"}),
@@ -70,11 +94,25 @@ fn resubmitting_a_plan_preserves_its_live_operation_claim() {
 fn completed_operation_returns_immutable_result_without_release() {
     with_isolated_home(|_| {
         seed_run("op-claim-2");
-        claim_cook_operation("op-claim-2", "finalize:xyz", LEASE).expect("claim");
-        complete_cook_operation("op-claim-2", "finalize:xyz", json!({"pr": 42})).expect("complete");
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-2", "finalize:xyz", LEASE)
+            .expect("claim");
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-2",
+            "finalize:xyz",
+            json!({"pr": 42}),
+        )
+        .expect("complete");
 
         // A resumed controller gets the recorded result, never a fresh lease.
-        match claim_cook_operation("op-claim-2", "finalize:xyz", LEASE).expect("resume") {
+        match claim_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-2",
+            "finalize:xyz",
+            LEASE,
+        )
+        .expect("resume")
+        {
             ClaimOutcome::AlreadyCompleted(result) => assert_eq!(result, json!({"pr": 42})),
             other => panic!("expected AlreadyCompleted, got {other:?}"),
         }
@@ -85,11 +123,22 @@ fn completed_operation_returns_immutable_result_without_release() {
 fn completing_twice_keeps_the_first_result() {
     with_isolated_home(|_| {
         seed_run("op-claim-3");
-        claim_cook_operation("op-claim-3", "retry:run-2", LEASE).expect("claim");
-        complete_cook_operation("op-claim-3", "retry:run-2", json!({"attempt": 2}))
-            .expect("first complete");
-        complete_cook_operation("op-claim-3", "retry:run-2", json!({"attempt": 999}))
-            .expect("second complete is a no-op");
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-3", "retry:run-2", LEASE)
+            .expect("claim");
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-3",
+            "retry:run-2",
+            json!({"attempt": 2}),
+        )
+        .expect("first complete");
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-3",
+            "retry:run-2",
+            json!({"attempt": 999}),
+        )
+        .expect("second complete is a no-op");
 
         let claim = operation_claim("op-claim-3", "retry:run-2")
             .expect("read")
@@ -107,13 +156,23 @@ fn live_owner_retains_claim_after_nominal_lease_expiry() {
         // old deadline deterministically: a second consumer must not dispatch
         // while the original process still owns the claim.
         assert_eq!(
-            claim_cook_operation("op-claim-4", "promote:def", Duration::from_secs(0))
-                .expect("first claim"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-4",
+                "promote:def",
+                Duration::from_secs(0)
+            )
+            .expect("first claim"),
             ClaimOutcome::Acquired
         );
         assert_eq!(
-            claim_cook_operation("op-claim-4", "promote:def", LEASE)
-                .expect("live owner retains expired claim"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-4",
+                "promote:def",
+                LEASE
+            )
+            .expect("live owner retains expired claim"),
             ClaimOutcome::LeaseHeld
         );
         assert!(operation_lease_is_active("op-claim-4", "promote:def")
@@ -126,16 +185,26 @@ fn expired_claim_is_recoverable_after_its_owner_is_stale() {
     with_isolated_home(|_| {
         seed_run("op-claim-expired-stale-owner");
         let key = "retry:attempt-2";
-        claim_cook_operation("op-claim-expired-stale-owner", key, Duration::from_secs(0))
-            .expect("reserve expired claim");
+        claim_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-expired-stale-owner",
+            key,
+            Duration::from_secs(0),
+        )
+        .expect("reserve expired claim");
         rewrite_record_for_test("op-claim-expired-stale-owner", |record| {
             record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
         })
         .expect("write stale owner");
 
         assert_eq!(
-            claim_cook_operation("op-claim-expired-stale-owner", key, LEASE)
-                .expect("recover stale expired claim"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-expired-stale-owner",
+                key,
+                LEASE
+            )
+            .expect("recover stale expired claim"),
             ClaimOutcome::Acquired
         );
     });
@@ -146,12 +215,24 @@ fn distinct_operation_keys_are_independent() {
     with_isolated_home(|_| {
         seed_run("op-claim-5");
         assert_eq!(
-            claim_cook_operation("op-claim-5", "promote:a", LEASE).expect("promote"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-5",
+                "promote:a",
+                LEASE
+            )
+            .expect("promote"),
             ClaimOutcome::Acquired
         );
         // A different operation on the same run gets its own fresh lease.
         assert_eq!(
-            claim_cook_operation("op-claim-5", "finalize:a", LEASE).expect("finalize"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-5",
+                "finalize:a",
+                LEASE
+            )
+            .expect("finalize"),
             ClaimOutcome::Acquired
         );
     });
@@ -161,8 +242,13 @@ fn distinct_operation_keys_are_independent() {
 fn completing_without_a_claim_is_an_invariant_error() {
     with_isolated_home(|_| {
         seed_run("op-claim-6");
-        let error = complete_cook_operation("op-claim-6", "never-claimed", json!({}))
-            .expect_err("terminal without claim must error");
+        let error = complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-6",
+            "never-claimed",
+            json!({}),
+        )
+        .expect_err("terminal without claim must error");
         assert!(error.message.contains("without its durable claim"));
     });
 }
@@ -171,10 +257,17 @@ fn completing_without_a_claim_is_an_invariant_error() {
 fn active_lease_is_reported_until_completion() {
     with_isolated_home(|_| {
         seed_run("op-claim-7");
-        claim_cook_operation("op-claim-7", "promote:live", LEASE).expect("claim");
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-7", "promote:live", LEASE)
+            .expect("claim");
         assert!(operation_lease_is_active("op-claim-7", "promote:live").expect("active"));
 
-        complete_cook_operation("op-claim-7", "promote:live", json!({})).expect("complete");
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-7",
+            "promote:live",
+            json!({}),
+        )
+        .expect("complete");
         assert!(
             !operation_lease_is_active("op-claim-7", "promote:live").expect("inactive"),
             "a completed operation no longer holds an active lease"
@@ -187,8 +280,10 @@ fn failed_claim_preserves_diagnostic_and_is_reclaimable_by_explicit_continuation
     with_isolated_home(|_| {
         seed_run("op-claim-failed");
         let key = "promote:failed";
-        claim_cook_operation("op-claim-failed", key, LEASE).expect("claim");
-        fail_cook_operation(
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-failed", key, LEASE)
+            .expect("claim");
+        fail_cook_operation_in_store(
+            &test_lifecycle_store(),
             "op-claim-failed",
             key,
             json!({"status":"failed","code":"ValidationInvalidArgument","message":"malformed response"}),
@@ -200,7 +295,8 @@ fn failed_claim_preserves_diagnostic_and_is_reclaimable_by_explicit_continuation
         assert_eq!(failed.state, ClaimState::Failed);
         assert_eq!(failed.result.unwrap()["message"], "malformed response");
         assert_eq!(
-            claim_cook_operation("op-claim-failed", key, LEASE).expect("explicit retry"),
+            claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-failed", key, LEASE)
+                .expect("explicit retry"),
             ClaimOutcome::Acquired
         );
     });
@@ -211,13 +307,20 @@ fn dead_owner_claim_is_reclaimed_without_waiting_for_lease_expiry() {
     with_isolated_home(|_| {
         seed_run("op-claim-dead-owner");
         let key = "promote:dead";
-        claim_cook_operation("op-claim-dead-owner", key, LEASE).expect("claim");
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-dead-owner", key, LEASE)
+            .expect("claim");
         rewrite_record_for_test("op-claim-dead-owner", |record| {
             record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
         })
         .expect("write dead owner");
         assert_eq!(
-            claim_cook_operation("op-claim-dead-owner", key, LEASE).expect("reclaim dead owner"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-dead-owner",
+                key,
+                LEASE
+            )
+            .expect("reclaim dead owner"),
             ClaimOutcome::Acquired
         );
     });
@@ -235,9 +338,16 @@ fn live_owner_claim_remains_held_without_side_effect_reentry() {
     with_isolated_home(|_| {
         seed_run("op-claim-live-owner");
         let key = "promote:live-owner";
-        claim_cook_operation("op-claim-live-owner", key, LEASE).expect("claim");
+        claim_cook_operation_in_store(&test_lifecycle_store(), "op-claim-live-owner", key, LEASE)
+            .expect("claim");
         assert_eq!(
-            claim_cook_operation("op-claim-live-owner", key, LEASE).expect("observe live owner"),
+            claim_cook_operation_in_store(
+                &test_lifecycle_store(),
+                "op-claim-live-owner",
+                key,
+                LEASE
+            )
+            .expect("observe live owner"),
             ClaimOutcome::LeaseHeld
         );
         let claim = operation_claim("op-claim-live-owner", key)
