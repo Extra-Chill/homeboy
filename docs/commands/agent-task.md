@@ -402,6 +402,21 @@ homeboy agent-task finalize-pr --recover cook-9750 \
   --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
 ```
 
+Manual finalization can execute one candidate-bound verification command and
+derive its gate result plus reviewer evidence from that result:
+
+```bash
+homeboy agent-task finalize-pr --manual-finalization \
+  --verify 'cargo test --locked' ...
+```
+
+`--verify` runs only against a clean committed candidate in an isolated detached
+checkout, before Homeboy reserves a manual-finalization lifecycle record. It
+derives the durable gate result, targeted-check evidence, and reviewer test
+step. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
+the explicit external-proof import path for verification that already occurred;
+they cannot be combined with `--verify`.
+
 Strict repeated-value shapes are `--gate-result NAME=STATUS[:DETAIL]`,
 `--test-step COMMAND=>EXPECTED`, `--changed-public-contract ID=>SUMMARY`, and
 `--review-override TARGET=VALUE@PROVENANCE`. Issue references accept `#NUMBER`,
