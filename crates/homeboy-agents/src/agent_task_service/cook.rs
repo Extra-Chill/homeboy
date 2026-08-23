@@ -4441,15 +4441,28 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        if let Some(evidence) = validate_cook_workspace(&options).map_err(|mut error| {
+        let workspace_base = validate_cook_workspace(&options).map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
-        })? {
-            record_cook_workspace_base_convergence(
-                lifecycle_store,
-                &options.initial_run_id,
-                evidence,
-            )?;
+        })?;
+        if let Some(workspace_base) = workspace_base {
+            match workspace_base {
+                CookWorkspaceBaseValidation::Snapshot(snapshot) => {
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        "cook_workspace_base_snapshot",
+                        snapshot,
+                    )?;
+                }
+                CookWorkspaceBaseValidation::Convergence(evidence) => {
+                    record_cook_workspace_base_convergence(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        evidence,
+                    )?;
+                }
+            }
         }
     }
     validate_cook_candidate_group(&options.initial_plan)?;
@@ -4874,11 +4887,29 @@ fn run_cook_spine(
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                    if let Some(evidence) = validate_cook_workspace(&options)? {
+                let workspace_base = if options.attempt_dispatcher.is_none()
+                    || options.source_worktree_path.is_some()
+                {
+                    validate_cook_workspace(&options)?
+                } else {
+                    None
+                };
+                let base_snapshot = match workspace_base {
+                    Some(CookWorkspaceBaseValidation::Snapshot(snapshot)) => Some(snapshot),
+                    Some(CookWorkspaceBaseValidation::Convergence(evidence)) => {
                         record_cook_workspace_base_convergence(lifecycle_store, &run_id, evidence)?;
+                        None
                     }
+                    None => None,
                 }
+                .or_else(|| {
+                    lifecycle_store
+                        .read_record(&run_id)
+                        .ok()
+                        .and_then(|record| {
+                            record.metadata.get("cook_workspace_base_snapshot").cloned()
+                        })
+                });
                 if options.attempt_dispatcher.is_none() {
                     homeboy_core::cleanup::admit_reconstructable_artifact_work(
                         plan.tasks
@@ -4970,6 +5001,17 @@ fn run_cook_spine(
                     .as_ref()
                     .or(re_materialized_baseline.as_ref());
                 let mut dispatch_plan = plan.clone();
+                if let Some(snapshot) = base_snapshot {
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        lifecycle_store,
+                        &run_id,
+                        "cook_workspace_base_snapshot",
+                        snapshot.clone(),
+                    )?;
+                    for task in &mut dispatch_plan.tasks {
+                        task.metadata["cook_workspace_base_snapshot"] = snapshot.clone();
+                    }
+                }
                 if let Some(baseline) = effective_baseline {
                     for task in &mut dispatch_plan.tasks {
                         // The baseline is immutable evidence for this dispatch,
@@ -5477,6 +5519,45 @@ fn run_cook_spine(
             }
             Err(error) => return Err(error),
         };
+        if aggregate.outcomes.iter().any(|outcome| {
+            outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Failed
+                && outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.workspace_snapshot_invalidated"
+                        && diagnostic.data["pre_provider"] == Value::Bool(true)
+                })
+        }) {
+            let error = Error::validation_invalid_argument(
+                "workspace",
+                "Cook workspace snapshot was invalidated before provider execution",
+                Some(run_id.clone()),
+                None,
+            )
+            .with_retryable(true);
+            let transitioned = lifecycle_store
+                .record_workspace_snapshot_fence_invalidation(&run_id, &plan, &error)?;
+            if transitioned.metadata["pre_execution_failure"]["phase"]
+                == Value::String("workspace_snapshot_fence".to_string())
+                && transitioned.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
+                && transitioned.metadata["provider_executions_consumed"].as_u64() == Some(0)
+            {
+                let failure = pre_execution_failure_details(Some(&transitioned), &error);
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: format!("{:?}", transitioned.state),
+                    aggregate_path: transitioned.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(pre_execution_failure_report(
+                    cook_id,
+                    attempts,
+                    failure,
+                    error,
+                    Some(&run_id),
+                ));
+            }
+        }
         observed_budget_used.add(execution_budget_usage(&aggregate));
         let mut budget_used = observed_budget_used;
         budget_used.same_provider_retries = budget_used
@@ -6333,7 +6414,9 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 /// Validate the Cook target before a provider can run. An explicit source path
 /// is already the authoritative workspace; otherwise resolve the declared
 /// handle through the existing local/provider path.
-fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<Option<Value>> {
+fn validate_cook_workspace(
+    options: &AgentTaskCookServiceOptions,
+) -> Result<Option<CookWorkspaceBaseValidation>> {
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
@@ -6460,6 +6543,15 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<Opti
         .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
 }
 
+/// Snapshot authority is passed to the scheduler, while convergence evidence is
+/// durable controller metadata. Keeping them distinct prevents provider details
+/// from being interpreted as an immutable workspace snapshot.
+#[derive(Debug)]
+enum CookWorkspaceBaseValidation {
+    Snapshot(Value),
+    Convergence(Value),
+}
+
 fn record_cook_workspace_base_convergence(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -6524,10 +6616,10 @@ fn pin_cook_workspace_base_at(
 fn preflight_cook_workspace_base_ancestry_with_provider(
     target: &Path,
     options: &AgentTaskCookServiceOptions,
-) -> Result<Option<Value>> {
+) -> Result<Option<CookWorkspaceBaseValidation>> {
     let base = options.task_base_sha.as_deref().unwrap_or(&options.base);
     match preflight_cook_workspace_base_ancestry(target, base) {
-        Ok(()) => Ok(None),
+        Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
                 && options.task_base_sha.is_some() =>
@@ -6550,23 +6642,27 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 base,
                 &config,
             )?;
-            preflight_cook_workspace_base_ancestry(target, base).map_err(|mut error| {
-                error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
+            let snapshot =
+                preflight_cook_workspace_base_ancestry(target, base).map_err(|mut error| {
+                    error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
+                        "provider_id": convergence.provider_id,
+                        "handle": convergence.handle,
+                        "path": convergence.path,
+                        "base_sha": convergence.base_sha,
+                    });
+                    error
+                })?;
+            Ok(Some(match snapshot {
+                Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
+                None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
+                    "schema": "homeboy/cook-workspace-base-convergence/v1",
+                    "planned_base_sha": base,
                     "provider_id": convergence.provider_id,
                     "handle": convergence.handle,
                     "path": convergence.path,
-                    "base_sha": convergence.base_sha,
-                });
-                error
-            })?;
-            Ok(Some(serde_json::json!({
-                "schema": "homeboy/cook-workspace-base-convergence/v1",
-                "planned_base_sha": base,
-                "provider_id": convergence.provider_id,
-                "handle": convergence.handle,
-                "path": convergence.path,
-                "provider_evidence": convergence.evidence,
-            })))
+                    "provider_evidence": convergence.evidence,
+                })),
+            }))
         }
         Err(error) => Err(error),
     }
@@ -6574,11 +6670,15 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
 
 /// A candidate diff is meaningful only when its destination contains the
 /// resolved base. Otherwise base-only files appear to be provider changes.
-fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<()> {
+/// A clean destination that is strictly behind is not mutated. Instead, the
+/// returned immutable base pin authorizes the scheduler's isolated attempt
+/// workspace. This keeps provider-managed destinations under their owner while
+/// ensuring provider output is based on the observed remote base.
+fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
         candidate_fingerprint(target.to_string_lossy().as_ref())?
     else {
-        return Ok(());
+        return Ok(None);
     };
     // A provider-owned Git destination can intentionally have no origin. When
     // origin is configured, resolve its authoritative base directly instead of
@@ -6589,22 +6689,27 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
         .output()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !origin.status.success() {
-        return Ok(());
+        return Ok(None);
     }
-    let resolved_base = if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        homeboy_core::git::run_git(
-            target,
-            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-            "resolve pinned Cook base",
-        )?
-        .trim()
-        .to_string()
+    let (declared_base, resolved_base) = if base.len() == 40
+        && base.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        (
+            base.to_string(),
+            homeboy_core::git::run_git(
+                target,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                "resolve pinned Cook base",
+            )?
+            .trim()
+            .to_string(),
+        )
     } else {
         let Some(base) = crate::agent_task_promotion::capture_declared_base(target, Some(base))?
         else {
-            return Ok(());
+            return Ok(None);
         };
-        base.sha
+        (base.base, base.sha)
     };
     let counts = homeboy_core::git::run_git(
         target,
@@ -6626,10 +6731,76 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
             "could not classify Cook destination ancestry against resolved base".to_string(),
         ));
     };
-    if behind == 0 {
-        return Ok(());
+    let status = homeboy_core::git::run_git(
+        target,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify Cook destination cleanliness before base snapshot",
+    )?;
+    if !status.trim().is_empty() {
+        let mut error = Error::validation_invalid_argument(
+            "workspace",
+            "Cook destination has uncommitted changes; refusing provider execution",
+            Some(target.display().to_string()),
+            None,
+        );
+        error.details["workspace_base_ancestry"] = serde_json::json!({
+            "schema": "homeboy/cook-workspace-base-ancestry/v1",
+            "base": declared_base,
+            "resolved_base": resolved_base,
+            "destination_head": fingerprint.head,
+            "direction": "dirty",
+            "base_only_commits": behind,
+            "candidate_only_commits": ahead,
+            "next_action": "clean_destination_before_provider",
+        });
+        return Err(error);
     }
-    let direction = if ahead == 0 { "behind" } else { "diverged" };
+    if behind == 0 {
+        // An unchanged or ahead-only candidate already has a meaningful base
+        // relative to its source HEAD; preserve its existing dispatch path.
+        return Ok(None);
+    }
+    if ahead == 0 {
+        // A recipe-pinned base is controller authority to converge the managed
+        // provider checkout. An unpinned declared ref instead authorizes an
+        // isolated scheduler snapshot without mutating that checkout.
+        if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let direction = "behind";
+            let mut error = Error::validation_invalid_argument(
+                "base",
+                format!(
+                    "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
+                    base, resolved_base
+                ),
+                Some(target.display().to_string()),
+                Some(vec![format!(
+                    "Update the destination with `{}` and rerun Cook; provider execution has not started.",
+                    format!("git merge --ff-only {resolved_base}")
+                )]),
+            );
+            error.details["workspace_base_ancestry"] = serde_json::json!({
+                "schema": "homeboy/cook-workspace-base-ancestry/v1",
+                "base": base,
+                "resolved_base": resolved_base,
+                "destination_head": fingerprint.head,
+                "direction": direction,
+                "base_only_commits": behind,
+                "candidate_only_commits": ahead,
+                "next_action": "converge_destination_before_provider",
+            });
+            return Err(error.with_retryable(true));
+        }
+        return Ok(Some(serde_json::json!({
+            "schema": "homeboy/cook-workspace-base-snapshot/v1",
+            "base": declared_base,
+            "resolved_base": resolved_base,
+            "destination_head": fingerprint.head,
+            "base_only_commits": behind,
+            "candidate_only_commits": ahead,
+            "mode": "isolated_attempt_snapshot",
+        })));
+    }
+    let direction = "diverged";
     let mut error = Error::validation_invalid_argument(
         "base",
         format!(

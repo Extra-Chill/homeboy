@@ -3881,6 +3881,89 @@ fn cancellation_wins_the_retry_pre_execution_failure_race() {
 }
 
 #[test]
+fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-cancelled";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        cancel_run(run_id, Some("operator cancellation")).expect("cancel");
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let error = Error::validation_invalid_argument(
+            "workspace",
+            "Cook workspace snapshot was invalidated before provider execution",
+            None,
+            None,
+        )
+        .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &error)
+            .expect("preserve cancellation");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert!(record.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
+fn snapshot_fence_transition_preserves_unrelated_zero_execution_failure() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-unrelated-failure";
+        let plan = test_plan();
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        let original =
+            Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
+        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
+            .expect("record unrelated failure");
+        let fence =
+            Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
+                .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
+            .expect("preserve unrelated failure");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "unrelated_phase"
+        );
+    });
+}
+
+#[test]
+fn snapshot_fence_transition_rejects_same_class_without_pre_provider_identity() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-same-class-provider-outcome";
+        let plan = test_plan();
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        let original =
+            Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
+        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
+            .expect("record unrelated failure");
+        let mut aggregate = store.read_aggregate(run_id).expect("aggregate");
+        aggregate.outcomes[0]
+            .diagnostics
+            .push(crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.workspace_snapshot_invalidated".to_string(),
+                message: "provider-side diagnostic must not authorize replacement".to_string(),
+                data: json!({ "pre_provider": false }),
+            });
+        store
+            .write_aggregate(run_id, &aggregate)
+            .expect("persist aggregate");
+        let fence =
+            Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
+                .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
+            .expect("preserve non-fence outcome");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "unrelated_phase"
+        );
+    });
+}
+
+#[test]
 fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
     with_strict_config_lock(|| {
         with_isolated_home(|_| {
