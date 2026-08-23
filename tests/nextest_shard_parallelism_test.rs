@@ -52,6 +52,53 @@
 //! correct, and slower-and-correct is the side to err on for a gate whose
 //! entire job is to be believed.
 //!
+//! ### Status of that condition, measured 2026-08-23
+//!
+//! **Both named stores are done, and both named failure families now pass in
+//! parallel.** The rig registry reached zero ambient production resolutions
+//! across #13011/#13019/#13030/#13032, and controller admission reached zero in
+//! #13035, where the ambient entry points were additionally gated `#[cfg(test)]`
+//! so production cannot reach them at all.
+//!
+//! Reproduced locally against `c747bec09` on an 8-core Linux host, `cargo
+//! nextest`, three consecutive runs each:
+//!
+//! | scope | serial | parallel | verdict |
+//! |---|---|---|---|
+//! | `workspace::tests::prune::*` (the 10 named here) | 26.5s, 30/30 | 5.6s, 30/30 | passes |
+//! | `status_and_recovery` (holds both named tests) | 20.3s, 53/53 | 4.7s, 53/53 | passes |
+//! | `homeboy-lab-runner --lib` (1881 tests) | 410.3s, 7 failed | 98.5s, 7 failed | **identical failure set** |
+//!
+//! For `homeboy-lab-runner` the parallel-only failure count is **zero**: every
+//! failure reproduces serially in isolation and is environmental to that host.
+//!
+//! ### Why this still says `1`
+//!
+//! `homeboy-agents --lib` (1945 tests, 165.5s parallel) had 7 failures, and
+//! re-running those 7 serially in isolation cleared only 5. Two fail *only*
+//! under parallelism:
+//!
+//! - `agent_task_scheduler::managed_services::tests::cleanup_runs_multiple_service_grace_periods_concurrently`
+//! - `agent_task_scheduler::tests::scheduling_tests::concurrency::concurrency_tests::timeout_quarantines_only_its_workspace_without_starving_unrelated_work`
+//!
+//! Both assert on grace periods and timeouts. They are wall-clock sensitive, so
+//! eight-way CPU contention starves them — a different defect class from the
+//! shared-directory contamination this file was written about, and one that
+//! rooting a store cannot fix. **The release condition above is met; this is a
+//! new and separate blocker.** Restoring `0` needs those two given deadlines
+//! that do not depend on how loaded the host is.
+//!
+//! Two cautions for whoever measures next, both of which produced false results
+//! here before being caught:
+//!
+//! - A host under disk pressure can have cleanup delete `/var/tmp/.homeboy-test-tmp`
+//!   mid-run. That presents as ~1000 failures reading `No such file or
+//!   directory`, not as a race. Check free space before believing a bad run.
+//! - `/dev/null` on that host had been replaced by a regular file containing 99
+//!   bytes of git error text, which makes `git` fail with `bad config line 1 in
+//!   file /dev/null` in whichever tests happen to run while it is broken. That
+//!   looks exactly like an intermittent race and is not one.
+//!
 //! ## Why this is pinned rather than commented
 //!
 //! The value has now moved three times, and only one of those moves announced
