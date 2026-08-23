@@ -169,6 +169,13 @@ pub(super) fn create_with_store(
     options: WorktreeCreateOptions,
     store_dir: &Path,
 ) -> Result<WorktreeCreateOutput> {
+    with_task_worktree_registry_write_lock(|| create_with_store_unlocked(options, store_dir))
+}
+
+fn create_with_store_unlocked(
+    options: WorktreeCreateOptions,
+    store_dir: &Path,
+) -> Result<WorktreeCreateOutput> {
     let target = component::resolve_target(TargetSpec {
         component_id: Some(&options.component_id),
         path_override: None,
@@ -188,15 +195,117 @@ pub(super) fn create_with_store(
     })?;
     let id = format!("{}@{}", target.component_id, branch_slug(&options.branch));
     let worktree_path = parent.join(&id);
+    let existing = record_path(store_dir, &id)
+        .exists()
+        .then(|| read_record(store_dir, &id))
+        .transpose()?;
+    let identity = task_worktree_workspace_identity(&target.component_id, &id)?;
+    if let Some(record) = &existing {
+        verify_create_record_identity(
+            record,
+            &target.component_id,
+            &source_checkout,
+            &worktree_path,
+            &options.branch,
+            &identity,
+        )?;
+    }
+    let desired_path = normalize_missing_path(&worktree_path);
+    let registrations = branch_worktree_registrations(&source_checkout, &options.branch)?;
+    if let Some(registration) = registrations
+        .iter()
+        .find(|registration| registration.path != desired_path)
+    {
+        return Err(branch_ownership_error(&options.branch, registration));
+    }
     if worktree_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "branch",
-            "Task worktree path already exists",
-            Some(worktree_path.display().to_string()),
-            Some(vec![
-                "Use a unique branch name or remove the existing task worktree".to_string(),
-            ]),
-        ));
+        let record = existing.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "branch",
+                "Task worktree path exists without a matching active Homeboy record",
+                Some(worktree_path.display().to_string()),
+                Some(vec![
+                    "Inspect the existing checkout and adopt or remove it explicitly.".to_string(),
+                ]),
+            )
+        })?;
+        let _registration = registrations
+            .iter()
+            .find(|registration| registration.path == desired_path)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "branch",
+                    "Task worktree path is not registered for the declared branch",
+                    Some(worktree_path.display().to_string()),
+                    None,
+                )
+            })?;
+        verify_linked_worktree_identity(&source_checkout, &worktree_path, &options.branch)?;
+        return Ok(WorktreeCreateOutput {
+            record,
+            reconciliation: None,
+        });
+    }
+
+    if let Some(record) = existing {
+        if let Some(registration) = registrations
+            .iter()
+            .find(|registration| registration.path == desired_path)
+        {
+            if !registration.prunable {
+                return Err(Error::validation_invalid_argument(
+                    "branch",
+                    "Task worktree registration is missing its path but is not safely prunable",
+                    Some(registration.path.display().to_string()),
+                    Some(vec![
+                        "Inspect the Git worktree registration before retrying.".to_string(),
+                    ]),
+                ));
+            }
+            if !remove_exact_stale_worktree_registration(&source_checkout, &desired_path)? {
+                return Err(Error::validation_invalid_argument(
+                    "branch",
+                    "Git stale task worktree registration changed before exact cleanup",
+                    Some(worktree_path.display().to_string()),
+                    None,
+                ));
+            }
+        }
+        if !branch_exists(&source_checkout, &options.branch)? {
+            return Err(Error::validation_invalid_argument(
+                "branch",
+                "The declared branch is missing for the active task worktree record",
+                Some(options.branch.clone()),
+                None,
+            ));
+        }
+        let previous = create_evidence(&record, "missing".to_string())?;
+        let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
+        git::run_git(
+            &source_checkout,
+            &[
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                &options.branch,
+            ],
+            "git worktree add restore",
+        )?;
+        ownership::normalize_created_path(
+            &worktree_path,
+            worktree_owner,
+            true,
+            "git worktree add",
+        )?;
+        let current = create_evidence(&record, "registered".to_string())?;
+        return Ok(WorktreeCreateOutput {
+            record,
+            reconciliation: Some(WorktreeCreateReconciliation {
+                action: WorktreeCreateAction::Restored,
+                previous,
+                current,
+            }),
+        });
     }
 
     let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
@@ -235,8 +344,257 @@ pub(super) fn create_with_store(
         terminal_workspace_authority: None,
     };
     record.workspace_identity = Some(record.effective_workspace_identity()?);
-    write_record(store_dir, &record)?;
-    Ok(WorktreeCreateOutput { record })
+    write_record_unlocked(store_dir, &record)?;
+    Ok(WorktreeCreateOutput {
+        record,
+        reconciliation: None,
+    })
+}
+
+#[derive(Debug)]
+struct BranchWorktreeRegistration {
+    path: PathBuf,
+    prunable: bool,
+    status: String,
+}
+
+fn branch_worktree_registrations(
+    source: &Path,
+    branch: &str,
+) -> Result<Vec<BranchWorktreeRegistration>> {
+    let output = git::run_git(
+        source,
+        &["worktree", "list", "--porcelain"],
+        "git worktree list",
+    )?;
+    let mut registrations = Vec::new();
+    for block in output.split("\n\n") {
+        let mut path = None;
+        let mut registered_branch = None;
+        let mut prunable = false;
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(normalize_missing_path(Path::new(value)));
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                registered_branch = Some(value);
+            } else if line.starts_with("prunable") {
+                prunable = true;
+            }
+        }
+        if registered_branch == Some(branch) {
+            if let Some(path) = path {
+                registrations.push(BranchWorktreeRegistration {
+                    path,
+                    prunable,
+                    status: if prunable { "prunable" } else { "registered" }.to_string(),
+                });
+            }
+        }
+    }
+    Ok(registrations)
+}
+
+fn branch_exists(source: &Path, branch: &str) -> Result<bool> {
+    Ok(git::run_git(
+        source,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        "git show-ref task branch",
+    )
+    .is_ok())
+}
+
+fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str) -> Result<()> {
+    let common_dir = git_common_dir(source)?;
+    let pointer = fs::read_to_string(worktree.join(".git")).map_err(|_| {
+        linked_worktree_identity_error(worktree, "worktree .git pointer is unavailable")
+    })?;
+    let registration = pointer
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .and_then(|pointer| resolve_gitdir_pointer(worktree, pointer))
+        .ok_or_else(|| {
+            linked_worktree_identity_error(
+                worktree,
+                "worktree .git is not a linked-worktree pointer",
+            )
+        })?;
+    let registrations = common_dir.join("worktrees");
+    if registration.parent() != Some(registrations.as_path())
+        || !registration.is_dir()
+        || fs::read_to_string(registration.join("gitdir"))
+            .ok()
+            .is_none_or(|pointer| {
+                resolve_gitdir_pointer(&registration, pointer.trim())
+                    != worktree.join(".git").canonicalize().ok()
+            })
+    {
+        return Err(linked_worktree_identity_error(
+            worktree,
+            "linked-worktree registration does not point back to the declared path",
+        ));
+    }
+    let current_branch = git::run_git(worktree, &["branch", "--show-current"], "git branch")?;
+    let head = git::run_git(worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
+    let branch_head = git::run_git(
+        source,
+        &["rev-parse", &format!("refs/heads/{branch}")],
+        "git rev-parse branch",
+    )?;
+    if current_branch.trim() != branch || head.trim() != branch_head.trim() {
+        return Err(linked_worktree_identity_error(
+            worktree,
+            "linked-worktree branch or HEAD does not match the declared branch",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_gitdir_pointer(base: &Path, pointer: &str) -> Option<PathBuf> {
+    let pointer = resolve_gitdir_pointer_path(base, pointer);
+    pointer.canonicalize().ok()
+}
+
+fn resolve_gitdir_pointer_path(base: &Path, pointer: &str) -> PathBuf {
+    let pointer = PathBuf::from(pointer);
+    let pointer = if pointer.is_absolute() {
+        pointer
+    } else {
+        base.join(pointer)
+    };
+    let mut normalized = PathBuf::new();
+    for component in pointer.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn remove_exact_stale_worktree_registration(source: &Path, worktree: &Path) -> Result<bool> {
+    if worktree.exists() {
+        return Ok(false);
+    }
+    let expected_gitdir = resolve_gitdir_pointer_path(worktree, ".git");
+    let registrations = git_common_dir(source)?.join("worktrees");
+    let entries = fs::read_dir(&registrations).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(registrations.display().to_string()))
+    })?;
+    for entry in entries {
+        let directory = entry
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(registrations.display().to_string()))
+            })?
+            .path();
+        let matches = fs::read_to_string(directory.join("gitdir"))
+            .ok()
+            .is_some_and(|pointer| {
+                resolve_gitdir_pointer_path(&directory, pointer.trim()) == expected_gitdir
+            });
+        if !matches {
+            continue;
+        }
+        if directory.join("locked").exists()
+            || worktree.exists()
+            || fs::read_to_string(directory.join("gitdir"))
+                .ok()
+                .is_none_or(|pointer| {
+                    resolve_gitdir_pointer_path(&directory, pointer.trim()) != expected_gitdir
+                })
+        {
+            return Ok(false);
+        }
+        fs::remove_dir_all(&directory).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(directory.display().to_string()))
+        })?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn git_common_dir(source: &Path) -> Result<PathBuf> {
+    let raw = git::run_git(source, &["rev-parse", "--git-common-dir"], "git common dir")?;
+    let path = PathBuf::from(raw.trim());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        source.join(path)
+    };
+    path.canonicalize()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+fn linked_worktree_identity_error(worktree: &Path, reason: &str) -> Error {
+    Error::validation_invalid_argument(
+        "branch",
+        "Existing task worktree does not prove linked-worktree identity",
+        Some(worktree.display().to_string()),
+        Some(vec![reason.to_string()]),
+    )
+}
+
+fn verify_create_record_identity(
+    record: &TaskWorktreeRecord,
+    component_id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    workspace_identity: &WorkspaceIdentity,
+) -> Result<()> {
+    let expected_path = normalize_missing_path(worktree_path);
+    let record_path = normalize_missing_path(Path::new(&record.worktree_path));
+    let record_source = Path::new(&record.source_checkout).canonicalize().ok();
+    if record.state != TaskWorktreeState::Active
+        || record.component_id != component_id
+        || record.branch != branch
+        || record_path != expected_path
+        || record_source.as_deref() != Some(source_checkout)
+        || record.effective_workspace_identity()? != *workspace_identity
+    {
+        return Err(Error::validation_invalid_argument(
+            "branch",
+            "Existing task-worktree record does not prove the declared worktree identity",
+            Some(record.id.clone()),
+            Some(vec!["Record component, source checkout, contained path, branch, state, and workspace identity must match exactly.".to_string()]),
+        ));
+    }
+    Ok(())
+}
+
+fn branch_ownership_error(branch: &str, registration: &BranchWorktreeRegistration) -> Error {
+    Error::validation_invalid_argument(
+        "branch",
+        "Declared branch is already claimed by another Git worktree path",
+        Some(branch.to_string()),
+        Some(vec![
+            format!("owner_path={}", registration.path.display()),
+            format!("registration={}", registration.status),
+        ]),
+    )
+}
+
+fn create_evidence(
+    record: &TaskWorktreeRecord,
+    git_registration: String,
+) -> Result<WorktreeCreateEvidence> {
+    Ok(WorktreeCreateEvidence {
+        task_worktree_id: record.id.clone(),
+        component_id: record.component_id.clone(),
+        source_checkout: record.source_checkout.clone(),
+        worktree_path: record.worktree_path.clone(),
+        branch: record.branch.clone(),
+        workspace_identity: record.effective_workspace_identity()?,
+        git_registration,
+    })
 }
 
 pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
