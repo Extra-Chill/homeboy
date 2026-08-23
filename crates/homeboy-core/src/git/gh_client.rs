@@ -1,13 +1,23 @@
 //! Shared GitHub CLI client helpers.
 
+use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 
 use crate::component::{GithubConfig, GithubHostConfig};
 use crate::error::{Error, Result};
 use crate::git::release_download::GitHubRepo;
+use crate::process::{force_terminate_process_tree_bounded, ProcessContainment};
+use homeboy_engine_primitives::command::{
+    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
+};
 use std::collections::HashMap;
+
+const API_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const API_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct GhClient {
@@ -136,6 +146,18 @@ impl GhClient {
             .map_err(|e| Error::internal_json(e.to_string(), Some(format!("parse gh api {path}"))))
     }
 
+    /// Read a GitHub API response without allowing a caller-wide deadline to be
+    /// extended by one slow page. The child is reaped on timeout.
+    pub fn api_json_until<T: DeserializeOwned>(&self, path: &str, deadline: Instant) -> Result<T> {
+        let args = ["api", path];
+        let output = self.output_until(&args, deadline)?;
+        if !output.status.success() {
+            return Err(self.command_failed(&format!("gh api {path}"), output));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|e| Error::internal_json(e.to_string(), Some(format!("parse gh api {path}"))))
+    }
+
     pub fn api_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let args = ["api", path];
         let output = self.output(&args)?;
@@ -143,6 +165,135 @@ impl GhClient {
             return Err(self.command_failed(&format!("gh api {path}"), output));
         }
         Ok(output.stdout)
+    }
+
+    fn output_until(&self, args: &[&str], deadline: Instant) -> Result<Output> {
+        if Instant::now() >= deadline {
+            return Err(Error::internal_io(
+                "GitHub API deadline exhausted before invocation",
+                None,
+            ));
+        }
+        let mut command = self.command(args);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut containment = ProcessContainment::prepare(&mut command).map_err(|error| {
+            Error::internal_io(format!("Failed to contain gh: {error}"), Some("gh".into()))
+        })?;
+        let guard = ControllerChildGuard::prepare(&mut command).map_err(|error| {
+            Error::internal_io(format!("Failed to contain gh: {error}"), Some("gh".into()))
+        })?;
+        let mut child = command.spawn().map_err(|e| {
+            Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into()))
+        })?;
+        if let Err(error) = containment.attach(&child) {
+            cleanup_gh_child(&containment, &mut child, false);
+            return Err(Error::internal_io(
+                format!("Failed to attach gh containment: {error}"),
+                Some("gh".into()),
+            ));
+        }
+        if let Err(error) = guard.attach(&child) {
+            cleanup_gh_child(&containment, &mut child, false);
+            return Err(Error::internal_io(
+                format!("Failed to guard gh: {error}"),
+                Some("gh".into()),
+            ));
+        }
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let stdout_reader = std::thread::spawn(move || {
+            let _ = stdout_tx.send(read_bounded(stdout, API_CAPTURE_LIMIT_BYTES));
+        });
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        let stderr_reader = std::thread::spawn(move || {
+            let _ = stderr_tx.send(read_bounded(stderr, API_CAPTURE_LIMIT_BYTES));
+        });
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    cleanup_gh_child(&containment, &mut child, true);
+                    break status;
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Ok(None) => {
+                    cleanup_gh_child(&containment, &mut child, false);
+                    join_gh_readers(stdout_reader, stderr_reader);
+                    return Err(Error::internal_io("GitHub API deadline exhausted", None));
+                }
+                Err(error) => {
+                    cleanup_gh_child(&containment, &mut child, false);
+                    join_gh_readers(stdout_reader, stderr_reader);
+                    return Err(Error::internal_io(
+                        format!("Failed while waiting for gh: {error}"),
+                        Some("gh".into()),
+                    ));
+                }
+            }
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let stdout = match stdout_rx.recv_timeout(remaining) {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                cleanup_gh_child(&containment, &mut child, true);
+                join_gh_readers(stdout_reader, stderr_reader);
+                return Err(error.into());
+            }
+            Err(_) => {
+                cleanup_gh_child(&containment, &mut child, true);
+                join_gh_readers(stdout_reader, stderr_reader);
+                return Err(Error::internal_io(
+                    "GitHub API stdout did not close before the deadline",
+                    None,
+                ));
+            }
+        };
+        let stderr =
+            match stderr_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => {
+                    cleanup_gh_child(&containment, &mut child, true);
+                    join_gh_readers(stdout_reader, stderr_reader);
+                    return Err(error.into());
+                }
+                Err(_) => {
+                    cleanup_gh_child(&containment, &mut child, true);
+                    join_gh_readers(stdout_reader, stderr_reader);
+                    return Err(Error::internal_io(
+                        "GitHub API stderr did not close before the deadline",
+                        None,
+                    ));
+                }
+            };
+        let stdout_join = stdout_reader.join();
+        let stderr_join = stderr_reader.join();
+        stdout_join.map_err(|_| Error::internal_io("GitHub API stdout reader panicked", None))?;
+        stderr_join.map_err(|_| Error::internal_io("GitHub API stderr reader panicked", None))?;
+        if stdout.truncated {
+            return Err(Error::internal_io(
+                format!(
+                    "GitHub API stdout exceeded the {} byte capture limit",
+                    API_CAPTURE_LIMIT_BYTES
+                ),
+                Some("gh api".into()),
+            ));
+        }
+        if stderr.truncated {
+            return Err(Error::internal_io(
+                format!(
+                    "GitHub API stderr exceeded the {} byte capture limit",
+                    API_CAPTURE_LIMIT_BYTES
+                ),
+                Some("gh api".into()),
+            ));
+        }
+        Ok(Output {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        })
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -159,6 +310,46 @@ impl GhClient {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let combined = if stderr.is_empty() { stdout } else { stderr };
         Error::git_command_failed(format!("{action} failed: {combined}"))
+    }
+}
+
+fn cleanup_gh_child(
+    containment: &ProcessContainment,
+    child: &mut std::process::Child,
+    leader_has_exited: bool,
+) {
+    // Snapshot procfs before reaping the leader so Linux cleanup also reaches a
+    // descendant that escaped the contained group with `setsid`.
+    let _ = containment.terminate_on_failure_bounded(API_CLEANUP_BUDGET, leader_has_exited);
+    let _ = containment.cleanup_after_leader_exit_bounded(API_CLEANUP_BUDGET);
+    let _ = force_terminate_process_tree_bounded(child.id(), API_CLEANUP_BUDGET);
+    let _ = terminate_remaining_process_group(child.id());
+    let _ = terminate_process_tree_and_reap(child);
+}
+
+fn join_gh_readers(stdout: std::thread::JoinHandle<()>, stderr: std::thread::JoinHandle<()>) {
+    let _ = stdout.join();
+    let _ = stderr.join();
+}
+
+struct BoundedRead {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
+    let mut bytes = Vec::with_capacity(limit.min(8192));
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(BoundedRead { bytes, truncated });
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let retained = remaining.min(count);
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained != count;
     }
 }
 
@@ -282,7 +473,15 @@ fn inherited_enterprise_https_proxy(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use std::collections::HashMap;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
+    use std::sync::{Mutex, OnceLock};
+    #[cfg(target_os = "linux")]
+    use std::time::{Duration, Instant};
 
     use crate::component::{GithubConfig, GithubHostConfig};
 
@@ -549,5 +748,57 @@ mod tests {
             ]
         );
         assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
+    }
+
+    #[test]
+    fn bounded_api_capture_drains_without_retaining_unbounded_stdout() {
+        let captured = super::read_bounded(Cursor::new(b"abcdef"), 4).unwrap();
+
+        assert_eq!(captured.bytes, b"abcd");
+        assert!(captured.truncated);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_gh_capture_reaps_setsid_descendant_after_leader_exit() {
+        static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _path_lock = PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let pid_file = fixture.path().join("descendant.pid");
+        let gh = fixture.path().join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
+                homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+                homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let previous_path = std::env::var_os("PATH");
+        let mut paths = vec![fixture.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &previous_path.clone().unwrap_or_default(),
+        ));
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+
+        let client = GhClient::for_host("github.com");
+        let result = client.output_until(&[], Instant::now() + Duration::from_secs(1));
+        if let Some(path) = previous_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        result.expect("contained gh capture completes after cleanup");
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            !crate::process::pid_is_running(descendant_pid),
+            "setsid gh descendant {descendant_pid} survived capture cleanup"
+        );
     }
 }

@@ -22,6 +22,7 @@ use crate::agent_task_finalization::{
     AgentTaskPrFinalizationBackend, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
+use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
     promote_with_checkpoint_in_observation_store, AgentTaskPromotionOptions,
@@ -1057,27 +1058,14 @@ pub(crate) fn candidate_adoption_source_in_store(
 }
 
 pub(crate) fn concrete_adoption_ai_model(value: &str) -> Result<String> {
-    let normalized = value.trim();
-    if normalized.is_empty()
-        || value != normalized
-        || value.chars().any(char::is_control)
-        || matches!(
-            normalized.to_ascii_lowercase().as_str(),
-            "not recorded"
-                | "unknown"
-                | "ai-assisted"
-                | "ai assisted"
-                | "legacy caller did not record a model"
-        )
-    {
-        return Err(Error::validation_invalid_argument(
+    normalize_concrete_model_identifier(value).ok_or_else(|| {
+        Error::validation_invalid_argument(
             "ai_model",
             "candidate adoption requires a concrete model identifier",
             None,
             None,
-        ));
-    }
-    Ok(normalized.to_string())
+        )
+    })
 }
 
 /// Resolve an existing run first, then recover a deterministic persisted

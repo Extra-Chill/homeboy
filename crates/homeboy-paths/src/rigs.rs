@@ -60,11 +60,6 @@ pub fn rig_packages_in_root(config_root: &Path) -> PathBuf {
     rig_registry_root_in_root(config_root).join("rig-packages")
 }
 
-/// Installed rig package directory (~/.config/homeboy/rig-packages/)
-pub fn rig_packages() -> Result<PathBuf> {
-    Ok(rig_packages_in_root(&homeboy()?))
-}
-
 /// Cloned rig package path below an already-resolved config root.
 pub fn rig_package_in_root(config_root: &Path, id: &str) -> PathBuf {
     rig_packages_in_root(config_root).join(id)

@@ -169,6 +169,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
         }
+        attach_status_scope(&mut value, &target.run_id);
         return Ok((value, 0));
     }
 
@@ -275,6 +276,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection.as_ref() {
         value["candidate_selection"] = selection.clone();
     }
+    attach_status_scope(&mut value, run_id);
     if args.full {
         let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
         attach_full_status_candidate(&mut value, aggregate.as_ref(), run_id);
@@ -1170,6 +1172,10 @@ fn normalized_full_status(
                 "label": bounded_value(action.get("label").unwrap_or(&Value::Null)),
             })),
         },
+        "status_scope": value
+            .get("status_scope")
+            .map(compact_status_scope)
+            .unwrap_or(Value::Null),
         "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
         "details": {
             "status": { "ref": status_ref, "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)) },
@@ -1212,6 +1218,10 @@ fn normalized_full_status(
                 "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
                 "terminal_status": bounded_value(value.get("terminal_status").unwrap_or(&Value::Null)),
             },
+            "status_scope": value
+                .get("status_scope")
+                .map(compact_status_scope)
+                .unwrap_or(Value::Null),
             "output_budget": {
                 "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
                 "truncated": true,
@@ -1361,6 +1371,37 @@ mod bounded_full_status_tests {
             .windows(2)
             .all(|pair| { pair[0]["ref"].as_str().unwrap() < pair[1]["ref"].as_str().unwrap() }));
         assert_eq!(full["details"]["artifacts"]["total_items"], 10_000);
+    }
+
+    #[test]
+    fn bounded_full_status_preserves_attempt_and_cook_scope() {
+        let full = normalized_full_status(
+            json!({
+                "run_id": "cancelled-retry",
+                "state": "cancelled",
+                "status_scope": {
+                    "schema": "homeboy/agent-task-status-scope/v1",
+                    "queried_attempt": { "run_id": "cancelled-retry", "candidate": { "state": "unknown" }, "unbounded": "x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2) },
+                    "cook": { "selection": { "status": "selected", "run_id": "historical-finalized", "candidate": { "state": "finalized" } }, "finalization": { "status": "review_ready", "pr_url": "x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2) } }
+                }
+            }),
+            "cancelled-retry",
+            None,
+        );
+
+        assert!(serialized_len(&full) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(
+            full["status_scope"]["queried_attempt"]["run_id"],
+            "cancelled-retry"
+        );
+        assert_eq!(
+            full["status_scope"]["cook"]["selection"]["status"],
+            "selected"
+        );
+        assert_eq!(
+            full["status_scope"]["cook"]["selection"]["candidate"]["state"],
+            "finalized"
+        );
     }
 }
 
@@ -1669,6 +1710,39 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
 }
 
 fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
+    if value
+        .pointer("/metadata/manual_finalization_failure/status")
+        .and_then(Value::as_str)
+        == Some("failed")
+    {
+        value["publication_recovery"] = json!({
+            "kind": "manual_finalization",
+            "phase": "publication",
+            "command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
+            "error": value.pointer("/metadata/manual_finalization_failure/error"),
+        });
+        let metadata = CommandActionableMetadata {
+            refs: CommandResultRefs {
+                agent_tasks: vec![agent_task_ref(run_id)],
+                ..Default::default()
+            },
+            next_actions: vec![
+                CommandNextAction::new(
+                    "recover manual publication",
+                    format!("homeboy agent-task finalize-pr --recover {run_id}"),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+                CommandNextAction::new(
+                    "show status",
+                    format!("homeboy agent-task status {run_id} --full"),
+                )
+                .with_kind(CommandNextActionKind::Show),
+            ],
+            ..Default::default()
+        };
+        attach_actionable_metadata(value, metadata);
+        return;
+    }
     let blocked = cook_requires_action(value);
     let mut next_actions = Vec::new();
     if blocked {
@@ -2434,7 +2508,12 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
         record.metadata.get("cook_finalization"),
         Some(&record.run_id),
     ) {
-        value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
+        let mut completion = serde_json::to_value(completion).expect("completion serializes");
+        // This legacy top-level field remains for existing consumers, but its
+        // candidate fact belongs to the Cook rather than this queried attempt.
+        completion["scope"] = json!("cook");
+        completion["context"] = json!("selected_cook_candidate");
+        value["cook_completion"] = completion;
     }
     // The completion projection answers whether a PR exists; it does not carry
     // the PR's identity. Project that beside it so `status` can answer "is there
@@ -2454,6 +2533,132 @@ fn cook_finalization_pr_url(record: &AgentTaskRunRecord) -> Option<&str> {
         .and_then(Value::as_str)?
         .trim();
     (!url.is_empty()).then_some(url)
+}
+
+/// Versioned semantic boundary between one queried lifecycle attempt and the
+/// Cook-wide candidate that can survive later empty or cancelled retries.
+/// Legacy top-level fields intentionally retain their historical projection.
+fn attach_status_scope(value: &mut Value, queried_run_id: &str) {
+    // The bridge status projection intentionally omits record metadata and the
+    // aggregate. Rehydrate both from the controller before classifying so every
+    // status mode describes the same durable attempt, not its transient view.
+    let queried_record = agent_task_service_direct::persisted_status(queried_run_id).ok();
+    let queried_aggregate = completed_run_aggregate(queried_run_id).and_then(Result::ok);
+    let queried_payload = queried_record
+        .as_ref()
+        .and_then(|record| serde_json::to_value(record).ok())
+        .unwrap_or_else(|| value.clone());
+    let queried_candidate = canonical_candidate_projection(classify_candidates(
+        &candidate_result_payload(&queried_payload, queried_aggregate.as_ref()),
+    ));
+    let cook_id = queried_record
+        .as_ref()
+        .and_then(|record| record.metadata.get("cook_id"))
+        .and_then(Value::as_str);
+    // A status scope distinguishes a queried Cook attempt from its selected
+    // candidate. Do not invent that distinction for ordinary lifecycle runs:
+    // a synthetic unavailable Cook selection changes their human summary.
+    let has_cook_evidence = cook_id.is_some_and(|cook_id| !cook_id.is_empty())
+        || value
+            .get("cook_completion")
+            .is_some_and(|completion| !completion.is_null())
+        || value
+            .pointer("/metadata/cook_finalization")
+            .is_some_and(|finalization| !finalization.is_null());
+    if !has_cook_evidence {
+        return;
+    }
+    let mut cook = json!({
+        "selection": {
+            "status": "unavailable",
+            "diagnostics": [{ "code": "cook_identity_unavailable" }],
+        },
+        "completion": Value::Null,
+        "finalization": Value::Null,
+    });
+    if let Some(cook_id) = cook_id.filter(|cook_id| !cook_id.is_empty()) {
+        cook["cook_id"] = bounded_value(&Value::String(cook_id.to_string()));
+        match agent_task_service_direct::select_cook_candidate(cook_id) {
+            Ok(selection) if selection.incomplete => {
+                cook["selection"] = json!({
+                    "status": "unavailable",
+                    "reason": selection.reason,
+                    "latest_attempt_run_id": bounded_value(&Value::String(selection.latest_attempt_run_id)),
+                    "diagnostics": [{ "code": "selection_incomplete", "skipped_attempts": selection.skipped_newer_run_ids.len() }],
+                });
+            }
+            Ok(selection) if selection.selected_artifact_id.is_none() => {
+                cook["selection"] = json!({
+                    "status": "none",
+                    "reason": selection.reason,
+                    "latest_attempt_run_id": bounded_value(&Value::String(selection.latest_attempt_run_id)),
+                });
+            }
+            Ok(selection) => {
+                let selected_run_id = selection.run_id;
+                let selected = agent_task_service_direct::persisted_status(&selected_run_id)
+                    .ok()
+                    .map(|record| {
+                        let aggregate =
+                            completed_run_aggregate(&selected_run_id).and_then(Result::ok);
+                        let mut payload = serde_json::to_value(&record).unwrap_or(Value::Null);
+                        attach_cook_completion(&mut payload, &record);
+                        (
+                            canonical_candidate_projection(classify_candidates(
+                                &candidate_result_payload(&payload, aggregate.as_ref()),
+                            )),
+                            payload
+                                .get("cook_completion")
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                            payload
+                                .pointer("/metadata/cook_finalization")
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        )
+                    });
+                let selection_available = selected.is_some();
+                let (candidate, completion, finalization) = selected.unwrap_or_else(|| {
+                    (
+                        json!({ "schema": "homeboy/agent-task-candidate/v1", "state": "unknown" }),
+                        Value::Null,
+                        Value::Null,
+                    )
+                });
+                cook["completion"] = completion;
+                cook["finalization"] = finalization;
+                cook["selection"] = json!({
+                    "status": if selection_available { "selected" } else { "unavailable" },
+                    "run_id": bounded_value(&Value::String(selected_run_id)),
+                    "attempt": selection.attempt,
+                    "latest_attempt_run_id": bounded_value(&Value::String(selection.latest_attempt_run_id)),
+                    "reason": selection.reason,
+                    "selected_task_id": selection.selected_task_id.map(Value::String).unwrap_or(Value::Null),
+                    "selected_artifact_id": selection.selected_artifact_id.map(Value::String).unwrap_or(Value::Null),
+                    "candidate": candidate,
+                    "diagnostics": if selection_available { Value::Array(Vec::new()) } else { json!([{ "code": "selected_attempt_unavailable" }]) },
+                });
+            }
+            Err(error) => {
+                cook["selection"] = json!({
+                    "status": "unavailable",
+                    "diagnostics": [{ "code": "selection_read_failed", "message": bounded_value(&Value::String(error.message)) }],
+                });
+            }
+        }
+    }
+    value["status_scope"] = json!({
+        "schema": "homeboy/agent-task-status-scope/v1",
+        "queried_attempt": {
+            "run_id": bounded_value(&Value::String(queried_run_id.to_string())),
+            "state": value.get("state").cloned().unwrap_or(Value::Null),
+            "child_run_state": value.get("child_run_state").cloned().unwrap_or(Value::Null),
+            "totals": value.get("totals").cloned().unwrap_or(Value::Null),
+            "artifacts": { "count": value.get("artifact_refs").and_then(Value::as_array).map_or(0, Vec::len) },
+            "candidate": queried_candidate,
+        },
+        "cook": cook,
+    });
 }
 
 /// Basis marker for `next_actions`: the diagnosis mapped a typed failure
@@ -3790,7 +3995,7 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task status run-1 --full",
                 "homeboy runner status homeboy-lab",
-                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
                 "homeboy --runner homeboy-lab agent-task retry run-1 --run",
             ]
         );
@@ -5281,6 +5486,9 @@ fn compact_status_summary_with_aggregate(
             summary["pr_url"] = pr_url.clone();
         }
     }
+    if let Some(status_scope) = record.get("status_scope") {
+        summary["status_scope"] = compact_status_scope(status_scope);
+    }
     if let Some(delivery) = record.get("notification_delivery") {
         summary["notification_delivery"] = compact_fields(
             delivery,
@@ -5393,6 +5601,74 @@ fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
     summary
 }
 
+fn compact_status_scope(scope: &Value) -> Value {
+    let selection = scope.pointer("/cook/selection").unwrap_or(&Value::Null);
+    let candidate = |value: &Value| {
+        let mut result = compact_status_scope_fields(value, &["schema", "state"]);
+        result["scan"] = compact_status_scope_fields(
+            value.get("scan").unwrap_or(&Value::Null),
+            &[
+                "degraded",
+                "attempts_omitted",
+                "outcomes_omitted",
+                "artifacts_omitted",
+            ],
+        );
+        result
+    };
+    json!({
+            "schema": bounded_status_scope_value(scope.get("schema").unwrap_or(&Value::Null)),
+        "queried_attempt": {
+            "run_id": bounded_status_scope_value(scope.pointer("/queried_attempt/run_id").unwrap_or(&Value::Null)),
+            "state": bounded_status_scope_value(scope.pointer("/queried_attempt/state").unwrap_or(&Value::Null)),
+            "child_run_state": bounded_status_scope_value(scope.pointer("/queried_attempt/child_run_state").unwrap_or(&Value::Null)),
+            "totals": compact_status_scope_fields(scope.pointer("/queried_attempt/totals").unwrap_or(&Value::Null), &["queued", "running", "blocked", "skipped", "succeeded", "failed", "cancelled", "timed_out"]),
+            "artifacts": compact_status_scope_fields(scope.pointer("/queried_attempt/artifacts").unwrap_or(&Value::Null), &["count"]),
+            "candidate": candidate(scope.pointer("/queried_attempt/candidate").unwrap_or(&Value::Null)),
+        },
+        "cook": {
+            "cook_id": bounded_status_scope_value(scope.pointer("/cook/cook_id").unwrap_or(&Value::Null)),
+            "selection": {
+                "status": bounded_status_scope_value(selection.get("status").unwrap_or(&Value::Null)),
+                "run_id": bounded_status_scope_value(selection.get("run_id").unwrap_or(&Value::Null)),
+                "attempt": bounded_status_scope_value(selection.get("attempt").unwrap_or(&Value::Null)),
+                "latest_attempt_run_id": bounded_status_scope_value(selection.get("latest_attempt_run_id").unwrap_or(&Value::Null)),
+                "reason": bounded_status_scope_value(selection.get("reason").unwrap_or(&Value::Null)),
+                "selected_task_id": bounded_status_scope_value(selection.get("selected_task_id").unwrap_or(&Value::Null)),
+                "selected_artifact_id": bounded_status_scope_value(selection.get("selected_artifact_id").unwrap_or(&Value::Null)),
+                "candidate": candidate(selection.get("candidate").unwrap_or(&Value::Null)),
+                "diagnostics": selection.get("diagnostics").and_then(Value::as_array).map(|diagnostics| diagnostics.iter().take(COMPACT_REF_LIMIT).map(|diagnostic| compact_status_scope_fields(diagnostic, &["code", "skipped_attempts", "message"])).collect::<Vec<_>>()),
+            },
+            "completion": compact_status_scope_fields(scope.pointer("/cook/completion").unwrap_or(&Value::Null), &["scope", "context", "candidate_produced", "finalization_requested", "pr_finalized", "state"]),
+            "finalization": {
+                "status": bounded_status_scope_value(scope.pointer("/cook/finalization/status").unwrap_or(&Value::Null)),
+                "pr_number": bounded_status_scope_value(scope.pointer("/cook/finalization/pr_number").unwrap_or(&Value::Null)),
+                "pr_url": bounded_status_scope_value(scope.pointer("/cook/finalization/pr_url").or_else(|| scope.pointer("/cook/finalization/pull_request_url")).unwrap_or(&Value::Null)),
+            },
+        },
+    })
+}
+
+fn compact_status_scope_fields(value: &Value, fields: &[&str]) -> Value {
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = value.get(*field) {
+            object.insert((*field).to_string(), bounded_status_scope_value(value));
+        }
+    }
+    Value::Object(object)
+}
+
+fn bounded_status_scope_value(value: &Value) -> Value {
+    if serialized_len(value) <= COMPACT_TEXT_LIMIT {
+        return value.clone();
+    }
+    Value::String(format!(
+        "sha256:{}",
+        content_hash::sha256_hex(&serde_json::to_vec(value).unwrap_or_default())
+    ))
+}
+
 fn compact_gate_summaries(gates: &[Value]) -> (Value, usize) {
     let summaries = gates
         .iter()
@@ -5406,6 +5682,12 @@ fn compact_gate_summaries(gates: &[Value]) -> (Value, usize) {
 }
 
 fn enforce_compact_status_budget(mut value: Value) -> Value {
+    // Callers may add scope after producing their compact projection. Normalize
+    // it here as well so the mandatory semantic boundary cannot consume the
+    // budget or be removed by overflow handling.
+    if let Some(scope) = value.get("status_scope").cloned() {
+        value["status_scope"] = compact_status_scope(&scope);
+    }
     if serialized_len(&value) <= COMPACT_STATUS_BYTE_LIMIT {
         return value;
     }
@@ -5547,6 +5829,7 @@ fn compact_mandatory_field(field: &str) -> bool {
             | "latest_run_id"
             | "status"
             | "state"
+            | "status_scope"
             | "full_command"
     )
 }
@@ -7005,6 +7288,12 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     }
+    if let Err(error) = agent_task_service_direct::retry_admission(&record.run_id) {
+        return RetryReplayAction::unavailable(
+            owner,
+            format!("retry admission is unavailable: {}", error.message),
+        );
+    }
     if !plan_has_retry_materialization_identity(&plan) {
         return RetryReplayAction::unavailable(
             owner,
@@ -7851,6 +8140,20 @@ mod tests {
             "candidate_selection": { "evidence": large },
             "identity": { "cook_alias": { "evidence": large } },
             "runner_probe": { "evidence": large },
+            "status_scope": {
+                "schema": "homeboy/agent-task-status-scope/v1",
+                "queried_attempt": { "run_id": "retry", "state": "cancelled", "candidate": { "state": "unknown", "scan": { "degraded": false, "unbounded": large } } },
+                "cook": {
+                    "cook_id": "cook",
+                    "selection": {
+                        "status": "selected",
+                        "run_id": "historical",
+                        "candidate": { "state": "finalized", "scan": { "degraded": false, "unbounded": large } },
+                        "diagnostics": [{ "code": large, "message": large, "skipped_attempts": large }]
+                    },
+                    "finalization": { "status": large, "pr_number": large, "pr_url": large }
+                }
+            },
             ACTIONABLE_METADATA_KEY: { "next_actions": [{ "command": large }] },
             "unknown_future_enrichment": { "evidence": large }
         });
@@ -7888,6 +8191,30 @@ mod tests {
             "unknown_future_enrichment",
         ] {
             assert!(compact.get(section).is_none(), "{section}");
+        }
+        assert_eq!(
+            compact["status_scope"]["queried_attempt"]["state"],
+            "cancelled"
+        );
+        assert_eq!(
+            compact["status_scope"]["cook"]["selection"]["candidate"]["state"],
+            "finalized"
+        );
+        for field in ["status", "pr_number", "pr_url"] {
+            assert!(
+                compact["status_scope"]["cook"]["finalization"][field]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("sha256:")),
+                "{field}"
+            );
+        }
+        for field in ["code", "message", "skipped_attempts"] {
+            assert!(
+                compact["status_scope"]["cook"]["selection"]["diagnostics"][0][field]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("sha256:")),
+                "{field}"
+            );
         }
         assert!(compact["omitted_sections"]
             .as_array()
@@ -8031,6 +8358,8 @@ mod tests {
                 }},
                 "cook_completion": {
                     "schema": "homeboy/agent-task-cook-completion/v1",
+                    "scope": "cook",
+                    "context": "selected_cook_candidate",
                     "candidate_produced": true,
                     "finalization_requested": true,
                     "pr_finalized": false,
@@ -8046,6 +8375,11 @@ mod tests {
             "candidate_awaiting_finalization"
         );
         assert_eq!(summary["cook_completion"]["pr_finalized"], false);
+        assert_eq!(summary["cook_completion"]["scope"], "cook");
+        assert_eq!(
+            summary["cook_completion"]["context"],
+            "selected_cook_candidate"
+        );
         assert_eq!(summary["pr_url"], "https://example.test/pull/1");
         assert_eq!(summary["canonical_candidate"]["state"], "promoted");
 
@@ -8257,7 +8591,7 @@ mod tests {
         assert!(rendered.contains("Patch candidates: 1 non-empty / 0 empty"));
         assert!(!rendered.contains("Patch candidates: 1 non-empty / 0 empty /"));
         assert!(rendered.contains("Diff bytes: 32318"));
-        assert!(rendered.contains("Changed files: unknown"));
+        assert!(rendered.contains("Changed files: 7"));
         assert!(rendered.contains("Next: homeboy agent-task review agent-task-durable-patch"));
         assert!(compact[ACTIONABLE_METADATA_KEY]["next_actions"]
             .as_array()
@@ -8308,6 +8642,36 @@ mod tests {
             .any(
                 |action| action["command"] == "homeboy agent-task review agent-task-durable-patch"
             ));
+    }
+
+    #[test]
+    fn manual_publication_failure_projects_recovery_without_agent_task_execution() {
+        let mut status = json!({
+            "run_id": "manual-publication",
+            "state": "failed",
+            "metadata": {
+                "manual_finalization_failure": {
+                    "status": "failed",
+                    "phase": "publication",
+                    "error": { "code": "validation.invalid_argument" }
+                }
+            }
+        });
+
+        attach_agent_task_status_actionable(&mut status, "manual-publication");
+        let actions = status[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("manual publication actions");
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy agent-task finalize-pr --recover manual-publication"
+        }));
+        assert_eq!(
+            status["publication_recovery"]["command"],
+            "homeboy agent-task finalize-pr --recover manual-publication"
+        );
+        assert!(!actions.iter().any(|action| action["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("agent-task run"))));
     }
 
     #[test]

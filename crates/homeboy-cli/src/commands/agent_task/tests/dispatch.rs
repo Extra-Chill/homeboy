@@ -338,7 +338,7 @@ fn repo_only_cook_without_registered_component_persists_requested_repository_exp
 }
 
 #[test]
-fn cook_normalizes_repository_alias_to_component_identity_for_every_destination_form() {
+fn cook_preserves_repository_and_component_identity_for_every_destination_form() {
     with_isolated_home(|_| {
         let checkout = tempfile::tempdir().expect("repository checkout");
         init_runtime_component_checkout(checkout.path());
@@ -420,6 +420,37 @@ fn cook_normalizes_repository_alias_to_component_identity_for_every_destination_
         assert_eq!(
             plan.metadata["cook_repository_identity"]["component_id"],
             "php-transformer"
+        );
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "dmc".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    ensure: Some(vec![
+                        "dmc-worktree-provider".to_string(),
+                        "{repo}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save DMC provider config");
+        let mut provider_args = issue.clone();
+        provider_args.base = Some("main".to_string());
+        let provision = super::super::run::provision_cook_destination(&provider_args)
+            .expect("defer DMC provisioning until Cook admission");
+        assert_eq!(provision["provision_intent"]["repo"], "blocks-engine");
+        assert_eq!(
+            provider_args.dispatch.repo.as_deref(),
+            Some("php-transformer")
         );
 
         let component_id = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![

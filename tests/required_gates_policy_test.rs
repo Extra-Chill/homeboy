@@ -168,6 +168,10 @@ fn run_execution_gate(env: &[(&str, &str)]) -> Output {
     command.env_remove("GITHUB_STEP_SUMMARY");
     command.env("CI_GATE_RESULTS", r#"{"gates":{"result":"success"}}"#);
     command.env("REQUIRED_GATES_CONFIG", &fixture);
+    command.env(
+        "REQUIRED_GATES_HEAD_SHA",
+        "0000000000000000000000000000000000000000",
+    );
     for (key, value) in env {
         command.env(key, value);
     }
@@ -185,6 +189,7 @@ fn execution_jobs(contexts: &[String], exception: Option<(&str, serde_json::Valu
             .map(|context| {
                 serde_json::json!({
                     "name": context,
+                    "head_sha": "0000000000000000000000000000000000000000",
                     "conclusion": exception
                         .as_ref()
                         .filter(|(candidate, _)| *candidate == context)
@@ -692,6 +697,7 @@ fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success
         serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
     jobs.push(serde_json::json!({
         "name": "homeboy / Test",
+        "head_sha": "0000000000000000000000000000000000000000",
         "conclusion": "skipped",
     }));
     let jobs = scratch.write(
@@ -705,6 +711,109 @@ fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success
         "a successful canonical Test context remains valid when its planning duplicate is skipped: {}\n{}",
         stdout_of(&output),
         stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"success\",\"skipped\"]")
+            && stdout_of(&output).contains("\"selected_conclusion\":\"success\""),
+        "duplicate diagnostics must retain both results and the selected success: {}",
+        stdout_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("declared=8 executed=8"),
+        "the terminal gate counts itself after observing the other seven: {}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_keeps_duplicate_failures_and_cancellations_fail_closed() {
+    let contexts = declared_contexts();
+
+    for (name, conclusion) in [("failure", "failure"), ("cancelled", "cancelled")] {
+        let scratch = Scratch::new(name);
+        let mut jobs: Vec<serde_json::Value> =
+            serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
+        jobs.push(serde_json::json!({
+            "name": "homeboy / Test",
+            "head_sha": "0000000000000000000000000000000000000000",
+            "conclusion": conclusion,
+        }));
+        let jobs = scratch.write(
+            "jobs.json",
+            &serde_json::to_string(&jobs).expect("duplicate jobs"),
+        );
+        let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+        assert!(
+            !output.status.success()
+                && stdout_of(&output).contains("required-gates-executed-status=failed"),
+            "a {name} duplicate must not be masked by success: {}",
+            stdout_of(&output)
+        );
+        assert!(
+            stdout_of(&output).contains(&format!("\"selected_conclusion\":\"{conclusion}\"")),
+            "the selected fail-closed result must be diagnosable: {}",
+            stdout_of(&output)
+        );
+    }
+}
+
+#[test]
+fn terminal_execution_verdict_rejects_skipped_only_and_ignores_other_head_duplicates() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("skipped-only-other-head");
+    let mut jobs: Vec<serde_json::Value> = serde_json::from_str(&execution_jobs(
+        &contexts,
+        Some(("homeboy / Test", serde_json::json!("skipped"))),
+    ))
+    .expect("execution jobs");
+    jobs.push(serde_json::json!({
+        "name": "homeboy / Test",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "conclusion": "success",
+    }));
+    let jobs = scratch.write(
+        "jobs.json",
+        &serde_json::to_string(&jobs).expect("duplicate jobs"),
+    );
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+    assert!(
+        !output.status.success()
+            && stdout_of(&output).contains("required-gates-executed-status=failed"),
+        "a success for another head must not satisfy a skipped candidate: {}",
+        stdout_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"skipped\"]")
+            && stdout_of(&output).contains("\"selected_conclusion\":\"skipped\""),
+        "the candidate-head result must be diagnosable: {}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_accepts_duplicate_success() {
+    let contexts = declared_contexts();
+    let scratch = Scratch::new("duplicate-success");
+    let mut jobs: Vec<serde_json::Value> =
+        serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
+    jobs.push(serde_json::json!({
+        "name": "homeboy / Test",
+        "head_sha": "0000000000000000000000000000000000000000",
+        "conclusion": "success",
+    }));
+    let jobs = scratch.write(
+        "jobs.json",
+        &serde_json::to_string(&jobs).expect("duplicate jobs"),
+    );
+    let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
+
+    assert!(output.status.success(), "{}", stdout_of(&output));
+    assert!(
+        stdout_of(&output).contains("\"raw_conclusions\":[\"success\",\"success\"]"),
+        "duplicate successes must remain visible in diagnostics: {}",
+        stdout_of(&output)
     );
 }
 

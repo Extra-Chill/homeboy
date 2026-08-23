@@ -45,6 +45,17 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 `agent-task status <run-id> --watch` follows the same durable status abstraction used by one-shot status reads, including `--bridge` runner reconciliation. Every material state change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Its `change.change_basis` contains the same state, task, progress, and liveness fields that caused the event, including a complete task-state digest beyond the compact task page. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope: it retains at most 12 changed records, reports omissions and continuation commands, and has one total size budget covering changes and fixed sections. `latest` is always the final observed compact status; terminal conclusions additionally include `terminal_summary`, while timeout/nonterminal conclusions leave it null. `--full` supplies bounded change records with stable `full_status_ref`/continuation commands for durable retrieval rather than expanding the live stream. This is an explicit v2 migration from the former v1 `latest` snapshot contract. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. The shared watcher caps each sleep to the remaining timeout, so its wall-clock bound is not extended by the polling interval. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
+Status keeps established top-level machine fields for compatibility and adds
+`status_scope` with schema `homeboy/agent-task-status-scope/v1`. Its
+`queried_attempt` describes the exact attempt's state, counts, artifacts, and
+candidate classification. Its `cook` section describes the Cook-wide selected
+candidate identity/classification, completion, and finalization. The selection
+state is explicitly `selected`, `none`, or `unavailable`; unavailable includes
+diagnostics so a bounded or degraded scan is never reported as proof of no
+candidate. The human `Candidate:` line identifies Cook-wide selected context and
+prints the queried-attempt candidate separately. Legacy records without this
+envelope are qualified as `legacy canonical`.
+
 ### Resource Behavior
 
 Resource admission follows command capability rather than command names. Bounded
@@ -897,6 +908,9 @@ status <cook-id>` preserves it with the latest notification delivery outcome.
 accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
+The same `--model` value records adopted-candidate and manual-finalization AI
+provenance. `--ai-model` remains a deprecated compatibility alias for those
+two commands and will be removed in the next minor release.
 
 ## Fanout/Reconcile
 

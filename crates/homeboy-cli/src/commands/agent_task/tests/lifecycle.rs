@@ -116,6 +116,256 @@ fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
 }
 
 #[test]
+fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry() {
+    with_isolated_home(|_| {
+        let cook_id = "status-scope-cook";
+        let source_run_id = "status-scope-attempt-1";
+        let retry_run_id = "status-scope-attempt-2";
+        let plan = test_plan();
+        let task_id = plan.tasks[0].task_id.clone();
+        let artifact_dir = tempfile::tempdir().expect("artifact directory");
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch_path = artifact_dir.path().join("candidate.patch");
+        std::fs::write(&patch_path, patch).expect("candidate patch");
+
+        agent_task_lifecycle::submit_plan(&plan, Some(source_run_id)).expect("source attempt");
+        agent_task_lifecycle::submit_plan(&plan, Some(retry_run_id)).expect("retry attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
+            .expect("source Cook identity");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
+            .expect("retry Cook identity");
+        let artifact = AgentTaskArtifact {
+            id: "historical-patch".to_string(),
+            kind: "patch".to_string(),
+            path: Some(patch_path.display().to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(patch.as_bytes()))),
+            metadata: json!({
+                "task_id": task_id,
+                "run_id": source_run_id,
+                "producer_attempt": 1,
+                "base_ref": "main",
+                "provider_backend": "fixture",
+                "repository_identity": "fixture",
+                "workspace_identity": "fixture",
+            }),
+            ..Default::default()
+        };
+        let aggregate = AgentTaskAggregate {
+            schema: "homeboy/agent-task-aggregate/v1".to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
+            totals: Default::default(),
+            outcomes: vec![AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: task_id.clone(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("historical patch".to_string()),
+                failure_classification: None,
+                artifacts: vec![artifact.clone()],
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        agent_task_lifecycle::record_run_aggregate(source_run_id, &plan, &aggregate)
+            .expect("source aggregate");
+        let mut hash = Sha256::new();
+        hash.update(source_run_id.as_bytes());
+        hash.update([0]);
+        hash.update(task_id.as_bytes());
+        hash.update([0]);
+        hash.update(b"historical-patch");
+        let artifact_id = format!("agent-task-{:x}", hash.finalize());
+        homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("observation store")
+            .record_verified_artifact_with_id(
+                source_run_id,
+                "patch",
+                &patch_path,
+                &artifact_id,
+                Some(patch.len() as i64),
+                Some(&format!("{:x}", Sha256::digest(patch.as_bytes()))),
+                json!({"agent_task":{"task_id":task_id,"logical_artifact_id":"historical-patch"}}),
+            )
+            .expect("controller artifact");
+        homeboy::agents::agent_tasks::lifecycle::reconcile_terminal_artifact_projection(
+            source_run_id,
+        )
+        .expect("controller projection");
+        agent_task_lifecycle::record_cook_finalization(
+            source_run_id,
+            json!({"status":"review_ready","pr_url":"https://example.test/pull/12971"}),
+        )
+        .expect("historical finalization");
+        agent_task_lifecycle::rewrite_record_for_test(retry_run_id, |record| {
+            record.state = AgentTaskRunState::Cancelled;
+        })
+        .expect("cancel retry");
+
+        let status_args = |full: bool, bridge: bool| StatusArgs {
+            run_id: retry_run_id.to_string(),
+            // `--bridge` and `--exact` conflict in Clap. A positional attempt
+            // still resolves its Cook identity and candidate selection.
+            exact: !bridge,
+            bridge,
+            since_cursor: None,
+            full,
+            bounded: false,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        };
+        for value in [
+            status(status_args(false, false)).expect("compact status").0,
+            status(status_args(true, false)).expect("full status").0,
+            status(status_args(false, true)).expect("bridge status").0,
+        ] {
+            assert_eq!(
+                value["status_scope"]["queried_attempt"]["state"],
+                "cancelled"
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["selection"]["status"],
+                "selected"
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["selection"]["run_id"],
+                source_run_id
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["selection"]["candidate"]["state"],
+                "finalized"
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["finalization"]["pr_url"],
+                "https://example.test/pull/12971"
+            );
+        }
+    });
+}
+
+#[test]
+fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
+    with_isolated_home(|_| {
+        let cook_id = "status-scope-degraded-cook";
+        let plan = test_plan();
+        let run_ids = (1..=65)
+            .map(|attempt| format!("status-scope-degraded-{attempt}"))
+            .collect::<Vec<_>>();
+        for (index, run_id) in run_ids.iter().enumerate() {
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("Cook attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, (index + 1) as u32, run_id)
+                .expect("Cook index attempt");
+        }
+        let retry_run_id = run_ids.last().expect("latest attempt");
+        agent_task_lifecycle::rewrite_record_for_test(retry_run_id, |record| {
+            record.state = AgentTaskRunState::Cancelled;
+        })
+        .expect("cancel retry");
+
+        for value in [
+            status(StatusArgs {
+                run_id: retry_run_id.clone(),
+                exact: true,
+                bridge: false,
+                since_cursor: None,
+                full: false,
+                bounded: false,
+                no_runner_probe: false,
+                strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
+            })
+            .expect("compact status")
+            .0,
+            status(StatusArgs {
+                run_id: retry_run_id.clone(),
+                exact: true,
+                bridge: false,
+                since_cursor: None,
+                full: true,
+                bounded: false,
+                no_runner_probe: false,
+                strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
+            })
+            .expect("full status")
+            .0,
+            status(StatusArgs {
+                run_id: retry_run_id.clone(),
+                // Bridge resolution starts from the supplied attempt ID; Clap
+                // rejects pairing `--bridge` with `--exact`.
+                exact: false,
+                bridge: true,
+                since_cursor: None,
+                full: false,
+                bounded: false,
+                no_runner_probe: false,
+                strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
+            })
+            .expect("bridge status")
+            .0,
+        ] {
+            assert_eq!(
+                value["status_scope"]["queried_attempt"]["state"],
+                "cancelled"
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["selection"]["status"],
+                "unavailable"
+            );
+            assert_eq!(
+                value["status_scope"]["cook"]["selection"]["diagnostics"][0]["code"],
+                "selection_incomplete"
+            );
+        }
+    });
+}
+
+#[test]
+fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
+    with_isolated_home(|_| {
+        let run_id = "ordinary-status-attempt";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+
+        let (value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: false,
+            bounded: false,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("status");
+
+        assert!(value.get("status_scope").is_none());
+    });
+}
+
+#[test]
 fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
     with_isolated_home(|_| {
         let run_id = "status-scoped-cleanup";
