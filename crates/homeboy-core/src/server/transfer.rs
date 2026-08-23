@@ -43,6 +43,9 @@ pub struct TransferOutput {
     pub effective_destination: String,
     pub method: String,
     pub direction: String,
+    /// Whether the transfer backend will recurse after resolving source semantics.
+    pub effective_recursive: bool,
+    /// Whether recursion was requested by the caller.
     pub recursive: bool,
     /// Effective recursive scope, including sync's directory-contents behavior.
     pub scope: String,
@@ -57,6 +60,7 @@ fn transfer_output(
     config: &TransferConfig,
     method: impl Into<String>,
     direction: impl Into<String>,
+    effective_recursive: bool,
     success: bool,
     error: Option<String>,
     dry_run: bool,
@@ -68,8 +72,9 @@ fn transfer_output(
         effective_destination: config.destination.clone(),
         method: method.into(),
         direction: direction.into(),
+        effective_recursive,
         recursive: config.recursive,
-        scope: transfer_scope(config).to_string(),
+        scope: transfer_scope(config, effective_recursive).to_string(),
         compress: config.compress,
         success,
         error,
@@ -77,8 +82,8 @@ fn transfer_output(
     }
 }
 
-fn transfer_scope(config: &TransferConfig) -> &'static str {
-    match (config.recursive, config.directory_contents) {
+fn transfer_scope(config: &TransferConfig, effective_recursive: bool) -> &'static str {
+    match (effective_recursive, config.directory_contents) {
         (true, true) => "recursive directory contents",
         (true, false) => "recursive path",
         (false, _) => "single path",
@@ -149,13 +154,22 @@ enum TransferBackend {
 struct TransferPlan {
     method: String,
     direction: String,
+    effective_recursive: bool,
     backend: TransferBackend,
 }
 
 impl TransferPlan {
     fn dry_run_output(&self, config: &TransferConfig) -> (TransferOutput, i32) {
         (
-            transfer_output(config, &self.method, &self.direction, true, None, true),
+            transfer_output(
+                config,
+                &self.method,
+                &self.direction,
+                self.effective_recursive,
+                true,
+                None,
+                true,
+            ),
             0,
         )
     }
@@ -215,6 +229,7 @@ fn plan_push(
 
     let remote_target = format!("{}@{}:{}", client.user, client.host, remote_path);
     let effective_local_path = local_path.to_string();
+    let effective_recursive = config.recursive || Path::new(local_path).is_dir();
 
     if config.dry_run {
         log_status!(
@@ -227,6 +242,7 @@ fn plan_push(
         return Ok(TransferPlan {
             method: "scp".to_string(),
             direction: "push".to_string(),
+            effective_recursive,
             backend: TransferBackend::Scp {
                 args: Vec::new(),
                 prepare: None,
@@ -248,7 +264,7 @@ fn plan_push(
 
     let mut scp_args = scp_args(&client);
 
-    if config.recursive || local.is_dir() {
+    if effective_recursive {
         scp_args.push("-r".to_string());
     }
     if config.compress {
@@ -308,6 +324,7 @@ fn plan_push(
     Ok(TransferPlan {
         method: "scp".to_string(),
         direction: "push".to_string(),
+        effective_recursive,
         backend: TransferBackend::Scp {
             args: scp_args,
             prepare,
@@ -344,6 +361,7 @@ fn plan_pull(
         return Ok(TransferPlan {
             method: "scp".to_string(),
             direction: "pull".to_string(),
+            effective_recursive: config.recursive,
             backend: TransferBackend::Scp {
                 args: Vec::new(),
                 prepare: None,
@@ -388,6 +406,7 @@ fn plan_pull(
     Ok(TransferPlan {
         method: "scp".to_string(),
         direction: "pull".to_string(),
+        effective_recursive: config.recursive,
         backend: TransferBackend::Scp {
             args: scp_args,
             prepare: None,
@@ -410,11 +429,13 @@ fn plan_server_to_server(
     let src_client = SshClient::from_server(&src_server, src_id)?;
     let dst_client = SshClient::from_server(&dst_server, dst_id)?;
 
+    let effective_recursive = config.recursive || src_path.ends_with('/');
+
     if config.dry_run {
-        let method = if config.recursive {
+        let method = if effective_recursive {
             "tar-pipe"
         } else {
-            "scp-pipe"
+            "cat-pipe"
         };
         log_status!(
             "dry-run",
@@ -428,6 +449,7 @@ fn plan_server_to_server(
         return Ok(TransferPlan {
             method: method.to_string(),
             direction: "server-to-server".to_string(),
+            effective_recursive,
             backend: TransferBackend::Shell {
                 command: String::new(),
             },
@@ -440,7 +462,7 @@ fn plan_server_to_server(
     let source_remote = format!("{}@{}", src_client.user, src_client.host);
     let dest_remote = format!("{}@{}", dst_client.user, dst_client.host);
 
-    let (method, command) = if config.recursive || src_path.ends_with('/') {
+    let (method, command) = if effective_recursive {
         let tar_compress_flag = if config.compress { "z" } else { "" };
 
         let exclude_args: String = config
@@ -476,6 +498,7 @@ fn plan_server_to_server(
     Ok(TransferPlan {
         method,
         direction: "server-to-server".to_string(),
+        effective_recursive,
         backend: TransferBackend::Shell { command },
     })
 }
@@ -504,7 +527,7 @@ fn execute_plan_with(
 
     let source = bounded_identity(&effective_source(config));
     let destination = bounded_identity(&effective_destination(config));
-    let scope = transfer_scope(config);
+    let scope = transfer_scope(config, plan.effective_recursive);
 
     if let TransferBackend::Scp {
         prepare: Some(args),
@@ -528,6 +551,7 @@ fn execute_plan_with(
                     config,
                     plan.method,
                     plan.direction,
+                    plan.effective_recursive,
                     &String::from_utf8_lossy(&output.stderr),
                 );
             }
@@ -536,6 +560,7 @@ fn execute_plan_with(
                     config,
                     plan.method,
                     plan.direction,
+                    plan.effective_recursive,
                     "ssh preparation",
                     &error,
                 );
@@ -552,7 +577,15 @@ fn execute_plan_with(
     ) {
         log_status!("transfer", "Complete");
         return Ok((
-            transfer_output(config, plan.method, plan.direction, true, None, false),
+            transfer_output(
+                config,
+                plan.method,
+                plan.direction,
+                plan.effective_recursive,
+                true,
+                None,
+                false,
+            ),
             0,
         ));
     }
@@ -611,7 +644,15 @@ fn execute_plan_with(
             });
 
             Ok((
-                transfer_output(config, plan.method, plan.direction, success, error, false),
+                transfer_output(
+                    config,
+                    plan.method,
+                    plan.direction,
+                    plan.effective_recursive,
+                    success,
+                    error,
+                    false,
+                ),
                 if success { 0 } else { 1 },
             ))
         }
@@ -632,6 +673,7 @@ fn execute_plan_with(
                     config,
                     plan.method,
                     plan.direction,
+                    plan.effective_recursive,
                     false,
                     Some(error),
                     false,
@@ -646,11 +688,12 @@ fn transfer_backend_failure(
     config: &TransferConfig,
     method: String,
     direction: String,
+    effective_recursive: bool,
     stderr: &str,
 ) -> crate::Result<(TransferOutput, i32)> {
     let source = bounded_identity(&effective_source(config));
     let destination = bounded_identity(&effective_destination(config));
-    let scope = transfer_scope(config);
+    let scope = transfer_scope(config, effective_recursive);
     let detail = bounded_detail(stderr.trim());
     eprintln!(
         "[transfer] phase=failed source={} destination={} scope={} detail={}; destination may be partial; retry: {}",
@@ -665,6 +708,7 @@ fn transfer_backend_failure(
             config,
             method,
             direction,
+            effective_recursive,
             false,
             Some(format!(
                 "{}; destination may be partial; retry: {}",
@@ -681,12 +725,13 @@ fn transfer_execution_failure(
     config: &TransferConfig,
     method: String,
     direction: String,
+    effective_recursive: bool,
     backend_label: &str,
     error: &std::io::Error,
 ) -> crate::Result<(TransferOutput, i32)> {
     let source = bounded_identity(&effective_source(config));
     let destination = bounded_identity(&effective_destination(config));
-    let scope = transfer_scope(config);
+    let scope = transfer_scope(config, effective_recursive);
     eprintln!(
         "[transfer] phase=failed source={} destination={} scope={}; destination may be partial; retry: {}",
         source,
@@ -699,6 +744,7 @@ fn transfer_execution_failure(
             config,
             method,
             direction,
+            effective_recursive,
             false,
             Some(format!(
                 "Failed to execute {backend_label}: {error}; destination may be partial; retry: {}",
@@ -868,7 +914,7 @@ mod tests {
     use super::{
         bounded_detail, bounded_identity, execute_plan, execute_plan_with, parse_target, plan_push,
         retry_command, run_transfer_command_with_policy, scp_args, transfer, transfer_scope,
-        TransferBackend, TransferConfig, TransferPlan, TransferTarget,
+        TransferBackend, TransferConfig, TransferOutput, TransferPlan, TransferTarget,
     };
     use crate::server::{ManagedSshSession, SshClient};
 
@@ -926,6 +972,8 @@ mod tests {
             assert_eq!(code, 0);
             assert_eq!(out.direction, "push");
             assert_eq!(out.method, "scp");
+            assert!(!out.recursive);
+            assert!(!out.effective_recursive);
             assert!(out.compress);
             assert!(out.dry_run);
             assert!(out.success);
@@ -953,8 +1001,140 @@ mod tests {
             assert_eq!(out.direction, "server-to-server");
             assert_eq!(out.method, "tar-pipe");
             assert!(out.recursive);
+            assert!(out.effective_recursive);
             assert!(out.compress);
             assert!(out.dry_run);
+        });
+    }
+
+    #[test]
+    fn transfer_serialization_preserves_requested_and_effective_recursion_across_directions() {
+        let cases = [
+            ("push", "scp", false, true),
+            ("push", "scp", true, true),
+            ("pull", "scp", true, true),
+            ("server-to-server", "tar-pipe", false, true),
+        ];
+
+        for (direction, method, recursive, effective_recursive) in cases {
+            let output = TransferOutput {
+                source: "source".to_string(),
+                destination: "destination".to_string(),
+                effective_source: "source".to_string(),
+                effective_destination: "destination".to_string(),
+                method: method.to_string(),
+                direction: direction.to_string(),
+                effective_recursive,
+                recursive,
+                scope: "recursive path".to_string(),
+                compress: false,
+                success: true,
+                error: None,
+                dry_run: true,
+            };
+
+            assert_eq!(
+                serde_json::to_string(&output).expect("serialize transfer output"),
+                format!(
+                    "{{\"source\":\"source\",\"destination\":\"destination\",\"effective_source\":\"source\",\"effective_destination\":\"destination\",\"method\":\"{method}\",\"direction\":\"{direction}\",\"effective_recursive\":{effective_recursive},\"recursive\":{recursive},\"scope\":\"recursive path\",\"compress\":false,\"success\":true,\"dry_run\":true}}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn local_directory_push_implicitly_reports_effective_recursion() {
+        with_isolated_home(|_| {
+            save_server("prod");
+            let fixture = tempfile::tempdir().expect("transfer fixture");
+            let source = fixture.path().join("directory");
+            std::fs::create_dir(&source).expect("source directory");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: source.to_string_lossy().into_owned(),
+                destination: "prod:/tmp/directory".to_string(),
+                recursive: false,
+                directory_contents: false,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run directory push");
+
+            assert_eq!(code, 0);
+            assert!(!out.recursive);
+            assert!(out.effective_recursive);
+            assert_eq!(out.scope, "recursive path");
+        });
+    }
+
+    #[test]
+    fn pull_preserves_explicit_recursion_in_dry_run() {
+        with_isolated_home(|_| {
+            save_server("prod");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: "prod:/var/www/uploads".to_string(),
+                destination: "./uploads".to_string(),
+                recursive: true,
+                directory_contents: false,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run pull");
+
+            assert_eq!(code, 0);
+            assert_eq!(out.direction, "pull");
+            assert!(out.recursive);
+            assert!(out.effective_recursive);
+        });
+    }
+
+    #[test]
+    fn non_recursive_server_transfer_dry_run_uses_execution_method() {
+        with_isolated_home(|_| {
+            save_server("old");
+            save_server("new");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: "old:/tmp/source.txt".to_string(),
+                destination: "new:/tmp/destination.txt".to_string(),
+                recursive: false,
+                directory_contents: false,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run server transfer");
+
+            assert_eq!(code, 0);
+            assert_eq!(out.method, "cat-pipe");
+            assert!(!out.effective_recursive);
+        });
+    }
+
+    #[test]
+    fn trailing_slash_server_transfer_reports_effective_recursion_in_dry_run() {
+        with_isolated_home(|_| {
+            save_server("old");
+            save_server("new");
+
+            let (out, code) = transfer(&TransferConfig {
+                source: "old:/var/www/uploads/".to_string(),
+                destination: "new:/var/www/uploads".to_string(),
+                recursive: false,
+                directory_contents: false,
+                compress: false,
+                dry_run: true,
+                exclude: Vec::new(),
+            })
+            .expect("dry run server transfer");
+
+            assert_eq!(code, 0);
+            assert_eq!(out.method, "tar-pipe");
+            assert!(!out.recursive);
+            assert!(out.effective_recursive);
         });
     }
 
@@ -1078,6 +1258,7 @@ mod tests {
 
             assert_eq!(code, 0);
             assert!(out.success);
+            assert!(out.effective_recursive);
             assert_eq!(out.effective_source, source.to_string_lossy());
             let (dry_run, dry_run_code) = transfer(&TransferConfig {
                 source: source.to_string_lossy().into_owned(),
@@ -1148,7 +1329,10 @@ mod tests {
             exclude: vec!["cache files".to_string()],
         };
 
-        assert_eq!(transfer_scope(&config), "recursive directory contents");
+        assert_eq!(
+            transfer_scope(&config, true),
+            "recursive directory contents"
+        );
         assert_eq!(
             retry_command(&config),
             "homeboy file sync 'local dir'\\''s contents' 'prod:/var/www/site' --compress --exclude 'cache files'"
@@ -1227,6 +1411,7 @@ mod tests {
         let plan = TransferPlan {
             method: "fixture".to_string(),
             direction: "push".to_string(),
+            effective_recursive: false,
             backend: TransferBackend::Shell {
                 command: "printf '\\377backend failure' >&2; exit 7".to_string(),
             },
@@ -1236,6 +1421,7 @@ mod tests {
 
         assert_eq!(code, 1);
         assert!(!output.success);
+        assert!(!output.effective_recursive);
         let error = output.error.expect("failure diagnostic");
         assert!(error.contains('\u{fffd}'));
         assert!(error.contains("backend failure"));

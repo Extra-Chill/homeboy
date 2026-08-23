@@ -116,7 +116,14 @@ pub(super) fn owner_capture_shell(reference: &str) -> String {
 
 pub(super) fn owner_restore_shell(parent: &str, dest: &str) -> String {
     format!(
-        "if [ \"$(id -u)\" = \"0\" ] && [ -n \"$owner\" ] && [ \"$owner\" != \"0:0\" ]; then chown \"$owner\" {parent} && chown -R \"$owner\" {dest}; fi",
+        "if [ \"$(id -u)\" = \"0\" ] && [ -n \"$owner\" ] && [ \"$owner\" != \"0:0\" ]; then chown \"$owner\" {parent} && {}; fi",
+        owner_restore_path_shell(dest),
+    )
+}
+
+pub(super) fn owner_restore_path_shell(path: &str) -> String {
+    format!(
+        "if [ \"$(id -u)\" = \"0\" ] && [ -n \"$owner\" ] && [ \"$owner\" != \"0:0\" ]; then chown -R \"$owner\" {path}; fi",
     )
 }
 

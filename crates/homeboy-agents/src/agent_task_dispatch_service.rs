@@ -605,7 +605,11 @@ fn missing_default_backend_error(available_backends: &[String]) -> Error {
         )
     };
 
-    Error::validation_invalid_argument("backend", problem, None, Some(tried))
+    let mut error = Error::validation_invalid_argument("backend", problem, None, Some(tried));
+    // Consumers distinguish an omitted route selection from an executor outage
+    // without coupling to the rendered validation message.
+    error.details["selection_required"] = Value::Bool(true);
+    error
 }
 
 /// Resolution core that also takes the Homeboy-config default resolver so tests
@@ -843,6 +847,7 @@ mod tests {
             .as_str()
             .expect("readiness caveat")
             .contains("--validate-readiness"));
+        assert_eq!(error.details["selection_required"], true);
     }
 
     #[test]

@@ -5,7 +5,13 @@
 //! field for operators while still keeping the machine-readable fields.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::time::Instant;
 
+use super::external_check_detail_resolver::{
+    has_unique_resolver, hydrate, normalize_target_url, skipped_for_budget, HydratedDetail,
+    ResolverDiagnostic, MAX_RESOLVERS, TOTAL_BUDGET,
+};
 use homeboy::core::error::{Error, Result};
 use homeboy::core::git::GhClient;
 
@@ -13,6 +19,7 @@ const DEFAULT_MAX_RUNS: usize = 5;
 const DEFAULT_MAX_SNIPPETS_PER_JOB: usize = 4;
 const DEFAULT_CONTEXT_LINES: usize = 2;
 const MAX_SNIPPET_LINE_CHARS: usize = 220;
+const MAX_GH_ERROR_CHARS: usize = 512;
 
 mod types {
     use super::*;
@@ -67,6 +74,10 @@ mod types {
         pub human_summary: String,
         pub next_actions: Vec<String>,
         pub runs: Vec<CiFailedRunSummary>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub external_checks: Vec<CiExternalCheckSummary>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub api_degradations: Vec<CiApiDegradation>,
     }
 
     #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -103,6 +114,26 @@ mod types {
     pub struct CiLogSnippet {
         pub line: usize,
         pub text: String,
+    }
+
+    #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+    pub struct CiExternalCheckSummary {
+        pub provider: String,
+        pub status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub target_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub details: Vec<HydratedDetail>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub resolver_diagnostics: Vec<ResolverDiagnostic>,
+    }
+
+    #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+    pub struct CiApiDegradation {
+        pub api: String,
+        pub message: String,
     }
 
     #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -148,6 +179,10 @@ mod engine {
         let repo = gh.repo_path()?.to_string();
         let pr = fetch_pr(&gh, parsed.number)?;
         let runs = fetch_runs_for_head(&gh, &pr.head_sha)?;
+        // One fixed deadline is shared by every resolver invocation in this triage.
+        let resolver_deadline = Instant::now() + TOTAL_BUDGET;
+        let (external_checks, api_degradations) =
+            fetch_external_checks(&gh, &pr.head_sha, resolver_deadline);
 
         let failed_runs: Vec<GhWorkflowRun> = runs.into_iter().filter(is_failed_run).collect();
         let total_failed_runs = failed_runs.len();
@@ -238,9 +273,19 @@ mod engine {
             .iter()
             .filter(|run| run.failure_origin == CiFailureOrigin::PrHead)
             .count();
-        let next_actions = build_next_actions(&repo, pr.number, &summaries);
-        let human_summary =
-            render_human_summary(&repo, &pr, total_failed_runs, &summaries, &next_actions);
+        let mut next_actions = build_next_actions(&repo, pr.number, &summaries);
+        if !api_degradations.is_empty() {
+            next_actions.push("Retry CI triage after the degraded provider API is available; retained evidence may be incomplete.".to_string());
+        }
+        let human_summary = render_human_summary(
+            &repo,
+            &pr,
+            total_failed_runs,
+            &summaries,
+            &external_checks,
+            &api_degradations,
+            &next_actions,
+        );
         let runs_inspected = summaries.len();
 
         Ok(CiFailureTriageOutput {
@@ -257,6 +302,8 @@ mod engine {
             human_summary,
             next_actions,
             runs: summaries,
+            external_checks,
+            api_degradations,
         })
     }
 
@@ -343,6 +390,212 @@ mod engine {
             "repos/{repo}/actions/runs?head_sha={head_sha}&per_page=50"
         ))?;
         Ok(raw.workflow_runs)
+    }
+
+    const MAX_EXTERNAL_STATUS_PAGES: usize = 2;
+    const MAX_CHECK_RUN_PAGES: usize = 4;
+
+    pub(crate) fn fetch_external_checks(
+        gh: &GhClient,
+        head_sha: &str,
+        resolver_deadline: Instant,
+    ) -> (Vec<CiExternalCheckSummary>, Vec<CiApiDegradation>) {
+        let Ok(repo) = gh.repo_path() else {
+            return (
+                Vec::new(),
+                vec![CiApiDegradation {
+                    api: "check discovery".into(),
+                    message: "Repository resolution failed.".into(),
+                }],
+            );
+        };
+        let mut checks = Vec::new();
+        let mut degradations = Vec::new();
+        let mut resolver_slots = MAX_RESOLVERS;
+        let mut latest_status_contexts = HashSet::new();
+        let mut seen_checks = HashSet::new();
+        for page in 1..=MAX_EXTERNAL_STATUS_PAGES {
+            if Instant::now() >= resolver_deadline {
+                degradations.push(deadline_degradation());
+                break;
+            }
+            match gh.api_json_until::<GhStatusesResponse>(
+                &format!("repos/{repo}/commits/{head_sha}/statuses?per_page=100&page={page}"),
+                resolver_deadline,
+            ) {
+                Ok(response) => {
+                    let complete = response.len() < 100;
+                    for status in latest_failed_statuses(response, &mut latest_status_contexts) {
+                        if !seen_checks.insert(check_identity(
+                            &status.context,
+                            status.target_url.as_deref(),
+                            None,
+                        )) {
+                            continue;
+                        }
+                        checks.push(hydrate_external(
+                            status.context,
+                            status.state.unwrap_or_default(),
+                            status.description,
+                            status.target_url,
+                            &mut resolver_slots,
+                            resolver_deadline,
+                        ));
+                    }
+                    if complete {
+                        break;
+                    } else if page == MAX_EXTERNAL_STATUS_PAGES {
+                        degradations.push(CiApiDegradation {
+                            api: "legacy commit statuses".into(),
+                            message: format!("Pagination truncated after {MAX_EXTERNAL_STATUS_PAGES} pages; older statuses were not inspected."),
+                        });
+                    }
+                }
+                Err(error) => {
+                    degradations.push(CiApiDegradation {
+                        api: "legacy commit statuses".into(),
+                        message: gh_error_diagnostic(&error),
+                    });
+                    break;
+                }
+            }
+        }
+        for page in 1..=MAX_CHECK_RUN_PAGES {
+            if Instant::now() >= resolver_deadline {
+                degradations.push(deadline_degradation());
+                break;
+            }
+            match gh.api_json_until::<GhCheckRunsResponse>(
+                &format!(
+                "repos/{repo}/commits/{head_sha}/check-runs?filter=latest&per_page=100&page={page}"
+            ),
+                resolver_deadline,
+            ) {
+                Ok(response) => {
+                    for check in response.check_runs.into_iter().filter(is_failed_check_run) {
+                        if !seen_checks.insert(check_identity(
+                            &check.name,
+                            check.details_url.as_deref(),
+                            check.external_id.as_deref(),
+                        )) {
+                            continue;
+                        }
+                        checks.push(hydrate_external(
+                            check.name,
+                            check.conclusion.unwrap_or_default(),
+                            None,
+                            check.details_url,
+                            &mut resolver_slots,
+                            resolver_deadline,
+                        ));
+                    }
+                    if response.total_count <= page * 100 {
+                        break;
+                    } else if page == MAX_CHECK_RUN_PAGES {
+                        degradations.push(CiApiDegradation {
+                            api: "GitHub Check Runs".into(),
+                            message: format!("Pagination truncated after {MAX_CHECK_RUN_PAGES} pages; older checks were not inspected."),
+                        });
+                    }
+                }
+                Err(error) => {
+                    degradations.push(CiApiDegradation {
+                        api: "GitHub Check Runs".into(),
+                        message: gh_error_diagnostic(&error),
+                    });
+                    break;
+                }
+            }
+        }
+        (checks, degradations)
+    }
+
+    pub(crate) fn hydrate_external(
+        provider: String,
+        status: String,
+        description: Option<String>,
+        target_url: Option<String>,
+        resolver_slots: &mut usize,
+        resolver_deadline: Instant,
+    ) -> CiExternalCheckSummary {
+        let target_url = target_url.map(|url| normalize_target_url(&url));
+        let (details, resolver_diagnostics) =
+            if has_unique_resolver(&provider) && *resolver_slots == 0 {
+                (Vec::new(), vec![skipped_for_budget(&provider)])
+            } else {
+                // Unknown and ambiguous providers are diagnostic-only and never
+                // consume a bounded resolver invocation slot.
+                if has_unique_resolver(&provider) {
+                    *resolver_slots -= 1;
+                }
+                hydrate(&provider, &status, target_url.as_deref(), resolver_deadline)
+            };
+        CiExternalCheckSummary {
+            provider,
+            status: homeboy::core::redaction::RedactionPolicy::default()
+                .redact_embedded_urls(&normalize_log_line(&status)),
+            description: description.map(|description| {
+                homeboy::core::redaction::RedactionPolicy::default()
+                    .redact_embedded_urls(&normalize_log_line(&description))
+            }),
+            target_url,
+            details,
+            resolver_diagnostics,
+        }
+    }
+
+    pub(crate) fn check_identity(
+        provider: &str,
+        target_url: Option<&str>,
+        external_id: Option<&str>,
+    ) -> String {
+        // Target URLs are shared by legacy Statuses and Check Runs. Provider
+        // plus that normalized build handle is the cross-API identity; a check
+        // run's external id covers providers that omit a details URL.
+        let build = target_url
+            .map(normalize_target_url)
+            .or_else(|| external_id.map(str::to_string))
+            .unwrap_or_default();
+        format!("{provider}\u{0}{build}")
+    }
+
+    fn deadline_degradation() -> CiApiDegradation {
+        CiApiDegradation {
+            api: "external check discovery".into(),
+            message: "Shared external-check discovery and resolver deadline exhausted.".into(),
+        }
+    }
+
+    /// CiApiDegradation is rendered both as JSON and operator-facing text. Keep
+    /// its GhClient error projection canonical, redacted, and bounded at entry.
+    pub(crate) fn gh_error_diagnostic(error: &Error) -> String {
+        homeboy::core::redaction::RedactionPolicy::default()
+            .redact_embedded_urls(&homeboy::core::redaction::redact_string(&error.to_string()))
+            .chars()
+            .take(MAX_GH_ERROR_CHARS)
+            .collect()
+    }
+
+    fn is_failed_status(status: &GhCommitStatus) -> bool {
+        matches!(status.state.as_deref(), Some("failure" | "error"))
+    }
+
+    pub(crate) fn latest_failed_statuses(
+        statuses: Vec<GhCommitStatus>,
+        contexts: &mut HashSet<String>,
+    ) -> Vec<GhCommitStatus> {
+        statuses
+            .into_iter()
+            // GitHub returns legacy statuses newest first. Record the first context
+            // even when it succeeded so stale failures cannot hydrate.
+            .filter(|status| contexts.insert(status.context.clone()) && is_failed_status(status))
+            .collect()
+    }
+    pub(crate) fn is_failed_check_run(run: &GhCheckRun) -> bool {
+        matches!(
+            run.conclusion.as_deref(),
+            Some("failure" | "timed_out" | "cancelled" | "action_required")
+        )
     }
 
     pub(crate) fn fetch_run_jobs(
@@ -617,6 +870,8 @@ mod engine {
         pr: &GhPullRequest,
         total_failed_runs: usize,
         runs: &[CiFailedRunSummary],
+        external_checks: &[CiExternalCheckSummary],
+        api_degradations: &[CiApiDegradation],
         next_actions: &[String],
     ) -> String {
         let mut lines = vec![format!(
@@ -649,6 +904,43 @@ mod engine {
                 }
             }
         }
+        for check in external_checks {
+            lines.push(format!(
+                "- external check {}: {} {}",
+                check.provider,
+                check.status,
+                check.target_url.as_deref().unwrap_or("")
+            ));
+            if let Some(description) = &check.description {
+                lines.push(format!("  - {description}"));
+            }
+            for detail in &check.details {
+                if !detail.summary.is_empty() {
+                    lines.push(format!("  - {}", detail.summary));
+                }
+                for action in &detail.actions {
+                    lines.push(format!("  - replay: {action}"));
+                }
+                for reference in &detail.artifact_refs {
+                    lines.push(format!("  - artifact: {reference}"));
+                }
+                for reference in &detail.log_refs {
+                    lines.push(format!("  - log: {reference}"));
+                }
+            }
+            for diagnostic in &check.resolver_diagnostics {
+                lines.push(format!(
+                    "  - resolver {}: {}",
+                    diagnostic.kind, diagnostic.message
+                ));
+            }
+        }
+        for degradation in api_degradations {
+            lines.push(format!(
+                "API degradation ({}): {}",
+                degradation.api, degradation.message
+            ));
+        }
         if !next_actions.is_empty() {
             lines.push("Next actions:".to_string());
             for action in next_actions {
@@ -660,10 +952,10 @@ mod engine {
 
     #[derive(Debug)]
     pub(crate) struct GhPullRequest {
-        number: u64,
-        title: String,
-        url: String,
-        head_sha: String,
+        pub(crate) number: u64,
+        pub(crate) title: String,
+        pub(crate) url: String,
+        pub(crate) head_sha: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -723,6 +1015,31 @@ mod engine {
         #[serde(default)]
         name: String,
         conclusion: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(crate) struct GhCommitStatus {
+        #[serde(default)]
+        pub(crate) context: String,
+        pub(crate) state: Option<String>,
+        pub(crate) description: Option<String>,
+        pub(crate) target_url: Option<String>,
+    }
+    type GhStatusesResponse = Vec<GhCommitStatus>;
+    #[derive(Debug, Deserialize)]
+    pub(crate) struct GhCheckRunsResponse {
+        #[serde(default)]
+        total_count: usize,
+        #[serde(default)]
+        check_runs: Vec<GhCheckRun>,
+    }
+    #[derive(Debug, Deserialize)]
+    pub(crate) struct GhCheckRun {
+        #[serde(default)]
+        name: String,
+        conclusion: Option<String>,
+        details_url: Option<String>,
+        external_id: Option<String>,
     }
 }
 
@@ -791,5 +1108,186 @@ mod tests {
         assert_eq!(snippets[0].text, "setup");
         assert_eq!(snippets[1].text, "cargo test");
         assert_eq!(snippets[2].text, "error: src/main.rs failed");
+    }
+
+    #[test]
+    fn ignores_stale_legacy_failure_after_latest_success() {
+        let mut contexts = HashSet::new();
+        let failures = latest_failed_statuses(
+            vec![
+                GhCommitStatus {
+                    context: "example-ci".into(),
+                    state: Some("success".into()),
+                    description: None,
+                    target_url: None,
+                },
+                GhCommitStatus {
+                    context: "example-ci".into(),
+                    state: Some("failure".into()),
+                    description: None,
+                    target_url: None,
+                },
+            ],
+            &mut contexts,
+        );
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn dedupes_legacy_status_and_check_run_by_provider_and_build_url() {
+        let legacy = check_identity(
+            "example-ci",
+            Some("https://example.test/build/42?token=secret#credential"),
+            None,
+        );
+        let check_run = check_identity("example-ci", Some("https://example.test/build/42"), None);
+
+        assert_eq!(legacy, check_run);
+    }
+
+    #[test]
+    fn external_status_redacts_embedded_credential_url() {
+        let status = "failure: see (https://user:pass@example.test/build?token=secret#credential).";
+        let redacted =
+            homeboy::core::redaction::RedactionPolicy::default().redact_embedded_urls(status);
+
+        assert!(!redacted.contains("pass"));
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("credential"));
+        assert!(redacted.ends_with(")."));
+    }
+
+    #[test]
+    fn human_summary_preserves_hydration_and_degradation_diagnostics() {
+        let pr = GhPullRequest {
+            number: 1,
+            title: "Test".into(),
+            url: "https://example.test/pr/1".into(),
+            head_sha: "abc".into(),
+        };
+        let check = CiExternalCheckSummary {
+            provider: "example-ci".into(),
+            status: "failure".into(),
+            description: None,
+            target_url: Some("https://example.test/job".into()),
+            details: vec![HydratedDetail {
+                provider: "example-ci".into(),
+                build_id: Some("42".into()),
+                summary: "compile failed".into(),
+                actions: vec!["example-ci replay 1".into()],
+                artifact_refs: vec!["https://example.test/artifact/42".into()],
+                log_refs: vec!["https://example.test/log/42".into()],
+            }],
+            resolver_diagnostics: vec![ResolverDiagnostic {
+                provider: "example-ci".into(),
+                kind: "unavailable".into(),
+                message: "network unavailable".into(),
+            }],
+        };
+        let text = render_human_summary(
+            "owner/repo",
+            &pr,
+            0,
+            &[],
+            &[check],
+            &[CiApiDegradation {
+                api: "Check Runs".into(),
+                message: "rate limited".into(),
+            }],
+            &[],
+        );
+        assert!(text.contains("compile failed"));
+        assert!(text.contains("replay: example-ci replay 1"));
+        assert!(text.contains("API degradation (Check Runs)"));
+    }
+
+    #[test]
+    fn legacy_status_keeps_failure_state_when_description_is_missing_or_redacted() {
+        let empty = hydrate_external(
+            "example-ci".into(),
+            "failure".into(),
+            None,
+            None,
+            &mut 0,
+            Instant::now(),
+        );
+        assert_eq!(empty.status, "failure");
+        assert_eq!(empty.description, None);
+
+        let described = hydrate_external(
+            "example-ci".into(),
+            "error".into(),
+            Some("see https://user:token@example.test/job?token=secret".into()),
+            None,
+            &mut 0,
+            Instant::now(),
+        );
+        assert_eq!(described.status, "error");
+        let description = described.description.unwrap();
+        assert!(!description.contains("user"));
+        assert!(!description.contains("secret"));
+    }
+
+    #[test]
+    fn discovery_normalizes_multiple_failed_legacy_statuses_and_check_runs() {
+        let mut contexts = HashSet::new();
+        let legacy = latest_failed_statuses(
+            vec![
+                GhCommitStatus {
+                    context: "legacy-failure".into(),
+                    state: Some("failure".into()),
+                    description: None,
+                    target_url: None,
+                },
+                GhCommitStatus {
+                    context: "legacy-error".into(),
+                    state: Some("error".into()),
+                    description: Some("provider error".into()),
+                    target_url: None,
+                },
+            ],
+            &mut contexts,
+        );
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|status| status.state.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("failure"), Some("error")]
+        );
+
+        let check_runs = ["failure", "timed_out", "cancelled", "action_required"]
+            .into_iter()
+            .map(|conclusion| {
+                serde_json::from_value::<GhCheckRun>(serde_json::json!({
+                    "name": conclusion,
+                    "conclusion": conclusion,
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            check_runs
+                .iter()
+                .filter(|check| is_failed_check_run(check))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn gh_api_degradation_errors_are_redacted_and_bounded() {
+        let error = Error::internal_io(
+            format!(
+                "request failed https://user:token@example.test/api?token=secret {}",
+                "x".repeat(MAX_GH_ERROR_CHARS * 2)
+            ),
+            None,
+        );
+        let diagnostic = engine::gh_error_diagnostic(&error);
+
+        assert!(!diagnostic.contains("user"));
+        assert!(!diagnostic.contains("secret"));
+        assert!(diagnostic.chars().count() <= MAX_GH_ERROR_CHARS);
     }
 }

@@ -2446,6 +2446,32 @@ fn annotate_provider_lookup_error(
         Value::String(crate::redaction::redact_argv_shell_display(command));
 }
 
+/// Extract the causal command facts needed by compact operator projections.
+/// Full command evidence remains attached to the durable error details.
+pub fn compact_provider_failure_details(details: &Value) -> Option<Value> {
+    const STDERR_EXCERPT_LIMIT: usize = 512;
+
+    let operation = details.get("worktree_provider_operation")?.as_str()?;
+    let evidence = details.get("command_evidence")?;
+    let stderr = evidence.get("stderr")?.as_str()?;
+    let stderr_excerpt: String = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(stderr)
+        .chars()
+        .take(STDERR_EXCERPT_LIMIT)
+        .collect();
+    if stderr_excerpt.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "operation": operation,
+        "exit_code": evidence.get("exit_code"),
+        "replay_command": details.get("worktree_provider_replay_command").or_else(|| evidence.get("command")),
+        "stderr_excerpt": stderr_excerpt,
+    }))
+}
+
 fn provider_command_evidence(command: &[String], output: &std::process::Output) -> CommandEvidence {
     let (stdout, stdout_truncated) = bounded_provider_output(&output.stdout);
     let (stderr, stderr_truncated) = bounded_provider_output(&output.stderr);
@@ -2466,6 +2492,65 @@ fn bounded_provider_output(output: &[u8]) -> (String, bool) {
     let output = String::from_utf8_lossy(output);
     let truncated = output.chars().count() > MAX_OUTPUT_CHARS;
     (output.chars().take(MAX_OUTPUT_CHARS).collect(), truncated)
+}
+
+#[cfg(test)]
+mod compact_provider_failure_details_tests {
+    use super::compact_provider_failure_details;
+    use serde_json::json;
+
+    #[test]
+    fn projects_short_stderr_for_ensure_resolve_and_plan_failures() {
+        for operation in ["ensure", "resolve", "plan"] {
+            let details = json!({
+                "worktree_provider_operation": operation,
+                "worktree_provider_replay_command": format!("fixture-provider {operation}"),
+                "command_evidence": {
+                    "command": format!("fixture-provider {operation}"),
+                    "exit_code": 17,
+                    "stderr": "Error: actionable provider failure\nsecondary context",
+                },
+            });
+
+            assert_eq!(
+                compact_provider_failure_details(&details),
+                Some(json!({
+                    "operation": operation,
+                    "exit_code": 17,
+                    "replay_command": format!("fixture-provider {operation}"),
+                    "stderr_excerpt": "Error: actionable provider failure",
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_large_stderr_without_changing_durable_evidence() {
+        let stderr = format!("Error: {}", "x".repeat(2_048));
+        let details = json!({
+            "worktree_provider_operation": "ensure",
+            "worktree_provider_replay_command": "fixture-provider ensure",
+            "command_evidence": {
+                "command": "fixture-provider ensure",
+                "exit_code": 1,
+                "stderr": stderr,
+            },
+        });
+
+        let projection = compact_provider_failure_details(&details).expect("compact evidence");
+        assert_eq!(
+            projection["stderr_excerpt"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            512
+        );
+        assert_eq!(
+            details["command_evidence"]["stderr"].as_str(),
+            Some(stderr.as_str())
+        );
+    }
 }
 
 fn map_provider_list_result(

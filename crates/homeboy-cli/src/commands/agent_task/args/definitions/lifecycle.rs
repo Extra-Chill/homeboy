@@ -266,6 +266,27 @@ mod tests {
     }
 
     #[test]
+    fn bridge_status_accepts_a_positional_attempt_without_exact() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "cook-attempt-2",
+            "--bridge",
+        ])
+        .expect("bridge status with positional attempt parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert_eq!(args.run_id, "cook-attempt-2");
+        assert!(args.bridge);
+        assert!(!args.exact);
+    }
+
+    #[test]
     fn strict_subject_exit_is_status_only() {
         let cli = Cli::try_parse_from([
             "homeboy",
