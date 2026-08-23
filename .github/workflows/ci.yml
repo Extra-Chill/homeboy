@@ -146,6 +146,25 @@ jobs:
       - name: Check all workspace crates for Windows
         run: cargo check --workspace --locked
 
+  # The external detail resolver crosses the extension/process boundary. Run its
+  # portable fixture on every hosted OS without expanding the general test gate.
+  external-resolver-fixtures:
+    name: homeboy / External Resolver Fixtures (${{ matrix.os }})
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Run portable external resolver fixture subprocess tests
+        run: cargo test --locked -p homeboy-cli --lib commands::ci::external_check_detail_resolver::tests::discovery_invokes_cross_platform_fixture_for_success_unavailable_and_malformed
+
   # Keep `main` rustfmt-clean so a feature branch's `cargo fmt` only ever touches
   # the files it changed. Without this gate, unformatted files drift onto main
   # and get pulled into unrelated PRs (a bare `cargo fmt` reformats them, or a
@@ -275,7 +294,7 @@ jobs:
 
   ci-capacity-evidence:
     name: homeboy / CI Capacity Evidence
-    needs: [required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, rustfmt, homeboy-fast, homeboy]
+    needs: [required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, external-resolver-fixtures, rustfmt, homeboy-fast, homeboy]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -315,7 +334,7 @@ jobs:
   # the EXECUTION claim, named for what it checks.
   required-gates-executed:
     name: homeboy / Required Gates Executed
-    needs: [pr-state, ci-capacity-admission, required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, rustfmt, homeboy-fast, homeboy]
+    needs: [pr-state, ci-capacity-admission, required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, external-resolver-fixtures, rustfmt, homeboy-fast, homeboy]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

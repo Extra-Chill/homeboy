@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::autofix_config::*;
 use crate::ci_config::*;
 use crate::extension_contract_producer::*;
+use crate::external_check_detail_resolver::*;
 use crate::fuzz_config::*;
 use crate::manifest_action_config::*;
 use crate::manifest_artifact_cleanup::*;
@@ -82,6 +83,10 @@ pub struct ExtensionManifest {
     /// Versioned, extension-owned completion notification transports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notification_transports: Vec<NotificationTransportConfig>,
+
+    /// Extension-owned, opt-in hydration for failed external CI statuses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_check_detail_resolvers: Vec<ExternalCheckDetailResolverConfig>,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
     /// Component-declared requirements still win; these are fallbacks for the
@@ -238,6 +243,18 @@ impl ExtensionManifest {
                     "notification_transports.id",
                     "must be unique within an extension manifest",
                     Some(transport.id.clone()),
+                    None,
+                ));
+            }
+        }
+        let mut providers = std::collections::HashSet::new();
+        for resolver in &self.external_check_detail_resolvers {
+            resolver.validate()?;
+            if !providers.insert(&resolver.provider) {
+                return Err(homeboy_error::Error::validation_invalid_argument(
+                    "external_check_detail_resolvers.provider",
+                    "must be unique within an extension manifest",
+                    Some(resolver.provider.clone()),
                     None,
                 ));
             }
