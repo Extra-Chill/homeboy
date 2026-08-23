@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use homeboy::agents::agent_task_model::normalize_concrete_model_identifier;
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
@@ -67,8 +68,16 @@ pub struct FinalizePrEvidenceArgs {
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
-    /// Actual model identifier for AI disclosure. Finalization requires a recorded model.
-    #[arg(long, value_name = "MODEL")]
+    /// Actual model identifier for AI disclosure. Use `--model`; `--ai-model`
+    /// is a deprecated compatibility alias and will be removed in the next
+    /// minor release. Recovery uses durable provenance and rejects model
+    /// overrides. Finalization requires a recorded model.
+    #[arg(
+        long = "model",
+        alias = "ai-model",
+        value_name = "MODEL",
+        conflicts_with = "recover"
+    )]
     pub ai_model: Option<String>,
 
     /// Source finding id shared by sibling generated PRs.
@@ -682,7 +691,7 @@ fn adoption_envelope(
     })
 }
 
-pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
+pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value> {
     validate_finalize_inputs(&args)?;
     if let Some(run_or_cook_id) = args.recover.as_deref() {
         let overrides = args
@@ -699,6 +708,18 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
             });
         return Ok((value, i32::from(!success)));
     }
+    let path = args.path.expect("clap requires --path without --recover");
+    let mut verified_candidate_sha = None;
+    if let Some(command) = args.verify.as_deref() {
+        let verification = execute_manual_verification(&path, command)?;
+        verified_candidate_sha = Some(verification.candidate_sha);
+        args.gate_results = vec![format!("manual-verify=passed:{}", verification.command)];
+        args.evidence.targeted_checks_run = vec![verification.command.clone()];
+        args.test_steps = vec![format!(
+            "{}=>passes as recorded by Homeboy's deterministic gate",
+            verification.command
+        )];
+    }
     let mut run_id = args
         .run_id
         .expect("clap requires --run-id without --recover");
@@ -708,7 +729,6 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     // Retained for the finalization handoff, which names the exact apply command
     // after a validated preflight (#9867). `run_id` itself moves into the options.
     let handoff_run_id = run_id.clone();
-    let path = args.path.expect("clap requires --path without --recover");
     let title = args.title.expect("clap requires --title without --recover");
     let commit_message = args
         .commit_message
@@ -816,13 +836,27 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         review_profile,
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
+        verified_candidate_sha,
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
-    let report = if args.preflight {
-        homeboy::agents::agent_tasks::finalization::preflight_pr(options)?
+    let result = if args.preflight {
+        homeboy::agents::agent_tasks::finalization::preflight_pr(options)
+    } else if args.manual_finalization {
+        let intent = homeboy::agents::agent_tasks::finalization::preflight_pr(options.clone())?;
+        agent_task_service::persist_manual_finalization_retry_intent(&handoff_run_id, &intent)?;
+        finalize_pr(options)
     } else {
-        finalize_pr(options)?
+        finalize_pr(options)
+    };
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if args.manual_finalization && !args.preflight {
+                agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
+            }
+            return Err(error);
+        }
     };
     let exit_code = if matches!(
         report.status.as_str(),
@@ -840,6 +874,14 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         report.manual_finalization,
     ) {
         agent_task_service::persist_manual_finalization_intent(&handoff_run_id, &report)?;
+    }
+    if !args.preflight && report.manual_finalization {
+        if let Err(error) =
+            agent_task_service::persist_manual_finalization_receipt(&handoff_run_id, &report)
+        {
+            agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
+            return Err(error);
+        }
     }
     value["handoff"] = finalization_handoff(
         &report.status,
@@ -900,6 +942,37 @@ fn should_persist_manual_preflight_intent(
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
     let mut errors = Vec::new();
+    if args.verify.is_some() {
+        if !args.manual_finalization {
+            errors.push(homeboy::core::Error::validation_invalid_argument(
+                "verify",
+                "--verify is available only with --manual-finalization",
+                None,
+                None,
+            ));
+        }
+        if !args.gate_results.is_empty()
+            || !args.evidence.targeted_checks_run.is_empty()
+            || !args.test_steps.is_empty()
+        {
+            errors.push(homeboy::core::Error::validation_invalid_argument(
+                "verify",
+                "--verify derives gate result, targeted-check evidence, and reviewer test instructions; remove --gate-result, --targeted-check-run, and --test-step",
+                None,
+                Some(vec!["homeboy agent-task finalize-pr --manual-finalization --verify '<command>' ...".to_string()]),
+            ));
+        }
+    }
+    if let Some(model) = args.evidence.ai_model.as_deref() {
+        if normalize_concrete_model_identifier(model).is_none() {
+            errors.push(homeboy::core::Error::validation_invalid_argument(
+                "model",
+                "AI disclosure requires a concrete model identifier",
+                None,
+                None,
+            ));
+        }
+    }
     if let Err(error) = validate_finalization_base(
         args.path.as_deref(),
         &args.base,
@@ -956,6 +1029,118 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
     );
     error.details = serde_json::json!({ "diagnostics": diagnostics });
     Err(error)
+}
+
+/// Run against a detached worktree so the declared gate cannot observe later
+/// working-tree edits or mutate the candidate finalization publishes.
+struct ManualVerification {
+    command: String,
+    candidate_sha: String,
+}
+
+fn execute_manual_verification(
+    path: &str,
+    command: &str,
+) -> homeboy::core::Result<ManualVerification> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "verification command must be non-empty",
+            None,
+            None,
+        ));
+    }
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !status.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&status.stderr).trim().to_string(),
+        ));
+    }
+    if !status.stdout.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "manual --verify requires a committed clean candidate so Homeboy can run it in an immutable checkout",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    let candidate_sha = git_output(path, &["rev-parse", "HEAD"])?;
+    let checkout = tempfile::tempdir()
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let checkout_path = checkout.path().to_string_lossy().to_string();
+    let add = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &checkout_path,
+            &candidate_sha,
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !add.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&add.stderr).trim().to_string(),
+        ));
+    }
+    let output = Command::new("sh")
+        .args(["-lc", command])
+        .current_dir(&checkout_path)
+        .output()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("run manual deterministic verification".to_string()),
+            )
+        })?;
+    let remove = Command::new("git")
+        .args(["worktree", "remove", "--force", &checkout_path])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !remove.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&remove.stderr).trim().to_string(),
+        ));
+    }
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            format!(
+                "manual deterministic gate failed with exit code {}",
+                output.status.code().unwrap_or(1)
+            ),
+            Some(command.to_string()),
+            Some(vec![
+                "Fix the candidate and rerun the same --verify command before finalization."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(ManualVerification {
+        command: command.to_string(),
+        candidate_sha,
+    })
+}
+
+fn git_output(path: &str, args: &[&str]) -> homeboy::core::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn validate_finalization_base(
@@ -2551,6 +2736,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_manual_model_fails_before_reserving_finalization_identity() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-invalid-model",
+                "--path",
+                "/tmp/manual-invalid-model",
+                "--title",
+                "Invalid model",
+                "--commit-message",
+                "fixture",
+                "--model",
+                "unknown",
+            ]);
+
+            assert!(error.details["diagnostics"]
+                .as_array()
+                .expect("validation diagnostics")
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic["details"]["field"] == "model"
+                        && diagnostic["message"].as_str().is_some_and(|message| {
+                            message.contains("AI disclosure requires a concrete model identifier")
+                        })
+                }));
+            assert!(agent_task_lifecycle::status("manual-invalid-model").is_err());
+        });
+    }
+
+    #[test]
     fn compact_provider_bounds_extensions_and_large_diagnostics() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "provider-".to_string() + &"x".repeat(10_000),
@@ -3806,13 +4026,11 @@ mod tests {
                 "Dirty manual preflight",
                 "--commit-message",
                 "fixture",
-                "--gate-result",
-                "fixture=passed",
                 "--changed-file",
                 "feature.txt",
-                "--targeted-check-run",
-                "cargo test fixture",
-                "--ai-model",
+                "--verify",
+                "true",
+                "--model",
                 "fixture-model",
                 "--ai-used-for",
                 "CLI dirty preflight coverage",
@@ -3820,14 +4038,10 @@ mod tests {
             assert!(
                 error
                     .message
-                    .contains("recoverable manual preflight requires a committed candidate"),
+                    .contains("requires a committed clean candidate"),
                 "unexpected error: {error:?}"
             );
-            assert!(error.message.contains("without --preflight"));
-            assert!(agent_task_lifecycle::status("manual-cli-dirty-12706")
-                .expect("manual identity was reserved")
-                .metadata["manual_finalization_intent"]
-                .is_null());
+            assert!(agent_task_lifecycle::status("manual-cli-dirty-12706").is_err());
             run_git(
                 &checkout,
                 &[
@@ -3884,6 +4098,75 @@ mod tests {
                 .metadata["manual_finalization_intent"]
                 .is_null());
             run_git(&checkout, &["push", "-u", "origin", "feature"]);
+            let failed_gate = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-cli-failed-gate-13077",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Manual failed gate",
+                "--commit-message",
+                "fixture",
+                "--changed-file",
+                "feature.txt",
+                "--verify",
+                "false",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI gate failure coverage",
+            ]);
+            assert!(failed_gate
+                .message
+                .contains("manual deterministic gate failed"));
+            assert!(agent_task_lifecycle::status("manual-cli-failed-gate-13077").is_err());
+            let race_gate = format!(
+                "printf 'mutated\\n' > '{}'",
+                checkout.join("feature.txt").display()
+            );
+            let mutation = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-cli-mutated-candidate-13077",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Manual mutation race",
+                "--commit-message",
+                "fixture",
+                "--changed-file",
+                "feature.txt",
+                "--verify",
+                &race_gate,
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI candidate binding coverage",
+            ]);
+            assert!(mutation
+                .message
+                .contains("manual verification candidate changed after its gate completed"));
+            std::fs::write(checkout.join("feature.txt"), "feature\n")
+                .expect("restore fixture candidate");
             run_git(
                 &checkout,
                 &[
@@ -3968,18 +4251,29 @@ esac
                 "Manual continuation",
                 "--commit-message",
                 "fixture",
-                "--gate-result",
-                "fixture=passed",
                 "--changed-file",
                 "feature.txt",
-                "--targeted-check-run",
-                "cargo test fixture",
-                "--ai-model",
+                "--verify",
+                "test \"$(cat feature.txt)\" = feature",
+                "--model",
                 "fixture-model",
                 "--ai-used-for",
                 "CLI recovery coverage",
             ]);
             assert_eq!(preflight["status"], "validated");
+            assert_eq!(preflight["normalized_gate_results"][0]["status"], "passed");
+            assert_eq!(
+                preflight["verification"]["targeted_checks_run"][0],
+                "test \"$(cat feature.txt)\" = feature"
+            );
+            assert_eq!(
+                preflight["review_dossier"]["how_to_test"][0]["command"],
+                "test \"$(cat feature.txt)\" = feature"
+            );
+            assert_eq!(
+                preflight["review_dossier"]["ai_assistance"]["model"],
+                "fixture-model"
+            );
             let continuation = preflight["handoff"]["finalize_command"]
                 .as_str()
                 .expect("emitted continuation")

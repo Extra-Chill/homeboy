@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
     enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
@@ -174,6 +175,25 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
     };
     let candidate_changed_files = normalize_changed_files(&changed_files);
+    if let Some(verified_candidate_sha) = options.verified_candidate_sha.as_deref() {
+        if commit_required {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "manual verification candidate changed after its gate completed",
+                None,
+                None,
+            ));
+        }
+        let observed = backend.validate_committed_publication_identity(&options.path, None)?;
+        if observed.commit_sha.as_deref() != Some(verified_candidate_sha) {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "manual verification candidate changed after its gate completed",
+                observed.commit_sha,
+                None,
+            ));
+        }
+    }
     if options.manual_finalization && !publish && !commit_required && push_required {
         return Err(Error::validation_invalid_argument(
             "publication_intent",
@@ -317,6 +337,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             None,
         )
     })?;
+    if let Some(verified_candidate_sha) = options.verified_candidate_sha.as_deref() {
+        if verified_candidate_sha != commit_sha {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "manual verification candidate changed after its gate completed",
+                Some(commit_sha.to_string()),
+                None,
+            ));
+        }
+    }
     if let Some(expected_candidate_sha) = options.expected_candidate_sha.as_deref() {
         if expected_candidate_sha != commit_sha {
             return Err(Error::validation_invalid_argument(
@@ -1230,17 +1260,7 @@ fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
 }
 
 fn is_concrete_model(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value == value.trim()
-        && !value.chars().any(char::is_control)
-        && !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "not recorded"
-                | "unknown"
-                | "ai-assisted"
-                | "ai assisted"
-                | "legacy caller did not record a model"
-        )
+    normalize_concrete_model_identifier(value).is_some()
 }
 
 fn is_git_commit_identity(value: &str) -> bool {

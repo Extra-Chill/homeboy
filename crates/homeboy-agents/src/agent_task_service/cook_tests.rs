@@ -12023,6 +12023,8 @@ struct CaptureBackend {
     hydrate_run_id: Option<String>,
     hydrate_gate_proof_run_id: Option<String>,
     synthetic_gate_proof: Option<AgentTaskPromotionReport>,
+    commit_error: bool,
+    commit_real: bool,
 }
 
 impl AgentTaskPrFinalizationBackend for CaptureBackend {
@@ -12168,7 +12170,46 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         proof.scope = "commit_host_policy".to_string();
         Ok(proof)
     }
-    fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
+    fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
+        if self.commit_error {
+            return Err(
+                homeboy_core::Error::validation_invalid_argument_with_evidence(
+                    "publication",
+                    "git commit failed",
+                    None,
+                    None,
+                    Some(homeboy_error::CommandEvidence {
+                        command: "git commit".to_string(),
+                        cwd: None,
+                        location: Some("local".to_string()),
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: "hook rejected commit".to_string(),
+                        truncated: false,
+                    }),
+                ),
+            );
+        }
+        if self.commit_real {
+            for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+                let output = Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .output()
+                    .map_err(|error| homeboy_core::Error::git_command_failed(error.to_string()))?;
+                if !output.status.success() {
+                    return Err(homeboy_core::Error::git_command_failed(
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    ));
+                }
+            }
+            let output = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()
+                .map_err(|error| homeboy_core::Error::git_command_failed(error.to_string()))?;
+            self.committed_sha = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
         self.committed = true;
         Ok(())
     }
@@ -12183,7 +12224,10 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             local_branch: head.to_string(),
             remote: "origin".to_string(),
             upstream_ref: format!("refs/remotes/origin/{head}"),
-            verified_remote_sha: "candidate-sha".to_string(),
+            verified_remote_sha: self
+                .committed_sha
+                .clone()
+                .unwrap_or_else(|| "candidate-sha".to_string()),
         })
     }
     fn find_open_pr(
@@ -12253,7 +12297,14 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     ) -> Result<AgentTaskPublicationBinding> {
         Ok(AgentTaskPublicationBinding {
             candidate_sha: candidate_sha.to_string(),
-            candidate_tree: "candidate-tree".to_string(),
+            candidate_tree: match crate::agent_task_promotion::candidate_fingerprint(_path)? {
+                crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } => {
+                    fingerprint.tree
+                }
+                crate::agent_task_promotion::AgentTaskPromotionCandidate::NonGit { .. } => {
+                    "candidate-tree".to_string()
+                }
+            },
             remote_sha: candidate_sha.to_string(),
             pr_head_sha: candidate_sha.to_string(),
             repository: "Extra-Chill/homeboy".to_string(),
@@ -12669,10 +12720,12 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             "test \"$(cat ../figma-transformer/tracked.txt)\" = promoted; printf ran >> {}",
             gate_log.display()
         );
+        let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
-                verify: vec![gate.clone()],
+                verify: vec![reviewer_gate.clone()],
+                private_verify: vec![gate.clone()],
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -12692,17 +12745,26 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             vec!["figma-transformer/tracked.txt"]
         );
         assert_eq!(
-            replacement.deterministic_gates[0]
+            replacement.deterministic_gates[1]
                 .cwd
                 .as_ref()
                 .expect("gate cwd evidence")
                 .effective,
             target.join("php-transformer").display().to_string()
         );
-        assert_eq!(replacement.deterministic_gates.len(), 1);
+        assert_eq!(replacement.deterministic_gates.len(), 2);
         assert_eq!(
             replacement.deterministic_gates[0].command,
+            vec!["sh".to_string(), "-lc".to_string(), reviewer_gate]
+        );
+        assert_eq!(
+            replacement.deterministic_gates[1].command,
             vec!["sh".to_string(), "-lc".to_string(), gate]
+        );
+        assert_eq!(
+            replacement.deterministic_gates[1].visibility,
+            homeboy_core::gate::HomeboyGateVisibility::Private,
+            "a private required gate remains durable runtime evidence"
         );
         let replay = verify_replacement_gates(
             "cook-verify-replacement",
@@ -14453,6 +14515,207 @@ fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fre
 }
 
 #[test]
+fn direct_manual_publication_failure_records_retry_and_successful_recovery_supersedes_it() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "manual-publication-failure";
+        prepare_manual_finalization_identity(run_id).expect("reserve manual identity");
+        crate::agent_task_lifecycle::record_manual_finalization_retry(run_id)
+            .expect("persist direct retry dossier marker");
+        let error = homeboy_core::Error::validation_invalid_argument_with_evidence(
+            "publication",
+            "git push failed token=secret-value",
+            None,
+            None,
+            Some(homeboy_error::CommandEvidence {
+                command: "git add".to_string(),
+                cwd: None,
+                location: Some("local".to_string()),
+                exit_code: 17,
+                stdout: "index is locked".to_string(),
+                stderr: String::new(),
+                truncated: false,
+            }),
+        );
+
+        crate::agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)
+            .expect("record publication failure");
+        let record = agent_task_lifecycle::status(run_id).expect("failed manual record");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
+        assert_eq!(
+            record.metadata["manual_finalization_failure"]["error"]["details"]["command_evidence"]
+                ["command"],
+            "git add"
+        );
+        assert_eq!(
+            record.metadata["manual_finalization_failure"]["error"]["details"]["command_evidence"]
+                ["stdout"],
+            "index is locked"
+        );
+        assert_eq!(record.metadata["manual_finalization_retry"], true);
+        assert!(!record.metadata["manual_finalization_failure"]
+            .to_string()
+            .contains("secret-value"));
+
+        crate::agent_task_lifecycle::record_manual_finalization_receipt(
+            run_id,
+            serde_json::json!({ "status": "review_ready", "run_id": run_id }),
+        )
+        .expect("record successful retry receipt");
+        let recovered = agent_task_lifecycle::status(run_id).expect("recovered manual record");
+        assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            recovered.lifecycle.execution.state,
+            RunExecutionState::Succeeded
+        );
+        assert!(recovered.metadata["manual_finalization_failure"].is_null());
+        assert!(recovered.metadata["manual_finalization_retry"].is_null());
+    });
+}
+
+#[test]
+fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-manual-publication-failure";
+        let run_id = "cook-manual-publication-failure-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(target.path())
+                .status()
+                .expect("run git")
+                .success());
+        }
+        std::fs::create_dir_all(target.path().join("src")).expect("create source directory");
+        std::fs::write(target.path().join("src/lib.rs"), "base\n").expect("write base");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(target.path())
+            .status()
+            .expect("stage base")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(target.path())
+            .status()
+            .expect("commit base")
+            .success());
+        std::fs::write(target.path().join("src/lib.rs"), "dirty\n").expect("write candidate");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("submit Cook attempt");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        let dirty = crate::agent_task_finalization::AgentTaskPrCandidateState::Dirty {
+            changed_files: vec!["src/lib.rs".to_string()],
+        };
+        let intent = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(dirty.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("preflight direct manual publication");
+        super::super::cook_promotion::persist_manual_finalization_retry_intent(run_id, &intent)
+            .expect("persist direct retry intent");
+        let hook = target.path().join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ngit add .\necho hook rejected >&2\nexit 1\n",
+        )
+        .expect("write rejecting hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("make hook executable");
+        }
+
+        recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend {
+                candidate_state: Some(dirty),
+                commit_real: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("commit failure remains recoverable");
+        let record = agent_task_lifecycle::status(run_id).expect("failed Cook manual record");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        // The rejecting hook staged the original bytes. A real content change
+        // must still invalidate the retry's semantic tree/path binding.
+        std::fs::write(target.path().join("src/lib.rs"), "drifted\n")
+            .expect("mutate candidate after hook rejection");
+        let drift = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend {
+                candidate_state: Some(
+                    crate::agent_task_finalization::AgentTaskPrCandidateState::Dirty {
+                        changed_files: vec!["src/lib.rs".to_string()],
+                    },
+                ),
+                ..Default::default()
+            },
+        )
+        .expect_err("content drift rejects retry");
+        assert!(drift
+            .message
+            .contains("candidate changed after the direct preflight"));
+        std::fs::write(target.path().join("src/lib.rs"), "dirty\n")
+            .expect("restore bound candidate");
+        std::fs::remove_file(&hook).expect("remove rejecting hook");
+
+        let recovered = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend {
+                candidate_state: Some(
+                    crate::agent_task_finalization::AgentTaskPrCandidateState::Dirty {
+                        changed_files: vec!["src/lib.rs".to_string()],
+                    },
+                ),
+                commit_real: true,
+                ..Default::default()
+            },
+        )
+        .expect("retry commits the bound candidate and publishes it");
+        assert_eq!(recovered["status"], "review_ready");
+        let recovered_record = agent_task_lifecycle::status(run_id).expect("recovered status");
+        assert_eq!(recovered_record.state, AgentTaskRunState::Succeeded);
+        assert!(recovered_record.metadata["manual_finalization_failure"].is_null());
+        assert!(recovered_record.metadata["manual_finalization_retry"].is_null());
+        assert!(recovered_record.metadata["manual_finalization_retry_candidate"].is_null());
+        assert!(recovered_record.metadata["manual_finalization_retry_origin"].is_object());
+        let repeated = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect("published retry receipt is idempotent");
+        assert_eq!(repeated, recovered);
+    });
+}
+
+#[test]
 fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "manual-11974";
@@ -15334,15 +15597,20 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
 fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_republishing() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-11290";
-        let run_id = "cook-11290-attempt-1";
+        let failed_run_id = "cook-11290-attempt-1";
+        let run_id = "cook-11290-attempt-2";
         let target = tempfile::tempdir().expect("fixture target");
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
         options.head = Some("fix/8058".to_string());
         options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(failed_run_id))
+            .expect("submit failed attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, failed_run_id)
+            .expect("link failed attempt");
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link recipe attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id).expect("link retry attempt");
         seed_patch_alias_aggregate(
             run_id,
             &options.initial_plan,
@@ -15359,6 +15627,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         failed.deterministic_gates[0].exit_code = 1;
         failed.deterministic_gates[0].stderr = "rustup infrastructure failure".to_string();
         failed.provenance["candidate"] = serde_json::json!({"kind": "git", "fingerprint": {"head": "candidate", "tree": "candidate-tree", "sha256": "candidate-sha"}});
+        let legacy_checkout = failed.provenance["candidate_checkout"].take();
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
             .expect("record immutable failed evidence");
 
@@ -15368,6 +15637,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded;
         replacement.deterministic_gates[0].exit_code = 0;
         replacement.deterministic_gates[0].stderr.clear();
+        replacement.provenance["candidate_checkout"] = legacy_checkout;
         replacement.command_evidence = vec![
             crate::agent_task_promotion::AgentTaskPromotionCommandReport {
                 command: vec![
@@ -15407,9 +15677,80 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             Some("Chris approved external proof".to_string()),
         )
         .expect_err("each gate needs matching command evidence");
-        assert!(error
-            .message
-            .contains("matching zero-exit command evidence"));
+        assert!(error.message.contains("matching_command_evidence"));
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "matching_command_evidence"
+        );
+
+        let mut private_gate = replacement.clone();
+        private_gate.deterministic_gates[0].visibility =
+            homeboy_core::gate::HomeboyGateVisibility::Private;
+        let error = record_replacement_gate_proof(
+            run_id,
+            private_gate,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("private gates cannot hydrate reviewer test instructions");
+        assert_eq!(error.details["failed_eligibility_predicate"], "visibility");
+
+        let mut unrelated_legacy_checkout = replacement.clone();
+        unrelated_legacy_checkout.provenance["candidate_checkout"]["tree"] =
+            serde_json::json!("other-tree");
+        unrelated_legacy_checkout.provenance["candidate_checkout"]["candidate_sha256"] =
+            serde_json::json!("other-sha");
+        unrelated_legacy_checkout.deterministic_gates[0].candidate_checkout = Some(
+            serde_json::from_value(
+                unrelated_legacy_checkout.provenance["candidate_checkout"].clone(),
+            )
+            .unwrap(),
+        );
+        let error = record_replacement_gate_proof(
+            run_id,
+            unrelated_legacy_checkout,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("legacy replacement checkout must match the original immutable fingerprint");
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "legacy_candidate_checkout_fingerprint"
+        );
+
+        let mut mixed_gates = replacement.clone();
+        let mut unbound_private_gate = mixed_gates.deterministic_gates[0].clone();
+        unbound_private_gate.id = "private-unbound".to_string();
+        unbound_private_gate.visibility = homeboy_core::gate::HomeboyGateVisibility::Private;
+        unbound_private_gate.command = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "cargo test private-replacement-gate".to_string(),
+        ];
+        unbound_private_gate
+            .candidate_checkout
+            .as_mut()
+            .unwrap()
+            .commit = "other-candidate".to_string();
+        mixed_gates.command_evidence.push(
+            crate::agent_task_promotion::AgentTaskPromotionCommandReport {
+                command: unbound_private_gate.command.clone(),
+                exit_code: 0,
+                stdout: "passed".to_string(),
+                stderr: String::new(),
+                capture: Default::default(),
+            },
+        );
+        mixed_gates.deterministic_gates.push(unbound_private_gate);
+        let error = record_replacement_gate_proof(
+            run_id,
+            mixed_gates,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("an unbound private gate cannot be persisted beside a valid visible gate");
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "candidate_checkout"
+        );
+        assert_eq!(error.details["gate_id"], "private-unbound");
 
         let replacement_for_finalization = replacement.clone();
         let replacement_for_replay = replacement.clone();
@@ -15431,6 +15772,11 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         );
         let record = agent_task_lifecycle::status(run_id).expect("read durable evidence");
         assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(run_id),
+            "recovery selects the retry attempt that owns the latest accepted proof"
+        );
         let original_history = &record.metadata["promotions"][0];
         assert!(original_history["deterministic_gates"][0]["stderr"]
             .as_str()
@@ -15459,6 +15805,19 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["environment_policy"][0]["environment"]["mode"],
             "inherit"
+        );
+
+        let mut preflight_backend = CaptureBackend {
+            synthetic_gate_proof: Some(replacement_for_finalization.clone()),
+            ..Default::default()
+        };
+        let preflight =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
+                .expect("replacement proof hydrates preflight from retry attempt");
+        assert_eq!(preflight["status"], "validated");
+        assert_eq!(
+            preflight["review_dossier"]["how_to_test"][0]["command"],
+            "cargo test --locked agent_task_promotion --lib"
         );
 
         let mut backend = CaptureBackend {

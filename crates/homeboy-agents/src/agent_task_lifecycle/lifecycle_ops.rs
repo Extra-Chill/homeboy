@@ -7809,6 +7809,48 @@ pub(crate) fn record_manual_finalization_intent(
     }
 }
 
+/// Mark a preflight dossier as a retryable direct publication. Unlike an
+/// explicit `--preflight` recovery, this path may still need to commit.
+pub fn record_manual_finalization_retry(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata["manual_finalization_retry"] == true {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_retry".to_string(), json!(true));
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+pub fn record_manual_finalization_retry_candidate(
+    run_id: &str,
+    candidate: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_retry_candidate") == Some(&candidate) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record.ensure_metadata_object().insert(
+            "manual_finalization_retry_candidate".to_string(),
+            candidate.clone(),
+        );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 /// Stable digest of the exact validated manual dossier persisted for recovery.
 pub(crate) fn manual_finalization_intent_digest(intent: &Value) -> String {
     content_hash::sha256_hex(
@@ -7824,9 +7866,22 @@ pub(crate) fn record_manual_finalization_receipt(
     let run_id = sanitize_run_id(run_id);
     let record = store::mutate_record(&run_id, |record| {
         let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
+        let receipt_matches = record.metadata.get("cook_finalization") == Some(&receipt);
+        let already_succeeded = record.state == AgentTaskRunState::Succeeded;
+        let retry_cleared = record.metadata.get("manual_finalization_retry").is_none();
+        let failure_cleared = record.metadata.get("manual_finalization_failure").is_none();
+        if receipt_matches && already_succeeded && retry_cleared && failure_cleared {
+            return false;
+        }
         record.updated_at = Some(now_timestamp());
+        set_run_state(record, AgentTaskRunState::Succeeded);
         let metadata = record.ensure_metadata_object();
         metadata.insert("cook_finalization".to_string(), receipt.clone());
+        metadata.remove("manual_finalization_failure");
+        metadata.remove("manual_finalization_retry");
+        if let Some(candidate) = metadata.remove("manual_finalization_retry_candidate") {
+            metadata.insert("manual_finalization_retry_origin".to_string(), candidate);
+        }
         metadata.insert(
             "manual_finalization_receipt_digest".to_string(),
             json!(manual_finalization_intent_digest(&receipt)),
@@ -7835,6 +7890,44 @@ pub(crate) fn record_manual_finalization_receipt(
             "manual_finalization_receipt_intent_digest".to_string(),
             intent_digest,
         );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Record a failed manual publication as a terminal, recoverable lifecycle
+/// state. Manual identities have no provider tasks, so leaving them queued
+/// would falsely suggest that `agent-task run` can make progress.
+pub fn record_manual_finalization_failure(
+    run_id: &str,
+    error: &homeboy_core::Error,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    let failure = json!({
+        "schema": "homeboy/agent-task-manual-finalization-failure/v1",
+        "status": "failed",
+        "phase": "publication",
+        "error": {
+            "code": error.code.as_str(),
+            "message": policy.redact_string(&error.message),
+            "details": policy.redact_json(&error.details),
+        },
+    });
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_failure") == Some(&failure)
+            && record.state == AgentTaskRunState::Failed
+        {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        set_run_state(record, AgentTaskRunState::Failed);
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_failure".to_string(), failure.clone());
         true
     })?;
     match record {

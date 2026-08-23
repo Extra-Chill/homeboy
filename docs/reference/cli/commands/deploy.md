@@ -48,4 +48,5 @@ Deploy components to remote server
 | `--release-set` | `<PATH>` | Validate this versioned release-set manifest before any deploy action |
 | `--ref` | `<GIT_REF_OR_SHA>` | Deploy an exact Git ref resolved from the declared component repository |
 | `--tagged` | flag | Force local tag-based build/deploy, ignoring reusable release assets |
+| `--target` | `<TARGET>` | Select which deliverable a dual-deliverable component deploys Values: `server`, `provider`. |
 | `--resume` | `<RUN_ID>` | Resume a prior multi-project deploy run after exact identity validation |

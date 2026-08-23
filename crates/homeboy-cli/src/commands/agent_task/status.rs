@@ -1710,6 +1710,39 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
 }
 
 fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
+    if value
+        .pointer("/metadata/manual_finalization_failure/status")
+        .and_then(Value::as_str)
+        == Some("failed")
+    {
+        value["publication_recovery"] = json!({
+            "kind": "manual_finalization",
+            "phase": "publication",
+            "command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
+            "error": value.pointer("/metadata/manual_finalization_failure/error"),
+        });
+        let metadata = CommandActionableMetadata {
+            refs: CommandResultRefs {
+                agent_tasks: vec![agent_task_ref(run_id)],
+                ..Default::default()
+            },
+            next_actions: vec![
+                CommandNextAction::new(
+                    "recover manual publication",
+                    format!("homeboy agent-task finalize-pr --recover {run_id}"),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+                CommandNextAction::new(
+                    "show status",
+                    format!("homeboy agent-task status {run_id} --full"),
+                )
+                .with_kind(CommandNextActionKind::Show),
+            ],
+            ..Default::default()
+        };
+        attach_actionable_metadata(value, metadata);
+        return;
+    }
     let blocked = cook_requires_action(value);
     let mut next_actions = Vec::new();
     if blocked {
@@ -8609,6 +8642,36 @@ mod tests {
             .any(
                 |action| action["command"] == "homeboy agent-task review agent-task-durable-patch"
             ));
+    }
+
+    #[test]
+    fn manual_publication_failure_projects_recovery_without_agent_task_execution() {
+        let mut status = json!({
+            "run_id": "manual-publication",
+            "state": "failed",
+            "metadata": {
+                "manual_finalization_failure": {
+                    "status": "failed",
+                    "phase": "publication",
+                    "error": { "code": "validation.invalid_argument" }
+                }
+            }
+        });
+
+        attach_agent_task_status_actionable(&mut status, "manual-publication");
+        let actions = status[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("manual publication actions");
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy agent-task finalize-pr --recover manual-publication"
+        }));
+        assert_eq!(
+            status["publication_recovery"]["command"],
+            "homeboy agent-task finalize-pr --recover manual-publication"
+        );
+        assert!(!actions.iter().any(|action| action["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("agent-task run"))));
     }
 
     #[test]
