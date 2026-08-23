@@ -1,4 +1,4 @@
-//! Pins nextest shard replay to serial execution.
+//! Pins nextest shard replay to parallel execution.
 //!
 //! `extensions.rust.settings.rust_nextest_shard_threads` is the `--test-threads`
 //! value the rust extension passes to `cargo nextest run` during shard replay
@@ -40,60 +40,51 @@
 //! the shared rig registry, where a peer's `create` leaves the registry in a
 //! state the assertions were not written for.
 //!
-//! ## What has to be true before this goes back to `0`
+//! ## That condition was met, and the value is back at `0`
 //!
-//! Not "the flakes stopped". The stores have to stop being machine-global:
-//! controller admission and the rig registry need the same explicit-root
-//! treatment #7505 is applying everywhere else, so that a test's writes land in
-//! its own `HermeticTestContext` rather than in a directory every concurrent
-//! test can see.
+//! The stores stopped being machine-global. The rig registry reached zero
+//! ambient production resolutions across #13011/#13019/#13030/#13032, and
+//! controller admission reached zero in #13035, where the ambient entry points
+//! were additionally gated `#[cfg(test)]` so production cannot reach them even
+//! by accident.
 //!
-//! Until then a parallel value is not faster, it is red. Serial is slower and
-//! correct, and slower-and-correct is the side to err on for a gate whose
-//! entire job is to be believed.
+//! Measured on an 8-core Linux host, `cargo nextest`, repeated runs:
 //!
-//! ### Status of that condition, measured 2026-08-23
+//! | scope | serial | parallel |
+//! |---|---|---|
+//! | `workspace::tests::prune::*` (the 10 named above) | 26.5s, 30/30 | 5.6s, 30/30 |
+//! | `status_and_recovery` (holds both tests named above) | 20.3s, 53/53 | 4.7s, 53/53 |
+//! | `homeboy-lab-runner --lib` (1881 tests) | 410.3s | 98.5s |
+//! | `homeboy-agents --lib` (1946 tests) | — | 164.0s |
 //!
-//! **Both named stores are done, and both named failure families now pass in
-//! parallel.** The rig registry reached zero ambient production resolutions
-//! across #13011/#13019/#13030/#13032, and controller admission reached zero in
-//! #13035, where the ambient entry points were additionally gated `#[cfg(test)]`
-//! so production cannot reach them at all.
-//!
-//! Reproduced locally against `c747bec09` on an 8-core Linux host, `cargo
-//! nextest`, three consecutive runs each:
-//!
-//! | scope | serial | parallel | verdict |
-//! |---|---|---|---|
-//! | `workspace::tests::prune::*` (the 10 named here) | 26.5s, 30/30 | 5.6s, 30/30 | passes |
-//! | `status_and_recovery` (holds both named tests) | 20.3s, 53/53 | 4.7s, 53/53 | passes |
-//! | `homeboy-lab-runner --lib` (1881 tests) | 410.3s, 7 failed | 98.5s, 7 failed | **identical failure set** |
-//!
-//! For `homeboy-lab-runner` the parallel-only failure count is **zero**: every
+//! For both crates the parallel-only failure count is zero: every remaining
 //! failure reproduces serially in isolation and is environmental to that host.
+//! `homeboy-lab-runner` is a 4.2x improvement.
 //!
-//! ### Why this still says `1`
+//! ### Two things had to be fixed first, and neither was a store
 //!
-//! `homeboy-agents --lib` (1945 tests, 165.5s parallel) had 7 failures, and
-//! re-running those 7 serially in isolation cleared only 5. Two fail *only*
-//! under parallelism:
+//! Restoring parallelism surfaced two defects that serialization had been
+//! hiding, which is the argument for not serializing:
 //!
-//! - `agent_task_scheduler::managed_services::tests::cleanup_runs_multiple_service_grace_periods_concurrently`
-//! - `agent_task_scheduler::tests::scheduling_tests::concurrency::concurrency_tests::timeout_quarantines_only_its_workspace_without_starving_unrelated_work`
+//! - `linux_scope_pids` counted *every* unreadable `/proc/<pid>/environ` as
+//!   incomplete discovery, including `ENOENT` — a process that exited between
+//!   `read_dir` and the read. That is the state cleanup is trying to reach, not
+//!   a gap in it. Any concurrent load made managed-service cleanup report
+//!   `incomplete` spuriously, in production as much as in tests. Now only
+//!   `EPERM`/`EACCES` counts, because only that is a real blind spot.
+//! - Two scheduler tests asserted concurrency and non-starvation with total
+//!   wall-clock bounds, which restate a structural property as a claim about
+//!   host load. Both now assert the property directly: overlapping SIGTERM
+//!   handler windows, and the task-start events that were already there.
 //!
-//! Both assert on grace periods and timeouts. They are wall-clock sensitive, so
-//! eight-way CPU contention starves them — a different defect class from the
-//! shared-directory contamination this file was written about, and one that
-//! rooting a store cannot fix. **The release condition above is met; this is a
-//! new and separate blocker.** Restoring `0` needs those two given deadlines
-//! that do not depend on how loaded the host is.
+//! ### Cautions for whoever measures this next
 //!
-//! Two cautions for whoever measures next, both of which produced false results
-//! here before being caught:
+//! Both of these produced false results here before being caught:
 //!
-//! - A host under disk pressure can have cleanup delete `/var/tmp/.homeboy-test-tmp`
-//!   mid-run. That presents as ~1000 failures reading `No such file or
-//!   directory`, not as a race. Check free space before believing a bad run.
+//! - A host under disk pressure can have cleanup delete
+//!   `/var/tmp/.homeboy-test-tmp` mid-run. That presents as ~1000 failures
+//!   reading `No such file or directory`, not as a race. Check free space
+//!   before believing a bad run.
 //! - `/dev/null` on that host had been replaced by a regular file containing 99
 //!   bytes of git error text, which makes `git` fail with `bad config line 1 in
 //!   file /dev/null` in whichever tests happen to run while it is broken. That
@@ -122,9 +113,10 @@
 //! invisible in review either way. That is what makes a test the right
 //! instrument here.
 //!
-//! If shard parallelism is intentionally restored, delete or invert this test in
-//! the same commit that changes the value, so the intent is recorded once rather
-//! than argued a fourth time.
+//! Shard parallelism has now been intentionally restored, and this test was
+//! inverted in the same commit that changed the value rather than deleted — so a
+//! silent re-serialization fails here too. The failure mode this file exists to
+//! prevent is a one-token numeric edit that nobody argues about.
 
 use serde_json::Value;
 
@@ -136,7 +128,7 @@ fn rust_settings() -> Value {
 }
 
 #[test]
-fn nextest_shard_replay_stays_serial_while_stores_are_machine_global() {
+fn nextest_shard_replay_stays_parallel_now_that_the_stores_take_roots() {
     let settings = rust_settings();
 
     let threads = settings
@@ -145,14 +137,15 @@ fn nextest_shard_replay_stays_serial_while_stores_are_machine_global() {
         .expect("extensions.rust.settings.rust_nextest_shard_threads is present and numeric");
 
     assert_eq!(
-        threads, 1,
-        "rust_nextest_shard_threads must stay 1 while the controller-runtime \
-         admission store and the rig registry live in machine-global directories. \
-         nextest gives every test its own process, which isolates env but not the \
-         filesystem those stores sit on, so concurrent tests observe each other's \
-         leases and registry writes. See this file's module docs for the observed \
-         cross-test contamination (run 32294476539). Restore 0 only after those \
-         stores take explicit roots (#7505)."
+        threads, 0,
+        "rust_nextest_shard_threads must stay 0. It was 1 for a real reason and that \
+         reason is gone: the controller-runtime admission store and the rig registry \
+         now take explicit roots for every production caller, and both failure \
+         families this file documented pass in parallel. Serializing again costs \
+         roughly 4x wall clock and buys nothing measured. If a shared-directory race \
+         returns, fix the store rather than re-serializing the suite, or invert this \
+         test in the same commit and say which store — the one thing this value has \
+         never survived is being changed quietly. See this file's module docs and #7505."
     );
 }
 

@@ -1488,11 +1488,27 @@ mod tests {
             first.socket_handoff = false;
             first.readiness = None;
             first.cleanup_deadline_ms = 3_000;
+            // The service stamps the wall-clock window it spends inside its own
+            // SIGTERM handler. Concurrency is then proved by those windows
+            // overlapping, which is what `thread::scope` in `cleanup` actually
+            // guarantees — and unlike a total-elapsed bound it does not become a
+            // statement about how loaded the host is (#7505).
             first.command = vec![
                 "python3".to_string(),
                 "-u".to_string(),
                 "-c".to_string(),
-                "import signal,time; signal.signal(signal.SIGTERM, lambda *_: time.sleep(2.1)); print('ready', flush=True); signal.pause()".to_string(),
+                concat!(
+                    "import signal,sys,time; ",
+                    "w=lambda m:(sys.stdout.write(m+chr(10)),sys.stdout.flush()); ",
+                    "signal.signal(signal.SIGTERM, lambda *_:(",
+                    "w('term_start %.6f'%time.time()),",
+                    "time.sleep(1.0),",
+                    "w('term_end %.6f'%time.time()),",
+                    "sys.exit(0))); ",
+                    "print('ready',flush=True); ",
+                    "signal.pause()",
+                )
+                .to_string(),
             ];
             let mut second = first.clone();
             second.id = "second".to_string();
@@ -1508,15 +1524,54 @@ mod tests {
                 }
                 assert!(std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")));
             }
-            let started = Instant::now();
+            let log_paths = services
+                .records()
+                .into_iter()
+                .map(|record| record.log_path.expect("service log"))
+                .collect::<Vec<_>>();
             let records = services.cleanup("test");
 
-            assert!(started.elapsed() < Duration::from_secs(4));
             assert_eq!(records.len(), 2);
-            assert!(records.iter().all(|record| {
-                record.cleanup_outcome.as_deref() == Some("graceful")
-                    && record.cleanup.as_deref() == Some("cleaned_up:test")
-            }));
+            let outcomes = records
+                .iter()
+                .map(|record| (record.cleanup_outcome.clone(), record.cleanup.clone()))
+                .collect::<Vec<_>>();
+            assert!(
+                records.iter().all(|record| {
+                    record.cleanup_outcome.as_deref() == Some("graceful")
+                        && record.cleanup.as_deref() == Some("cleaned_up:test")
+                }),
+                "expected both services to clean up gracefully, got {outcomes:?}"
+            );
+
+            // Both services were inside their SIGTERM handler at the same
+            // instant. Serial cleanup cannot produce overlapping windows however
+            // slow or fast the host is; this is the property the test name
+            // claims, asserted directly.
+            let windows = log_paths
+                .iter()
+                .map(|path| {
+                    let log = std::fs::read_to_string(path).expect("read service log");
+                    let stamp = |prefix: &str| {
+                        log.lines()
+                            .find_map(|line| line.strip_prefix(prefix))
+                            .unwrap_or_else(|| {
+                                panic!("`{prefix}` missing from service log:\n{log}")
+                            })
+                            .trim()
+                            .parse::<f64>()
+                            .expect("service stamp parses")
+                    };
+                    (stamp("term_start "), stamp("term_end "))
+                })
+                .collect::<Vec<_>>();
+            let latest_start = windows[0].0.max(windows[1].0);
+            let earliest_end = windows[0].1.min(windows[1].1);
+            assert!(
+                latest_start < earliest_end,
+                "service SIGTERM handler windows did not overlap, so cleanup ran \
+                 serially: {windows:?}"
+            );
         });
     }
 
