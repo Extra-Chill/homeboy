@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.0] - 2026-08-23
+
+### Added
+- declare Cargo CI cache
+
 ## [1.36.2] - 2026-08-16
 
 ### Fixed
