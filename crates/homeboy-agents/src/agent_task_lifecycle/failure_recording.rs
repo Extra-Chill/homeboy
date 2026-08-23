@@ -22,8 +22,43 @@ pub fn record_pre_execution_failure_in_store(
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let mut record = lifecycle_store.read_record(&run_id)?;
+    // Cancellation and aggregate projection both own a terminal transition.
+    // Re-read and arbitrate while holding the record/aggregate transaction lock
+    // so a retry launcher failure cannot overwrite a cancellation winner.
+    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+        let record = lifecycle_store.read_record(&run_id)?;
+        // A completed provider candidate still needs its non-terminal transport
+        // follow-up marker. Bare cancellation and other terminal winners are
+        // returned unchanged rather than being overwritten by this aggregate.
+        if record.state.is_terminal() && !record.has_recorded_provider_progress() {
+            return Ok((record, None));
+        }
+        record_pre_execution_failure_locked(lifecycle_store, record, plan, phase, error)
+    })?;
 
+    // Projection acquires its own authority locks. It follows the locked
+    // arbitration/commit so a cancellation winner is never overwritten.
+    if let Some(aggregate) = aggregate {
+        record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            None,
+        )?;
+    } else if record.state.is_terminal() {
+        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
+    }
+    Ok(record)
+}
+
+fn record_pre_execution_failure_locked(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    mut record: AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    phase: &str,
+    error: &Error,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
     // A transport/handoff error that arrives AFTER a provider attempt was
     // already dispatched (or completed) on a runner is not a pre-execution
     // failure. Terminalizing it here would overwrite a succeeded candidate with
@@ -33,7 +68,8 @@ pub fn record_pre_execution_failure_in_store(
     // controller reconciliation can adopt the completed candidate without
     // rerunning the provider.
     if record.has_recorded_provider_progress() {
-        return record_transport_follow_up_failure_in_store(lifecycle_store, record, phase, error);
+        return record_transport_follow_up_failure_in_store(lifecycle_store, record, phase, error)
+            .map(|record| (record, None));
     }
 
     let task_count = plan.tasks.len();
@@ -44,7 +80,7 @@ pub fn record_pre_execution_failure_in_store(
     let outcomes = plan
         .tasks
         .iter()
-        .map(|task| build_pre_execution_failure_outcome(&run_id, task, phase, error))
+        .map(|task| build_pre_execution_failure_outcome(&record.run_id, task, phase, error))
         .collect();
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -77,8 +113,12 @@ pub fn record_pre_execution_failure_in_store(
             ..AgentTaskQueueStatus::default()
         },
     };
-    let mut failed_record =
-        record_aggregate_in_store(lifecycle_store, &mut record, plan, &aggregate)?;
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
+    apply_aggregate_to_record(&mut record, plan, &aggregate, aggregate_path);
+    let mut failed_record = record;
     let runner_id = failed_record.runner_id().map(str::to_string);
     let metadata = failed_record.ensure_metadata_object();
     if retryable {
@@ -106,8 +146,12 @@ pub fn record_pre_execution_failure_in_store(
             })).collect::<Vec<_>>(),
         }),
     );
-    lifecycle_store.write_record(&failed_record)?;
-    Ok(failed_record)
+    let failed_record = lifecycle_store
+        .write_aggregate_and_record_locked_without_terminal_projection(
+            &failed_record,
+            &aggregate,
+        )?;
+    Ok((failed_record, Some(aggregate)))
 }
 
 fn record_transport_follow_up_failure_in_store(
@@ -136,8 +180,7 @@ fn record_transport_follow_up_failure_in_store(
     // must not be reaped as a clean success when its follow-up failed.
     metadata.insert("candidate_preserved".to_string(), json!(true));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    lifecycle_store.write_record(&record)?;
-    Ok(record)
+    lifecycle_store.write_record_locked_without_terminal_projection(&record)
 }
 
 pub(crate) fn build_pre_execution_failure_outcome(
