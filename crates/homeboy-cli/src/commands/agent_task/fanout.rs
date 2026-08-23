@@ -3528,6 +3528,7 @@ impl BatchCookSpec {
         }
         let dispatch = AgentTaskDispatchCommand {
             prompt,
+            prompt_is_literal: false,
             tasks: self.tasks.clone(),
             cwd: self.cwd.clone(),
             workspace: self

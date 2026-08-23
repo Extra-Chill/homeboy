@@ -643,7 +643,7 @@ fn materialize_prompt_from(
 /// following element, an attached `--prompt=-` names itself.
 fn stdin_prompt_index(args: &[String]) -> Option<usize> {
     args.iter().enumerate().find_map(|(index, arg)| {
-        if arg == "--prompt" && args.get(index + 1).is_some_and(|value| value == "-") {
+        if arg == "--prompt" && args.get(index + 1).is_some_and(|value| value.trim() == "-") {
             Some(index + 1)
         } else if arg == "--prompt=-" {
             Some(index)

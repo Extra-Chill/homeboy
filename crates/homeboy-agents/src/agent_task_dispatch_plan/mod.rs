@@ -141,7 +141,11 @@ pub fn build_dispatch_plan_with_provider_requirements(
         });
     let mut prompt_specs = Vec::new();
     if let Some(prompt) = &request.prompt {
-        prompt_specs.push(DispatchPromptSpec::new(prompt.clone()));
+        prompt_specs.push(DispatchPromptSpec {
+            prompt: prompt.clone(),
+            task_id: None,
+            is_literal: request.prompt_is_literal,
+        });
     }
     prompt_specs.extend(request.tasks.iter().cloned().map(DispatchPromptSpec::new));
     prompt_specs.extend(read_dispatch_tasks_json(
@@ -199,7 +203,14 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let command_policy = resolve_dispatch_command_policy(request)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
-        let resolved_prompt = read_prompt_spec(&prompt_spec.prompt)?;
+        let resolved_prompt = if prompt_spec.is_literal {
+            prompt_spec::ResolvedPromptSpec {
+                content: prompt_spec.prompt.clone(),
+                stored_prompt: None,
+            }
+        } else {
+            read_prompt_spec(&prompt_spec.prompt)?
+        };
         let instructions = dispatch_instructions(
             resolved_prompt.content.clone(),
             request.task_url.as_deref(),
@@ -2215,6 +2226,7 @@ mod tests {
     fn dispatch_request(overrides: DispatchRequestOverrides) -> AgentTaskDispatchRequest {
         AgentTaskDispatchRequest {
             prompt: overrides.prompt,
+            prompt_is_literal: false,
             tasks: overrides.tasks,
             cwd: overrides.cwd,
             workspace: overrides.workspace,
