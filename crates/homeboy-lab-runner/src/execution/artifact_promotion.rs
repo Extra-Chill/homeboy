@@ -30,7 +30,23 @@ pub fn promote_runner_exec_artifacts(
     output: &RunnerExecOutput,
     artifact_outputs: &[String],
 ) -> homeboy_core::Result<Vec<ArtifactRecord>> {
+    promote_runner_exec_artifacts_in_store(
+        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        output,
+        artifact_outputs,
+    )
+}
+
+/// The store-rooted counterpart of [`promote_runner_exec_artifacts`].
+pub fn promote_runner_exec_artifacts_in_store(
+    lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    output: &RunnerExecOutput,
+    artifact_outputs: &[String],
+) -> homeboy_core::Result<Vec<ArtifactRecord>> {
     promote_runner_exec_outputs(
+        lifecycle_store,
         run_id,
         output,
         artifact_outputs,
@@ -44,11 +60,31 @@ pub fn promote_runner_exec_artifact_dirs(
     output: &RunnerExecOutput,
     artifact_dir_outputs: &[String],
 ) -> homeboy_core::Result<Vec<ArtifactRecord>> {
+    promote_runner_exec_artifact_dirs_in_store(
+        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        output,
+        artifact_dir_outputs,
+    )
+}
+
+/// The store-rooted counterpart of [`promote_runner_exec_artifact_dirs`].
+pub fn promote_runner_exec_artifact_dirs_in_store(
+    lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    output: &RunnerExecOutput,
+    artifact_dir_outputs: &[String],
+) -> homeboy_core::Result<Vec<ArtifactRecord>> {
     if artifact_dir_outputs.is_empty() {
         return Ok(Vec::new());
     }
 
-    let store = ObservationStore::open_initialized()?;
+    // Every durable touch in this promotion follows the caller's store. The
+    // directory checkpoint, the per-child idempotence guard, and the promotion
+    // write below used to open three further ambient stores beside this one, so
+    // the guard that decides whether a child is skipped answered about a row
+    // the write did not necessarily address (#7505).
+    let store = lifecycle_store.open_observation_maintained()?;
     // Taken FROM the store, not resolved beside it. Downloaded bytes land under
     // this root and the records indexing them are written into that same store,
     // so the two cannot be allowed to disagree. Resolving separately made them
@@ -81,14 +117,16 @@ pub fn promote_runner_exec_artifact_dirs(
             ));
         }
         let tree_sha256 = homeboy_core::observation::directory_tree_sha256(&record_dir)?;
-        homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree(
+        homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree_in_store(
+            lifecycle_store,
             run_id,
             declared_dir,
             &tree_sha256,
         )?;
         for (relative, record_path) in runner_exec_directory_children(&record_dir)? {
             let relative_string = relative.display().to_string();
-            if homeboy_agents::agent_task_lifecycle::runner_exec_directory_child_is_promoted(
+            if homeboy_agents::agent_task_lifecycle::runner_exec_directory_child_is_promoted_in_store(
+                lifecycle_store,
                 run_id,
                 declared_dir,
                 &relative_string,
@@ -131,7 +169,8 @@ pub fn promote_runner_exec_artifact_dirs(
                 &artifact_id,
                 artifact_metadata,
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion_in_store(
+                lifecycle_store,
                 run_id,
                 declared_dir,
                 &relative_string,
@@ -231,7 +270,23 @@ pub fn promote_runner_exec_summaries(
     output: &RunnerExecOutput,
     summary_outputs: &[String],
 ) -> homeboy_core::Result<Vec<ArtifactRecord>> {
+    promote_runner_exec_summaries_in_store(
+        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        output,
+        summary_outputs,
+    )
+}
+
+/// The store-rooted counterpart of [`promote_runner_exec_summaries`].
+pub fn promote_runner_exec_summaries_in_store(
+    lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    output: &RunnerExecOutput,
+    summary_outputs: &[String],
+) -> homeboy_core::Result<Vec<ArtifactRecord>> {
     promote_runner_exec_outputs(
+        lifecycle_store,
         run_id,
         output,
         summary_outputs,
@@ -297,6 +352,7 @@ pub fn runner_exec_structured_summary(
 }
 
 fn promote_runner_exec_outputs(
+    lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     output: &RunnerExecOutput,
     output_paths: &[String],
@@ -306,7 +362,7 @@ fn promote_runner_exec_outputs(
         return Ok(Vec::new());
     }
 
-    let store = ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_maintained()?;
     // Taken FROM the store, not resolved beside it. Downloaded bytes land under
     // this root and the records indexing them are written into that same store,
     // so the two cannot be allowed to disagree. Resolving separately made them

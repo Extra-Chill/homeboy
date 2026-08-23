@@ -242,7 +242,13 @@ impl AgentTaskLifecycleStore {
     /// Like every opener on this store, BOTH roots come from `self`: the
     /// database below `data` and the artifact tree it indexes below `artifacts`,
     /// which `PathRoots` carries separately.
-    pub(crate) fn open_observation_maintained(&self) -> Result<ObservationStore> {
+    ///
+    /// Public because rooting is a cross-crate migration: `homeboy-lab-runner`
+    /// promotes runner-exec artifacts and has the same constraint, so it needs
+    /// the same opener. Reach for this only when replacing an ambient
+    /// `ObservationStore::open_initialized()`; a caller that never ran startup
+    /// artifact maintenance wants [`Self::open_observation_initialized`].
+    pub fn open_observation_maintained(&self) -> Result<ObservationStore> {
         ObservationStore::open_initialized_in_roots(&self.roots)
     }
 
