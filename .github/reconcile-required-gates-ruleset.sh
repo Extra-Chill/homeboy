@@ -74,7 +74,7 @@ stage='token'
 stage='policy'
 check_context="$(jq -er '.reconcile_preflight.required_context' "${config}")" \
   || write_failure 'policy' 'reconcile preflight context is missing'
-check_name="$(jq -er 'sub("^[^/]+ / "; "")' <<< "${check_context}")" \
+check_name="$(jq -Rer 'sub("^[^/]+ / "; "")' <<< "${check_context}")" \
   || write_failure 'policy' 'reconcile preflight context has no check-run name'
 check_app_id="$(jq -er --arg context "${check_context}" '
   [.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]

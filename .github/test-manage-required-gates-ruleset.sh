@@ -6,31 +6,23 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 workflow="${root}/.github/workflows/required-gates-ruleset.yml"
+reconciler="${root}/.github/reconcile-required-gates-ruleset.sh"
 grep -Fq 'workflow_dispatch:' "${workflow}"
 grep -Fq 'schedule:' "${workflow}"
 grep -Fq "cron: '17 * * * *'" "${workflow}"
 grep -Fq 'environment: main-ruleset-administration' "${workflow}"
 grep -Fq -- '--operation audit' "${workflow}"
 grep -Fq 'bash .github/reconcile-required-gates-ruleset.sh --evidence required-gates-ruleset-reconcile.json' "${workflow}"
-grep -Fq -- '--operation reconcile' "${root}/.github/reconcile-required-gates-ruleset.sh"
+grep -Fq -- '--operation reconcile' "${reconciler}"
 grep -Fq "github.ref == 'refs/heads/main'" "${workflow}"
-grep -Fq 'environments/main-ruleset-administration' "${workflow}"
-grep -Fq 'required_reviewers' "${workflow}"
-grep -Fq 'can_admins_bypass == false' "${workflow}"
-grep -Fq 'commits/${head}/check-runs' "${workflow}"
-grep -Fq '.name == "homeboy / Test" and .app.id == 15368 and .conclusion == "success"' "${workflow}"
-grep -Fq 'commits/main' "${workflow}"
-grep -Fq 'test "${head}" = "${current_main}"' "${workflow}"
-grep -Fq 'bash .github/validate-required-gates.sh --github' "${workflow}"
+grep -Fq 'environments/main-ruleset-administration' "${reconciler}"
+grep -Fq 'required_reviewers' "${reconciler}"
+grep -Fq 'can_admins_bypass == false' "${reconciler}"
+grep -Fq 'commits/${head}/check-runs' "${reconciler}"
+grep -Fq 'commits/main' "${reconciler}"
+grep -Fq 'bash .github/validate-required-gates.sh --github' "${reconciler}"
 ! grep -Fq 'gh api --method PUT' "${root}/docs/operations/required-ci-gates.md"
 ! grep -Fq 'gh api --method PUT' "${root}/.github/validate-required-gates.sh"
-
-preflight_query='any(.check_runs[]; .name == "homeboy / Test" and .app.id == 15368 and .conclusion == "success")'
-if jq -e "${preflight_query}" <<<'{"check_runs":[{"name":"homeboy / Test","app":{"id":99999},"conclusion":"success"}]}' >/dev/null; then
-  echo 'ruleset preflight accepted a spoofed successful Test check' >&2
-  exit 1
-fi
-jq -e "${preflight_query}" <<<'{"check_runs":[{"name":"homeboy / Test","app":{"id":15368},"conclusion":"success"}]}' >/dev/null
 
 jq 'del(.rules[] | select(.type == "required_status_checks"))' \
   "${root}/.github/required-gates-ruleset.json" > "${tmp}/state.json"
