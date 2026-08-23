@@ -607,12 +607,20 @@ impl AgentTaskScheduler {
                     }
                     #[cfg(not(test))]
                     {
-                        crate::controller_scratch::allocate_attempt(
-                            &scratch_run_id,
-                            &plan.plan_id,
-                            &request.task_id,
-                            scheduled.attempt,
-                        )
+                        // The scratch directory holds the working files of the
+                        // very attempt whose reservation was taken through the
+                        // accessor. Allocating it from the environment instead
+                        // would let an attempt's scratch and its durable records
+                        // live in different installations (#7505).
+                        self.durable_lifecycle_store().and_then(|lifecycle_store| {
+                            crate::controller_scratch::allocate_attempt_at(
+                                &lifecycle_store.data_root(),
+                                &scratch_run_id,
+                                &plan.plan_id,
+                                &request.task_id,
+                                scheduled.attempt,
+                            )
+                        })
                     }
                 };
                 let scratch = match scratch {

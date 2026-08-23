@@ -121,3 +121,16 @@ fn the_timeout_terminal_record_has_no_ambient_fallback() {
          that resolution and passes the store down (#7505)."
     );
 }
+
+#[test]
+fn the_attempt_scratch_shares_the_durable_root() {
+    let source = engine_source();
+    assert!(
+        !source.contains("controller_scratch::allocate_attempt("),
+        "engine.rs allocates attempt scratch through the ambient \
+         `allocate_attempt`, which resolves its own data root. The scratch \
+         directory holds the working files of the attempt whose reservation was \
+         taken through durable_lifecycle_store(), so the two must share a root: \
+         use `allocate_attempt_at(&store.data_root(), ..)` (#7505)."
+    );
+}
