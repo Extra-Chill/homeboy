@@ -4084,9 +4084,7 @@ fn run_cook_reported(
                     )?;
                     record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
                 }
-                if error.retryable != Some(true)
-                    && record.metadata.get("pre_execution_failure").is_some()
-                {
+                if record.metadata.get("pre_execution_failure").is_some() {
                     return Ok(pre_execution_failure_report(
                         failure_options.cook_id.clone(),
                         vec![AgentTaskCookAttemptReport {
@@ -6553,7 +6551,7 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
         "candidate_only_commits": ahead,
         "next_action": "converge_destination_before_provider",
     });
-    Err(error)
+    Err(error.with_retryable(true))
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can
