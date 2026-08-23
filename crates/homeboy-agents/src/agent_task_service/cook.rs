@@ -1272,8 +1272,8 @@ pub struct AgentTaskCookReport {
     pub terminal_failure_classification: Option<String>,
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
-    /// recipe was materialized. This intentionally contains no provider or gate
-    /// evidence; operators retrieve that through the listed diagnose command.
+    /// recipe was materialized. It may contain a bounded causal provider-command
+    /// projection; expanded evidence remains available through `diagnose`.
     pub failure_context: Option<AgentTaskCookFailureContext>,
 }
 
