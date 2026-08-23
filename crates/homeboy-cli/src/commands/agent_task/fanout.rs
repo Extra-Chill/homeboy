@@ -4295,6 +4295,14 @@ fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
 /// provider can serve it — turning a late, provider-shaped child failure into an
 /// early configuration error listing the backends that are actually installed.
 fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    resolve_and_validate_effective_backend_with_providers(args, catalog.providers())
+}
+
+fn resolve_and_validate_effective_backend_with_providers(
+    args: &mut AgentTaskFanoutCookBatchArgs,
+    providers: &[provider::AgentTaskExecutorProvider],
+) -> Result<()> {
     let effective = match args.backend.as_deref() {
         Some(backend) if !backend.trim().is_empty() => backend.trim().to_string(),
         _ => match provider::default_backend().map_err(|error| {
@@ -4314,33 +4322,44 @@ fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArg
     // that is exactly where we fail early instead.
     let will_execute = args.run_plan && !args.dry_run;
     if will_execute {
-        let catalog = AgentTaskProviderCatalog::discover();
         let selector = args.selector.as_deref();
-        if !matches!(
-            provider::resolve_provider_for_backend(catalog.providers(), &effective, selector),
-            provider::ProviderResolution::Resolved(_)
-        ) {
-            let mut available: Vec<String> = catalog
-                .providers()
-                .iter()
-                .map(|p| p.backend.clone())
-                .collect();
-            available.sort();
-            available.dedup();
-            let available_hint = if available.is_empty() {
-                "no agent-task provider backends are installed; install a provider extension (e.g. opencode)".to_string()
-            } else {
-                format!("installed backends: {}", available.join(", "))
-            };
-            let source = if args.backend.is_some() {
-                "requested via --backend"
-            } else {
-                "resolved from agent_task.default_backend"
-            };
-            return Err(invalid_fanout(&format!(
+        match provider::resolve_provider_for_backend(providers, &effective, selector) {
+            provider::ProviderResolution::Resolved(_) => {}
+            provider::ProviderResolution::SelectorMismatch { available_ids, .. } => {
+                let selector = selector.expect("selector mismatch requires a selector");
+                return Err(invalid_fanout(&format!(
+                    "agent-task fanout backend '{effective}' is installed, but --selector '{selector}' does not match it. \
+                     Available selector IDs for backend '{effective}': {}. --selector selects a Homeboy executor provider, not a worktree or nested runtime provider.",
+                    available_ids.join(", ")
+                )));
+            }
+            provider::ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
+                return Err(invalid_fanout(&format!(
+                    "agent-task fanout backend alias '{effective}' matches multiple installed providers. \
+                     Pass --selector with one of: {}.",
+                    candidate_ids.join(", ")
+                )));
+            }
+            provider::ProviderResolution::NotFound => {
+                let mut available: Vec<String> =
+                    providers.iter().map(|p| p.backend.clone()).collect();
+                available.sort();
+                available.dedup();
+                let available_hint = if available.is_empty() {
+                    "no agent-task provider backends are installed; install a provider extension (e.g. opencode)".to_string()
+                } else {
+                    format!("installed backends: {}", available.join(", "))
+                };
+                let source = if args.backend.is_some() {
+                    "requested via --backend"
+                } else {
+                    "resolved from agent_task.default_backend"
+                };
+                return Err(invalid_fanout(&format!(
                 "agent-task fanout backend '{effective}' ({source}) has no installed provider. \
                  Pass --backend <installed> explicitly, or set agent_task.default_backend to an installed backend. {available_hint}"
             )));
+            }
         }
     }
 
@@ -7584,6 +7603,32 @@ fi
             "error must be actionable: {}",
             error.message
         );
+    }
+
+    #[test]
+    fn executing_batch_names_selector_mismatch_for_an_installed_backend() {
+        let mut args = cook_batch_args();
+        args.backend = Some("opencode".to_string());
+        args.selector = Some("dmc".to_string());
+        args.dry_run = false;
+        args.run_plan = true;
+        let providers = vec![serde_json::from_value(serde_json::json!({
+            "id": "opencode.agent-task-executor",
+            "backend": "opencode",
+            "extension_id": "opencode.extension",
+            "runtime_id": "opencode-runtime",
+        }))
+        .expect("provider fixture")];
+
+        let error = resolve_and_validate_effective_backend_with_providers(&mut args, &providers)
+            .expect_err("an unknown selector must fail early");
+
+        assert!(error.message.contains("backend 'opencode' is installed"));
+        assert!(error.message.contains("--selector 'dmc'"));
+        assert!(error.message.contains("opencode.agent-task-executor"));
+        assert!(error
+            .message
+            .contains("not a worktree or nested runtime provider"));
     }
 
     #[test]
