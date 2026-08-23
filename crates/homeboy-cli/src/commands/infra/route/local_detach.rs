@@ -1433,6 +1433,13 @@ fn placement_name(placement: homeboy::cli_surface::Placement) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use clap::Parser;
 
@@ -1717,8 +1724,13 @@ mod tests {
                 Some(source),
             )
             .expect("persist source record");
-            agent_task_lifecycle::record_cook_attempt("retry-interceptor-cook", 1, source)
-                .expect("bind source to Cook");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                "retry-interceptor-cook",
+                1,
+                source,
+            )
+            .expect("bind source to Cook");
             let normalized = args(&[
                 "homeboy",
                 "--placement",
@@ -2134,8 +2146,11 @@ mod tests {
     #[test]
     fn a_pending_handoff_cook_id_resolves_to_its_lifecycle_parent() {
         crate::test_support::with_isolated_home(|_| {
-            agent_task_lifecycle::record_detached_cook_handoff_parent("cook-pending")
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                "cook-pending",
+            )
+            .expect("persist handoff parent");
 
             let status = agent_task_lifecycle::status("cook-pending")
                 .expect("pending handoff status resolves");
@@ -2158,13 +2173,17 @@ mod tests {
     fn handoff_admission_transitions_from_parent_to_child_to_supervisor() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-admission-transitions";
-            let parent = agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pre-supervisor parent");
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pre-supervisor parent");
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
                 "pre_supervisor"
             );
-            let child = agent_task_lifecycle::record_detached_cook_handoff_child(
+            let child = agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 1,
                 homeboy::core::process::ProcessStartIdentity::Macos {
@@ -2177,8 +2196,12 @@ mod tests {
                 child.metadata["detached_cook_handoff"]["admission_state"],
                 "child_attached"
             );
-            agent_task_lifecycle::record_detached_cook_supervisor(cook_id, "supervisor-1")
-                .expect("attach supervisor");
+            agent_task_lifecycle::record_detached_cook_supervisor_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                "supervisor-1",
+            )
+            .expect("attach supervisor");
             let supervised =
                 agent_task_lifecycle::exact_record(cook_id).expect("read supervised handoff");
             assert_eq!(
@@ -2196,8 +2219,11 @@ mod tests {
     fn a_materialized_handoff_cook_id_cancels_its_attempt() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-materialized";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             let attempt_id = "cook-materialized-attempt-1";
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
                 "materialized-handoff-attempt",
@@ -2205,8 +2231,13 @@ mod tests {
             );
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
                 .expect("persist materialized attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
-                .expect("redirect cook alias to materialized attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                attempt_id,
+            )
+            .expect("redirect cook alias to materialized attempt");
 
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read redirected handoff parent");
@@ -2236,13 +2267,17 @@ mod tests {
     fn cancelling_before_attempt_index_terminates_the_detached_child() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-cancel-before-index";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             let child = Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
                 .expect("spawn detached preparation fixture");
-            agent_task_lifecycle::record_detached_cook_handoff_child(
+            agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 child.id(),
                 detached_child_start_identity(child.id()).expect("capture child identity"),
@@ -2276,15 +2311,19 @@ mod tests {
     fn cancellation_between_spawn_and_child_attachment_stops_the_child() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-cancel-before-child-attachment";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist parent before spawn");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist parent before spawn");
             agent_task_lifecycle::cancel_run(cook_id, None).expect("cancel before child attach");
             let mut child = Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
                 .expect("spawn child after cancellation");
 
-            let parent = agent_task_lifecycle::record_detached_cook_handoff_child(
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 child.id(),
                 detached_child_start_identity(child.id()).expect("capture child identity"),
@@ -2309,8 +2348,11 @@ mod tests {
     fn a_spawn_failure_terminalizes_the_precreated_handoff_parent() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-spawn-failure";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist parent before spawn");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist parent before spawn");
             let directory = tempfile::tempdir().expect("log directory");
 
             let token = (
@@ -2341,8 +2383,11 @@ mod tests {
     fn attaching_a_child_preserves_an_exited_before_handoff_terminal_parent() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-exited-before-child-attachment";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             agent_task_lifecycle::fail_detached_cook_handoff_parent(
                 cook_id,
                 "detached Cook exited before materializing its first attempt",
@@ -2353,7 +2398,8 @@ mod tests {
                 .args(["-c", "sleep 30"])
                 .spawn()
                 .expect("spawn child for delayed attachment");
-            let parent = agent_task_lifecycle::record_detached_cook_handoff_child(
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 child.id(),
                 detached_child_start_identity(child.id()).expect("capture child identity"),
@@ -2386,7 +2432,13 @@ mod tests {
             );
             agent_task_lifecycle::submit_plan(&plan, Some(cook_id)).expect("persist unrelated run");
 
-            assert!(agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).is_err());
+            assert!(
+                agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                    &test_lifecycle_store(),
+                    cook_id
+                )
+                .is_err()
+            );
             let record = agent_task_lifecycle::exact_record(cook_id)
                 .expect("unrelated run remains readable");
             assert!(
@@ -2410,7 +2462,8 @@ mod tests {
                 .expect("spawn child before persistence failure");
 
             assert!(
-                agent_task_lifecycle::record_detached_cook_handoff_child(
+                agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                    &test_lifecycle_store(),
                     "missing-handoff-parent",
                     child.id(),
                     detached_child_start_identity(child.id()).expect("capture child identity"),
@@ -2433,8 +2486,11 @@ mod tests {
     fn preparation_past_the_handoff_window_keeps_follow_commands_resolvable() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-slow-preparation";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent before preparation");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent before preparation");
             let mut child = Command::new("sh")
                 .args(["-c", "sleep 1"])
                 .spawn()
@@ -2472,16 +2528,24 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-materialized-acceptance";
             let attempt_id = "cook-materialized-acceptance-attempt-1";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
                 "materialized-acceptance-attempt",
                 Vec::new(),
             );
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
                 .expect("persist executable attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
-                .expect("publish durable Cook attempt ownership");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                attempt_id,
+            )
+            .expect("publish durable Cook attempt ownership");
             let mut child = Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
@@ -2501,16 +2565,24 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-materialized-parent-preserved";
             let attempt_id = "cook-materialized-parent-preserved-attempt-1";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
                 "materialized-parent-preserved-attempt",
                 Vec::new(),
             );
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
                 .expect("persist executable attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
-                .expect("publish durable Cook attempt ownership");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                attempt_id,
+            )
+            .expect("publish durable Cook attempt ownership");
 
             agent_task_lifecycle::fail_detached_cook_handoff_parent(
                 cook_id,
@@ -2540,10 +2612,15 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-exit-after-attempt-record";
             let attempt_id = "cook-exit-after-attempt-record-attempt-1";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
-            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
-                cook_id, attempt_id,
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                attempt_id,
             )
             .expect("reserve materializing attempt identity");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
@@ -2559,8 +2636,13 @@ mod tests {
             )
             .expect("durable attempt protects the handoff arbitration");
 
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
-                .expect("durable attempt publishes Cook ownership after child exit");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                attempt_id,
+            )
+            .expect("durable attempt publishes Cook ownership after child exit");
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read redirected handoff parent");
             assert_eq!(
@@ -2585,9 +2667,13 @@ mod tests {
             let cook_id = "cook-retry-after-handoff";
             let first_attempt = "cook-retry-after-handoff-attempt-1";
             let retry_attempt = "cook-retry-after-handoff-attempt-2";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
-            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 first_attempt,
             )
@@ -2598,18 +2684,29 @@ mod tests {
             );
             agent_task_lifecycle::submit_plan(&plan, Some(first_attempt))
                 .expect("persist first attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, first_attempt)
-                .expect("redirect parent to first attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                first_attempt,
+            )
+            .expect("redirect parent to first attempt");
 
-            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 retry_attempt,
             )
             .expect("a later detached retry bypasses the completed first-handoff reservation");
             agent_task_lifecycle::submit_plan(&plan, Some(retry_attempt))
                 .expect("persist detached retry");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_attempt)
-                .expect("redirected first handoff accepts later retry registration");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                2,
+                retry_attempt,
+            )
+            .expect("redirected first handoff accepts later retry registration");
         });
     }
 
@@ -2618,8 +2715,11 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-cancel-before-materialization";
             let attempt_id = "cook-cancel-before-materialization-attempt-1";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
                 "cancel-before-materialization-attempt",
                 Vec::new(),
@@ -2635,7 +2735,13 @@ mod tests {
             );
 
             assert!(
-                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
+                agent_task_lifecycle::record_cook_attempt_in_store(
+                    &test_lifecycle_store(),
+                    cook_id,
+                    1,
+                    attempt_id
+                )
+                .is_err(),
                 "a cancelled parent must prevent attempt and index publication"
             );
             let parent = agent_task_lifecycle::exact_record(cook_id)
@@ -2661,16 +2767,24 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-materialized-before-cancel";
             let attempt_id = "cook-materialized-before-cancel-attempt-1";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist pending handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist pending handoff parent");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
                 "materialized-before-cancel-attempt",
                 Vec::new(),
             );
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
                 .expect("persist executable attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
-                .expect("materialization wins the handoff arbitration");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                attempt_id,
+            )
+            .expect("materialization wins the handoff arbitration");
 
             let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
                 .expect("Cook alias resolves to its materialized attempt");
@@ -2692,8 +2806,11 @@ mod tests {
     fn a_dead_detached_process_is_never_reported_as_an_accepted_handoff() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-never-submitted";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist handoff parent");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
             let mut child = Command::new("sh")
                 .args(["-c", "exit 0"])
                 .spawn()

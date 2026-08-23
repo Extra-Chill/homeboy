@@ -2049,7 +2049,11 @@ fn apply_explicit_local_continuation(
     let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
         return Ok(());
     };
-    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation(
+    let lifecycle_store =
+        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment(
+        )?;
+    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation_in_store(
+        &lifecycle_store,
         run_id,
         decision.clone(),
     )?;

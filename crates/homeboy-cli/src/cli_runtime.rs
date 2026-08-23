@@ -2534,6 +2534,13 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use clap::Parser;
     use sha2::{Digest, Sha256};
@@ -2641,7 +2648,8 @@ mod tests {
     fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "hot-unmaterialized-resume";
-            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission(
+            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 run_id,
                 serde_json::json!({
                     "request_ref": "sha256:resume",
