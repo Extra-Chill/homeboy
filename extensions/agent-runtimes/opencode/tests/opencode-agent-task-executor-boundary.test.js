@@ -165,6 +165,7 @@ assert.deepEqual(
 assert.equal('Unexpected server error. Check server logs for details. err_not-hex'.match(errorRefPattern), null);
 const packageJson = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'package.json'), 'utf8'));
 assert.equal(packageJson.name, 'homeboy-agent-runtime-opencode');
+assert.equal(packageJson.version, manifest.version);
 assert.equal(packageJson.homeboy.agent_runtime_manifest, 'opencode.json');
 assert.equal(JSON.stringify({ manifest, packageJson }).includes('wp-codebox'), false);
 assert.equal(JSON.stringify({ manifest, packageJson }).includes('WP Codebox'), false);
@@ -684,16 +685,22 @@ if (process.argv[2] === 'export') {
 }
 `);
 	fs.chmodSync(provenanceOpenCode, 0o755);
-	const defaultModelResult = await executeOpenCodeAgentTask({
-		...request,
-		task_id: 'opencode-default-model-provenance',
-		workspace_path: preflightWorkspace,
-		artifacts_path: path.join(root, 'default-model-artifacts'),
-		executor: {
-			...request.executor,
-			config: { ...request.executor.config, runtime_bin: provenanceOpenCode, command_args: [] },
-		},
-	}, { env: fixtureEnv });
+	const defaultModelRun = spawnSync(process.execPath, [scriptPath], {
+		encoding: 'utf8',
+		env: fixtureEnv,
+		input: JSON.stringify({
+			...request,
+			task_id: 'opencode-default-model-provenance',
+			workspace_path: preflightWorkspace,
+			artifacts_path: path.join(root, 'default-model-artifacts'),
+			executor: {
+				...request.executor,
+				config: { ...request.executor.config, runtime_bin: provenanceOpenCode, command_args: [] },
+			},
+		}),
+	});
+	assert.equal(defaultModelRun.status, 0, defaultModelRun.stderr);
+	const defaultModelResult = JSON.parse(defaultModelRun.stdout);
 	assert.equal(defaultModelResult.status, 'succeeded', JSON.stringify(defaultModelResult.diagnostics));
 	assert.equal(defaultModelResult.metadata.model, 'openai/gpt-5.6-sol');
 	assert.deepEqual(defaultModelResult.metadata.opencode_session, {
