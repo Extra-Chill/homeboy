@@ -1912,7 +1912,7 @@ pub(super) fn validate_snapshot_stability(
     if before == staged && staged == after {
         return Ok(());
     }
-    let mut error = snapshot_construction_failure(
+    Err(snapshot_construction_failure(
         "workspace_snapshot",
         source,
         Some(staging_output),
@@ -1920,8 +1920,7 @@ pub(super) fn validate_snapshot_stability(
             "source and staged snapshot manifests differ; refusing a mixed snapshot; {}",
             snapshot_manifest_difference(before, staged, after)
         ),
-    ));
-    error
+    ))
 }
 
 fn snapshot_manifest_difference(
