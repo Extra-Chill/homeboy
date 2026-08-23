@@ -12,9 +12,9 @@ use homeboy::extension::{
     ExternalCheckDetailResponse, EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA,
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };
-use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
-};
+#[cfg(not(windows))]
+use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
+use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};
 use serde::Serialize;
 use tempfile::NamedTempFile;
 
@@ -474,7 +474,7 @@ fn cleanup(
         if let Err(error) = force_terminate_process_tree_bounded(child.id(), CLEANUP_BUDGET) {
             errors.push(format!("process-tree termination: {error}"));
         }
-        if let Err(error) = terminate_process_tree_and_reap(child) {
+        if let Err(error) = reap_child_after_bounded_cleanup(child) {
             errors.push(format!("child reap: {error}"));
         }
     }
@@ -486,6 +486,38 @@ fn cleanup(
         errors.push(format!("remaining process-group cleanup: {error}"));
     }
     errors
+}
+
+#[cfg(not(windows))]
+fn reap_child_after_bounded_cleanup(child: &mut std::process::Child) -> std::io::Result<()> {
+    terminate_process_tree_and_reap(child).map(|_| ())
+}
+
+#[cfg(windows)]
+fn reap_child_after_bounded_cleanup(child: &mut std::process::Child) -> std::io::Result<()> {
+    let pid = child.id();
+    let deadline = Instant::now() + CLEANUP_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    child_reap_timeout_evidence(pid, CLEANUP_BUDGET),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
+fn child_reap_timeout_evidence(pid: u32, timeout: Duration) -> String {
+    format!(
+        "child {pid} remained alive after bounded cleanup for {} ms; taskkill/Job cleanup may have left a survivor",
+        timeout.as_millis()
+    )
 }
 
 fn cleanup_diagnostic(errors: &[String]) -> String {
@@ -745,6 +777,31 @@ mod tests {
             ]),
             "; cleanup evidence: process-tree termination: taskkill exceeded 2000 ms; remaining process-group cleanup: survivor 42"
         );
+    }
+
+    #[test]
+    fn bounded_reap_timeout_evidence_identifies_a_possible_windows_survivor() {
+        assert_eq!(
+            child_reap_timeout_evidence(42, Duration::from_millis(2000)),
+            "child 42 remained alive after bounded cleanup for 2000 ms; taskkill/Job cleanup may have left a survivor"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_reap_returns_when_a_stubborn_child_survives_the_cleanup_budget() {
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+
+        let error = reap_child_after_bounded_cleanup(&mut child)
+            .expect_err("live child must not reach an unbounded wait");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("may have left a survivor"));
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
