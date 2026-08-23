@@ -4301,6 +4301,9 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
+    if !store.recipe_exists(&options.cook_id) {
+        pin_initial_cook_workspace_base(&mut options)?;
+    }
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -4438,10 +4441,16 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        validate_cook_workspace(&options).map_err(|mut error| {
+        if let Some(evidence) = validate_cook_workspace(&options).map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
-        })?;
+        })? {
+            record_cook_workspace_base_convergence(
+                lifecycle_store,
+                &options.initial_run_id,
+                evidence,
+            )?;
+        }
     }
     validate_cook_candidate_group(&options.initial_plan)?;
     // Reserve the source tree's projected copy before the scheduler creates its
@@ -4866,7 +4875,9 @@ fn run_cook_spine(
             let mut failed_dispatch_plan = None;
             let execution = (|| {
                 if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                    validate_cook_workspace(&options)?;
+                    if let Some(evidence) = validate_cook_workspace(&options)? {
+                        record_cook_workspace_base_convergence(lifecycle_store, &run_id, evidence)?;
+                    }
                 }
                 if options.attempt_dispatcher.is_none() {
                     homeboy_core::cleanup::admit_reconstructable_artifact_work(
@@ -6307,7 +6318,7 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 /// Validate the Cook target before a provider can run. An explicit source path
 /// is already the authoritative workspace; otherwise resolve the declared
 /// handle through the existing local/provider path.
-fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
+fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<Option<Value>> {
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
@@ -6430,9 +6441,120 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
     }
-    preflight_cook_workspace_base_ancestry(&target, &options.base)
-        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))?;
+    preflight_cook_workspace_base_ancestry_with_provider(&target, options)
+        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
+}
+
+fn record_cook_workspace_base_convergence(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    evidence: Value,
+) -> Result<()> {
+    lifecycle_store.mutate_record(run_id, |record| {
+        record.metadata["cook_workspace_base_convergence"] = evidence;
+        true
+    })?;
     Ok(())
+}
+
+/// Capture the base once before a new Cook recipe freezes its execution
+/// lineage. Existing recipes retain their recorded boundary on every retry.
+fn pin_initial_cook_workspace_base(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    if options.task_base_sha.is_some() {
+        return Ok(());
+    }
+    let workspace = options
+        .source_worktree_path
+        .as_deref()
+        .or_else(|| {
+            std::path::Path::new(&options.to_worktree)
+                .is_dir()
+                .then_some(std::path::Path::new(&options.to_worktree))
+        })
+        .or_else(|| {
+            options
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.root.as_deref())
+                .map(std::path::Path::new)
+        });
+    let Some(workspace) = workspace.map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    pin_cook_workspace_base_at(options, &workspace)
+}
+
+fn pin_cook_workspace_base_at(
+    options: &mut AgentTaskCookServiceOptions,
+    workspace: &Path,
+) -> Result<()> {
+    if options.task_base_sha.is_some() {
+        return Ok(());
+    }
+    let Some(base) =
+        crate::agent_task_promotion::capture_declared_base(workspace, Some(&options.base))?
+    else {
+        return Ok(());
+    };
+    options.task_base_sha = Some(base.sha.clone());
+    options.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
+        "schema": "homeboy/cook-workspace-base/v1",
+        "base": base.base,
+        "sha": base.sha,
+    });
+    Ok(())
+}
+
+fn preflight_cook_workspace_base_ancestry_with_provider(
+    target: &Path,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<Option<Value>> {
+    let base = options.task_base_sha.as_deref().unwrap_or(&options.base);
+    match preflight_cook_workspace_base_ancestry(target, base) {
+        Ok(()) => Ok(None),
+        Err(error)
+            if error.details["workspace_base_ancestry"]["direction"] == "behind"
+                && options.task_base_sha.is_some() =>
+        {
+            let config = homeboy_core::defaults::load_config();
+            let handle = if std::path::Path::new(&options.to_worktree).is_dir() {
+                let Some(resolution) =
+                    homeboy_core::worktree_providers::resolve_worktree_provider_path_from_config(
+                        target, &config,
+                    )?
+                else {
+                    return Err(error);
+                };
+                resolution.worktree.handle
+            } else {
+                options.to_worktree.clone()
+            };
+            let convergence = homeboy_core::worktree_providers::converge_apply_enabled_worktree_provider_to_base_from_config(
+                &handle,
+                base,
+                &config,
+            )?;
+            preflight_cook_workspace_base_ancestry(target, base).map_err(|mut error| {
+                error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
+                    "provider_id": convergence.provider_id,
+                    "handle": convergence.handle,
+                    "path": convergence.path,
+                    "base_sha": convergence.base_sha,
+                });
+                error
+            })?;
+            Ok(Some(serde_json::json!({
+                "schema": "homeboy/cook-workspace-base-convergence/v1",
+                "planned_base_sha": base,
+                "provider_id": convergence.provider_id,
+                "handle": convergence.handle,
+                "path": convergence.path,
+                "provider_evidence": convergence.evidence,
+            })))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// A candidate diff is meaningful only when its destination contains the
@@ -6454,10 +6576,20 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
     if !origin.status.success() {
         return Ok(());
     }
-    let Some(resolved_base) =
-        crate::agent_task_promotion::capture_declared_base(target, Some(base))?
-    else {
-        return Ok(());
+    let resolved_base = if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        homeboy_core::git::run_git(
+            target,
+            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            "resolve pinned Cook base",
+        )?
+        .trim()
+        .to_string()
+    } else {
+        let Some(base) = crate::agent_task_promotion::capture_declared_base(target, Some(base))?
+        else {
+            return Ok(());
+        };
+        base.sha
     };
     let counts = homeboy_core::git::run_git(
         target,
@@ -6465,7 +6597,7 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
             "rev-list",
             "--left-right",
             "--count",
-            &format!("{}...HEAD", resolved_base.sha),
+            &format!("{resolved_base}...HEAD"),
         ],
         "compare Cook destination to resolved base",
     )?;
@@ -6487,18 +6619,18 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
         "base",
         format!(
             "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
-            resolved_base.base, resolved_base.sha
+            base, resolved_base
         ),
         Some(target.display().to_string()),
         Some(vec![format!(
             "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-            format!("git merge --ff-only {}", resolved_base.sha)
+            format!("git merge --ff-only {resolved_base}")
         )]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base-ancestry/v1",
-        "base": resolved_base.base,
-        "resolved_base": resolved_base.sha,
+        "base": base,
+        "resolved_base": resolved_base,
         "destination_head": fingerprint.head,
         "direction": direction,
         "base_only_commits": behind,
@@ -6804,6 +6936,14 @@ fn materialize_pending_cook_workspace(
     effective_lookup_timeout_ms: Option<u64>,
 ) -> Result<()> {
     restore_legacy_cook_provision(&mut options.initial_plan)?;
+    if options.task_base_sha.is_none() {
+        options.task_base_sha = options
+            .initial_plan
+            .metadata
+            .pointer("/cook_workspace_base/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
     let provider_id = |options: &AgentTaskCookServiceOptions| {
         options
             .initial_plan
@@ -6922,6 +7062,10 @@ fn materialize_pending_cook_workspace(
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
+    // Deferred provider materialization has no checkout at initial recipe
+    // persistence. Capture and persist this immutable boundary before Cook can
+    // admit or dispatch the materialized destination.
+    pin_cook_workspace_base_at(options, &target)?;
     validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
     for task in &mut options.initial_plan.tasks {
         task.workspace.root = Some(target.display().to_string());

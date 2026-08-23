@@ -339,6 +339,117 @@ pub struct WorktreeProviderHandleSafety {
     pub primary: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderConvergence {
+    pub provider_id: String,
+    pub handle: String,
+    pub path: String,
+    pub base_sha: String,
+    pub evidence: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeProviderConvergenceEvidence {
+    schema: String,
+    identity_token: String,
+    base_sha: String,
+}
+
+/// Converge a provider-owned worktree only through its declared mutation
+/// capability. The split resolver proves the handle is currently clean,
+/// pushed, non-primary, and owned by an apply-enabled provider before the
+/// provider receives the immutable base SHA.
+pub fn converge_apply_enabled_worktree_provider_to_base_from_config(
+    handle: &str,
+    base_sha: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderConvergence> {
+    let resolution = resolve_apply_enabled_worktree_provider_split_from_config(handle, config)?;
+    let provider = config
+        .worktree_providers
+        .get(&resolution.identity.provider_id)
+        .expect("split resolution selects a configured provider");
+    let command = provider.commands.converge.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "provider `{}` owns `{handle}` but does not configure token-bound commands.converge",
+                resolution.identity.provider_id
+            ),
+            Some(handle.to_string()),
+            None,
+        )
+    })?;
+    let command = command
+        .iter()
+        .map(|argument| {
+            argument
+                .replace("{handle}", handle)
+                .replace("{identity}", &resolution.identity.token)
+                .replace("{base}", base_sha)
+        })
+        .collect::<Vec<_>>();
+    let output = run_provider_mutation_command(
+        &resolution.identity.provider_id,
+        provider,
+        &command,
+        "converge",
+    )?;
+    let evidence_value: Value = serde_json::from_slice(&output).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "provider `{}` returned invalid convergence evidence: {error}",
+                resolution.identity.provider_id
+            ),
+            Some(handle.to_string()),
+            None,
+        )
+    })?;
+    let evidence: WorktreeProviderConvergenceEvidence =
+        serde_json::from_value(evidence_value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "to_worktree",
+                format!(
+                    "provider `{}` returned incomplete convergence evidence: {error}",
+                    resolution.identity.provider_id
+                ),
+                Some(handle.to_string()),
+                None,
+            )
+        })?;
+    if evidence.schema != "homeboy/worktree-provider-convergence/v1"
+        || evidence.identity_token != resolution.identity.token
+        || evidence.base_sha != base_sha
+    {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider convergence evidence does not bind the attested identity token and pinned base",
+            Some(handle.to_string()),
+            None,
+        ));
+    }
+    // The mutation command is bound to the pre-mutation opaque token. Re-attest
+    // afterward only to detect a changed safety state, never as authorization.
+    let safety =
+        attest_apply_enabled_worktree_provider_safety_from_config(&resolution.identity, config)?;
+    if !safety.fresh || safety.dirty || safety.unpushed || resolution.identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider safety attestation is not safe after pinned Cook convergence",
+            Some(handle.to_string()),
+            None,
+        ));
+    }
+    Ok(WorktreeProviderConvergence {
+        provider_id: resolution.identity.provider_id,
+        handle: resolution.identity.handle,
+        path: resolution.identity.path,
+        base_sha: base_sha.to_string(),
+        evidence: evidence_value,
+    })
+}
+
 /// Resolve an externally managed worktree handle without creating or adopting
 /// a Homeboy record. This is intentionally a lookup-only boundary.
 pub fn resolve_worktree_provider_handle(handle: &str) -> Result<WorktreeProviderHandle> {
@@ -1538,7 +1649,7 @@ fn run_provider_ensure_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
 ) -> Result<()> {
-    run_provider_mutation_command(provider_id, provider, command, "ensure")
+    run_provider_mutation_command(provider_id, provider, command, "ensure").map(|_| ())
 }
 
 fn run_provider_mutation_command(
@@ -1546,8 +1657,15 @@ fn run_provider_mutation_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
     operation: &str,
-) -> Result<()> {
-    if let Some(argument) = command.iter().find(|argument| argument.contains('{')) {
+) -> Result<Vec<u8>> {
+    if let Some(argument) = command.iter().find(|argument| {
+        argument.split('{').skip(1).any(|tail| {
+            tail.chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+                && tail.contains('}')
+        })
+    }) {
         return Err(provider_lookup_error(
             provider_id,
             command,
@@ -1605,7 +1723,7 @@ fn run_provider_mutation_command(
     }
     let output = output.into_output();
     if output.status.success() {
-        return Ok(());
+        return Ok(output.stdout);
     }
     let mut error = Error::validation_invalid_argument_with_evidence(
         "to_worktree",
@@ -6464,6 +6582,111 @@ mod tests {
         )
         .expect_err("mismatched evidence is fail-closed");
         assert!(error.message.contains("different exact identity"));
+    }
+
+    #[test]
+    fn provider_convergence_uses_the_pinned_base_after_safe_attestation() {
+        let (root, workspace) = linked_workspace("branch");
+        let source = root.path().join("source");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .output()
+                .expect("run source git command");
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        // Materialization starts at the initial commit. Pin the first advance,
+        // then advance the moving branch again before destination admission.
+        git(&["commit", "--allow-empty", "-m", "pinned base"]);
+        let pinned_base = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "--allow-empty", "-m", "later base"]);
+        let later_base = git(&["rev-parse", "HEAD"]);
+        let evidence = tempfile::NamedTempFile::new().expect("convergence evidence file");
+        let evidence_path = evidence.path().display().to_string();
+        let mut provider = default_command_provider();
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
+        ]);
+        provider.commands.attest_safety = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' '{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"opaque-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}'".to_string(),
+        ]);
+        provider.commands.converge = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "git -C '{}' merge --ff-only \"$3\" >/dev/null && printf '%s' \"$3\" > '{evidence_path}' && printf '{{\"schema\":\"homeboy/worktree-provider-convergence/v1\",\"identity_token\":\"%s\",\"base_sha\":\"%s\"}}' \"$2\" \"$3\"",
+                workspace.display()
+            ),
+            "_".to_string(),
+            "{handle}".to_string(),
+            "{identity}".to_string(),
+            "{base}".to_string(),
+        ]);
+
+        let convergence = converge_apply_enabled_worktree_provider_to_base_from_config(
+            "fixture@branch",
+            &pinned_base,
+            &config_with_provider(provider),
+        )
+        .expect("clean managed worktree converges through its provider");
+
+        assert_eq!(convergence.provider_id, "fixture");
+        assert_eq!(
+            std::fs::read_to_string(evidence.path()).expect("read convergence evidence"),
+            pinned_base
+        );
+        let workspace_head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&workspace)
+            .output()
+            .expect("read converged workspace HEAD");
+        assert!(workspace_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&workspace_head.stdout).trim(),
+            pinned_base,
+            "the later moving base was not used"
+        );
+        assert_ne!(pinned_base, later_base);
+    }
+
+    #[test]
+    fn provider_convergence_refuses_dirty_worktree_without_mutation() {
+        let (_root, workspace) = linked_workspace("branch");
+        let evidence = tempfile::NamedTempFile::new().expect("convergence evidence file");
+        std::fs::remove_file(evidence.path()).expect("remove untouched evidence file");
+        let evidence_path = evidence.path().display().to_string();
+        let mut provider = default_command_provider();
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
+        ]);
+        provider.commands.attest_safety = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' '{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"opaque-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":true,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}'".to_string(),
+        ]);
+        provider.commands.converge = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch '{evidence_path}'"),
+        ]);
+
+        let error = converge_apply_enabled_worktree_provider_to_base_from_config(
+            "fixture@branch",
+            "0123456789012345678901234567890123456789",
+            &config_with_provider(provider),
+        )
+        .expect_err("dirty managed worktree is never converged");
+
+        assert!(error.message.contains("not safe for mutation"));
+        assert!(!evidence.path().exists());
     }
 
     #[test]

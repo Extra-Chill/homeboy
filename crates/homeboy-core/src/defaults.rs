@@ -674,6 +674,11 @@ pub struct WorktreeProviderCommands {
     /// `{cleanup_policy}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure: Option<Vec<String>>,
+    /// Atomically converge one already-owned clean worktree to immutable
+    /// `{base}`. It receives `{handle}` and the attested opaque `{identity}`, and
+    /// returns a `homeboy/worktree-provider-convergence/v1` evidence envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converge: Option<Vec<String>>,
     /// Read-only projection of an `ensure` request. It receives the same
     /// placeholders as `ensure` and returns the prospective workspace through
     /// `list_result_mapping`, without creating a branch or checkout.
@@ -711,6 +716,7 @@ impl Default for WorktreeProviderCommands {
             resolve_not_found_exit_codes: Vec::new(),
             list: None,
             ensure: None,
+            converge: None,
             plan: None,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
@@ -1178,6 +1184,7 @@ mod tests {
             resolve_not_found_exit_codes: Vec::new(),
             list: Some(vec!["provider".to_string(), "list".to_string()]),
             ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
+            converge: None,
             plan: None,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
