@@ -179,7 +179,7 @@ fn json_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde
 
 #[cfg(unix)]
 #[test]
-fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_lifecycle() {
+fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_lifecycle() {
     use std::os::unix::fs::PermissionsExt;
 
     let mut ledger = PhaseLedger::new();
@@ -364,11 +364,11 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         .env("PATH", &path)
         .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
         .args([
-            "--runner",
-            "lab",
             "--detach-after-handoff",
             "agent-task",
             "cook",
+            "--placement",
+            "lab",
             "--repo",
             "cook-source",
             "--prompt",
@@ -654,11 +654,16 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let durable_record = terminal;
     let decision_id = durable_record.metadata["execution_placement_decision"]["decision_id"]
         .as_str()
-        .expect("pinned runner decision persisted on the terminal run");
+        .expect("Lab placement decision persisted on the terminal run");
+    assert_eq!(
+        durable_record.metadata["execution_placement_decision"]["requested"],
+        serde_json::json!("Lab"),
+        "the durable decision must retain explicit Lab placement: {durable_record:#?}"
+    );
     assert_eq!(
         durable_record.metadata["execution_placement_decision"]["runner"]["runner_id"],
         serde_json::json!("lab"),
-        "the durable decision must retain the explicitly pinned runner: {durable_record:#?}"
+        "the ready Lab runner must be selected for explicit Lab placement: {durable_record:#?}"
     );
     assert_eq!(
         durable_record.metadata["execution_placement_outcome"]["decision_id"],

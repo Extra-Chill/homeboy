@@ -425,11 +425,11 @@ fn default_placement_provider_discovery_stays_local_despite_connected_default_ru
 }
 
 #[test]
-fn route_reuses_the_admitted_lab_runner_without_a_second_readiness_lookup() {
+fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
     homeboy::core::resource_policy_context::reset_captured_context_for_test();
     homeboy::core::resource_policy_context::capture_context(
         homeboy::core::resource_policy_context::ResourcePolicyContext {
-            command: "review lint".to_string(),
+            command: "agent-task cook".to_string(),
             severity: "hot".to_string(),
             local_override: false,
             warned: true,
@@ -461,14 +461,32 @@ fn route_reuses_the_admitted_lab_runner_without_a_second_readiness_lookup() {
             },
         },
     );
-    let cli = Cli::parse_from(["homeboy", "review", "lint", "--path", "."]);
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--placement",
+        "lab",
+        "--to-worktree",
+        "repo@hot-cook",
+    ]);
     let command = lab_offload_command(&cli.command)
         .expect("Lab route contract resolves")
-        .expect("review lint is portable");
+        .expect("Cook has a Lab route contract");
 
+    let selected = admitted_lab_runner_id(&cli, Some(&command))
+        .flatten()
+        .expect("hot controller admission retains the ready runner");
+    let decision = placement_decision(&cli, Some(&selected), "cook", None)
+        .expect("explicit Lab placement is admissible with a ready runner");
+    assert_eq!(decision.requested, crate::cli_surface::Placement::Lab);
     assert_eq!(
-        admitted_lab_runner_id(&cli, Some(&command)),
-        Some(Some("admitted-lab".to_string()))
+        decision.selected,
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+    );
+    assert_eq!(
+        decision.runner.expect("selected runner").runner_id,
+        "admitted-lab"
     );
     homeboy::core::resource_policy_context::reset_captured_context_for_test();
 }

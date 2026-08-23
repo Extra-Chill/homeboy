@@ -1223,6 +1223,231 @@ pub fn record_detached_cook_supervisor_in_store(
     Ok(())
 }
 
+/// Bind a daemon supervisor to an already-materialized Cook retry attempt.
+/// Retry reservations own their exact lifecycle record before a child is
+/// launched, unlike an initial detached Cook handoff.
+pub fn record_local_cook_retry_supervisor_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    cook_id: &str,
+    job_id: &str,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let cook_id = sanitize_run_id(cook_id);
+    let job_id = job_id.to_string();
+    let updated = lifecycle_store.mutate_record(&run_id, |record| {
+        if record.state.is_terminal()
+            || record.metadata["cook_id"].as_str() != Some(cook_id.as_str())
+        {
+            return false;
+        }
+        if record.metadata["local_cook_supervisor"]["pinned_run_id"].as_str()
+            != Some(run_id.as_str())
+        {
+            return false;
+        }
+        record.metadata["local_cook_supervisor"] = json!({
+            "state": "supervising",
+            "job_id": job_id,
+            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+            "pinned_run_id": run_id,
+            "reattach_command": format!("homeboy agent-task status {run_id} --full"),
+        });
+        true
+    })?;
+    if updated.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "local Cook retry became terminal or is not owned by the expected Cook",
+            Some(run_id),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Outcome of claiming the launcher side of a pending local Cook retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalCookRetryLaunchClaim {
+    Acquired,
+    OwnedElsewhere,
+    RecoveryPending,
+    ChildSpawned {
+        pid: u32,
+        start_identity: homeboy_core::process::ProcessStartIdentity,
+        launch_token: String,
+        launch_token_path: String,
+    },
+    ChildExited,
+    NotPending,
+}
+
+/// Atomically fence the process allowed to spawn a pending local Cook retry.
+///
+/// A reservation is written before its child exists. The persisted launcher PID
+/// and start identity make that short interval recoverable after the launcher is
+/// killed, without allowing a second live launcher to spawn the same child.
+pub fn claim_local_cook_retry_launch_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    cook_id: &str,
+) -> Result<LocalCookRetryLaunchClaim> {
+    let run_id = sanitize_run_id(run_id);
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_pid = std::process::id();
+    let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+        .map_err(Error::internal_unexpected)?
+        .ok_or_else(|| {
+            Error::internal_unexpected(
+                "local Cook retry launcher exited before claiming its reservation",
+            )
+        })?;
+    let now = chrono::Utc::now();
+    let mut outcome = LocalCookRetryLaunchClaim::NotPending;
+    let updated = lifecycle_store.mutate_record(&run_id, |record| {
+        let supervisor = &record.metadata["local_cook_supervisor"];
+        if record.state != AgentTaskRunState::Queued
+            || record.metadata["cook_id"].as_str() != Some(cook_id.as_str())
+            || supervisor["pinned_run_id"] != run_id
+        {
+            return false;
+        }
+
+        if supervisor["state"] == "child_spawned" {
+            let child = supervisor["child_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .zip(serde_json::from_value(supervisor["child_start_identity"].clone()).ok())
+                .zip(supervisor["launch_token"].as_str())
+                .zip(supervisor["launch_token_path"].as_str());
+            let Some((((pid, start_identity), launch_token), launch_token_path)) = child else {
+                outcome = LocalCookRetryLaunchClaim::ChildExited;
+                return true;
+            };
+            outcome = if matches!(
+                homeboy_core::process::process_identity_state_with_start_identity(
+                    pid,
+                    None,
+                    Some(&start_identity),
+                ),
+                homeboy_core::process::ProcessIdentityState::Live
+            ) {
+                LocalCookRetryLaunchClaim::ChildSpawned {
+                    pid,
+                    start_identity,
+                    launch_token: launch_token.to_string(),
+                    launch_token_path: launch_token_path.to_string(),
+                }
+            } else {
+                LocalCookRetryLaunchClaim::ChildExited
+            };
+            return true;
+        }
+        if supervisor["state"] != "pending" {
+            return false;
+        }
+
+        let existing_pid = supervisor["launcher_pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok());
+        let existing_identity = supervisor["launcher_process_start_identity"].clone();
+        let is_current_launcher = existing_pid == Some(launcher_pid)
+            && existing_identity == json!(launcher_start_identity);
+        if is_current_launcher {
+            outcome = LocalCookRetryLaunchClaim::Acquired;
+            return true;
+        }
+
+        let owner_state = existing_pid
+            .zip(serde_json::from_value(existing_identity).ok())
+            .map(|(pid, identity)| {
+                homeboy_core::process::process_identity_state_with_start_identity(
+                    pid,
+                    None,
+                    Some(&identity),
+                )
+            });
+        match owner_state {
+            Some(homeboy_core::process::ProcessIdentityState::Live) => {
+                outcome = LocalCookRetryLaunchClaim::OwnedElsewhere;
+                return true;
+            }
+            Some(homeboy_core::process::ProcessIdentityState::Unverifiable)
+                if record.has_live_pending_local_cook_supervisor(now) =>
+            {
+                outcome = LocalCookRetryLaunchClaim::RecoveryPending;
+                return true;
+            }
+            None if record.has_live_pending_local_cook_supervisor(now) => {
+                outcome = LocalCookRetryLaunchClaim::RecoveryPending;
+                return true;
+            }
+            _ => {}
+        }
+
+        // A dead/mismatched identity is conclusively reclaimable. Ambiguous or
+        // malformed ownership is reclaimed only after its bounded lease expires.
+        let metadata = record.ensure_metadata_object();
+        metadata["local_cook_supervisor"]["launcher_pid"] = json!(launcher_pid);
+        metadata["local_cook_supervisor"]["launcher_process_start_identity"] =
+            json!(launcher_start_identity);
+        metadata["local_cook_supervisor"]["lease_started_at"] = json!(now.to_rfc3339());
+        metadata["local_cook_supervisor"]["lease_expires_at"] = json!((now
+            + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS))
+        .to_rfc3339());
+        metadata["local_cook_supervisor"]["launcher_reclaimed_at"] = json!(now.to_rfc3339());
+        outcome = LocalCookRetryLaunchClaim::Acquired;
+        true
+    })?;
+    if updated.is_none() {
+        outcome = LocalCookRetryLaunchClaim::NotPending;
+    }
+    Ok(outcome)
+}
+
+/// Atomically record the one detached child that a retry launcher spawned.
+///
+/// The child remains blocked on its private readiness token until a controller
+/// job is durably projected. A takeover can therefore submit or re-submit the
+/// deterministic job for this exact child instead of spawning a replacement.
+pub fn record_local_cook_retry_child_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    cook_id: &str,
+    child_pid: u32,
+    child_start_identity: homeboy_core::process::ProcessStartIdentity,
+    launch_token: &str,
+    launch_token_path: &str,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let cook_id = sanitize_run_id(cook_id);
+    let updated = lifecycle_store.mutate_record(&run_id, |record| {
+        if record.state != AgentTaskRunState::Queued
+            || record.metadata["cook_id"].as_str() != Some(cook_id.as_str())
+            || record.metadata["local_cook_supervisor"]["state"] != "pending"
+            || record.metadata["local_cook_supervisor"]["pinned_run_id"] != run_id
+        {
+            return false;
+        }
+        let supervisor = &mut record.ensure_metadata_object()["local_cook_supervisor"];
+        supervisor["state"] = json!("child_spawned");
+        supervisor["child_pid"] = json!(child_pid);
+        supervisor["child_start_identity"] = json!(child_start_identity);
+        supervisor["launch_token"] = json!(launch_token);
+        supervisor["launch_token_path"] = json!(launch_token_path);
+        true
+    })?;
+    if updated.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "local Cook retry was no longer pending when its child was attached",
+            Some(run_id),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Reserve the first attempt identity before its lifecycle record is submitted.
 ///
 /// The record and Cook index are separate durable writes. This reservation keeps
@@ -2470,9 +2695,15 @@ where
         }
         // Cook reports `provider_start` before a local executor or Lab runner
         // re-submits its materialized plan. That submission refreshes plan-owned
-        // fields but must not erase the durable lifecycle boundary that says
-        // provider work has started.
-        for key in ["cook_id", "cook_attempt", "cook_progress"] {
+        // fields but must not erase Cook-owned execution identity. In particular,
+        // a local retry's supervisor is reserved before the child re-enters this
+        // path, and its exact pinned run remains the owner through terminalization.
+        for key in [
+            "cook_id",
+            "cook_attempt",
+            "cook_progress",
+            "local_cook_supervisor",
+        ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
             }
@@ -5579,7 +5810,14 @@ pub(crate) fn retry_in_store(
     run_id: &str,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, false, false)
+    retry_with_force_inner_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        false,
+        false,
+        None,
+    )
 }
 
 /// Whether a persisted plan contains enough source identity to offer a retry
@@ -5652,7 +5890,24 @@ pub(crate) fn retry_with_force_in_store(
     requested_run_id: Option<&str>,
     force: bool,
 ) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, force, true)
+    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, force, true, None)
+}
+
+pub(crate) fn retry_with_force_and_metadata_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    metadata: serde_json::Map<String, Value>,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        true,
+        Some(metadata),
+    )
 }
 
 fn retry_with_force_inner_in_store(
@@ -5661,15 +5916,17 @@ fn retry_with_force_inner_in_store(
     requested_run_id: Option<&str>,
     force: bool,
     enforce_lineage_reservation: bool,
+    reservation_metadata: Option<serde_json::Map<String, Value>>,
 ) -> Result<AgentTaskRunRecord> {
     let runtime_root =
         homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
-    retry_with_runtime_admission_in_store(
+    retry_with_runtime_admission_with_metadata_in_store(
         lifecycle_store,
         run_id,
         requested_run_id,
         force,
         enforce_lineage_reservation,
+        reservation_metadata,
         Some(&|run_id| {
             homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
         }),
@@ -5710,6 +5967,32 @@ pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
     requested_run_id: Option<&str>,
     force: bool,
     enforce_lineage_reservation: bool,
+    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
+    retry_with_runtime_admission_with_metadata_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        enforce_lineage_reservation,
+        None,
+        admission_status,
+        admit_runtime,
+    )
+}
+
+fn retry_with_runtime_admission_with_metadata_in_store<F, A>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    enforce_lineage_reservation: bool,
+    reservation_metadata: Option<serde_json::Map<String, Value>>,
     admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
@@ -5842,6 +6125,9 @@ where
         metadata.insert("retry_root".to_string(), json!(root_run_id));
     }
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
+    if let Some(reservation_metadata) = reservation_metadata {
+        metadata.extend(reservation_metadata);
+    }
     let mut record = submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         &plan,
@@ -6358,18 +6644,20 @@ pub(crate) fn record_cook_attempt_locked_in_store(
     let metadata = record.ensure_metadata_object();
     metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
-    if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
-        if let Some(supervisor) = parent.metadata["detached_cook_handoff"]
-            .get("supervisor_job_id")
-            .cloned()
-        {
-            metadata.insert(
-                "local_cook_supervisor".to_string(),
-                json!({
-                    "job_id": supervisor,
-                    "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
-                }),
-            );
+    if !metadata.contains_key("local_cook_supervisor") {
+        if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
+            if let Some(supervisor) = parent.metadata["detached_cook_handoff"]
+                .get("supervisor_job_id")
+                .cloned()
+            {
+                metadata.insert(
+                    "local_cook_supervisor".to_string(),
+                    json!({
+                        "job_id": supervisor,
+                        "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
+                    }),
+                );
+            }
         }
     }
     let committed = lifecycle_store.write_record_locked_without_terminal_projection(&record)?;
@@ -7521,6 +7809,48 @@ pub(crate) fn record_manual_finalization_intent(
     }
 }
 
+/// Mark a preflight dossier as a retryable direct publication. Unlike an
+/// explicit `--preflight` recovery, this path may still need to commit.
+pub fn record_manual_finalization_retry(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata["manual_finalization_retry"] == true {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_retry".to_string(), json!(true));
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+pub fn record_manual_finalization_retry_candidate(
+    run_id: &str,
+    candidate: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_retry_candidate") == Some(&candidate) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record.ensure_metadata_object().insert(
+            "manual_finalization_retry_candidate".to_string(),
+            candidate.clone(),
+        );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 /// Stable digest of the exact validated manual dossier persisted for recovery.
 pub(crate) fn manual_finalization_intent_digest(intent: &Value) -> String {
     content_hash::sha256_hex(
@@ -7536,9 +7866,22 @@ pub(crate) fn record_manual_finalization_receipt(
     let run_id = sanitize_run_id(run_id);
     let record = store::mutate_record(&run_id, |record| {
         let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
+        let receipt_matches = record.metadata.get("cook_finalization") == Some(&receipt);
+        let already_succeeded = record.state == AgentTaskRunState::Succeeded;
+        let retry_cleared = record.metadata.get("manual_finalization_retry").is_none();
+        let failure_cleared = record.metadata.get("manual_finalization_failure").is_none();
+        if receipt_matches && already_succeeded && retry_cleared && failure_cleared {
+            return false;
+        }
         record.updated_at = Some(now_timestamp());
+        set_run_state(record, AgentTaskRunState::Succeeded);
         let metadata = record.ensure_metadata_object();
         metadata.insert("cook_finalization".to_string(), receipt.clone());
+        metadata.remove("manual_finalization_failure");
+        metadata.remove("manual_finalization_retry");
+        if let Some(candidate) = metadata.remove("manual_finalization_retry_candidate") {
+            metadata.insert("manual_finalization_retry_origin".to_string(), candidate);
+        }
         metadata.insert(
             "manual_finalization_receipt_digest".to_string(),
             json!(manual_finalization_intent_digest(&receipt)),
@@ -7547,6 +7890,44 @@ pub(crate) fn record_manual_finalization_receipt(
             "manual_finalization_receipt_intent_digest".to_string(),
             intent_digest,
         );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Record a failed manual publication as a terminal, recoverable lifecycle
+/// state. Manual identities have no provider tasks, so leaving them queued
+/// would falsely suggest that `agent-task run` can make progress.
+pub fn record_manual_finalization_failure(
+    run_id: &str,
+    error: &homeboy_core::Error,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    let failure = json!({
+        "schema": "homeboy/agent-task-manual-finalization-failure/v1",
+        "status": "failed",
+        "phase": "publication",
+        "error": {
+            "code": error.code.as_str(),
+            "message": policy.redact_string(&error.message),
+            "details": policy.redact_json(&error.details),
+        },
+    });
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_failure") == Some(&failure)
+            && record.state == AgentTaskRunState::Failed
+        {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        set_run_state(record, AgentTaskRunState::Failed);
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_failure".to_string(), failure.clone());
         true
     })?;
     match record {

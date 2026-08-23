@@ -1029,6 +1029,14 @@ pub fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
+pub fn record_recipe_attempt_replacement(
+    cook_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+) -> Result<AgentTaskCookRecipe> {
+    default_store()?.record_recipe_attempt_replacement(cook_id, replaced_run_id, replacement_run_id)
+}
+
 pub fn record_recipe_attempt_in_store(
     store: &CookRecipeStore,
     cook_id: &str,

@@ -65,6 +65,421 @@ const HANDOFF_POLL: Duration = Duration::from_millis(100);
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
 const LOCAL_COOK_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH";
+// Hermetic E2E control: keep the launcher observable after ownership was
+// accepted so the test can signal it. Normal invocations still return at handoff.
+const TEST_LOCAL_COOK_RETRY_FOLLOW_ENV: &str = "HOMEBOY_TEST_LOCAL_COOK_RETRY_FOLLOW";
+const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_RESERVATION_ENV: &str =
+    "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_RESERVATION";
+const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN_ENV: &str =
+    "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN";
+const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT_ENV: &str =
+    "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT";
+
+/// Serve the one local retry route that has an existing Cook owner. Generic
+/// retries, Lab retries, runner-side commands, and a retry that only reserves
+/// a successor retain their established routes.
+pub(super) fn intercept_local_cook_retry(
+    cli: &Cli,
+    normalized_args: &[String],
+    runner_side: bool,
+) -> homeboy::core::Result<Option<i32>> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Retry(retry),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+    if !retry.run || runner_side || cli.placement != homeboy::cli_surface::Placement::Local {
+        return Ok(None);
+    }
+    // The child cannot route the retry until its parent has atomically published
+    // this unique readiness token after recording the exact-run supervisor.
+    if local_cook_launch_token_is_present() {
+        return if await_local_cook_launch_token(handoff_timeout()) {
+            Ok(None)
+        } else {
+            Err(Error::validation_invalid_argument(
+                "retry",
+                "local Cook retry readiness token was not published before the bounded handoff deadline",
+                None,
+                None,
+            ))
+        };
+    }
+    let source = match agent_task_lifecycle::status(&retry.run_id) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    let Some(cook_id) = source.metadata["cook_id"].as_str() else {
+        return Ok(None);
+    };
+    if source.runner_id().is_some() || source.runner_job_id().is_some() {
+        return Ok(None);
+    }
+    // This guard must precede retry reservation: unsupported hosts retain the
+    // ordinary retry path without leaving an unowned queued successor behind.
+    if !local_cook_supervision_supported() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "local Cook retry supervision requires a platform with session detachment and exact process start identity support",
+            Some(source.run_id),
+            None,
+        ));
+    }
+
+    // Every fallible resource needed to launch is prepared before reserving a
+    // successor. A preflight error must not leave an ownerless queued retry.
+    let controller_client =
+        homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let session_root = detached_session_root(&format!(
+        "{}-retry-launch-{}",
+        source.run_id,
+        uuid::Uuid::new_v4()
+    ))?;
+    let launch_token = new_local_cook_launch_token(&session_root);
+    let _launch_token_cleanup = LocalCookLaunchTokenCleanup(launch_token.1.clone());
+    let log_path = session_root.join("cook-retry.log");
+
+    // A crashed launcher can leave its successor queued in `child_spawned`.
+    // Recover that exact durable reservation before asking normal retry
+    // admission, which correctly rejects a generic request while work is queued.
+    let existing_retry = agent_task_lifecycle::list_records()?
+        .into_iter()
+        .find(|record| {
+            record.metadata["retry_of"].as_str() == Some(retry.run_id.as_str())
+                && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+                && matches!(
+                    record.metadata["local_cook_supervisor"]["state"].as_str(),
+                    Some("pending") | Some("child_spawned")
+                )
+        });
+    let (retry_runs, retry_record) = match existing_retry {
+        Some(record) => (true, record),
+        None => {
+            let result = homeboy::agents::agent_task_service::retry(
+                &retry.run_id,
+                retry.new_run_id.as_deref(),
+                true,
+                retry.force,
+            )?;
+            (result.run, result.record)
+        }
+    };
+    if !retry_runs || retry_record.state.is_terminal() {
+        println!(
+            "{}",
+            serde_json::to_string(&retry_record).unwrap_or_default()
+        );
+        return Ok(Some(0));
+    }
+    let run_id = retry_record.run_id;
+    let child = match agent_task_lifecycle::claim_local_cook_retry_launch_in_store(
+        &lifecycle_store,
+        &run_id,
+        cook_id,
+    )? {
+        agent_task_lifecycle::LocalCookRetryLaunchClaim::Acquired => None,
+        agent_task_lifecycle::LocalCookRetryLaunchClaim::ChildSpawned {
+            pid,
+            start_identity,
+            launch_token,
+            launch_token_path,
+        } => Some((
+            pid,
+            start_identity,
+            (launch_token, PathBuf::from(launch_token_path)),
+        )),
+        agent_task_lifecycle::LocalCookRetryLaunchClaim::ChildExited => {
+            record_retry_launcher_failure_for_run(
+                &run_id,
+                "local Cook retry child exited before durable supervision",
+            );
+            return Ok(Some(0));
+        }
+        // A live owner has the same pinned reservation and will establish the
+        // supervisor. Returning success makes concurrent retries converge.
+        agent_task_lifecycle::LocalCookRetryLaunchClaim::OwnedElsewhere
+        | agent_task_lifecycle::LocalCookRetryLaunchClaim::RecoveryPending
+        | agent_task_lifecycle::LocalCookRetryLaunchClaim::NotPending => {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &agent_task_lifecycle::status_in_store(
+                        &lifecycle_store,
+                        &run_id,
+                        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                        false,
+                    )?
+                    .record
+                )
+                .unwrap_or_default()
+            );
+            return Ok(Some(0));
+        }
+    };
+    // A takeover must continue through the recovered stage, not reproduce the
+    // crash fixture that stopped its dead predecessor.
+    let is_initial_launcher = lifecycle_store.read_record(&run_id)?.metadata
+        ["local_cook_supervisor"]["launcher_reclaimed_at"]
+        .is_null();
+    if is_initial_launcher
+        && std::env::var_os(TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_RESERVATION_ENV).is_some()
+    {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    let plan = match agent_task_lifecycle::load_plan(&run_id) {
+        Ok(plan) => plan,
+        Err(error) => {
+            record_retry_launcher_failure_for_run(
+                &run_id,
+                "local Cook retry plan could not be loaded",
+            );
+            return Err(error);
+        }
+    };
+    let (pid, start_identity, launch_token) = match child {
+        Some(child) => child,
+        None => {
+            let route = detached_route(cli);
+            let child_args = retry_child_args(normalized_args, &run_id);
+            let mut child =
+                match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        record_retry_launcher_failure(
+                            &lifecycle_store,
+                            &run_id,
+                            &plan,
+                            "local Cook retry could not be spawned",
+                        );
+                        return Err(error);
+                    }
+                };
+            let pid = child.id();
+            let start_identity = match detached_child_start_identity(pid) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    terminate_and_reap_detached_child(&mut child);
+                    record_retry_launcher_failure(
+                        &lifecycle_store,
+                        &run_id,
+                        &plan,
+                        "local Cook retry child start identity could not be captured",
+                    );
+                    return Err(error);
+                }
+            };
+            if let Err(error) = agent_task_lifecycle::record_local_cook_retry_child_in_store(
+                &lifecycle_store,
+                &run_id,
+                cook_id,
+                pid,
+                start_identity.clone(),
+                &launch_token.0,
+                &launch_token.1.display().to_string(),
+            ) {
+                terminate_and_reap_detached_child(&mut child);
+                record_retry_launcher_failure(
+                    &lifecycle_store,
+                    &run_id,
+                    &plan,
+                    "local Cook retry child identity could not be persisted",
+                );
+                return Err(error);
+            }
+            if is_initial_launcher
+                && std::env::var_os(TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN_ENV).is_some()
+            {
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+            (pid, start_identity, launch_token)
+        }
+    };
+    let controller_job = match submit_cook_retry_controller_job(
+        &controller_client,
+        cook_id,
+        &run_id,
+        pid,
+        &start_identity,
+    ) {
+        Ok(job) => job,
+        Err(error) => {
+            record_retry_launcher_failure(
+                &lifecycle_store,
+                &run_id,
+                &plan,
+                "durable local Cook retry supervision could not be established",
+            );
+            return Err(error);
+        }
+    };
+    if is_initial_launcher
+        && std::env::var_os(TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT_ENV).is_some()
+    {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    if let Err(error) = agent_task_lifecycle::record_local_cook_retry_supervisor_in_store(
+        &lifecycle_store,
+        &run_id,
+        cook_id,
+        controller_job.job_id(),
+    ) {
+        let _ = controller_client.cancel(
+            controller_job.job_id(),
+            "local Cook retry supervisor projection failed",
+        );
+        record_retry_launcher_failure(
+            &lifecycle_store,
+            &run_id,
+            &plan,
+            "local Cook retry supervisor projection failed",
+        );
+        return Err(error);
+    }
+    if let Err(error) = publish_local_cook_launch_token(&launch_token) {
+        let _ = controller_client.cancel(
+            controller_job.job_id(),
+            "local Cook retry readiness publication failed",
+        );
+        record_retry_launcher_failure(
+            &lifecycle_store,
+            &run_id,
+            &plan,
+            "local Cook retry readiness publication failed",
+        );
+        return Err(error);
+    }
+    if let Err(error) = await_consumed_retry_launch_token_by_identity(
+        pid,
+        &start_identity,
+        &launch_token.1,
+        handoff_timeout(),
+    ) {
+        let _ = controller_client.cancel(
+            controller_job.job_id(),
+            "local Cook retry did not consume its launch readiness token",
+        );
+        record_retry_launcher_failure(
+            &lifecycle_store,
+            &run_id,
+            &plan,
+            "local Cook retry did not consume its launch readiness token",
+        );
+        return Err(error);
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "run_id": run_id,
+            "controller_job": controller_job.projection(),
+            "state": "accepted",
+        }))
+        .unwrap_or_default()
+    );
+    if std::env::var_os(TEST_LOCAL_COOK_RETRY_FOLLOW_ENV).as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        // A recovered launcher no longer owns a `Child` handle. The durable
+        // supervisor is the authority, so normal retry handoff returns here.
+        return Ok(Some(0));
+    }
+    Ok(Some(0))
+}
+
+fn await_consumed_retry_launch_token_by_identity(
+    pid: u32,
+    start_identity: &homeboy::core::process::ProcessStartIdentity,
+    token_path: &Path,
+    timeout: Duration,
+) -> homeboy::core::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while token_path.exists() {
+        if !matches!(
+            homeboy::core::process::process_identity_state_with_start_identity(
+                pid,
+                None,
+                Some(start_identity)
+            ),
+            homeboy::core::process::ProcessIdentityState::Live
+        ) {
+            return Err(Error::validation_invalid_argument(
+                "retry",
+                "local Cook retry child exited before consuming its readiness token",
+                None,
+                None,
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::validation_invalid_argument("retry", "local Cook retry launcher did not consume its readiness token before the bounded handoff deadline", None, None));
+        }
+        std::thread::sleep(HANDOFF_POLL);
+    }
+    Ok(())
+}
+
+fn record_retry_launcher_failure_for_run(run_id: &str, reason: &str) {
+    let Ok(lifecycle_store) =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
+    if let Ok(plan) = agent_task_lifecycle::load_plan(run_id) {
+        record_retry_launcher_failure(&lifecycle_store, run_id, &plan, reason);
+    } else {
+        // A corrupt or missing retry plan cannot produce an aggregate, but the
+        // reserved successor must still stop looking runnable.
+        let _ = agent_task_lifecycle::cancel_run(run_id, Some(reason));
+    }
+}
+
+fn record_retry_launcher_failure(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    reason: &str,
+) {
+    let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
+        lifecycle_store,
+        run_id,
+        plan,
+        "local_retry_supervisor",
+        &Error::internal_unexpected(reason),
+    );
+}
+
+/// Pin the detached child to the reservation its parent won. Replaying an
+/// unpinned retry can otherwise resolve a later Cook successor after a
+/// concurrent caller advances the recipe.
+fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
+    let mut args = Vec::with_capacity(normalized_args.len() + 2);
+    let mut index = usize::from(
+        normalized_args
+            .first()
+            .is_some_and(|arg| arg == "homeboy" || arg.ends_with("/homeboy")),
+    );
+    while index < normalized_args.len() {
+        let arg = &normalized_args[index];
+        if arg == "--new-run-id" {
+            index += 2;
+            continue;
+        }
+        if !arg.starts_with("--new-run-id=") {
+            args.push(arg.clone());
+        }
+        index += 1;
+    }
+    args.push("--new-run-id".to_string());
+    args.push(run_id.to_string());
+    args
+}
 
 /// Whether this is an unsupervised Cook requesting detached supervision.
 ///
@@ -103,13 +518,36 @@ fn consume_local_cook_launch_token() -> bool {
     consume_local_cook_launch_token_at(&token, &PathBuf::from(path))
 }
 
+fn local_cook_launch_token_is_present() -> bool {
+    std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV).is_some()
+        && std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV).is_some()
+}
+
+fn await_local_cook_launch_token(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if consume_local_cook_launch_token() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            if let Some(path) = std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV) {
+                let _ = std::fs::remove_file(PathBuf::from(path));
+            }
+            return false;
+        }
+        std::thread::sleep(HANDOFF_POLL);
+    }
+}
+
 fn consume_local_cook_launch_token_at(token: &std::ffi::OsStr, path: &Path) -> bool {
-    let valid = std::fs::read_to_string(path)
+    let claimed = path.with_extension(format!("consumed-{}", uuid::Uuid::new_v4()));
+    if std::fs::rename(path, &claimed).is_err() {
+        return false;
+    }
+    let valid = std::fs::read_to_string(&claimed)
         .ok()
         .is_some_and(|stored| stored.trim_end() == token);
-    if valid {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = std::fs::remove_file(claimed);
     valid
 }
 
@@ -504,6 +942,25 @@ fn submit_cook_controller_job_inner(
     Ok(job_id)
 }
 
+fn submit_cook_retry_controller_job(
+    client: &homeboy::core::daemon::LocalControllerJobClient,
+    cook_id: &str,
+    run_id: &str,
+    pid: u32,
+    start_identity: &homeboy::core::process::ProcessStartIdentity,
+) -> homeboy::core::Result<ControllerJobHandoff> {
+    let submission = homeboy::agents::agent_task_service::cook_retry_job_submission(
+        cook_id,
+        run_id,
+        pid,
+        start_identity,
+    )?;
+    let job = client.submit(submission)?;
+    Ok(ControllerJobHandoff::Owned {
+        job_id: job.id.to_string(),
+    })
+}
+
 /// The one context where local detachment stays a rejection.
 fn runner_side_detach_error() -> Error {
     Error::validation_invalid_argument(
@@ -670,19 +1127,48 @@ fn detached_session_root(cook_id: &str) -> homeboy::core::Result<PathBuf> {
 /// that came from argv or from the launcher's own environment. Setting both
 /// variables together also normalizes a half-set pair inherited from the
 /// launcher, which the child would otherwise reject as a validation error.
-fn create_local_cook_launch_token(session_root: &Path) -> homeboy::core::Result<(String, PathBuf)> {
+fn new_local_cook_launch_token(session_root: &Path) -> (String, PathBuf) {
     let token = uuid::Uuid::new_v4().to_string();
-    let path = session_root.join("launch-token");
-    std::fs::write(&path, &token)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let path = session_root.join(format!("launch-token-{token}"));
+    (token, path)
+}
+
+fn publish_local_cook_launch_token(launch_token: &(String, PathBuf)) -> homeboy::core::Result<()> {
+    let pending = launch_token.1.with_extension("pending");
+    std::fs::write(&pending, &launch_token.0).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(pending.display().to_string()))
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |error| Error::internal_io(error.to_string(), Some(path.display().to_string())),
+        std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| Error::internal_io(error.to_string(), Some(pending.display().to_string())),
         )?;
     }
-    Ok((token, path))
+    std::fs::rename(&pending, &launch_token.1).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(launch_token.1.display().to_string()),
+        )
+    })?;
+    Ok(())
+}
+
+/// Retry readiness is valid only while its parent is still establishing the
+/// handoff. Always remove it when that parent returns, including timeout paths.
+struct LocalCookLaunchTokenCleanup(PathBuf);
+
+impl Drop for LocalCookLaunchTokenCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(self.0.with_extension("pending"));
+    }
+}
+
+fn create_local_cook_launch_token(session_root: &Path) -> homeboy::core::Result<(String, PathBuf)> {
+    let launch_token = new_local_cook_launch_token(session_root);
+    publish_local_cook_launch_token(&launch_token)?;
+    Ok(launch_token)
 }
 
 fn spawn_detached_cook(
@@ -1171,6 +1657,90 @@ mod tests {
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         assert!(consume_local_cook_launch_token_at(token.as_ref(), &path));
         assert!(!consume_local_cook_launch_token_at(token.as_ref(), &path));
+    }
+
+    #[test]
+    fn retry_launch_tokens_are_unique_and_unpublished_until_supervisor_ready() {
+        let directory = tempfile::tempdir().expect("temporary token directory");
+        let first = new_local_cook_launch_token(directory.path());
+        let second = new_local_cook_launch_token(directory.path());
+        assert_ne!(first.1, second.1);
+        assert!(
+            !first.1.exists(),
+            "preflight reserves no readable readiness token"
+        );
+
+        publish_local_cook_launch_token(&first).expect("atomically publish readiness");
+        assert!(consume_local_cook_launch_token_at(
+            first.0.as_ref(),
+            &first.1
+        ));
+        assert!(
+            !second.1.exists(),
+            "one launch cannot release another child"
+        );
+    }
+
+    #[test]
+    fn retry_child_args_pin_the_parent_reservation() {
+        let rewritten = retry_child_args(
+            &args(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "retry",
+                "source",
+                "--run",
+                "--new-run-id=untrusted",
+            ]),
+            "reserved-retry",
+        );
+
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|arg| arg.as_str() == "--new-run-id")
+                .count(),
+            1
+        );
+        assert_eq!(rewritten.last(), Some(&"reserved-retry".to_string()));
+        assert!(!rewritten.iter().any(|arg| arg == "--new-run-id=untrusted"));
+    }
+
+    #[test]
+    fn retry_interceptor_leaves_no_reservation_when_controller_connect_fails() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let source = "retry-interceptor-connect-failure";
+            agent_task_lifecycle::submit_plan(
+                &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("retry-plan", vec![]),
+                Some(source),
+            )
+            .expect("persist source record");
+            agent_task_lifecycle::record_cook_attempt("retry-interceptor-cook", 1, source)
+                .expect("bind source to Cook");
+            let normalized = args(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "retry",
+                source,
+                "--run",
+            ]);
+            let cli = Cli::try_parse_from(&normalized).expect("parse retry invocation");
+
+            intercept_local_cook_retry(&cli, &normalized, false)
+                .expect_err("an isolated home has no controller daemon");
+
+            assert_eq!(
+                agent_task_lifecycle::list_records()
+                    .expect("list lifecycle records")
+                    .len(),
+                1,
+                "controller preflight must fail before reserving a retry"
+            );
+        });
     }
 
     #[test]

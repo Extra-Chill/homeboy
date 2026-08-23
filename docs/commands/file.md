@@ -169,7 +169,8 @@ Fields:
 - `effective_destination`: destination passed to the transfer backend
 - `method`: `scp`, `cat-pipe`, or `tar-pipe`
 - `direction`: `push`, `pull`, or `server-to-server`
-- `recursive`
+- `recursive`: recursion requested by the command configuration
+- `effective_recursive`: recursion applied by the transfer backend after source semantics are resolved. A local directory push and a server-to-server source ending in `/` are recursive even when `recursive` is `false`.
 - `scope`: `single path`, `recursive path`, or `recursive directory contents`
 - `compress`
 - `success`

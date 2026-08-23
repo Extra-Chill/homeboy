@@ -66,6 +66,11 @@ pub(crate) fn route_after_parse_with_provenance(
     // runner-side bail-out because the request needs a verdict — detach here,
     // or an explicit rejection there — in both contexts.
     if runner_side || cli.placement == homeboy::cli_surface::Placement::Local {
+        if let Some(exit_code) =
+            local_detach::intercept_local_cook_retry(cli, normalized_args, runner_side)?
+        {
+            return Ok(Some(exit_code));
+        }
         if let Some(exit_code) = local_detach::intercept_local_detached_cook(
             cli,
             normalized_args,
@@ -1153,12 +1158,12 @@ fn stage_unmaterialized_cook_replay_intent(
         if arg == "--notification-route" || arg.starts_with("--notification-route=") {
             has_notification_route = true;
         }
-        if matches!(arg.as_str(), "--placement" | "--runner") {
+        if arg == "--runner" {
             require_replay_value(normalized_args, index, arg)?;
             index += 2;
             continue;
         }
-        if arg.starts_with("--placement=") || arg.starts_with("--runner=") {
+        if arg.starts_with("--runner=") {
             index += 1;
             continue;
         }
@@ -1780,8 +1785,23 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
                 }
             }
         }
+        let placement = Cli::try_parse_from(&replay_argv)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_admission.replay_intent",
+                    format!("replay Cook arguments are invalid: {error}"),
+                    None,
+                    None,
+                )
+            })?
+            .placement;
         let mut args = replay_argv.into_iter().skip(1).collect::<Vec<_>>();
-        args.splice(0..0, ["--runner".to_string(), runner_id.to_string()]);
+        // `--runner` is a pin and conflicts with explicit placement. Required
+        // Lab placement already selects a ready runner during replay, retaining
+        // the operator's durable request instead of rewriting it as Auto.
+        if placement != homeboy::cli_surface::Placement::Lab {
+            args.splice(0..0, ["--runner".to_string(), runner_id.to_string()]);
+        }
         let worker_log = Path::new(&intent.input_manifest.path)
             .parent()
             .and_then(Path::parent)

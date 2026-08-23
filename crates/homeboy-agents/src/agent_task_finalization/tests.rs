@@ -51,6 +51,12 @@ struct MockBackend {
     last_body: String,
     publication_binding: Option<AgentTaskPublicationBinding>,
     publication_binding_calls: u8,
+    remote_candidate_sha: Option<String>,
+    remote_candidate_checks: u8,
+    quarantine_capability: Option<AgentTaskPrQuarantineCapability>,
+    quarantine_state: Option<String>,
+    quarantine_error: bool,
+    quarantine_calls: u8,
     candidate_validation_calls: u8,
     rooted_candidate_validation_calls: u8,
 }
@@ -281,6 +287,33 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(self.existing_pr.clone())
     }
 
+    fn verify_remote_candidate(
+        &mut self,
+        _path: &str,
+        _head: &str,
+        candidate_sha: &str,
+    ) -> Result<String> {
+        self.remote_candidate_checks += 1;
+        Ok(self
+            .remote_candidate_sha
+            .clone()
+            .unwrap_or_else(|| candidate_sha.to_string()))
+    }
+
+    fn quarantine_capability(
+        &mut self,
+        newly_created: bool,
+        was_draft: bool,
+    ) -> Result<AgentTaskPrQuarantineCapability> {
+        Ok(self.quarantine_capability.unwrap_or(if newly_created {
+            AgentTaskPrQuarantineCapability::CloseNewPr
+        } else if was_draft {
+            AgentTaskPrQuarantineCapability::PreserveExistingDraft
+        } else {
+            AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+        }))
+    }
+
     fn create_pr(
         &mut self,
         _path: &str,
@@ -341,6 +374,31 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 repository: "Extra-Chill/homeboy".to_string(),
                 head_repository: "Extra-Chill/homeboy".to_string(),
                 changed_files: changed_files.to_vec(),
+            }))
+    }
+
+    fn quarantine_pr(
+        &mut self,
+        _path: &str,
+        _pr: &AgentTaskPrRef,
+        capability: AgentTaskPrQuarantineCapability,
+    ) -> Result<String> {
+        self.quarantine_calls += 1;
+        if self.quarantine_error {
+            return Err(Error::git_command_failed("quarantine command failed"));
+        }
+        Ok(self
+            .quarantine_state
+            .clone()
+            .unwrap_or_else(|| match capability {
+                AgentTaskPrQuarantineCapability::CloseNewPr => "new_pr_closed".to_string(),
+                AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
+                    "existing_pr_already_draft".to_string()
+                }
+                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
+                    "existing_pr_converted_to_draft".to_string()
+                }
+                AgentTaskPrQuarantineCapability::Unsupported => "unsupported".to_string(),
             }))
     }
 }
@@ -459,13 +517,14 @@ fn finalization_rejects_candidate_remote_pr_and_fork_binding_mismatches() {
         };
         let error =
             finalize_pr_with_backend(options(), &mut backend).expect_err("binding mismatch");
-        assert!(
-            error.message.contains("candidate SHA") || error.message.contains("same-repository")
-        );
+        assert!(error
+            .message
+            .contains("publication candidate drift refused"));
         assert!(
             backend.created,
             "PR mutation precedes the authoritative re-read"
         );
+        assert_eq!(backend.quarantine_calls, 1, "drift quarantines the PR");
         binding.candidate_sha.clear();
     };
     let binding =
@@ -493,6 +552,199 @@ fn finalization_rejects_candidate_remote_pr_and_fork_binding_mismatches() {
         "candidate-sha",
         "contributor/homeboy",
     ));
+}
+
+#[test]
+fn finalization_refuses_remote_drift_immediately_before_pr_mutation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        remote_candidate_sha: Some("foreign-remote-sha".to_string()),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend).expect_err("remote drift blocks");
+
+    assert!(error
+        .message
+        .contains("expected_candidate_sha=candidate-sha"));
+    assert!(error
+        .message
+        .contains("observed_remote_sha=foreign-remote-sha"));
+    assert!(error.message.contains("observed_pr_head_sha=not_observed"));
+    assert!(error
+        .message
+        .contains("cleanup_state=no PR mutation performed"));
+    assert_eq!(backend.remote_candidate_checks, 1);
+    assert!(
+        !backend.created && !backend.updated,
+        "PR mutation is refused"
+    );
+    assert_eq!(backend.quarantine_calls, 0);
+}
+
+#[test]
+fn post_mutation_drift_closes_new_pr_and_refuses_a_receipt() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "foreign-remote-sha".to_string(),
+            pr_head_sha: "foreign-pr-head".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let result = finalize_pr_with_backend(options(), &mut backend);
+    let error = result.expect_err("post-mutation drift refuses finalization receipt");
+
+    assert!(backend.created);
+    assert_eq!(backend.quarantine_calls, 1);
+    assert!(error
+        .message
+        .contains("expected_candidate_sha=candidate-sha"));
+    assert!(error
+        .message
+        .contains("observed_remote_sha=foreign-remote-sha"));
+    assert!(error
+        .message
+        .contains("observed_pr_head_sha=foreign-pr-head"));
+    assert!(error.message.contains("cleanup_state=new_pr_closed"));
+}
+
+#[test]
+fn post_mutation_drift_quarantines_existing_ready_pr_as_draft() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
+        }),
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "foreign-remote-sha".to_string(),
+            pr_head_sha: "foreign-pr-head".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("post-mutation drift refuses finalization receipt");
+
+    assert!(backend.updated);
+    assert!(!backend.created);
+    assert_eq!(backend.quarantine_calls, 1);
+    assert!(error
+        .message
+        .contains("cleanup_state=existing_pr_converted_to_draft"));
+}
+
+#[test]
+fn unsupported_existing_ready_pr_quarantine_refuses_update_before_mutation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
+        }),
+        quarantine_capability: Some(AgentTaskPrQuarantineCapability::Unsupported),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("unsupported quarantine blocks update and receipt");
+
+    assert!(error.message.contains("cleanup_capability=unsupported"));
+    assert!(!backend.updated && !backend.created);
+    assert_eq!(backend.quarantine_calls, 0);
+}
+
+#[test]
+fn failed_new_pr_close_preserves_drift_and_cleanup_evidence_without_receipt() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "foreign-remote-sha".to_string(),
+            pr_head_sha: "foreign-pr-head".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        quarantine_error: true,
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("failed close still refuses receipt");
+
+    assert!(backend.created);
+    assert_eq!(backend.quarantine_calls, 1);
+    for expected in [
+        "expected_candidate_sha=candidate-sha",
+        "observed_remote_sha=foreign-remote-sha",
+        "observed_pr_head_sha=foreign-pr-head",
+        "cleanup_state=failed",
+        "cleanup_capability=close_new_pr",
+        "cleanup_error=quarantine command failed",
+    ] {
+        assert!(
+            error.message.contains(expected),
+            "missing {expected}: {error}"
+        );
+    }
+}
+
+#[test]
+fn failed_existing_pr_draft_conversion_preserves_drift_and_cleanup_evidence_without_receipt() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
+        }),
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "foreign-remote-sha".to_string(),
+            pr_head_sha: "foreign-pr-head".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        quarantine_error: true,
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("failed draft conversion still refuses receipt");
+
+    assert!(backend.updated);
+    assert_eq!(backend.quarantine_calls, 1);
+    for expected in [
+        "expected_candidate_sha=candidate-sha",
+        "observed_remote_sha=foreign-remote-sha",
+        "observed_pr_head_sha=foreign-pr-head",
+        "cleanup_state=failed",
+        "cleanup_capability=convert_existing_ready_pr_to_draft",
+        "cleanup_error=quarantine command failed",
+    ] {
+        assert!(
+            error.message.contains(expected),
+            "missing {expected}: {error}"
+        );
+    }
 }
 
 #[test]

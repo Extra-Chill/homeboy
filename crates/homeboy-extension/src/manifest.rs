@@ -59,6 +59,11 @@ pub use homeboy_extension_contract::test_inventory_config::{
 // ExtensionManifest
 // ============================================================================
 
+pub use homeboy_extension_contract::external_check_detail_resolver::{
+    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
+    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
+    EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
+};
 pub use homeboy_extension_contract::manifest_capability_config::ExtensionDiagnosticsConfig;
 pub use homeboy_extension_contract::notification_transport_config::{
     NotificationTransportConfig, NotificationTransportDescriptor, NOTIFICATION_TRANSPORT_SCHEMA,
