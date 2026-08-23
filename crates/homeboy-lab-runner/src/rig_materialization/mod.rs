@@ -313,10 +313,11 @@ pub(super) fn sync_lab_offload_rigs(
                 )?
                 .0;
                 let install_source = remote_package_path(
+                    rig_id,
                     &resolved_source.snapshot_root,
                     &resolved_source.package_path,
                     &synced.remote_path,
-                );
+                )?;
                 let source_snapshot = homeboy_core::source_snapshot::collect_local(
                     runner_id,
                     Path::new(&synced.local_path),

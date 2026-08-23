@@ -36,19 +36,31 @@ pub(super) fn rig_install_capability_preflight() -> RunnerCapabilityPreflight {
 }
 
 pub(super) fn remote_package_path(
+    rig_id: &str,
     source_root: &str,
     package_path: &str,
     remote_source_root: &str,
-) -> String {
+) -> Result<String> {
     let source_root = Path::new(source_root);
     let package_path = Path::new(package_path);
-    match package_path.strip_prefix(source_root) {
-        Ok(relative) if !relative.as_os_str().is_empty() => Path::new(remote_source_root)
-            .join(relative)
-            .to_string_lossy()
-            .to_string(),
-        _ => remote_source_root.to_string(),
-    }
+    let relative = package_path.strip_prefix(source_root).map_err(|_| {
+        Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch cannot materialize rig `{rig_id}` because its package path cannot be remapped from the synced worktree"
+            ),
+            Some(package_path.display().to_string()),
+            Some(vec![
+                format!("synced worktree: {}", source_root.display()),
+                "Reinstall the rig from a package inside the declared worktree before using --runner."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    Ok(Path::new(remote_source_root)
+        .join(relative)
+        .to_string_lossy()
+        .to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -90,6 +102,21 @@ pub(super) fn resolve_installed_rig_source(
         package_path,
         declared_root.as_deref(),
     )?;
+
+    if let Some(declared_root) = declared_root.as_deref() {
+        validate_relative_metadata_within_worktree(
+            rig_id,
+            "source root",
+            &declared_source,
+            declared_root,
+        )?;
+        validate_relative_metadata_within_worktree(
+            rig_id,
+            "package path",
+            &package_path,
+            declared_root,
+        )?;
+    }
 
     if declared_source.is_file() && package_path != declared_source {
         return Err(Error::validation_invalid_argument(
@@ -143,6 +170,30 @@ fn source_directory(path: PathBuf) -> PathBuf {
     } else {
         path
     }
+}
+
+fn validate_relative_metadata_within_worktree(
+    rig_id: &str,
+    label: &str,
+    path: &Path,
+    declared_worktree: &Path,
+) -> Result<()> {
+    if path.starts_with(declared_worktree) {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "rig",
+        format!(
+            "runner dispatch cannot materialize rig `{rig_id}` because its relative {label} resolves outside the declared worktree"
+        ),
+        Some(path.display().to_string()),
+        Some(vec![
+            format!("declared worktree: {}", declared_worktree.display()),
+            "Replace the escaping symlink or reinstall the rig from a package inside the declared worktree."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn package_directory(rig_id: &str, path: PathBuf) -> Result<PathBuf> {
@@ -542,10 +593,12 @@ mod tests {
         );
         assert_eq!(
             remote_package_path(
+                "fixture-matrix",
                 &resolved.snapshot_root,
                 &resolved.package_path,
                 "/runner/worktree"
-            ),
+            )
+            .unwrap(),
             "/runner/worktree/rigs/fixture-matrix"
         );
     }
@@ -670,6 +723,102 @@ mod tests {
         )
         .expect_err("symlink to sibling is outside declared source directory");
         assert!(error.message.contains("outside the declared source root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_source_root_symlink_escaping_worktree_rejects() {
+        use std::os::unix::fs::symlink;
+
+        let worktree = tempfile::tempdir().expect("worktree");
+        let external = tempfile::tempdir().expect("external package");
+        symlink(external.path(), worktree.path().join("external-source"))
+            .expect("external source symlink");
+
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("external-source"),
+            "external-source",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("source symlink outside worktree rejects");
+
+        assert!(error
+            .message
+            .contains("source root resolves outside the declared worktree"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_package_symlink_escaping_worktree_rejects() {
+        use std::os::unix::fs::symlink;
+
+        let worktree = tempfile::tempdir().expect("worktree");
+        let external = tempfile::tempdir().expect("external package");
+        std::fs::create_dir_all(worktree.path().join("rigs")).expect("source root");
+        symlink(
+            external.path(),
+            worktree.path().join("rigs/external-package"),
+        )
+        .expect("external package symlink");
+
+        let error = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs"),
+            "rigs/external-package",
+            &worktree.path().display().to_string(),
+        )
+        .expect_err("package symlink outside worktree rejects");
+
+        assert!(error
+            .message
+            .contains("package path resolves outside the declared worktree"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_internal_symlink_source_and_package_are_authorized() {
+        use std::os::unix::fs::symlink;
+
+        let worktree = tempfile::tempdir().expect("worktree");
+        let package = worktree.path().join("rigs/authorized");
+        std::fs::create_dir_all(&package).expect("authorized package");
+        symlink(&package, worktree.path().join("rigs/authorized-link"))
+            .expect("internal package symlink");
+
+        let resolved = resolve_installed_rig_source(
+            "fixture-matrix",
+            Some("rigs/authorized-link"),
+            "rigs/authorized-link",
+            &worktree.path().display().to_string(),
+        )
+        .expect("internal symlink remains inside the declared worktree");
+
+        assert_eq!(
+            resolved.package_path,
+            package.canonicalize().unwrap().display().to_string()
+        );
+    }
+
+    #[test]
+    fn remote_package_path_rejects_paths_outside_snapshot() {
+        let error = remote_package_path(
+            "fixture-matrix",
+            "/snapshot/worktree",
+            "/outside/package",
+            "/runner/worktree",
+        )
+        .expect_err("outside package cannot remap to snapshot root");
+
+        assert!(error
+            .message
+            .contains("cannot be remapped from the synced worktree"));
+        assert!(error.details["tried"]
+            .as_array()
+            .expect("actionable hints")
+            .iter()
+            .filter_map(|hint| hint.as_str())
+            .any(|hint| hint.contains("Reinstall the rig")));
     }
 
     #[test]
