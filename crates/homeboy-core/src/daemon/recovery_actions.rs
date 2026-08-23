@@ -27,6 +27,8 @@ pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
 pub const DAEMON_RECONCILE_LEASELESS_ORPHANS: &str = "daemon_reconcile_leaseless_orphans";
 /// Reconcile an exact PID-less job set after a proven unexpected daemon exit.
 pub const DAEMON_RECONCILE_DEAD_LEASE_ORPHANS: &str = "daemon_reconcile_dead_lease_orphans";
+/// Preview/review unleased foreground candidates after a lease retirement.
+pub const DAEMON_RECONCILE_UNLEASED_CANDIDATES: &str = "daemon_reconcile_unleased_candidates";
 /// Re-read daemon evidence. The step emitted when nothing else is authorized.
 pub const DAEMON_DIAGNOSE: &str = "daemon_diagnose";
 
@@ -154,6 +156,18 @@ pub fn diagnose() -> ExecutableAction {
     )
 }
 
+pub fn reconcile_unleased_candidates() -> ExecutableAction {
+    action(
+        "daemon.reconcile_unleased_candidates",
+        "review unleased local daemon candidates".to_string(),
+        [
+            "daemon".to_string(),
+            "reconcile-unleased-candidates".to_string(),
+        ],
+        ActionSafety::ReadOnly,
+    )
+}
+
 /// The recovery a dispatcher resolved from one `homeboy daemon status` read.
 ///
 /// Every argument in `steps` is already filled in from that report. The point
@@ -250,6 +264,28 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
                 executable: true,
             };
         }
+    }
+
+    // A preceding lease-bound retirement can expose an old foreground daemon
+    // with no lease or startup token. Keep it separate from the destructive
+    // plan: this command first emits a reviewed, identity-bound apply token.
+    if freshness.active_jobs == 0
+        && status.process_candidates.iter().any(|candidate| {
+            matches!(
+                candidate.ownership,
+                super::DaemonProcessOwnership::Owning | super::DaemonProcessOwnership::Ambiguous
+            )
+        })
+    {
+        return DaemonRecoveryPlan {
+            steps: vec![DaemonRepairStep::executable(
+                DAEMON_RECONCILE_UNLEASED_CANDIDATES,
+                reconcile_unleased_candidates(),
+            )],
+            reason: "lease recovery exposed unleased foreground daemon candidates; review the typed candidate set before explicit apply".to_string(),
+            required_confirmations: Vec::new(),
+            executable: false,
+        };
     }
 
     // Nothing is authorized. Say so, and hand back the read-only step that
