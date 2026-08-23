@@ -2027,6 +2027,41 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
 }
 
 #[test]
+fn unmaterialized_cook_run_requires_resume_without_execution_or_mutation() {
+    with_temp_home(|| {
+        let run_id = "run-cli-unmaterialized-cook";
+        agent_task_lifecycle::record_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "blocked_runner_unavailable",
+            "runner disconnected",
+        )
+        .expect("record unmaterialized admission");
+        let before = agent_task_lifecycle::exact_record(run_id).expect("admission record");
+        let executor = Arc::new(CapturingExecutor::default());
+
+        let error = run_submitted_with_executor(run_id.to_string(), None, executor.clone())
+            .expect_err("unmaterialized parent requires fenced resume");
+
+        assert!(error.message.contains("fenced resume path"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message == format!("Run `homeboy agent-task resume {run_id}`.")));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id).expect("admission record after run"),
+            before,
+            "run must not create a runner job, mutate the parent, or consume provider work"
+        );
+    });
+}
+
+#[test]
 fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

@@ -599,6 +599,15 @@ fn unmaterialized_admission_value(
     })
 }
 
+/// An unmaterialized admission has no executable task plan. It can progress
+/// only through its fenced admission reconciler.
+pub fn is_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
+    record
+        .metadata
+        .get("unmaterialized_cook_admission")
+        .is_some_and(Value::is_object)
+}
+
 pub fn record_unmaterialized_cook_admission_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,

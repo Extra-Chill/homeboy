@@ -2360,6 +2360,45 @@ fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
 }
 
 #[test]
+fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "controller-unmaterialized-cook";
+        agent_task_lifecycle::record_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "blocked_runner_unavailable",
+            "runner disconnected",
+        )
+        .expect("record unmaterialized admission");
+        let args = [
+            "homeboy",
+            "agent-task",
+            "run",
+            run_id,
+            "--runner",
+            "homeboy-lab",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&cli)
+                .expect("resolve controller-owned admission"),
+            "the router must not select a Lab workspace for an unmaterialized parent"
+        );
+        let error = materialize_agent_task_run_handoff(&cli, &args)
+            .expect_err("a bypassed route still refuses ordinary run before workspace selection");
+        assert!(error.message.contains("fenced resume path"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| { hint.message == format!("Run `homeboy agent-task resume {run_id}`.") }));
+    });
+}
+
+#[test]
 fn controller_owned_run_refuses_an_ambiguous_plan_workspace() {
     let first = tempfile::tempdir().expect("first workspace");
     let second = tempfile::tempdir().expect("second workspace");
