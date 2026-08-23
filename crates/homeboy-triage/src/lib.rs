@@ -6,6 +6,7 @@
 //! The separate `triage --watch --auto-merge` path is the explicit opt-in
 //! exception for state-transition automation.
 
+mod cli_capability;
 mod gh;
 mod landing;
 mod observation;
@@ -29,6 +30,7 @@ pub use types::{
     TriagePrItem, TriageRepo, TriageRepoRef, TriageSummary, TriageUnresolved,
 };
 
+pub use cli_capability::{capability, TRIAGE_CAPABILITY};
 pub use watch::{
     run as watch, TriageWatchEvent, TriageWatchItemState, TriageWatchOptions, TriageWatchOutput,
     TriageWatchTargetOutput,

@@ -714,6 +714,7 @@ dependencies = [
  "homeboy-extension",
  "homeboy-lab-contract",
  "homeboy-product-identity",
+ "homeboy-triage",
  "libc",
  "reqwest",
  "rusqlite",
@@ -815,7 +816,6 @@ dependencies = [
  "homeboy-review",
  "homeboy-rig",
  "homeboy-stack",
- "homeboy-triage",
  "homeboy-tunnel",
  "homeboy-upgrade",
  "homeboy-version",
@@ -1268,6 +1268,8 @@ name = "homeboy-triage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "clap",
+ "homeboy-cli",
  "homeboy-core",
  "homeboy-rig",
  "serde",
