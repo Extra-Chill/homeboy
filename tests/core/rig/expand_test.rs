@@ -12,6 +12,12 @@ use homeboy_core::test_support::with_isolated_home;
 use std::collections::HashMap;
 use std::fs;
 
+/// A test is the entry point for its own unit of work, so resolving once
+/// here is a boundary resolution (#7505).
+fn test_config_root() -> std::path::PathBuf {
+    homeboy_core::paths::homeboy().expect("config root")
+}
+
 fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
     RigSpec {
         id: id.to_string(),
@@ -82,7 +88,7 @@ fn test_expand_vars_component_path() {
 fn test_expand_vars_package_root_from_installed_source_metadata() {
     with_isolated_home(|home| {
         let package_root = home.path().join("rig-packages/studio-web");
-        let metadata_dir = paths::rig_sources().expect("rig sources dir");
+        let metadata_dir = paths::rig_sources_in_root(&test_config_root());
         fs::create_dir_all(&metadata_dir).expect("mkdir rig sources");
         fs::write(
             metadata_dir.join("studio-web-product-matrix.json"),

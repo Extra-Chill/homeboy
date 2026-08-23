@@ -162,16 +162,12 @@ pub struct ProcessContainment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessContainmentCleanup {
     pub forced: bool,
-    /// True when no run-owned process is known to remain. Reduced visibility
-    /// into unrelated host processes lowers confidence but is not evidence that
-    /// containment leaked, so it does not clear this flag.
     pub complete: bool,
-    /// Why cleanup could not be verified. Present only when `complete` is false.
-    pub detail: Option<String>,
-    /// A non-fatal confidence diagnostic worth retaining as evidence. Callers
-    /// must surface it without overriding the result the contained command
-    /// already produced.
+    /// Non-fatal evidence collected while confirming cleanup. This is separate
+    /// from `detail` so unrelated host-process metadata cannot turn a verified
+    /// run-owned scope cleanup into a producer failure.
     pub diagnostic: Option<String>,
+    pub detail: Option<String>,
 }
 
 impl ProcessContainment {
@@ -277,8 +273,8 @@ impl ProcessContainment {
                 Ok(ProcessContainmentCleanup {
                     forced: true,
                     complete: true,
-                    detail: None,
                     diagnostic: None,
+                    detail: None,
                 })
             } else {
                 Err(Error::internal_unexpected(format!(
@@ -307,8 +303,8 @@ impl ProcessContainment {
             return Ok(ProcessContainmentCleanup {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
-                detail: cleanup.detail,
                 diagnostic: cleanup.diagnostic,
+                detail: cleanup.detail,
             });
         }
         #[cfg(not(target_os = "linux"))]
@@ -321,8 +317,8 @@ impl ProcessContainment {
                     ProcessContainmentCleanup {
                         forced: termination.signal == "SIGKILL",
                         complete: true,
-                        detail: None,
                         diagnostic: None,
+                        detail: None,
                     }
                 });
             }
@@ -333,8 +329,8 @@ impl ProcessContainment {
                 ProcessContainmentCleanup {
                     forced,
                     complete: true,
-                    detail: None,
                     diagnostic: None,
+                    detail: None,
                 }
             })
         }
@@ -1277,28 +1273,28 @@ fn scope_cleanup_report(
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    // Cleanup is incomplete only when a run-owned process is *known* to be
-    // unaccounted for: discovery ran and found no marker-owned process at all,
-    // meaning a descendant escaped by dropping HOMEBOY_PROCESS_SCOPE.
-    //
-    // A same-owner /proc entry we could not read lowers confidence but proves
-    // nothing. Treating it as incomplete turned every clean gate on a shared
-    // host into an infrastructure failure (#13128), so it is reported as a
-    // diagnostic that never overrides the producer's own result.
-    let complete = !targets.pids.is_empty();
+    let complete = !targets.pids.is_empty() && survivors.pids.is_empty();
     let detail = (!complete).then(|| {
-        "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
-    });
-    let diagnostic = (unreadable > 0).then(|| {
-        format!(
-            "process-scope discovery had reduced confidence: {unreadable} same-owner /proc environment entries could not be read"
-        )
+        if !survivors.pids.is_empty() {
+            format!(
+                "process-scope cleanup confirmed run-owned survivors: {}",
+                join_pids(&survivors.pids)
+            )
+        } else {
+            "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
+        }
     });
     ProcessContainmentCleanup {
         forced,
         complete,
+        // Foreign-owned entries are no longer counted at all, so anything left
+        // here is a process this user owns but still cannot inspect (#13128).
+        diagnostic: (unreadable > 0).then(|| {
+            format!(
+                "process-scope discovery could not read {unreadable} same-owner /proc environment entries"
+            )
+        }),
         detail,
-        diagnostic,
     }
 }
 
@@ -1811,7 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_cleanup_reports_omitted_or_unreadable_marker_discovery() {
+    fn scope_cleanup_keeps_unreadable_same_owner_environments_as_diagnostics() {
         let omitted = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: Vec::new(),
@@ -1828,10 +1824,7 @@ mod tests {
             .detail
             .as_deref()
             .is_some_and(|detail| detail.contains("no marker-owned process")));
-        assert_eq!(omitted.diagnostic, None);
 
-        // Reduced visibility is evidence, not a cleanup failure: the scope was
-        // discovered and drained, so the run's own result must stand (#13128).
         let unreadable = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: vec![42],
@@ -1849,7 +1842,7 @@ mod tests {
         assert!(unreadable
             .diagnostic
             .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("could not be read")));
+            .is_some_and(|detail| detail.contains("same-owner /proc environment entries")));
     }
 
     #[test]
@@ -1884,14 +1877,38 @@ mod tests {
 
         assert!(discovery.pids.is_empty(), "an unused scope owns no process");
         // Before the fix this equalled `denied_foreign`, which is in the
-        // hundreds on a shared VPS or a GitHub-hosted runner and failed every
-        // clean gate. Only same-owner denials may ever be counted, so the
-        // reported gap can never exceed what this sample could plausibly see.
+        // hundreds on a shared VPS or a GitHub-hosted runner and buried every
+        // clean run in a bogus diagnostic. Only same-owner denials may ever be
+        // counted, so the reported gap can never exceed what this sample could
+        // plausibly see.
         assert!(
             discovery.unreadable_environments <= denied_same_owner,
             "counted {} unreadable environments with {denied_same_owner} same-owner and {denied_foreign} foreign denials",
             discovery.unreadable_environments
         );
+    }
+
+    #[test]
+    fn scope_cleanup_fails_closed_for_confirmed_run_owned_survivors() {
+        let cleanup = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: vec![43],
+                unreadable_environments: 1,
+            },
+            true,
+        );
+
+        assert!(!cleanup.complete);
+        assert!(cleanup.forced);
+        assert!(cleanup
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("run-owned survivors: 43")));
+        assert!(cleanup.diagnostic.is_some());
     }
 
     #[test]

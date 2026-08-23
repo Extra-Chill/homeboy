@@ -34,21 +34,6 @@ pub(crate) fn prepare_process_scope_cleanup(
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group_cleanup(_cmd: &mut Command) {}
 
-/// What containment teardown observed. `incomplete` is a failure the caller
-/// must surface; `warning` is evidence-only and must not override the result
-/// the contained command already produced (#13128).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessCleanupReport {
-    pub incomplete: Option<String>,
-    pub warning: Option<String>,
-}
-
-impl ProcessCleanupReport {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.incomplete.is_none() && self.warning.is_none()
-    }
-}
-
 pub(crate) struct ProcessGroupCleanupGuard {
     #[cfg(unix)]
     pgid: Option<libc::pid_t>,
@@ -88,19 +73,19 @@ impl ProcessGroupCleanupGuard {
         }
     }
 
-    pub(crate) fn cleanup(mut self) -> ProcessCleanupReport {
+    pub(crate) fn cleanup(mut self) -> Option<String> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
-            let report = cleanup_process_group(
+            let detail = cleanup_process_group(
                 pgid,
                 #[cfg(target_os = "linux")]
                 self.containment.as_ref(),
             );
             self.pgid = None;
-            return report;
+            return detail;
         }
 
-        ProcessCleanupReport::default()
+        None
     }
 
     #[cfg(unix)]
@@ -177,32 +162,21 @@ pub(crate) fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) 
 fn cleanup_process_group(
     pgid: libc::pid_t,
     #[cfg(target_os = "linux")] containment: Option<&crate::process::ProcessContainment>,
-) -> ProcessCleanupReport {
+) -> Option<String> {
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
         match containment.cleanup_with_grace(Duration::from_millis(200), false) {
-            Ok(cleanup) => {
-                return ProcessCleanupReport {
-                    incomplete: (!cleanup.complete).then(|| {
-                        cleanup.detail.unwrap_or_else(|| {
-                            "process-scope cleanup could not be verified".to_string()
-                        })
-                    }),
-                    warning: cleanup.diagnostic,
-                }
-            }
+            Ok(cleanup) if cleanup.complete => return cleanup.diagnostic,
+            Ok(cleanup) => return cleanup.detail,
             Err(error) => {
                 cleanup_process_group_fallback(pgid);
-                return ProcessCleanupReport {
-                    incomplete: Some(format!("process containment cleanup failed: {error}")),
-                    warning: None,
-                };
+                return Some(format!("process containment cleanup failed: {error}"));
             }
         }
     }
 
     cleanup_process_group_fallback(pgid);
-    ProcessCleanupReport::default()
+    None
 }
 
 #[cfg(unix)]
