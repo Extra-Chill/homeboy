@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.1] - 2026-08-23
+
+### Changed
+- align cache ownership assertions
+
+### Fixed
+- cache extension-owned build state
+
 ## [2.15.0] - 2026-08-23
 
 ### Added
