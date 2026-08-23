@@ -79,13 +79,17 @@ impl ProcessGroupCleanupGuard {
         }
     }
 
-    pub(crate) fn cleanup(mut self) -> Option<ProcessCleanupReport> {
+    pub(crate) fn cleanup(
+        mut self,
+        context: crate::process::ProcessContainmentCleanupContext,
+    ) -> Option<ProcessCleanupReport> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             let detail = cleanup_process_group(
                 pgid,
                 #[cfg(target_os = "linux")]
                 self.containment.as_ref(),
+                context,
             );
             self.pgid = None;
             return detail;
@@ -113,6 +117,7 @@ impl Drop for ProcessGroupCleanupGuard {
                 pgid,
                 #[cfg(target_os = "linux")]
                 self.containment.as_ref(),
+                crate::process::ProcessContainmentCleanupContext::LeaderMayBeRunning,
             );
         }
     }
@@ -168,10 +173,13 @@ pub(crate) fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) 
 fn cleanup_process_group(
     pgid: libc::pid_t,
     #[cfg(target_os = "linux")] containment: Option<&crate::process::ProcessContainment>,
+    context: crate::process::ProcessContainmentCleanupContext,
 ) -> Option<ProcessCleanupReport> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = context;
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
-        match containment.cleanup_with_grace(Duration::from_millis(200), false) {
+        match containment.cleanup_with_grace(Duration::from_millis(200), context) {
             Ok(cleanup) if cleanup.complete => {
                 return cleanup.warning.map(|warning| ProcessCleanupReport {
                     incomplete: None,

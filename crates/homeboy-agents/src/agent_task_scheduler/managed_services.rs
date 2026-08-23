@@ -16,7 +16,7 @@ use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
     terminate_isolated_process_group_with_grace, terminate_process_tree_with_grace,
-    ProcessIdentityState, ProcessStartIdentity,
+    ProcessContainmentCleanupContext, ProcessIdentityState, ProcessStartIdentity,
 };
 use serde_json::{json, Value};
 
@@ -292,8 +292,10 @@ impl AgentTaskServiceSupervisor {
         persist_record(run_id, &record)?;
         if let Err(error) = wait_ready(&spec, local_url.as_deref(), &mut record.readiness_attempts)
         {
-            let cleanup = containment
-                .cleanup_with_grace(Duration::from_millis(spec.cleanup_deadline_ms), false);
+            let cleanup = containment.cleanup_with_grace(
+                Duration::from_millis(spec.cleanup_deadline_ms),
+                ProcessContainmentCleanupContext::LeaderMayBeRunning,
+            );
             // A complete containment cleanup verifies its owned leader and
             // descendants before returning.
             let reaped = cleanup.as_ref().is_ok_and(|cleanup| cleanup.complete);
@@ -353,10 +355,9 @@ impl AgentTaskServiceSupervisor {
                 .iter_mut()
                 .map(|service| {
                     scope.spawn(move || {
-                        let exited = service.child.try_wait().ok().flatten().is_some();
                         let cleanup = service.containment.cleanup_with_grace(
                             Duration::from_millis(service.spec.cleanup_deadline_ms),
-                            exited,
+                            ProcessContainmentCleanupContext::LeaderMayBeRunning,
                         );
                         let child_reaped = service.child.wait().is_ok();
                         let reaped =

@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::engine::invocation;
+use crate::process::ProcessContainmentCleanupContext;
 
 #[cfg(not(target_os = "linux"))]
 use super::super::process_cleanup::configure_process_group_cleanup;
@@ -211,7 +212,8 @@ fn run_local_command(
             let containment_error = containment
                 .terminate_on_failure_bounded(Duration::from_secs(2), false)
                 .err();
-            ProcessGroupCleanupGuard::new(child.id()).cleanup();
+            ProcessGroupCleanupGuard::new(child.id())
+                .cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning);
             let _ = child.wait();
             return CommandOutput {
                 stdout: String::new(),
@@ -283,10 +285,15 @@ fn run_local_command(
     let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
+    let cleanup_context = if matches!(&status, Ok(status) if status.success()) {
+        ProcessContainmentCleanupContext::LeaderReapedAfterSuccess
+    } else {
+        ProcessContainmentCleanupContext::LeaderMayBeRunning
+    };
     let cleanup_report = cleanup_report.or_else(|| {
         cleanup_guard
             .take()
-            .and_then(ProcessGroupCleanupGuard::cleanup)
+            .and_then(|guard| guard.cleanup(cleanup_context))
     });
     let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
 
@@ -907,7 +914,7 @@ fn wait_for_child_or_delegated_failure(
         }
         if let Some(signal) = active_cleanup_signal() {
             let cleanup_report = if let Some(cleanup_guard) = cleanup_guard.take() {
-                cleanup_guard.cleanup()
+                cleanup_guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
             } else {
                 let _ = child.kill();
                 None
@@ -924,15 +931,15 @@ fn wait_for_child_or_delegated_failure(
             .as_ref()
             .and_then(|monitor| monitor.terminal_failure())
         {
-            let cleanup_report = cleanup_guard
-                .take()
-                .and_then(ProcessGroupCleanupGuard::cleanup);
+            let cleanup_report = cleanup_guard.take().and_then(|guard| {
+                guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
+            });
             return (child.wait(), Some(failure), false, None, cleanup_report);
         }
 
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let cleanup_report = if let Some(cleanup_guard) = cleanup_guard.take() {
-                cleanup_guard.cleanup()
+                cleanup_guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
             } else {
                 let _ = child.kill();
                 None
@@ -1495,6 +1502,26 @@ mod tests {
             .stdout
             .parse::<libc::pid_t>()
             .expect("descendant pid");
+        assert_pid_reaped(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clean_completion_with_a_reaped_leader_does_not_fail_marker_discovery() {
+        let output = execute_local_command("printf clean");
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.exit_code, 0);
+        assert!(!output.stderr.contains("cleanup was incomplete"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clean_completion_reaps_an_owned_scope_survivor() {
+        let output = execute_local_command("sleep 30 & printf '%s' \"$!\"");
+
+        assert!(output.success, "{}", output.stderr);
+        let pid = output.stdout.parse::<libc::pid_t>().expect("survivor pid");
         assert_pid_reaped(pid);
     }
 }
