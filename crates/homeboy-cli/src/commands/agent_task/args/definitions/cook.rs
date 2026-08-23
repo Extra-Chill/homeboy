@@ -718,6 +718,29 @@ mod tests {
     }
 
     #[test]
+    fn compact_cook_help_explains_backend_resolution() {
+        use clap::CommandFactory;
+
+        let command = crate::cli_surface::Cli::command();
+        let help = command
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("cook")
+            .expect("Cook command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("Backend selection: pass --backend explicitly"),
+            "{help}"
+        );
+        assert!(
+            help.contains("multiple ready routes require an explicit choice"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn cook_help_documents_explicit_execution_cap_precedence_over_configured_rotations() {
         let help = rendered_cook_help();
         assert!(

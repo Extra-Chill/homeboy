@@ -250,6 +250,28 @@ pub(crate) fn preview_cook(
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
     args.gates.snapshot_file_inputs()?;
+    // Authorization is a security boundary, not an unrelated task-input
+    // validation, so preserve its precedence over backend guidance.
+    if args.no_finalize {
+        if let Some(provenance) = provenance {
+            provenance
+                .require_sources(
+                    &["no_finalize"],
+                    &[crate::cli_surface::ArgumentSource::CommandLine],
+                )
+                .map_err(|error| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "no_finalize",
+                        "--no-finalize must be explicitly authorized on the command line",
+                        Some(serde_json::to_string(&error).expect("source policy serializes")),
+                        None,
+                    )
+                })?;
+        }
+    }
+    if let Some(backend) = unresolved_cook_backend_preview(&args)? {
+        return Ok((backend, 0));
+    }
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -387,6 +409,90 @@ pub(crate) fn preview_cook(
         }),
         0,
     ))
+}
+
+/// Resolve missing backend policy before validating task content. This keeps the
+/// task-first preview useful when the command cannot execute regardless of its
+/// prompt, evidence, or gates.
+fn unresolved_cook_backend_preview(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<Option<Value>> {
+    let resolution =
+        dispatch_service::resolve_dispatch_request(dispatch_args_for_cook(args).into());
+    let Err(error) = resolution else {
+        return Ok(None);
+    };
+    if !is_missing_default_backend_policy_error(&error) {
+        return Err(error);
+    }
+
+    let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+    let ready_backends = catalog
+        .backends()
+        .into_iter()
+        .filter(|backend| {
+            homeboy::agents::agent_tasks::provider::preflight_provider_credentials_for_backend(
+                catalog.providers(),
+                backend,
+                None,
+            )
+            .and_then(|_| {
+                homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
+                    &catalog, backend, None,
+                )
+            })
+            .is_ok()
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(missing_backend_preview_value(args, ready_backends)))
+}
+
+fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool {
+    error.code == homeboy::core::ErrorCode::ValidationInvalidArgument
+        && error.details["field"] == "backend"
+        && error.details["problem"]
+            .as_str()
+            .is_some_and(|problem| problem.starts_with("agent-task cook requires --backend because no default backend policy is configured"))
+}
+
+fn missing_backend_preview_value(args: &AgentTaskCookArgs, ready_backends: Vec<String>) -> Value {
+    let replay_backend = (ready_backends.len() == 1).then(|| ready_backends[0].clone());
+    let mut replay = cook_preview_replay_argv(args);
+    if let Some(backend) = &replay_backend {
+        replay
+            .argv
+            .extend(["--backend".to_string(), backend.clone()]);
+    }
+    let state = if replay_backend.is_some() {
+        "ready_backend_unambiguous"
+    } else if ready_backends.is_empty() {
+        "backend_required_no_ready_route"
+    } else {
+        "backend_required_multiple_ready_routes"
+    };
+    if replay_backend.is_none() {
+        replay.requires.push(
+            "pass --backend with one ready backend before replaying; multiple eligible routes are never selected implicitly"
+                .to_string(),
+        );
+    }
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-cook-preview/v1",
+        "mutates": false,
+        "resolved": {
+            "backend": {
+                "state": state,
+                "default_policy": "missing",
+                "ready_backends": ready_backends,
+                "replay_backend": replay_backend,
+                "next_command": "homeboy agent-task providers --validate-readiness",
+            },
+        },
+        "replay_argv": replay.argv,
+        "replay_requires": replay.requires,
+    })
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -751,6 +857,111 @@ mod preview_tests {
             "{replay:?}"
         );
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
+    }
+
+    #[test]
+    fn missing_backend_preview_requires_policy_when_no_ready_backend_exists() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "backend_required_no_ready_route"
+        );
+        assert!(preview["replay_argv"]
+            .as_array()
+            .expect("replay argv")
+            .iter()
+            .all(|arg| arg != "--backend"));
+    }
+
+    #[test]
+    fn preview_reports_missing_backend_policy_before_prompt_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            let (preview, exit_code) =
+                preview_cook(cook(&["homeboy", "agent-task", "cook", "--preview"]), None)
+                    .expect("missing policy returns backend guidance before prompt validation");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["backend"]["default_policy"], "missing");
+            assert!(matches!(
+                preview["resolved"]["backend"]["state"].as_str(),
+                Some(
+                    "ready_backend_unambiguous"
+                        | "backend_required_no_ready_route"
+                        | "backend_required_multiple_ready_routes"
+                )
+            ));
+        });
+    }
+
+    #[test]
+    fn missing_backend_preview_replays_the_one_ready_backend() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            vec!["fixture".to_string()],
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "ready_backend_unambiguous"
+        );
+        assert_eq!(preview["resolved"]["backend"]["replay_backend"], "fixture");
+        let replay = preview["replay_argv"].as_array().expect("replay argv");
+        assert!(replay
+            .windows(2)
+            .any(|pair| pair == ["--backend", "fixture"]));
+        Cli::try_parse_from(
+            replay
+                .iter()
+                .map(|value| value.as_str().expect("argv string")),
+        )
+        .expect("ready-backend replay parses as Cook");
+    }
+
+    #[test]
+    fn missing_backend_preview_keeps_multiple_ready_backends_explicit() {
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            vec!["alpha".to_string(), "beta".to_string()],
+        );
+
+        assert_eq!(
+            preview["resolved"]["backend"]["state"],
+            "backend_required_multiple_ready_routes"
+        );
+        assert!(preview["resolved"]["backend"]["replay_backend"].is_null());
+        assert!(preview["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|value| value
+                .as_str()
+                .unwrap_or_default()
+                .contains("multiple eligible routes")));
     }
 
     #[cfg(unix)]
@@ -3398,6 +3609,11 @@ pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
+    // Backend policy is an execution prerequisite. Resolve it before validating
+    // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
+    // an operator must fix first.
+    let dispatch = dispatch_args_for_cook(args);
+    let request = dispatch_service::resolve_dispatch_request(dispatch.clone().into())?;
     if args.no_finalize {
         if let Some(provenance) = provenance {
             provenance
@@ -3429,7 +3645,6 @@ pub(crate) fn validate_cook_request_with_provenance(
         &args.provider_evidence_inputs,
         args.dispatch.prompt.as_deref(),
     )?;
-    let dispatch = dispatch_args_for_cook(args);
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
@@ -3458,7 +3673,6 @@ pub(crate) fn validate_cook_request_with_provenance(
     }
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
-    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let configured_rotations = dispatch_service::controller_resolved_execution_policy(&request)
         .rotation
         .as_ref()
