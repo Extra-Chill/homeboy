@@ -662,6 +662,68 @@ process.exit(0);
 	assert.equal(preflightReadWrite.status, 'succeeded', JSON.stringify(preflightReadWrite.diagnostics));
 	assert.equal(fs.readFileSync(preflightRunMarker, 'utf8'), 'run\nrun\n');
 
+	const provenanceOpenCode = path.join(root, 'opencode');
+	fs.writeFileSync(provenanceOpenCode, `#!/usr/bin/env node
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+if (process.argv[2] === 'debug') {
+  const permission = Object.entries(config.agent.build.permission)
+    .flatMap(([name, rules]) => Object.entries(rules).map(([pattern, action]) => ({ permission: name, pattern, action })));
+  process.stdout.write(JSON.stringify({ permission }));
+  process.exit(0);
+}
+if (process.argv[2] === 'export') {
+  if (process.env.HOMEBOY_TEST_HANG_EXPORT === '1') {
+    setInterval(() => {}, 1_000);
+  } else {
+    process.stdout.write('Exporting session\\n' + JSON.stringify({ info: { model: { providerID: 'openai', id: 'gpt-5.6-sol' } } }));
+    process.exit(0);
+  }
+} else {
+  process.stdout.write(JSON.stringify({ type: 'step_start', sessionID: 'ses_default_model', part: { sessionID: 'ses_default_model' } }) + '\\n');
+  process.exit(0);
+}
+`);
+	fs.chmodSync(provenanceOpenCode, 0o755);
+	const defaultModelResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-default-model-provenance',
+		workspace_path: preflightWorkspace,
+		artifacts_path: path.join(root, 'default-model-artifacts'),
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, runtime_bin: provenanceOpenCode, command_args: [] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(defaultModelResult.status, 'succeeded', JSON.stringify(defaultModelResult.diagnostics));
+	assert.equal(defaultModelResult.metadata.model, 'openai/gpt-5.6-sol');
+	assert.deepEqual(defaultModelResult.metadata.opencode_session, {
+		status: 'captured', session_id: 'ses_default_model', model: 'openai/gpt-5.6-sol',
+	});
+	const exportStarted = Date.now();
+	const unavailableModelResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-unavailable-session-model',
+		workspace_path: preflightWorkspace,
+		artifacts_path: path.join(root, 'unavailable-model-artifacts'),
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				runtime_bin: provenanceOpenCode,
+				command_args: [],
+				runtime_env: { HOMEBOY_TEST_HANG_EXPORT: '1' },
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.ok(Date.now() - exportStarted < 4_000, 'session export must not block provider completion');
+	assert.equal(unavailableModelResult.status, 'succeeded', JSON.stringify(unavailableModelResult.diagnostics));
+	assert.deepEqual(unavailableModelResult.metadata.opencode_session, {
+		status: 'unavailable',
+		session_id: 'ses_default_model',
+		reason: 'OpenCode did not return a readable completed-session export.',
+	});
+	assert.equal(unavailableModelResult.metadata.model, undefined);
+
 	const scratchAttempts = [
 		{ id: 'run-2250-attempt-1', status: 0 },
 		{ id: 'run-2250-attempt-2', status: 17 },

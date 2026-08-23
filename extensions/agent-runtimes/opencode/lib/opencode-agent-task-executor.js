@@ -71,6 +71,7 @@ const OPENCODE_GIT_CAPTURE_OPTIONS = {
 };
 const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
 const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
+const OPENCODE_SESSION_EXPORT_TIMEOUT_MS = 2_000;
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -522,6 +523,7 @@ function findArtifact(artifacts, declaration) {
 function opencodeSuccessOutcome(context) {
 	const structured = structuredOpenCodeOutputs(context);
 	const evidence = collectOpenCodeArtifacts(context, structured);
+	const session = sessionMetadata(context);
 	const emptyPatch = evidence.artifacts?.some((artifact) => artifact.name === 'patch' && artifact.bytes === 0);
 	const missingRequiredOutputs = structured.missingRequiredOutputs || [];
 	const intentionalNoChange = structured.outputs && missingRequiredOutputs.length === 0 && emptyPatch && context.initialRevision?.revision
@@ -548,7 +550,8 @@ function opencodeSuccessOutcome(context) {
 		],
 		metadata: {
 			exit_code: 0,
-			opencode_session: sessionMetadata(context),
+			opencode_session: session,
+			...(session.model ? { model: session.model } : {}),
 			opencode_progress: progressMetadata(context),
 		},
 		...(structured.outputs || intentionalNoChange ? {
@@ -1050,8 +1053,76 @@ function mergeEvidence(primary = {}, secondary = {}) {
 }
 
 function sessionMetadata(context = {}) {
-	const explicit = context.spawnResult?.opencode_session || context.spawnResult?.opencodeSession;
-	return explicit && typeof explicit === 'object' && !Array.isArray(explicit) ? explicit : OPENCODE_SESSION_METADATA_ABSENT;
+	if (context.sessionMetadata) {
+		return context.sessionMetadata;
+	}
+	const sessionId = openCodeSessionId(context.spawnResult?.stdout);
+	if (!sessionId || !isOpenCodeCommand(context.commandSpec)) {
+		context.sessionMetadata = OPENCODE_SESSION_METADATA_ABSENT;
+		return context.sessionMetadata;
+	}
+	const result = spawnSync(context.commandSpec.command, [
+		...arrayValue(context.commandSpec.args),
+		'export',
+		sessionId,
+		'--sanitize',
+	], {
+		cwd: context.cwd,
+		env: context.spawnExtra?.env,
+		encoding: 'utf8',
+		maxBuffer: 1024 * 1024,
+		// Session provenance is supplementary to a completed provider run. Bound
+		// its follow-up process so a wedged export cannot hold Cook indefinitely.
+		timeout: OPENCODE_SESSION_EXPORT_TIMEOUT_MS,
+		killSignal: 'SIGKILL',
+	});
+	if (result.status !== 0 || result.error) {
+		context.sessionMetadata = {
+			status: 'unavailable',
+			session_id: sessionId,
+			reason: 'OpenCode did not return a readable completed-session export.',
+		};
+		return context.sessionMetadata;
+	}
+	const exported = parseOpenCodeExport(result.stdout);
+	const provider = stringValue(exported?.info?.model?.providerID);
+	const model = stringValue(exported?.info?.model?.id);
+	if (!provider || !model) {
+		context.sessionMetadata = {
+			status: 'unavailable',
+			session_id: sessionId,
+			reason: 'OpenCode session export did not contain a concrete provider and model.',
+		};
+		return context.sessionMetadata;
+	}
+	context.sessionMetadata = {
+		status: 'captured',
+		session_id: sessionId,
+		model: `${provider}/${model}`,
+	};
+	return context.sessionMetadata;
+}
+
+function openCodeSessionId(stdout = '') {
+	for (const event of parseJsonObjectsFromText(stdout)) {
+		const sessionId = stringValue(event.sessionID || event.session_id || event.part?.sessionID);
+		if (sessionId) {
+			return sessionId;
+		}
+	}
+	return '';
+}
+
+function parseOpenCodeExport(output = '') {
+	const start = String(output).indexOf('{');
+	if (start < 0) {
+		return null;
+	}
+	try {
+		return JSON.parse(String(output).slice(start));
+	} catch {
+		return null;
+	}
 }
 
 function progressMetadata(context = {}) {
