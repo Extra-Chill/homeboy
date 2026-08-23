@@ -726,6 +726,41 @@ fn linked_workspace(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path:
 
 #[cfg(unix)]
 #[test]
+fn provider_attests_worktree_root_and_executes_nested_component() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (workspace, _) = linked_workspace(&temp);
+    let component = workspace.join("packages/component");
+    std::fs::create_dir_all(&component).expect("component directory");
+    let attestation = workspace_attestation(&workspace);
+    let script = script(
+        r#"const fs = require('fs'); let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => { const request = JSON.parse(input); fs.writeFileSync('provider-observation.json', JSON.stringify({ cwd: process.cwd(), workspace: request.workspace.root })); process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: request.task_id, status: 'succeeded', summary: 'nested component executed' })); });"#,
+    );
+    let (mut request, provider) = request("nested-component", format!("node {script}"));
+    request.workspace.root = Some(workspace.display().to_string());
+    request.executor.config = json!({ "component_cwd": "packages/component" });
+    request.metadata = json!({ "cook_attempt_workspace_identity": attestation });
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    let observation: Value = serde_json::from_slice(
+        &std::fs::read(component.join("provider-observation.json")).expect("provider observation"),
+    )
+    .expect("observation json");
+    assert_eq!(
+        observation["cwd"],
+        component
+            .canonicalize()
+            .expect("canonical component")
+            .display()
+            .to_string()
+    );
+    assert_eq!(observation["workspace"], workspace.display().to_string());
+    assert!(!workspace.join("provider-observation.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn provider_refuses_legacy_source_attestation_git_file_replaced_before_spawn() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (workspace, _) = linked_workspace(&temp);

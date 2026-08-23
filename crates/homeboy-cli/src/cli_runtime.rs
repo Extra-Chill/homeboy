@@ -1,5 +1,5 @@
 use clap::{ArgMatches, Command};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -593,6 +593,21 @@ impl CliRuntime {
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
+        if let Commands::AgentTask(agent_task) = &mut cli.command {
+            if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
+                &mut agent_task.command
+            {
+                if let Err(err) = crate::commands::agent_task::run::snapshot_cook_prompt(cook) {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            }
+        }
         if let Commands::Fuzz(args) = &mut cli.command {
             match args.absorb_planning_runner(cli.runner.take()) {
                 Ok(runner) => cli.runner = runner,
@@ -1023,11 +1038,23 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         || Ok(false),
     )
     .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
-    let status = ProcessCommand::new(&pinned)
+    let prompt_snapshot = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
+                .prompt_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.content.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut command = ProcessCommand::new(&pinned);
+    command
         .args(&normalized_args[1..])
-        .env(COOK_PINNED_RUNTIME_ENV, &pinned)
-        .status()
-        .map_err(|error| {
+        .env(COOK_PINNED_RUNTIME_ENV, &pinned);
+    let status = if let Some(prompt) = prompt_snapshot {
+        command.stdin(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
                 Some(format!(
@@ -1036,6 +1063,38 @@ fn delegate_agent_task_cook_to_pinned_runtime(
                 )),
             )
         })?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "pinned Cook runtime stdin was not piped".to_string(),
+                )
+            })?
+            .write_all(prompt.as_bytes())
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("write captured Cook prompt to pinned runtime stdin".to_string()),
+                )
+            })?;
+        child.wait().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("wait for pinned Cook runtime".to_string()),
+            )
+        })?
+    } else {
+        command.status().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "execute pinned controller runtime {}",
+                    pinned.display()
+                )),
+            )
+        })?
+    };
     Ok(Some(status.code().unwrap_or(1)))
 }
 

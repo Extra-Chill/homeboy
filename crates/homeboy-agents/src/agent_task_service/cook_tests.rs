@@ -4019,6 +4019,55 @@ fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets
         .expect("a provider-owned Git workspace without origin has no remote base to converge");
 }
 
+#[test]
+fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(primary.path())
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(primary.path().join("base.txt"), "base\n").unwrap();
+        git(&["add", "base.txt"]);
+        git(&["commit", "-m", "base"]);
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            "cook-primary-workspace-validation",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.to_worktree = primary.path().display().to_string();
+        options.source_worktree_path = Some(primary.path().to_path_buf());
+        options.initial_plan.tasks[0].metadata = serde_json::json!({
+            "worktree_provision": { "kind": "explicit_cwd" }
+        });
+
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("primary checkout is a durable pre-execution failure");
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let record = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("durable primary-checkout failure record");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "cook_pre_execution"
+        );
+        assert!(record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .expect("primary-checkout diagnostic")
+            .contains("primary or non-linked checkout"));
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
