@@ -921,8 +921,9 @@ pub fn record_replacement_gate_proof(
             None,
         ));
     }
-    let same_candidate = replacement.provenance.get("candidate")
-        == original.provenance.get("candidate")
+    let expected_candidate = original.provenance.get("candidate");
+    let observed_candidate = replacement.provenance.get("candidate");
+    let same_candidate = observed_candidate == expected_candidate
         && (original.provenance.get("candidate_checkout").is_none()
             || replacement.provenance.get("candidate_checkout")
                 == original.provenance.get("candidate_checkout"));
@@ -946,6 +947,10 @@ pub fn record_replacement_gate_proof(
             None,
         );
         error.details["drift"] = drifted;
+        error.details["candidate_fingerprint"] = serde_json::json!({
+            "expected": bounded_candidate_fingerprint(expected_candidate),
+            "observed": bounded_candidate_fingerprint(observed_candidate),
+        });
         return Err(error);
     }
     let record = agent_task_lifecycle::status(run_id)?;
@@ -1001,6 +1006,42 @@ pub fn record_replacement_gate_proof(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )?;
     Ok(replacement)
+}
+
+fn bounded_candidate_fingerprint(candidate: Option<&Value>) -> Value {
+    const MAX_CHANGED_FILES: usize = 32;
+
+    let Some(candidate) = candidate else {
+        return Value::Null;
+    };
+    let Some(fingerprint) = candidate.get("fingerprint") else {
+        return serde_json::json!({ "kind": candidate.get("kind") });
+    };
+    let changed_files = fingerprint
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .take(MAX_CHANGED_FILES)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "kind": candidate.get("kind"),
+        "schema": fingerprint.get("schema"),
+        "target_path": fingerprint.get("target_path"),
+        "head": fingerprint.get("head"),
+        "base": fingerprint.get("base"),
+        "tree": fingerprint.get("tree"),
+        "sha256": fingerprint.get("sha256"),
+        "changed_files": changed_files,
+        "changed_files_truncated": fingerprint
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .is_some_and(|files| files.len() > MAX_CHANGED_FILES),
+    })
 }
 
 /// Execute corrected gates against the exact failed applied candidate and record
@@ -1141,13 +1182,15 @@ fn verify_replacement_gates_owned(
     // side effects, so a dead owner after this point must recover with external
     // candidate-bound proof rather than replaying an unknown partial execution.
     mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
-    let replacement_workspace = replacement_component_workspace(&original, &target_path)?;
+    let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: replacement_workspace,
+            // Candidate identity remains rooted at the persisted promotion target.
+            // The corrected gate workspace is passed separately below.
+            source_worktree_path: None,
             base_ref: Some(verified_base.base.clone()),
             task_base_sha: inputs
                 .and_then(|value| value.get("task_base_sha"))
@@ -1168,6 +1211,7 @@ fn verify_replacement_gates_owned(
         &target_path,
         &serde_json::to_value(&original)
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        replacement_gate_workspace.as_deref(),
         &observation_store,
     )?;
     // #11290's import boundary requires command evidence for each green gate.
