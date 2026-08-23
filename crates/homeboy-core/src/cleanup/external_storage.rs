@@ -11,13 +11,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use homeboy_engine_primitives::command::{
-    wait_with_bounded_output_supervised, ControllerChildGuard, SupervisedCommandTermination,
+    terminate_process_tree_and_reap, wait_with_bounded_output_supervised, ControllerChildGuard,
+    SupervisedCommandTermination,
 };
 use homeboy_extension_contract::{
     ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
     ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
     ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
-    EXTERNAL_STORAGE_RETENTION_SCHEMA,
+    EXTERNAL_STORAGE_RETENTION_SCHEMA, MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS,
+    MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };
 use serde::Serialize;
 
@@ -97,6 +99,8 @@ pub fn cleanup_external_storage_with_providers(
         unknown_bytes: 0,
         providers: Vec::new(),
     };
+    let mut remaining_count = options.limit;
+    let mut remaining_bytes = options.max_bytes;
     for provider in providers {
         if !seen.insert(&provider.id) {
             return Err(Error::validation_invalid_argument(
@@ -126,10 +130,12 @@ pub fn cleanup_external_storage_with_providers(
             &inventory.items,
             &pressured_roots,
             options.min_age_days,
-            options.max_bytes,
-            options.limit,
+            remaining_bytes,
+            remaining_count,
         );
         let estimated_bytes = candidates.iter().map(|item| item.bytes).sum();
+        remaining_count = remaining_count.saturating_sub(candidates.len());
+        remaining_bytes = remaining_bytes.saturating_sub(estimated_bytes);
         let targets = candidates
             .iter()
             .map(|item| ExternalStorageReclaimTarget {
@@ -324,6 +330,14 @@ fn invoke_raw(
             None,
         ));
     };
+    if reclaim_targets.len() > MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS {
+        return Err(Error::validation_invalid_argument(
+            "external_storage_retention provider request",
+            "reclaim request exceeds the protocol target ceiling",
+            Some(provider.id.clone()),
+            None,
+        ));
+    }
     let request = serde_json::to_vec(&ExternalStorageRequest {
         schema: EXTERNAL_STORAGE_RETENTION_SCHEMA.to_string(),
         operation,
@@ -336,6 +350,14 @@ fn invoke_raw(
             Some("serialize external storage request".to_string()),
         )
     })?;
+    if request.len() > MAX_EXTERNAL_STORAGE_REQUEST_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "external_storage_retention provider request",
+            "reclaim request exceeds the protocol target or byte ceiling",
+            Some(provider.id.clone()),
+            None,
+        ));
+    }
     let timeout = deadline
         .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
         .map(|remaining| remaining.min(Duration::from_secs(provider.timeout_seconds)))
@@ -363,31 +385,39 @@ fn invoke_raw(
             provider.id
         ))
     })?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    stdin.write_all(&request).map_err(|error| {
-        Error::internal_unexpected(format!(
-            "write external storage provider '{}': {error}",
-            provider.id
-        ))
-    })?;
-    drop(stdin);
-    guard.attach(&child).map_err(|error| {
+    attach_guard_or_reap(&mut child, |child| guard.attach(child)).map_err(|error| {
         Error::internal_unexpected(format!(
             "attach external storage provider guard '{}': {error}",
             provider.id
         ))
     })?;
-    let result = wait_with_bounded_output_supervised(
+    // Start stdin delivery only after process-tree ownership is established.
+    // The writer can block on a provider that never reads, while the supervisor
+    // concurrently drains output and kills the tree at the shared deadline.
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || stdin.write_all(&request));
+    let supervised = wait_with_bounded_output_supervised(
         &mut child,
         PROVIDER_OUTPUT_LIMIT,
         timeout,
         Duration::from_millis(100),
         || false,
         |_, _| Ok(()),
-    )
-    .map_err(|error| {
+    );
+    // Always join delivery, including a supervision I/O failure, so no writer
+    // remains detached after the process tree has been reaped.
+    let write_result = writer.join().map_err(|_| {
+        Error::internal_unexpected("external storage provider stdin writer panicked")
+    })?;
+    let result = supervised.map_err(|error| {
         Error::internal_unexpected(format!(
             "wait for external storage provider '{}': {error}",
+            provider.id
+        ))
+    })?;
+    write_result.map_err(|error| {
+        Error::internal_unexpected(format!(
+            "write external storage provider '{}': {error}",
             provider.id
         ))
     })?;
@@ -400,6 +430,17 @@ fn invoke_raw(
         )));
     }
     Ok(result.output.stdout)
+}
+
+fn attach_guard_or_reap(
+    child: &mut std::process::Child,
+    attach: impl FnOnce(&std::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if let Err(error) = attach(child) {
+        let _ = terminate_process_tree_and_reap(child);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn invoke_reclaim(
@@ -527,6 +568,95 @@ mod tests {
             ..stale
         };
         assert!(validate_reclaim_receipt(&overclaim, "current-generation", &[&candidate]).is_err());
+    }
+
+    #[cfg(unix)]
+    fn inventory_provider(id: &str, item_id: &str) -> ExternalStorageRetentionProviderConfig {
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": id, "generation": "g1",
+            "items": [{
+                "id": item_id, "root_id": "root", "class": "scratch", "bytes": 10,
+                "locator": item_id, "reconstructable": true, "active": false,
+                "referenced": false, "ownership_known": true, "age_days": 7,
+                "reclaim_token": format!("token-{item_id}")
+            }]
+        });
+        ExternalStorageRetentionProviderConfig {
+            id: id.to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_limit_is_not_reset_for_each_provider() {
+        let output = cleanup_external_storage_with_providers(
+            &[
+                inventory_provider("one", "one"),
+                inventory_provider("two", "two"),
+            ],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 10,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 10,
+                deadline: None,
+            },
+        )
+        .expect("plan");
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.estimated_bytes, 10);
+        assert_eq!(output.providers[0].candidate_count, 1);
+        assert_eq!(output.providers[1].candidate_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_provider_stdin_is_cancelled_by_supervision() {
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "blocked".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 5".to_string()],
+            timeout_seconds: 1,
+        };
+        let targets = (0..MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS)
+            .map(|index| ExternalStorageReclaimTarget {
+                id: index.to_string(),
+                reclaim_token: "x".repeat(200),
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        assert!(invoke_raw(
+            &provider,
+            ExternalStorageOperation::Reclaim,
+            Some("g1".to_string()),
+            targets,
+            None
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_attach_failure_reaps_spawned_process() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 5");
+        let guard = ControllerChildGuard::prepare(&mut command).expect("guard");
+        let mut child = command.spawn().expect("spawn");
+        let result = attach_guard_or_reap(&mut child, |_| {
+            Err(std::io::Error::other("fixture attach failure"))
+        });
+        assert!(result.is_err());
+        assert!(child.try_wait().expect("poll").is_some());
+        drop(guard);
     }
 
     #[cfg(unix)]

@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 pub const EXTERNAL_STORAGE_RETENTION_SCHEMA: &str = "homeboy/external-storage-retention/v1";
 pub const DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS: u64 = 30;
+/// Hard protocol ceilings protect stdin delivery before provider-specific policy
+/// is available. The aggregate may choose stricter limits.
+pub const MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS: usize = 1_000;
+pub const MAX_EXTERNAL_STORAGE_REQUEST_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

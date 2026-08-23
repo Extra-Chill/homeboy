@@ -129,6 +129,7 @@ pub use external_storage_retention::{
     ExternalStorageResourceClass, ExternalStorageRetentionConfig,
     ExternalStorageRetentionProviderConfig, ExternalStorageRoot,
     DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS, EXTERNAL_STORAGE_RETENTION_SCHEMA,
+    MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS, MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };
 pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
