@@ -17301,13 +17301,15 @@ fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_can
         )
         .unwrap();
         let operation_key = format!("finalize:{current_run_id}");
-        agent_task_lifecycle::claim_cook_operation(
+        agent_task_lifecycle::claim_cook_operation_in_store(
+            &test_lifecycle_store(),
             &current_run_id,
             &operation_key,
             std::time::Duration::from_secs(60),
         )
         .unwrap();
-        agent_task_lifecycle::fail_cook_operation(
+        agent_task_lifecycle::fail_cook_operation_in_store(
+            &test_lifecycle_store(),
             &current_run_id,
             &operation_key,
             serde_json::json!({ "code": "publication_rejected" }),
@@ -17352,13 +17354,14 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id)
             .expect("index Cook attempt");
         let operation_key = format!("promote:{}", options.initial_run_id);
-        agent_task_lifecycle::claim_cook_operation(
+        agent_task_lifecycle::claim_cook_operation_in_store(
+            &test_lifecycle_store(),
             &options.initial_run_id,
             &operation_key,
             std::time::Duration::from_secs(60),
         )
         .expect("claim promotion");
-        agent_task_lifecycle::fail_cook_operation(
+        agent_task_lifecycle::fail_cook_operation_in_store(&test_lifecycle_store(), 
             &options.initial_run_id,
             &operation_key,
             serde_json::json!({
