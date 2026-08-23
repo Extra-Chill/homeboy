@@ -1581,6 +1581,60 @@ fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots(
 }
 
 #[test]
+fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let tracked_build = source.join("crates/homeboy-extension/src/build");
+    fs::create_dir_all(&tracked_build).expect("tracked build source directory");
+    fs::create_dir_all(source.join("build")).expect("ignored root build directory");
+    fs::write(tracked_build.join("mod.rs"), "pub mod local_permissions;\n")
+        .expect("tracked build source");
+    fs::write(source.join("build/generated.bin"), "ignored\n").expect("ignored build output");
+    let excludes = vec!["./build".to_string(), "./build/**".to_string()];
+
+    let source_manifest = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let input_manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &input_manifest, None)
+        .expect("snapshot preacceptance stage");
+    let staged_source = stage.path().join("source");
+    let staged_manifest = snapshot_stable_manifest(&staged_source, &[]).expect("staged manifest");
+    let current_manifest = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+    assert_eq!(source_manifest, staged_manifest);
+    assert_eq!(staged_manifest, current_manifest);
+    assert!(staged_source
+        .join("crates/homeboy-extension/src/build/mod.rs")
+        .is_file());
+    assert!(!staged_source.join("build").exists());
+
+    let provider_workspace = workspace.path().join("provider-workspace");
+    let provider_marker = workspace.path().join("provider-executed");
+    fs::create_dir_all(&provider_workspace).expect("provider workspace");
+    let target_command = format!(
+        "tar -C {} -xf - && test -f {} && test ! -e {} && touch {}",
+        homeboy_core::engine::shell::quote_arg(&provider_workspace.display().to_string()),
+        homeboy_core::engine::shell::quote_arg(
+            &provider_workspace
+                .join("crates/homeboy-extension/src/build/mod.rs")
+                .display()
+                .to_string()
+        ),
+        homeboy_core::engine::shell::quote_arg(
+            &provider_workspace.join("build").display().to_string()
+        ),
+        homeboy_core::engine::shell::quote_arg(&provider_marker.display().to_string()),
+    );
+    materialize_snapshot_piped(
+        &source,
+        &target_command,
+        &excludes,
+        "test Lab provider execution",
+        None,
+    )
+    .expect("snapshot preacceptance reaches provider execution");
+    assert!(provider_marker.is_file());
+}
+
+#[test]
 fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift() {
     let source = tempfile::tempdir().expect("source");
     let scratch = tempfile::tempdir().expect("admitted scratch");

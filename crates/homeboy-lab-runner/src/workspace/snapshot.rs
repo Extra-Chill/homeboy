@@ -2105,14 +2105,19 @@ pub(super) fn materialize_snapshot_stage(
         )
     })?;
     let inputs = snapshot_manifest_tar_input(manifest);
-    // The manifest selects root inputs only. Tar still recurses through each
-    // selected directory, so every exclusion, including a root-anchored nested
-    // path, must be applied during archive construction.
-    let archive_excludes = excludes;
+    // The manifest has already removed excluded root inputs. Do not pass those
+    // patterns to tar, whose exclude matching would also remove legitimate
+    // nested directories with the same name. Nested root-anchored exclusions
+    // still need tar because their admitted root input is recursively archived.
+    let archive_excludes = excludes
+        .iter()
+        .filter(|pattern| !is_root_input_exclude(pattern))
+        .cloned()
+        .collect::<Vec<_>>();
     let source_archive = format!(
         "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - --null -T -",
         src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(archive_excludes),
+        exclude = tar_exclude_args(&archive_excludes),
     );
     let command = format!(
         "({inputs}) | {source_archive} | tar --no-xattrs -C {stage} -xf - && root={root} && stage={stage} && export root stage && find \"$stage\" -type l -exec sh -c {resolve} sh {{}} \\;",
@@ -2120,7 +2125,7 @@ pub(super) fn materialize_snapshot_stage(
         root = shell::quote_arg(&local_path.display().to_string()),
         resolve = shell::quote_arg(&format!(
             "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
-            tar_exclude_args(archive_excludes)
+            tar_exclude_args(&archive_excludes)
         )),
     );
     run_shell_command(&command, "construct workspace snapshot staging").map_err(|error| {
@@ -2148,6 +2153,14 @@ pub(super) fn materialize_snapshot_stage(
         }
     }
     Ok(stage)
+}
+
+fn is_root_input_exclude(pattern: &str) -> bool {
+    let Some(pattern) = pattern.strip_prefix("./") else {
+        return false;
+    };
+    let root = pattern.trim_end_matches("/**").trim_end_matches('/');
+    !root.is_empty() && !root.contains('/')
 }
 
 fn snapshot_manifest_tar_input(manifest: &SnapshotInputManifest) -> String {
