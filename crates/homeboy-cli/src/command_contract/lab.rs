@@ -47,6 +47,7 @@ fn scope_cook_help(command: Command) -> Command {
         "goal",
         "repo",
         "task_url",
+        "model",
         "to_worktree",
         "cwd",
         "verify",
@@ -104,7 +105,11 @@ fn scope_lab_cli_arguments_at_path(
             if already_declared {
                 command
             } else {
-                command.arg(arg.clone().global(false).hide(false))
+                // Placement is declared on `Cli`, so retain its global
+                // propagation when exposing it at a supported subcommand.
+                // Otherwise a value after `cook` parses but the root request
+                // deserializes its default `auto` value.
+                command.arg(arg.clone().hide(false))
             }
         })
     } else if path.iter().map(String::as_str).eq(["cleanup"]) {

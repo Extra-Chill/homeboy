@@ -4,6 +4,7 @@
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
+use homeboy_core::api_jobs::{JobStatus, JobStore};
 use std::collections::{BTreeMap, BTreeSet};
 // `agent-task active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
@@ -667,6 +668,20 @@ fn classify_liveness(
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
+    // Retry reservation publishes a short, exact-run lease before its daemon
+    // job id can be projected. Honor only that bounded, well-formed window so
+    // discovery cannot cancel the queued successor between those two writes.
+    if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && record.has_live_pending_local_cook_supervisor(now)
+    {
+        return AgentTaskLiveness::Active;
+    }
+    // A local Cook retry owns a queued lifecycle reservation before its child
+    // begins provider execution. Its current daemon job is the authoritative
+    // owner, so test it before generic queued-record staleness.
+    if live_local_cook_retry_supervisor(record) {
+        return AgentTaskLiveness::Active;
+    }
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
@@ -741,6 +756,48 @@ fn classify_liveness(
         // we genuinely cannot confirm this run either way.
         (false, false) => AgentTaskLiveness::Unreconciled,
     }
+}
+
+fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
+    let supervisor = &record.metadata["local_cook_supervisor"];
+    if supervisor["job_type"].as_str() != Some(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE)
+    {
+        return false;
+    }
+    let Some(job_id) = supervisor["job_id"].as_str() else {
+        return false;
+    };
+    let Ok(job_id) = uuid::Uuid::parse_str(job_id) else {
+        return false;
+    };
+    let Ok(daemon) = homeboy_core::daemon::read_status() else {
+        return false;
+    };
+    let Some(lease) = daemon.state.map(|state| state.lease_id) else {
+        return false;
+    };
+    if !daemon.reachable || !daemon.fresh {
+        return false;
+    }
+    let Ok(path) = homeboy_core::paths::daemon_jobs_file() else {
+        return false;
+    };
+    let Ok(store) = JobStore::open_without_reconciliation(path) else {
+        return false;
+    };
+    let Ok(job) = store.get(job_id) else {
+        return false;
+    };
+    // Controller jobs retain their transport namespace in durable storage.
+    // The retry metadata carries the submitted job type, not that stored
+    // operation name, so compare against the authoritative controller form.
+    job.operation
+        == format!(
+            "controller.{}",
+            crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE
+        )
+        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
+        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
 }
 
 /// Label where a run executes so an operator can trace the runner process.
@@ -919,4 +976,66 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
 
 fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(Value::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn queued_record(supervisor: Value) -> AgentTaskRunRecord {
+        serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "retry-attempt",
+            "plan_id": "plan",
+            "state": "queued",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "plan_path": "plan.json",
+            "metadata": {
+                "cook_id": "cook",
+                "local_cook_supervisor": supervisor,
+            },
+        }))
+        .expect("queued record")
+    }
+
+    #[test]
+    fn queued_retry_honors_only_a_valid_bounded_pending_supervisor_lease() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let valid = queued_record(json!({
+            "state": "pending",
+            "pinned_run_id": "retry-attempt",
+            "lease_started_at": "2026-01-01T00:00:45Z",
+            "lease_expires_at": "2026-01-01T00:01:15Z",
+        }));
+        assert_eq!(
+            classify_liveness(&valid, Some(10), now),
+            AgentTaskLiveness::Active
+        );
+
+        let expired = queued_record(json!({
+            "state": "pending",
+            "pinned_run_id": "retry-attempt",
+            "lease_started_at": "2026-01-01T00:00:00Z",
+            "lease_expires_at": "2026-01-01T00:00:30Z",
+        }));
+        assert_eq!(
+            classify_liveness(&expired, Some(10), now),
+            AgentTaskLiveness::Stale
+        );
+
+        let invalid = queued_record(json!({
+            "state": "pending",
+            "pinned_run_id": "retry-attempt",
+            "lease_started_at": "2026-01-01T00:00:00Z",
+            "lease_expires_at": "2026-01-01T00:10:00Z",
+        }));
+        assert_eq!(
+            classify_liveness(&invalid, Some(10), now),
+            AgentTaskLiveness::Stale
+        );
+    }
 }

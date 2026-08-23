@@ -15,6 +15,7 @@ use crate::agent_task_scheduler::{
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
@@ -35,6 +36,116 @@ fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id
             true
         })
         .expect("seed admission parent");
+}
+
+#[test]
+fn pending_local_retry_launcher_claim_converges_live_owner_then_reclaims_dead_owner() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "pending-local-retry";
+    let cook_id = "pending-local-retry-cook";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit pending retry");
+    let mut owner = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn distinct launcher owner");
+    let owner_identity = homeboy_core::process::process_start_identity(owner.id())
+        .expect("inspect launcher owner")
+        .expect("launcher owner identity");
+    store
+        .mutate_record(run_id, |record| {
+            record.metadata["cook_id"] = json!(cook_id);
+            record.metadata["local_cook_supervisor"] = json!({
+                "state": "pending",
+                "pinned_run_id": run_id,
+                "lease_started_at": chrono::Utc::now().to_rfc3339(),
+                "lease_expires_at": (chrono::Utc::now()
+                    + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS))
+                    .to_rfc3339(),
+                "launcher_pid": owner.id(),
+                "launcher_process_start_identity": owner_identity,
+            });
+            true
+        })
+        .expect("persist pending launcher");
+
+    assert_eq!(
+        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id).expect("live owner claim"),
+        LocalCookRetryLaunchClaim::OwnedElsewhere,
+        "a live launcher remains the sole process allowed to spawn"
+    );
+    owner.kill().expect("kill initial launcher");
+    owner.wait().expect("reap initial launcher");
+
+    assert_eq!(
+        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
+            .expect("dead owner takeover"),
+        LocalCookRetryLaunchClaim::Acquired,
+        "a dead launcher is atomically replaced by this caller"
+    );
+    let record = store.read_record(run_id).expect("read reclaimed retry");
+    assert_eq!(
+        record.metadata["local_cook_supervisor"]["launcher_pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
+    assert!(
+        !record.metadata["local_cook_supervisor"]["launcher_reclaimed_at"].is_null(),
+        "takeover remains durable evidence"
+    );
+}
+
+#[test]
+fn spawned_local_retry_child_is_reclaimed_without_a_second_spawn() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "spawned-local-retry";
+    let cook_id = "spawned-local-retry-cook";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit pending retry");
+    store
+        .mutate_record(run_id, |record| {
+            record.metadata["cook_id"] = json!(cook_id);
+            record.metadata["local_cook_supervisor"] = json!({
+                "state": "pending",
+                "pinned_run_id": run_id,
+            });
+            true
+        })
+        .expect("seed pending retry");
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn retry child");
+    let identity = homeboy_core::process::process_start_identity(child.id())
+        .expect("inspect retry child")
+        .expect("retry child identity");
+    record_local_cook_retry_child_in_store(
+        &store,
+        run_id,
+        cook_id,
+        child.id(),
+        identity.clone(),
+        "one-child-token",
+        "/tmp/one-child-token",
+    )
+    .expect("persist retry child before submission");
+
+    assert!(matches!(
+        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
+            .expect("recover spawned child"),
+        LocalCookRetryLaunchClaim::ChildSpawned { pid, start_identity, .. }
+            if pid == child.id() && start_identity == identity
+    ));
+    child.kill().expect("kill retry child");
+    child.wait().expect("reap retry child");
+    assert_eq!(
+        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
+            .expect("observe dead child"),
+        LocalCookRetryLaunchClaim::ChildExited,
+    );
 }
 
 #[test]

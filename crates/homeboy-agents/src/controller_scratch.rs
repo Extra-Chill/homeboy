@@ -725,13 +725,6 @@ pub fn retained_storage_inventory() -> Result<Vec<ControllerScratchRetainedResou
     })
 }
 
-/// Registers provider-created controller scratch returned in an outcome's
-/// `metadata.controller_scratch` object or array. Providers own materializing
-/// the path; Homeboy owns its durable lifecycle and cleanup policy.
-pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -> Result<()> {
-    register_outcome_resources_at_index(index_path()?, run_id, outcomes)
-}
-
 pub(crate) fn register_outcome_resources_at(
     data_root: &Path,
     run_id: &str,

@@ -477,8 +477,7 @@ fn shorten_path(path: &str, cwd: Option<&PathBuf>) -> String {
         }
     }
 
-    if let Ok(home_str) = std::env::var("HOME") {
-        let home = PathBuf::from(&home_str);
+    if let Ok(home) = crate::paths::home_root() {
         if let Ok(relative) = path_buf.strip_prefix(&home) {
             return format!("~/{}", relative.to_string_lossy());
         }

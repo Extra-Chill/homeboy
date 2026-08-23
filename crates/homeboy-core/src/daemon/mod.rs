@@ -536,6 +536,10 @@ pub struct DaemonProcessCandidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_start_identity: Option<crate::process::ProcessStartIdentity>,
     pub executable: String,
+    /// SHA-256 of the executable used to attribute this candidate. This is
+    /// emitted only when the process resolves to the invoking binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_digest: Option<String>,
     pub cmdline: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_endpoint: Option<String>,
@@ -560,6 +564,11 @@ pub struct DaemonCandidateReconciliationResult {
     pub candidates: Vec<DaemonProcessCandidate>,
     pub retired_pids: Vec<u32>,
     pub blocked_pids: Vec<u32>,
+    /// Bounded, deterministic review identity required to apply a legacy
+    /// zero-job candidate retirement. It is invalidated by any re-enumerated
+    /// process identity change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_token: Option<String>,
     pub evidence: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement: Option<DaemonStartResult>,

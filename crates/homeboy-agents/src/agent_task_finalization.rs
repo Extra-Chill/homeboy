@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
     enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
@@ -174,6 +175,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
     };
     let candidate_changed_files = normalize_changed_files(&changed_files);
+    if options.manual_finalization && !publish && !commit_required && push_required {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent",
+            "recoverable manual preflight requires an already-pushed candidate; push the candidate branch and rerun preflight",
+            None,
+            None,
+        ));
+    }
     if options.expected_candidate_sha.is_some() && (commit_required || push_required) {
         return Err(Error::validation_invalid_argument(
             "publication_intent",
@@ -354,15 +363,36 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     });
     options.review_dossier.evidence.dedup();
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
-    let (action, pr, draft) = match existing {
-        Some(existing) => {
-            let draft = existing.is_draft;
-            (
-                "updated",
-                backend.update_pr(&options.path, existing.number, &options.title, &body)?,
-                draft,
-            )
-        }
+    // The lookup and base observation may take long enough for another writer to
+    // replace the branch. Bind the live remote again at the last safe point.
+    let observed_remote_sha = backend.verify_remote_candidate(&options.path, &head, commit_sha)?;
+    if observed_remote_sha != commit_sha {
+        return Err(publication_drift_error(
+            commit_sha,
+            &observed_remote_sha,
+            None,
+            "no PR mutation performed",
+        ));
+    }
+    let newly_created = existing.is_none();
+    let draft = existing.as_ref().is_some_and(|pr| pr.is_draft);
+    let quarantine_capability = backend.quarantine_capability(newly_created, draft)?;
+    if !quarantine_capability_is_safe(quarantine_capability, newly_created, draft) {
+        return Err(Error::validation_invalid_argument(
+            "publication_quarantine",
+            format!(
+                "refusing PR mutation without a guaranteed safe quarantine transition; cleanup_capability={}",
+                quarantine_capability_name(quarantine_capability)
+            ),
+            None,
+            None,
+        ));
+    }
+    let (action, pr) = match existing {
+        Some(existing) => (
+            "updated",
+            backend.update_pr(&options.path, existing.number, &options.title, &body)?,
+        ),
         None => (
             "created",
             backend.create_pr(
@@ -373,25 +403,54 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &body,
                 options.draft_pr,
             )?,
-            options.draft_pr,
         ),
     };
+    let published_draft = if newly_created {
+        options.draft_pr
+    } else {
+        draft
+    };
 
-    let binding = backend.verify_publication_binding(
+    let binding = match backend.verify_publication_binding(
         &options.path,
         &options.base,
         &head,
         commit_sha,
         &changed_files,
         &pr,
-    )?;
-    validate_publication_binding(&binding, commit_sha, &changed_files)?;
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            return Err(publication_drift_with_cleanup_error(
+                backend,
+                &options.path,
+                &pr,
+                commit_sha,
+                "not_observed",
+                None,
+                quarantine_capability,
+                &error.message,
+            ));
+        }
+    };
+    if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+        return Err(publication_drift_with_cleanup_error(
+            backend,
+            &options.path,
+            &pr,
+            commit_sha,
+            &binding.remote_sha,
+            Some(&binding.pr_head_sha),
+            quarantine_capability,
+            "binding tuple mismatch",
+        ));
+    }
 
     Ok(report(
         &options,
         intent,
         &head,
-        if draft {
+        if published_draft {
             "draft_published"
         } else {
             "review_ready"
@@ -820,6 +879,129 @@ fn validate_publication_binding(
     Ok(())
 }
 
+const PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT: usize = 160;
+
+fn publication_drift_error(
+    expected_candidate_sha: &str,
+    observed_remote_sha: &str,
+    observed_pr_head_sha: Option<&str>,
+    cleanup_state: &str,
+) -> Error {
+    let bounded = |value: &str| {
+        let value = value.trim();
+        let characters = value.chars().count();
+        if characters <= PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT {
+            value.to_string()
+        } else {
+            format!(
+                "{}...(+{} chars)",
+                value
+                    .chars()
+                    .take(PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT)
+                    .collect::<String>(),
+                characters - PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT
+            )
+        }
+    };
+    Error::validation_invalid_argument(
+        "publication_binding",
+        format!(
+            "publication candidate drift refused: expected_candidate_sha={}; observed_remote_sha={}; observed_pr_head_sha={}; cleanup_state={}",
+            bounded(expected_candidate_sha),
+            bounded(observed_remote_sha),
+            observed_pr_head_sha.map(bounded).unwrap_or_else(|| "not_observed".to_string()),
+            bounded(cleanup_state),
+        ),
+        None,
+        None,
+    )
+}
+
+fn quarantine_capability_is_safe(
+    capability: AgentTaskPrQuarantineCapability,
+    newly_created: bool,
+    was_draft: bool,
+) -> bool {
+    matches!(
+        (capability, newly_created, was_draft),
+        (AgentTaskPrQuarantineCapability::CloseNewPr, true, _)
+            | (
+                AgentTaskPrQuarantineCapability::PreserveExistingDraft,
+                false,
+                true
+            )
+            | (
+                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft,
+                false,
+                false
+            )
+    )
+}
+
+fn quarantine_capability_name(capability: AgentTaskPrQuarantineCapability) -> &'static str {
+    match capability {
+        AgentTaskPrQuarantineCapability::CloseNewPr => "close_new_pr",
+        AgentTaskPrQuarantineCapability::PreserveExistingDraft => "preserve_existing_draft",
+        AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
+            "convert_existing_ready_pr_to_draft"
+        }
+        AgentTaskPrQuarantineCapability::Unsupported => "unsupported",
+    }
+}
+
+fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
+    backend: &mut B,
+    path: &str,
+    pr: &AgentTaskPrRef,
+    expected_candidate_sha: &str,
+    observed_remote_sha: &str,
+    observed_pr_head_sha: Option<&str>,
+    capability: AgentTaskPrQuarantineCapability,
+    binding_error: &str,
+) -> Error {
+    let cleanup = match backend.quarantine_pr(path, pr, capability) {
+        Ok(state) => state,
+        Err(error) => format!(
+            "failed; cleanup_capability={}; cleanup_error={}",
+            quarantine_capability_name(capability),
+            bounded_publication_diagnostic(&error.message)
+        ),
+    };
+    let drift = publication_drift_error(
+        expected_candidate_sha,
+        observed_remote_sha,
+        observed_pr_head_sha,
+        &cleanup,
+    );
+    Error::validation_invalid_argument(
+        "publication_binding",
+        format!(
+            "{}; binding_error={}",
+            drift.message,
+            bounded_publication_diagnostic(binding_error)
+        ),
+        None,
+        None,
+    )
+}
+
+fn bounded_publication_diagnostic(value: &str) -> String {
+    let value = value.trim();
+    let characters = value.chars().count();
+    if characters <= PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT {
+        value.to_string()
+    } else {
+        format!(
+            "{}...(+{} chars)",
+            value
+                .chars()
+                .take(PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT)
+                .collect::<String>(),
+            characters - PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT
+        )
+    }
+}
+
 fn build_pr_publication_intent(
     options: &AgentTaskPrFinalizationOptions,
     head: &str,
@@ -941,6 +1123,7 @@ fn report(
         acceptance,
         review_dossier: options.review_dossier.clone(),
         manual_finalization: options.manual_finalization,
+        manual_candidate_binding: None,
         evidence: options.evidence.clone(),
     }
 }
@@ -1048,17 +1231,7 @@ fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
 }
 
 fn is_concrete_model(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value == value.trim()
-        && !value.chars().any(char::is_control)
-        && !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "not recorded"
-                | "unknown"
-                | "ai-assisted"
-                | "ai assisted"
-                | "legacy caller did not record a model"
-        )
+    normalize_concrete_model_identifier(value).is_some()
 }
 
 fn is_git_commit_identity(value: &str) -> bool {
