@@ -548,6 +548,9 @@ pub(crate) enum HarvestError {
     CandidateBaselineMismatch {
         message: String,
     },
+    SnapshotInvalidated {
+        message: String,
+    },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -617,6 +620,11 @@ pub(super) fn committed_harvest_failure(
             "agent_task.gate_feedback_candidate_baseline_mismatch",
             format!("refusing gate-feedback retry candidate baseline: {message}"),
             serde_json::json!({ "error": message }),
+        ),
+        HarvestError::SnapshotInvalidated { message } => (
+            "agent_task.workspace_snapshot_invalidated",
+            format!("Cook workspace snapshot was invalidated before provider execution: {message}"),
+            serde_json::json!({ "error": message, "pre_provider": true }),
         ),
     };
     outcome.status = AgentTaskOutcomeStatus::Failed;
