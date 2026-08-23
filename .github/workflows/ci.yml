@@ -163,7 +163,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Run portable external resolver fixture subprocess tests
-        run: cargo test --locked -p homeboy-cli --lib commands::ci::external_check_detail_resolver::tests::discovery_invokes_cross_platform_fixture_for_success_unavailable_and_malformed
+        run: cargo test --locked -p homeboy-cli --features test-support --test external_check_detail_resolver_fixture
 
   # Keep `main` rustfmt-clean so a feature branch's `cargo fmt` only ever touches
   # the files it changed. Without this gate, unformatted files drift onto main

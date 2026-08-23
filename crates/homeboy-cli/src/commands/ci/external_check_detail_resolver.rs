@@ -450,6 +450,142 @@ fn bound(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn test_cross_platform_fixture() {
+    const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
+
+    for (mode, expected_detail, expected_diagnostic) in [
+        ("success", true, None),
+        ("unavailable", false, Some("unavailable")),
+        ("malformed", false, Some("malformed")),
+        ("missing-executable", false, Some("unavailable")),
+    ] {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            install_fixture_extension(mode, FIXTURE_MODE_ENV);
+            let (details, diagnostics) = hydrate(
+                "fixture-ci",
+                "failure",
+                Some("https://example.test/build/42"),
+                Instant::now() + Duration::from_secs(10),
+            );
+            assert_eq!(
+                details.len() == 1,
+                expected_detail,
+                "{mode}: {diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics
+                    .first()
+                    .map(|diagnostic| diagnostic.kind.as_str()),
+                expected_diagnostic,
+                "{mode}"
+            );
+            if mode == "success" {
+                assert_eq!(details[0].actions, ["fixture-ci replay 42"]);
+                let mut resolver_slots = MAX_RESOLVERS;
+                let check = super::failure_log_triage::hydrate_external(
+                    "fixture-ci".into(),
+                    "failure".into(),
+                    Some("legacy failure description".into()),
+                    Some("https://example.test/build/42".into()),
+                    &mut resolver_slots,
+                    Instant::now() + Duration::from_secs(10),
+                );
+                assert_eq!(check.status, "failure");
+                assert_eq!(
+                    check.description.as_deref(),
+                    Some("legacy failure description")
+                );
+                let summary = super::failure_log_triage::render_human_summary(
+                    "owner/repo",
+                    &super::failure_log_triage::GhPullRequest {
+                        number: 42,
+                        title: "Fixture".into(),
+                        url: "https://example.test/pull/42".into(),
+                        head_sha: "abc".into(),
+                    },
+                    0,
+                    &[],
+                    &[check],
+                    &[],
+                    &[],
+                );
+                assert!(summary.contains("fixture-ci replay 42"));
+            }
+        });
+    }
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let (details, diagnostics) = hydrate(
+            "no-installed-provider",
+            "error",
+            None,
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert!(details.is_empty());
+        assert_eq!(diagnostics[0].kind, "unknown");
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
+    let root = homeboy::core::paths::homeboy().unwrap();
+    let extension = root.join("extensions").join("fixture-external-check");
+    std::fs::create_dir_all(&extension).unwrap();
+    let executable = fixture_program(&extension, fixture_mode_env);
+    let command = if mode == "missing-executable" {
+        "not-installed-resolver".to_string()
+    } else {
+        executable
+    };
+    std::fs::write(
+        extension.join("fixture-external-check.json"),
+        serde_json::json!({
+            "name": "Fixture external check",
+            "version": "1.0.0",
+            "external_check_detail_resolvers": [{
+                "schema": "homeboy/external-check-detail-resolver/v1",
+                "provider": "fixture-ci",
+                "command": [command],
+                "public_env": [fixture_mode_env]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::env::set_var(fixture_mode_env, mode);
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let name = "fixture-resolver";
+    let path = extension.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncase \"${fixture_mode_env}\" in\nsuccess) printf '%s\\n' '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}' ;;\nmalformed) printf '%s' 'not json' ;;\nunavailable) exit 23 ;;\n*) exit 24 ;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    name.into()
+}
+
+#[cfg(all(any(test, feature = "test-support"), windows))]
+fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
+    let name = "fixture-resolver.cmd";
+    let path = extension.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\nif \"%{fixture_mode_env}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{fixture_mode_env}%\"==\"unavailable\" exit /b 23\r\nexit /b 24\r\n"
+        ),
+    )
+    .unwrap();
+    name.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,140 +605,6 @@ mod tests {
         let response: ExternalCheckDetailResponse = serde_json::from_str(r#"{"schema":"homeboy/external-check-detail-response/v1","provider":"example","summary":"failed"}"#).unwrap();
         assert_eq!(response.provider, "example");
         assert!(response.actions.is_empty());
-    }
-
-    #[test]
-    fn discovery_invokes_cross_platform_fixture_for_success_unavailable_and_malformed() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            for (mode, expected_detail, expected_diagnostic) in [
-                ("success", true, None),
-                ("unavailable", false, Some("unavailable")),
-                ("malformed", false, Some("malformed")),
-                ("missing-executable", false, Some("unavailable")),
-            ] {
-                install_fixture_extension(mode);
-                let (details, diagnostics) = hydrate(
-                    "fixture-ci",
-                    "failure",
-                    Some("https://example.test/build/42"),
-                    Instant::now() + Duration::from_secs(10),
-                );
-                assert_eq!(
-                    details.len() == 1,
-                    expected_detail,
-                    "{mode}: {diagnostics:?}"
-                );
-                assert_eq!(
-                    diagnostics
-                        .first()
-                        .map(|diagnostic| diagnostic.kind.as_str()),
-                    expected_diagnostic,
-                    "{mode}"
-                );
-                if mode == "success" {
-                    assert_eq!(details[0].actions, ["fixture-ci replay 42"]);
-                    let mut resolver_slots = MAX_RESOLVERS;
-                    let check = super::super::failure_log_triage::hydrate_external(
-                        "fixture-ci".into(),
-                        "failure".into(),
-                        Some("legacy failure description".into()),
-                        Some("https://example.test/build/42".into()),
-                        &mut resolver_slots,
-                        Instant::now() + Duration::from_secs(10),
-                    );
-                    assert_eq!(check.status, "failure");
-                    assert_eq!(
-                        check.description.as_deref(),
-                        Some("legacy failure description")
-                    );
-                    let summary = super::super::failure_log_triage::render_human_summary(
-                        "owner/repo",
-                        &super::super::failure_log_triage::GhPullRequest {
-                            number: 42,
-                            title: "Fixture".into(),
-                            url: "https://example.test/pull/42".into(),
-                            head_sha: "abc".into(),
-                        },
-                        0,
-                        &[],
-                        &[check],
-                        &[],
-                        &[],
-                    );
-                    assert!(summary.contains("fixture-ci replay 42"));
-                }
-            }
-            let (details, diagnostics) = hydrate(
-                "no-installed-provider",
-                "error",
-                None,
-                Instant::now() + Duration::from_secs(10),
-            );
-            assert!(details.is_empty());
-            assert_eq!(diagnostics[0].kind, "unknown");
-        });
-    }
-
-    fn install_fixture_extension(mode: &str) {
-        let root = homeboy::core::paths::homeboy().unwrap();
-        let extension = root.join("extensions").join("fixture-external-check");
-        std::fs::create_dir_all(&extension).unwrap();
-        let executable = fixture_program(&extension);
-        let command = if mode == "missing-executable" {
-            "not-installed-resolver".to_string()
-        } else {
-            executable
-        };
-        std::fs::write(
-            extension.join("fixture-external-check.json"),
-            serde_json::json!({
-                "name": "Fixture external check",
-                "version": "1.0.0",
-                "external_check_detail_resolvers": [{
-                    "schema": "homeboy/external-check-detail-resolver/v1",
-                    "provider": "fixture-ci",
-                    "command": [command],
-                    "public_env": [FIXTURE_MODE_ENV]
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::env::set_var(FIXTURE_MODE_ENV, mode);
-    }
-
-    #[cfg(unix)]
-    fn fixture_program(extension: &Path) -> String {
-        use std::os::unix::fs::PermissionsExt;
-
-        let name = "fixture-resolver";
-        let path = extension.join(name);
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\ncase \"${FIXTURE_MODE_ENV}\" in\nsuccess) printf '%s\\n' '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}' ;;\nmalformed) printf '%s' 'not json' ;;\nunavailable) exit 23 ;;\n*) exit 24 ;;\nesac\n"
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_ne!(mode & 0o111, 0, "fixture must be executable");
-        name.into()
-    }
-
-    #[cfg(windows)]
-    fn fixture_program(extension: &Path) -> String {
-        let name = "fixture-resolver.cmd";
-        let path = extension.join(name);
-        std::fs::write(
-            &path,
-            format!(
-                "@echo off\r\nif \"%{FIXTURE_MODE_ENV}%\"==\"success\" (echo {{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}& exit /b 0)\r\nif \"%{FIXTURE_MODE_ENV}%\"==\"malformed\" (set /p =not json<nul& exit /b 0)\r\nif \"%{FIXTURE_MODE_ENV}%\"==\"unavailable\" exit /b 23\r\nexit /b 24\r\n"
-            ),
-        )
-        .unwrap();
-        assert!(path.is_file(), "fixture must be ready before discovery");
-        name.into()
     }
 
     #[test]
