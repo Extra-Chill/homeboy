@@ -204,6 +204,9 @@ fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
     for command in ["status", "watch", "cancel", "resume"] {
         assert!(replay.metadata["unmaterialized_cook_admission"]["commands"][command].is_string());
     }
+    assert!(replay.metadata["unmaterialized_cook_admission"]["commands"]
+        .get("run")
+        .is_none());
 }
 
 #[test]
@@ -247,7 +250,8 @@ fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_
 fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
     with_isolated_home(|_| {
         let cook_id = "cook-replay-consume";
-        record_unmaterialized_cook_admission(
+        record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
             cook_id,
             json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
             "queued",
@@ -324,7 +328,8 @@ fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
 fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners() {
     with_isolated_home(|_| {
         for cook_id in ["resume-blocked", "resume-materializing", "resume-terminal"] {
-            record_unmaterialized_cook_admission(
+            record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 json!({ "placement": { "local_fallback": false } }),
                 "blocked_runner_unavailable",
@@ -2582,8 +2587,9 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
             .expect("project v1 legacy pin");
             let before = status(&record.run_id).expect("record before migration");
 
-            let error = validate_controller_runtime(&record.run_id)
-                .expect_err("legacy migration fails closed");
+            let error =
+                validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
+                    .expect_err("legacy migration fails closed");
 
             assert!(
                 error.message.contains(expected_error),
@@ -4589,14 +4595,15 @@ fn record_health_recovers_after_interrupted_migration_without_changing_terminal_
             .expect("terminal malformed fixture");
 
         store::fail_next_record_write_for_test();
-        assert!(reconcile_record_health(false).is_err());
+        assert!(reconcile_record_health_in_store(&test_lifecycle_store(), false).is_err());
         assert_eq!(
             record_health_summary_in_store(&test_lifecycle_store(),)
                 .expect("still malformed")
                 .malformed,
             1
         );
-        let applied = reconcile_record_health(false).expect("retry migration");
+        let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
+            .expect("retry migration");
         assert_eq!(applied.migrated, 1);
         let repaired = status("interrupted-terminal").expect("repaired");
         assert_eq!(repaired.state, AgentTaskRunState::Succeeded);

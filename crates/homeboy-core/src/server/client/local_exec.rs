@@ -301,7 +301,7 @@ fn run_local_command(
         }
         if let Some(detail) = cleanup_detail {
             stderr.push_str(&format!(
-                "Homeboy containment cleanup was incomplete: {detail}.\n"
+                "Homeboy containment cleanup diagnostic: {detail}.\n"
             ));
         }
         if streams_stalled {

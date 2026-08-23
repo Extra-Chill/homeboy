@@ -2096,9 +2096,10 @@ fn run_split_placement_fanout(
                         command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
                     },
                 ),
-        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher(
+        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
             args.clone(),
             &attempt_dispatcher,
+            placement,
         )?,
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command:
@@ -2109,9 +2110,10 @@ fn run_split_placement_fanout(
                     },
                 ),
         }) if args.run_plan => {
-            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
+            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher_and_placement(
                 *args.clone(),
                 &attempt_dispatcher,
+                placement,
             )?
         }
         _ => return Ok(None),
@@ -3519,6 +3521,18 @@ fn materialize_agent_task_run_handoff(
     if !agent_task_lifecycle::run_record_exists(&run.run_id)? {
         return Ok(None);
     }
+    if agent_task_lifecycle::exact_record(&run.run_id)
+        .ok()
+        .is_some_and(|record| agent_task_lifecycle::is_unmaterialized_cook_admission(&record))
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "unmaterialized Cook admission must continue through its fenced resume path",
+            Some(run.run_id.clone()),
+            Some(vec![format!("homeboy agent-task resume {}", run.run_id)]),
+        )
+        .with_hint(format!("Run `homeboy agent-task resume {}`.", run.run_id)));
+    }
 
     let plan = agent_task_lifecycle::load_plan(&run.run_id)?;
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
@@ -3652,10 +3666,25 @@ fn materialize_agent_task_retry_handoff(
     // from its own store (a runner-owned retry). Returning `None` here preserves
     // that behavior; only a resolvable controller record is materialized into a
     // self-contained run-plan handoff.
-    if !agent_task_lifecycle::run_record_exists_resolved(&retry.run_id)? {
+    // The existence check and the cook-id read are one decision about one
+    // record, so they resolve one store rather than the environment twice
+    // (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if !agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, &retry.run_id)?
+    {
         return Ok(None);
     }
-    if agent_task_lifecycle::status(&retry.run_id)?.metadata["cook_id"].is_string() {
+    if agent_task_lifecycle::status_in_store(
+        &lifecycle_store,
+        &retry.run_id,
+        agent_task_lifecycle::AgentTaskStatusOptions::default(),
+        false,
+    )?
+    .record
+    .metadata["cook_id"]
+        .is_string()
+    {
         // Cook retries must return through the controller so its promotion,
         // gates, and finalization lifecycle consumes the successful patch.
         return Ok(None);
@@ -4411,6 +4440,15 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         return Ok(false);
     };
     let run_id = match &agent_task.command {
+        AgentTaskCommand::Run(args)
+            if agent_task_lifecycle::exact_record(&args.run_id)
+                .ok()
+                .is_some_and(|record| {
+                    agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
+                }) =>
+        {
+            Some(&args.run_id)
+        }
         AgentTaskCommand::Status(args) => Some(&args.run_id),
         AgentTaskCommand::Logs(args) => Some(&args.run_id),
         AgentTaskCommand::Evidence(args) => Some(&args.run_id),
@@ -4420,10 +4458,18 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         AgentTaskCommand::Reconcile(args) => Some(&args.run_id),
         _ => None,
     };
-    run_id
-        .map(|run_id| agent_task_lifecycle::run_record_exists_resolved(run_id))
-        .transpose()
-        .map(|present| present.unwrap_or(false))
+    let Some(run_id) = run_id else {
+        return Ok(false);
+    };
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    Some(agent_task_lifecycle::run_record_exists_resolved_in_store(
+        &lifecycle_store,
+        run_id,
+    )?)
+    .map(Ok)
+    .transpose()
+    .map(|present| present.unwrap_or(false))
 }
 
 fn lab_offload_command_for_materialized_args(

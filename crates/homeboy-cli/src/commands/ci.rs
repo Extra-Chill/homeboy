@@ -15,7 +15,6 @@ pub fn test_external_check_detail_resolver_fixture() {
 pub fn test_external_check_detail_resolver_pipe_holder_cleanup() {
     external_check_detail_resolver::test_inherited_pipe_holder_cleanup();
 }
-
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;

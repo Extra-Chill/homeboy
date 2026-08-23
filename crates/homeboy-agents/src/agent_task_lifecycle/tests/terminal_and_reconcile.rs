@@ -348,8 +348,13 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
         })
         .expect("project legacy pin");
 
-        let recovered = recover_controller_runtime(&record.run_id, Some(&artifact), None)
-            .expect("recover exact artifact");
+        let recovered = recover_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            &record.run_id,
+            Some(&artifact),
+            None,
+        )
+        .expect("recover exact artifact");
         let pinned = std::path::PathBuf::from(
             recovered["originating"]["pinned_executable"]
                 .as_str()
@@ -366,7 +371,8 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
                 [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
             recovered
         );
-        validate_controller_runtime(&record.run_id).expect("recovered runtime validates");
+        validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
+            .expect("recovered runtime validates");
     });
 }
 
@@ -3075,7 +3081,8 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         let run_id = "run-cancel-scratch-replay";
         let plan = test_plan();
         submit_plan(&plan, Some(run_id)).expect("submitted");
-        reserve_provider_execution(run_id, &plan.tasks[0], 1).expect("provider execution reserved");
+        reserve_provider_execution_in_store(&test_lifecycle_store(), run_id, &plan.tasks[0], 1)
+            .expect("provider execution reserved");
 
         let released = crate::controller_scratch::allocate_attempt(
             run_id,
@@ -3251,7 +3258,13 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-live")).expect("submitted");
         mark_running("owner-live").expect("running");
-        reserve_provider_execution("owner-live", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-live",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
 
         let first = status("owner-live").expect("first status");
         let second = status("owner-live").expect("second status");
@@ -3273,9 +3286,21 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-live-late-import")).expect("submitted");
         mark_running("owner-live-late-import").expect("running");
-        reserve_provider_execution("owner-live-late-import", &plan.tasks[0], 1).expect("reserved");
-        record_provider_execution_terminal("owner-live-late-import", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-live-late-import",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "owner-live-late-import",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
 
         let record = status("owner-live-late-import").expect("status before aggregate import");
         assert_eq!(record.state, AgentTaskRunState::Running);
@@ -3301,7 +3326,13 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-legacy")).expect("submitted");
         mark_running("owner-legacy").expect("running");
-        reserve_provider_execution("owner-legacy", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-legacy",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         rewrite_record_for_test("owner-legacy", |record| {
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
@@ -3335,7 +3366,13 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         let plan = test_plan();
         submit_plan(&plan, Some("owner-pid-reused")).expect("submitted");
         mark_running("owner-pid-reused").expect("running");
-        reserve_provider_execution("owner-pid-reused", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-pid-reused",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         rewrite_record_for_test("owner-pid-reused", |record| {
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
         })
@@ -3362,7 +3399,13 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-dead")).expect("submitted");
         mark_running("owner-dead").expect("running");
-        reserve_provider_execution("owner-dead", &plan.tasks[0], 1).expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-dead",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3401,9 +3444,21 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-late-success")).expect("submitted");
         mark_running("owner-late-success").expect("running");
-        reserve_provider_execution("owner-late-success", &plan.tasks[0], 1).expect("reserved");
-        record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "owner-late-success",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "owner-late-success",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3435,10 +3490,21 @@ fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-no-owner")).expect("submitted");
         mark_running("provider-failed-no-owner").expect("running");
-        reserve_provider_execution("provider-failed-no-owner", &plan.tasks[0], 1)
-            .expect("reserved");
-        record_provider_execution_terminal("provider-failed-no-owner", "task-a", 1, "failed")
-            .expect("provider failure recorded");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-no-owner",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-no-owner",
+            "task-a",
+            1,
+            "failed",
+        )
+        .expect("provider failure recorded");
         rewrite_record_for_test("provider-failed-no-owner", |record| {
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
@@ -3472,10 +3538,21 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-owner-dead")).expect("submitted");
         mark_running("provider-failed-owner-dead").expect("running");
-        reserve_provider_execution("provider-failed-owner-dead", &plan.tasks[0], 1)
-            .expect("reserved");
-        record_provider_execution_terminal("provider-failed-owner-dead", "task-a", 1, "failed")
-            .expect("provider failure recorded");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-owner-dead",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "provider-failed-owner-dead",
+            "task-a",
+            1,
+            "failed",
+        )
+        .expect("provider failure recorded");
         let mut owner = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -3511,9 +3588,21 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
         let plan = test_plan();
         submit_plan(&plan, Some("cancel-race")).expect("submitted");
         mark_running("cancel-race").expect("running");
-        reserve_provider_execution("cancel-race", &plan.tasks[0], 1).expect("reserved");
-        record_provider_execution_terminal("cancel-race", "task-a", 1, "succeeded")
-            .expect("provider success recorded");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "cancel-race",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "cancel-race",
+            "task-a",
+            1,
+            "succeeded",
+        )
+        .expect("provider success recorded");
 
         let deferred = cancel_run("cancel-race", Some("operator cancel"))
             .expect("cancellation defers to terminal provider");
@@ -3535,12 +3624,18 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-terminal-cancel-race")).expect("submitted");
         mark_running("provider-terminal-cancel-race").expect("running");
-        reserve_provider_execution("provider-terminal-cancel-race", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-terminal-cancel-race",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
         cancel_run("provider-terminal-cancel-race", Some("stale owner"))
             .expect("cancellation recorded");
 
-        let terminal = record_provider_execution_terminal(
+        let terminal = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "provider-terminal-cancel-race",
             "task-a",
             1,
@@ -3562,10 +3657,16 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("invalid-provider-terminal-state")).expect("submitted");
-        reserve_provider_execution("invalid-provider-terminal-state", &plan.tasks[0], 1)
-            .expect("reserved");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "invalid-provider-terminal-state",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
 
-        let error = record_provider_execution_terminal(
+        let error = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "invalid-provider-terminal-state",
             "task-a",
             1,
@@ -3589,7 +3690,8 @@ fn provider_terminalization_rejects_a_missing_execution_attempt() {
         let plan = test_plan();
         submit_plan(&plan, Some("missing-provider-terminal-attempt")).expect("submitted");
 
-        let error = record_provider_execution_terminal(
+        let error = record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "missing-provider-terminal-attempt",
             "task-a",
             1,
@@ -3775,6 +3877,89 @@ fn cancellation_wins_the_retry_pre_execution_failure_race() {
 
         assert_eq!(failure.state, AgentTaskRunState::Cancelled);
         assert!(failure.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
+fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-cancelled";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        cancel_run(run_id, Some("operator cancellation")).expect("cancel");
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let error = Error::validation_invalid_argument(
+            "workspace",
+            "Cook workspace snapshot was invalidated before provider execution",
+            None,
+            None,
+        )
+        .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &error)
+            .expect("preserve cancellation");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert!(record.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
+fn snapshot_fence_transition_preserves_unrelated_zero_execution_failure() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-unrelated-failure";
+        let plan = test_plan();
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        let original =
+            Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
+        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
+            .expect("record unrelated failure");
+        let fence =
+            Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
+                .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
+            .expect("preserve unrelated failure");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "unrelated_phase"
+        );
+    });
+}
+
+#[test]
+fn snapshot_fence_transition_rejects_same_class_without_pre_provider_identity() {
+    with_isolated_home(|_| {
+        let run_id = "snapshot-fence-same-class-provider-outcome";
+        let plan = test_plan();
+        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        let original =
+            Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
+        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
+            .expect("record unrelated failure");
+        let mut aggregate = store.read_aggregate(run_id).expect("aggregate");
+        aggregate.outcomes[0]
+            .diagnostics
+            .push(crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.workspace_snapshot_invalidated".to_string(),
+                message: "provider-side diagnostic must not authorize replacement".to_string(),
+                data: json!({ "pre_provider": false }),
+            });
+        store
+            .write_aggregate(run_id, &aggregate)
+            .expect("persist aggregate");
+        let fence =
+            Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
+                .with_retryable(true);
+        let record = store
+            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
+            .expect("preserve non-fence outcome");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "unrelated_phase"
+        );
     });
 }
 

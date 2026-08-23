@@ -2038,7 +2038,14 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
         crate::agents::agent_task_service::persist_initial_recipe(&options)
             .expect("persist Cook recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist Cook attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("bind Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind Cook attempt");
         agent_task_lifecycle::record_pre_execution_failure(
             run_id,
             &plan,
@@ -2349,6 +2356,45 @@ fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
         assert!(error
             .message
             .contains("requires exactly one task workspace"));
+    });
+}
+
+#[test]
+fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "controller-unmaterialized-cook";
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "blocked_runner_unavailable",
+            "runner disconnected",
+        )
+        .expect("record unmaterialized admission");
+        let args = [
+            "homeboy",
+            "agent-task",
+            "run",
+            run_id,
+            "--runner",
+            "homeboy-lab",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&cli)
+                .expect("resolve controller-owned admission"),
+            "the router must not select a Lab workspace for an unmaterialized parent"
+        );
+        let error = materialize_agent_task_run_handoff(&cli, &args)
+            .expect_err("a bypassed route still refuses ordinary run before workspace selection");
+        assert!(error.message.contains("fenced resume path"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| { hint.message == format!("Run `homeboy agent-task resume {run_id}`.") }));
     });
 }
 
@@ -3500,7 +3546,9 @@ fn replay_input_failure_never_commits_a_manifest_and_retry_is_clean() {
 fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let cook_id = "supervised-replay-worker";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
             cook_id,
             serde_json::json!({ "request_ref": "sha256:request" }),
             "queued",
@@ -3541,7 +3589,9 @@ fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
 fn rejected_admission_rebinding_writes_no_snapshot_bytes() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let cook_id = "snapshot-rebinding";
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
             cook_id,
             serde_json::json!({ "request_ref": "sha256:first" }),
             "queued",
@@ -3889,12 +3939,14 @@ fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materiali
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+
             let mut permissions = std::fs::metadata(&promotion_provider).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(&promotion_provider, permissions).unwrap();
         }
                 let cook_id = "e2e-unmaterialized-replay";
-                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
                     cook_id,
                     serde_json::json!({
                         "placement": { "requested": "auto", "local_fallback": false },

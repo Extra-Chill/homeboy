@@ -332,6 +332,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             None,
         )
     })?;
+    let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
+        .unwrap_or_else(|| source_worktree.clone());
     // Resolve the caller input to the commit object before durable ownership is
     // claimed, then use that immutable SHA for every subsequent operation.
     let candidate_sha = resolve_candidate_revision(&source_worktree, candidate_ref)?;
@@ -561,7 +563,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                             source,
                             source_run_id: Some(record.run_id.clone()),
                             source_path,
-                            source_worktree_path: options.source_worktree_path.clone(),
+                            source_worktree_path: Some(gate_workspace.clone()),
                             base_ref: Some(options.base.clone()),
                             task_base_sha: options.task_base_sha.clone(),
                             candidate_ref: Some(candidate_sha.clone()),
@@ -624,6 +626,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     super::cook_baseline::compare_gate_failures_to_verified_base(
         &mut promotion,
         &source_worktree,
+        &gate_workspace,
         &candidate_base_sha,
         options.gates.gate_timeout(),
         |compared, total| {
@@ -853,6 +856,20 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 invocation_latest_run_id: Some(record.run_id.as_str()),
             }));
         }
+    }
+    if feedback.status == AgentTaskCookLoopStatus::BaselineInconclusive {
+        let reason = "immutable baseline replay was inconclusive; repair the gate baseline setup or replay environment before retrying adoption";
+        lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.to_string()))?;
+        return Ok(cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "baseline_inconclusive",
+            disposition: CookDisposition::Terminal,
+            attempts: vec![attempt],
+            finalization: None,
+            stop_reason: Some(reason.to_string()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(record.run_id.as_str()),
+        }));
     }
     if feedback.status != AgentTaskCookLoopStatus::GreenCompleted
         && !(feedback.status == AgentTaskCookLoopStatus::BaselineRed

@@ -914,6 +914,13 @@ pub fn register_orchestration_driver() {
 
 #[cfg(test)]
 mod tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use crate::agent_task_scheduler::AgentTaskPlan;
     use homeboy_core::test_support::with_isolated_home;
@@ -931,7 +938,8 @@ mod tests {
     }
 
     fn due_unmaterialized_admission(run_id: &str) {
-        agent_task_lifecycle::record_unmaterialized_cook_admission(
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
             run_id,
             serde_json::json!({
                 "placement": { "requested": "auto", "local_fallback": false },
@@ -1081,7 +1089,8 @@ mod tests {
                 ("explicit-capability-compatible", "supported"),
                 ("explicit-capability-incompatible", "missing"),
             ] {
-                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                    &test_lifecycle_store(),
                     run_id,
                     serde_json::json!({
                         "placement": {
@@ -1444,8 +1453,11 @@ mod tests {
     fn pre_supervisor_detached_cook_admission_is_not_reconciled_as_stale_work() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-pre-supervisor-cook";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist detached admission");
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist detached admission");
 
             let report = reconcile_stale_active_runs(false).expect("reconcile admission state");
 
@@ -1472,8 +1484,11 @@ mod tests {
                 ("expired-pre-supervisor", false),
                 ("expired-legacy-pending", true),
             ] {
-                agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                    .expect("persist detached admission");
+                agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                    &test_lifecycle_store(),
+                    cook_id,
+                )
+                .expect("persist detached admission");
                 agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
                     if legacy {
                         record.metadata["detached_cook_handoff"]
@@ -1514,9 +1529,13 @@ mod tests {
     fn attached_detached_admission_outlives_its_pre_supervisor_deadline() {
         with_isolated_home(|_| {
             let cook_id = "attached-detached-admission";
-            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-                .expect("persist detached admission");
-            agent_task_lifecycle::record_detached_cook_handoff_child(
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist detached admission");
+            agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 1,
                 homeboy_core::process::ProcessStartIdentity::Macos {
@@ -1525,8 +1544,12 @@ mod tests {
                 },
             )
             .expect("attach child identity");
-            agent_task_lifecycle::record_detached_cook_supervisor(cook_id, "supervisor-1")
-                .expect("attach supervisor");
+            agent_task_lifecycle::record_detached_cook_supervisor_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                "supervisor-1",
+            )
+            .expect("attach supervisor");
             agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
                 record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
                     serde_json::json!("2000-01-01T00:00:00+00:00");
@@ -1587,7 +1610,8 @@ mod tests {
     fn unmaterialized_admission_retries_reconnect_once_under_a_fenced_lease() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-unmaterialized-reconnect";
-            agent_task_lifecycle::record_unmaterialized_cook_admission(
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 serde_json::json!({
                     "placement": {
@@ -1692,7 +1716,8 @@ mod tests {
     fn cancelled_unmaterialized_admission_never_invokes_replay() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-unmaterialized-cancelled";
-            agent_task_lifecycle::record_unmaterialized_cook_admission(
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 serde_json::json!({
                     "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false },
@@ -1719,7 +1744,8 @@ mod tests {
     fn live_materializer_identity_blocks_duplicate_replay() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-materializing-fence";
-            agent_task_lifecycle::record_unmaterialized_cook_admission(
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 serde_json::json!({ "placement": { "local_fallback": false } }),
                 "queued",
@@ -1794,7 +1820,8 @@ mod tests {
                 ),
                 ("reconcile-absent-materializer", false, None),
             ] {
-                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                    &test_lifecycle_store(),
                     cook_id,
                     serde_json::json!({ "placement": { "local_fallback": false } }),
                     "queued",
@@ -1850,7 +1877,8 @@ mod tests {
     fn restart_replay_converges_to_the_new_live_materializer() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-restart-materializer";
-            agent_task_lifecycle::record_unmaterialized_cook_admission(
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 serde_json::json!({ "placement": { "local_fallback": false } }),
                 "queued",
@@ -1919,7 +1947,8 @@ mod tests {
     fn scoped_reconcile_never_scans_or_mutates_a_sibling_admission() {
         with_isolated_home(|_| {
             for cook_id in ["scoped-admission-target", "scoped-admission-sibling"] {
-                agent_task_lifecycle::record_unmaterialized_cook_admission(
+                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                    &test_lifecycle_store(),
                     cook_id,
                     serde_json::json!({ "placement": { "local_fallback": false } }),
                     "blocked_runner_unavailable",
@@ -1957,7 +1986,8 @@ mod tests {
     fn unmaterialized_admission_exhaustion_terminalizes_without_materialization() {
         with_isolated_home(|_| {
             let cook_id = "reconcile-unmaterialized-exhausted";
-            agent_task_lifecycle::record_unmaterialized_cook_admission(
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
                 cook_id,
                 serde_json::json!({
                     "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false }

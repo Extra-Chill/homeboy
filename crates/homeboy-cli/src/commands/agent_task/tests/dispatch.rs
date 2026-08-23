@@ -661,6 +661,52 @@ fn cook_rejects_ambiguous_repository_identity_across_destination_forms() {
 }
 
 #[test]
+fn cook_exact_component_slug_disambiguates_shared_monorepo_remote() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("repository checkout");
+        init_runtime_component_checkout(checkout.path());
+        let remote = "https://github.com/example/wp-build.git";
+        add_remote(checkout.path(), "origin", remote);
+        for id in [
+            "site-forge",
+            "site-generation-agents",
+            "wp-build",
+            "wp-build-repo",
+            "wp-build-theme",
+        ] {
+            write_component_without_collision_validation(homeboy::core::component::Component {
+                id: id.to_string(),
+                local_path: checkout.path().display().to_string(),
+                remote_url: Some(remote.to_string()),
+                ..Default::default()
+            });
+        }
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "wp-build".to_string(),
+            "--cwd".to_string(),
+            checkout.path().display().to_string(),
+            "--to-worktree".to_string(),
+            checkout.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("exact component slug must disambiguate its shared monorepo remote");
+
+        assert_eq!(args.dispatch.repo.as_deref(), Some("wp-build"));
+        assert_eq!(
+            args.repository_identity.expect("repository identity")["component_id"],
+            "wp-build"
+        );
+    });
+}
+
+#[test]
 fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback() {
     with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source checkout");

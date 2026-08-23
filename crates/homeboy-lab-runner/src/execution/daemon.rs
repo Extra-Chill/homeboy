@@ -18,7 +18,6 @@ use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::super::daemon_http_get::daemon_get;
-#[cfg(test)]
 use super::super::evidence::{local_job_run_id, runner_exec_run_label};
 use super::super::evidence::{
     mirror_daemon_evidence, mirror_daemon_job_progress, terminalize_mirrored_daemon_job,
@@ -225,6 +224,9 @@ pub(super) fn exec_via_daemon(
                     )?;
                 }
             }
+            Ok(())
+        },
+        |job| {
             if let Some(run_id) = run_id.as_deref() {
                 let token = uuid::Uuid::new_v4().to_string();
                 let store = lease_store
@@ -284,7 +286,11 @@ pub(super) fn exec_via_daemon(
             *daemon_endpoint.borrow_mut() = endpoint;
             Ok(refreshed)
         },
-        |job_id| fetch_daemon_events(&client, &daemon_endpoint.borrow(), job_id),
+        |job| {
+            fetch_daemon_events(&client, &daemon_endpoint.borrow(), &job.id.to_string()).map_err(
+                |error| lab_terminal_result_transport_error(runner, &cwd, &command, job, error),
+            )
+        },
         |job, events, result| {
             let request = crate::evidence::MirrorEvidenceRequest::new(
                 runner,
@@ -2058,10 +2064,14 @@ pub(super) fn daemon_identity_transition(
     })
 }
 
-/// Only the handoff tests construct this error shape. It was already reachable
-/// from nothing but tests; deleting the ambient lifecycle wrappers this file
-/// sat beside is what made the compiler say so (#7505).
-#[cfg(test)]
+/// The terminal transport error shape, used by the daemon's own result
+/// delivery and by the handoff tests.
+///
+/// This carried `#[cfg(test)]` between #13140 and this commit, which broke
+/// the non-test build. `cargo check --workspace --tests` cannot see that
+/// class of mistake: with only test targets requested, the library is
+/// compiled once under `cfg(test)` and the ordinary configuration is never
+/// checked at all.
 pub(super) fn lab_terminal_result_transport_error(
     runner: &Runner,
     cwd: &str,

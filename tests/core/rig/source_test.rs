@@ -216,7 +216,7 @@ fn test_remove_source() {
         true,
     )
     .expect("install all");
-    let manual = homeboy_core::paths::rig_config("manual").expect("manual rig path");
+    let manual = homeboy_core::paths::rig_config_in_root(&test_config_root(), "manual");
     fs::write(&manual, minimal_rig("manual")).expect("manual rig");
 
     let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
@@ -224,8 +224,8 @@ fn test_remove_source() {
     assert_eq!(result.removed.len(), 2);
     assert!(result.skipped.is_empty());
     assert!(result.removed_package_path.is_none());
-    assert!(!homeboy_core::paths::rig_config("alpha").unwrap().exists());
-    assert!(!homeboy_core::paths::rig_config("beta").unwrap().exists());
+    assert!(!homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha").exists());
+    assert!(!homeboy_core::paths::rig_config_in_root(&test_config_root(), "beta").exists());
     assert!(
         !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha").exists()
     );
@@ -249,7 +249,7 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
         false,
     )
     .expect("install");
-    let config = homeboy_core::paths::rig_config("alpha").expect("rig config");
+    let config = homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha");
     fs::remove_file(&config).expect("remove symlink");
     fs::write(&config, minimal_rig("replacement")).expect("replacement rig");
 
@@ -307,7 +307,7 @@ fn remove_source_treats_copied_config_as_owned_when_contents_match() {
         false,
     )
     .expect("install");
-    let config = homeboy_core::paths::rig_config("alpha").expect("rig config");
+    let config = homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha");
     fs::remove_file(&config).expect("remove symlink");
     fs::copy(&source, &config).expect("copy rig config");
 
@@ -327,7 +327,7 @@ fn remove_source_treats_copied_config_as_owned_when_contents_match() {
 #[test]
 fn sources_list_reports_corrupt_metadata_and_missing_configs() {
     let _home = HomeGuard::new();
-    fs::create_dir_all(homeboy_core::paths::rig_sources().expect("sources dir"))
+    fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
         .expect("sources dir");
     fs::write(
         homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "broken"),
@@ -425,14 +425,14 @@ fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
 #[test]
 fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
     let _home = HomeGuard::new();
-    fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources dir"))
+    fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
         .expect("rig sources dir");
-    fs::create_dir_all(homeboy_core::paths::stack_sources().expect("stack sources dir"))
-        .expect("stack sources dir");
+    fs::create_dir_all(homeboy_core::paths::stack_sources_in_root(
+        &test_config_root(),
+    ))
+    .expect("stack sources dir");
     fs::write(
-        homeboy_core::paths::rig_sources()
-            .expect("rig sources dir")
-            .join("ignored.txt"),
+        homeboy_core::paths::rig_sources_in_root(&test_config_root()).join("ignored.txt"),
         "not json",
     )
     .expect("non-json metadata");
@@ -441,7 +441,8 @@ fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
         "not json",
     )
     .expect("broken stack metadata");
-    fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
+    fs::create_dir_all(homeboy_core::paths::stacks_in_root(&test_config_root()))
+        .expect("stacks dir");
     fs::write(
         homeboy_core::paths::stack_config_in_root(&test_config_root(), "broken-stack"),
         minimal_stack("broken-stack", "broken"),
@@ -488,8 +489,11 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     assert_eq!(result.updated[0].id, "alpha");
     assert_eq!(result.updated[0].previous_revision, before);
     assert_ne!(result.updated[0].source_revision, before);
-    let installed = fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
-        .expect("installed rig");
+    let installed = fs::read_to_string(homeboy_core::paths::rig_config_in_root(
+        &test_config_root(),
+        "alpha",
+    ))
+    .expect("installed rig");
     assert!(installed.contains("alpha rig updated"));
     assert_eq!(
         crate::read_source_metadata("alpha")
@@ -580,11 +584,12 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
         homeboy_core::git::short_head_revision_at(Path::new(&installed_root)),
         installed_revision
     );
-    assert!(
-        !fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
-            .expect("installed rig")
-            .contains("remote update")
-    );
+    assert!(!fs::read_to_string(homeboy_core::paths::rig_config_in_root(
+        &test_config_root(),
+        "alpha"
+    ))
+    .expect("installed rig")
+    .contains("remote update"));
 }
 
 #[test]
@@ -620,8 +625,11 @@ fn update_all_reports_broken_sources_and_continues() {
     assert!(result.failed[0].reason.contains("missing"));
     assert_eq!(result.updated.len(), 1);
     assert_eq!(result.updated[0].id, "good");
-    let installed = fs::read_to_string(homeboy_core::paths::rig_config("good").unwrap())
-        .expect("installed good rig");
+    let installed = fs::read_to_string(homeboy_core::paths::rig_config_in_root(
+        &test_config_root(),
+        "good",
+    ))
+    .expect("installed good rig");
     assert!(installed.contains("good rig updated"));
 }
 
@@ -656,17 +664,16 @@ fn refresh_source_selector_updates_recorded_package() {
     assert_eq!(result.updated[0].source, source);
     assert_eq!(
         result.updated[0].path,
-        homeboy_core::paths::rig_config("alpha")
-            .unwrap()
-            .to_string_lossy()
+        homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha").to_string_lossy()
     );
     assert_eq!(result.updated[0].previous_revision, before);
     assert_ne!(result.updated[0].source_revision, before);
-    assert!(
-        fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
-            .expect("installed rig")
-            .contains("alpha rig refreshed")
-    );
+    assert!(fs::read_to_string(homeboy_core::paths::rig_config_in_root(
+        &test_config_root(),
+        "alpha"
+    ))
+    .expect("installed rig")
+    .contains("alpha rig refreshed"));
 }
 
 #[test]

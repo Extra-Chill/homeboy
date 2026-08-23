@@ -701,11 +701,7 @@ impl Drop for AdmissionLock {
     }
 }
 
-pub fn pin_current() -> Result<Value> {
-    pin_current_in_root(&runtime_root()?)
-}
-
-/// [`pin_current`] under an already-resolved runtime root.
+/// `pin_current` under an already-resolved runtime root.
 pub fn pin_current_in_root(root: &Path) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     pin_current_unlocked()
@@ -1133,13 +1129,7 @@ pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result
     ))
 }
 
-/// Upgrade a legacy pin into the immutable content-addressed v2 format.
-/// The caller persists the returned metadata only after this has completed.
-pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
-    migrate_legacy_pin_in_root(&runtime_root()?, runtime)
-}
-
-/// [`migrate_legacy_pin`] under an already-resolved runtime root.
+/// `migrate_legacy_pin` under an already-resolved runtime root.
 pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     migrate_legacy_pin_unlocked(runtime)
@@ -1212,18 +1202,7 @@ pub fn validate(runtime: &Value) -> Result<()> {
     validate_pin(runtime)
 }
 
-/// Restore a missing or corrupted pin from one explicitly supplied trusted
-/// artifact or source checkout without changing the durable identity or digest
-/// contract.
-pub fn recover_pin(
-    runtime: &Value,
-    artifact: Option<&Path>,
-    source: Option<&Path>,
-) -> Result<Value> {
-    recover_pin_in_root(&runtime_root()?, runtime, artifact, source)
-}
-
-/// [`recover_pin`] under an already-resolved runtime root.
+/// `recover_pin` under an already-resolved runtime root.
 pub fn recover_pin_in_root(
     root: &Path,
     runtime: &Value,
@@ -3124,6 +3103,18 @@ mod identity_probe_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// A test is the entry point for its own unit of work, so the runtime root
+    /// resolves once here and the rooted entry points take it (#7505).
+    fn test_runtime_root() -> std::path::PathBuf {
+        runtime_root_in(
+            &crate::paths::PathRoots::from_environment()
+                .expect("path roots")
+                .data()
+                .to_path_buf(),
+        )
+        .expect("runtime root")
+    }
     use super::*;
 
     #[cfg(unix)]
@@ -4166,7 +4157,7 @@ mod tests {
     #[test]
     fn admission_replaces_a_stale_active_generation_with_the_submitting_runtime() {
         crate::test_support::with_isolated_home(|_| {
-            let mut runtime_a = pin_current().expect("pin runtime A");
+            let mut runtime_a = pin_current_in_root(&test_runtime_root()).expect("pin runtime A");
             runtime_a["originating"]["build_identity"] = json!("homeboy runtime-a");
             runtime_a["requested"] = json!("homeboy runtime-a");
             runtime_a["current"] = json!("homeboy runtime-a");
@@ -4203,7 +4194,8 @@ mod tests {
     #[test]
     fn pin_current_uses_the_explicit_test_controller_fixture() {
         crate::test_support::with_isolated_home(|_| {
-            let runtime = pin_current().expect("pin explicit controller fixture");
+            let runtime =
+                pin_current_in_root(&test_runtime_root()).expect("pin explicit controller fixture");
             let source = runtime
                 .pointer("/originating/executable")
                 .and_then(Value::as_str)
@@ -4264,7 +4256,8 @@ mod tests {
                 .clear();
             TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
 
-            let runtime = pin_current().expect("pin test controller fixture");
+            let runtime =
+                pin_current_in_root(&test_runtime_root()).expect("pin test controller fixture");
             let candidate = runtime
                 .pointer("/originating/pinned_executable")
                 .and_then(Value::as_str)
@@ -4554,7 +4547,8 @@ mod tests {
                 "pinned_executable": legacy,
             }});
 
-            let migrated = migrate_legacy_pin(&runtime).expect("migrate legacy pin");
+            let migrated = migrate_legacy_pin_in_root(&test_runtime_root(), &runtime)
+                .expect("migrate legacy pin");
             let destination = PathBuf::from(
                 migrated["originating"]["pinned_executable"]
                     .as_str()
@@ -4689,8 +4683,9 @@ mod tests {
             assert!(error.message.contains("hash mismatch"));
             assert!(error.message.contains(&digest_a));
 
-            let recovered = recover_pin(&runtime_a, Some(&artifact_a), None)
-                .expect("recover runtime A from trusted artifact");
+            let recovered =
+                recover_pin_in_root(&test_runtime_root(), &runtime_a, Some(&artifact_a), None)
+                    .expect("recover runtime A from trusted artifact");
             let recovered_pin = PathBuf::from(
                 recovered["originating"]["pinned_executable"]
                     .as_str()

@@ -41,7 +41,7 @@ const OPERATION_CLAIMS_KEY: &str = "cook_operation_claims";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimOutcome {
     /// This pass acquired a fresh lease and must perform the external effect,
-    /// then call [`complete_cook_operation`].
+    /// then call `complete_cook_operation`.
     Acquired,
     /// A prior pass already completed this operation. The immutable recorded
     /// result is returned; the caller must not repeat the effect.
@@ -73,26 +73,6 @@ pub struct OperationClaim {
     pub lease_deadline: Option<String>,
     pub owner_pid: Option<u32>,
     pub result: Option<Value>,
-}
-
-/// Reserve a cook side-effect operation before an external effect.
-///
-/// Writes a durable `running` lease keyed by `operation_key` when none exists,
-/// returning [`ClaimOutcome::Acquired`]. If the operation already completed, the
-/// recorded result is returned via [`ClaimOutcome::AlreadyCompleted`] and no
-/// lease is taken. If a live owner holds the claim, [`ClaimOutcome::LeaseHeld`]
-/// is returned even after the nominal deadline: a provider dispatch can outlive
-/// the lease interval, and must retain ownership for its full lifecycle. An
-/// expired claim without a live owner is reclaimable and is re-leased to this
-/// pass (the caller is expected to reconcile any partially-applied external
-/// effect via Git/PR lookup first).
-pub fn claim_cook_operation(
-    run_id: &str,
-    operation_key: &str,
-    lease: Duration,
-) -> Result<ClaimOutcome> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    claim_cook_operation_in_store(&lifecycle_store, run_id, operation_key, lease)
 }
 
 pub fn claim_cook_operation_in_store(
@@ -167,18 +147,6 @@ pub fn claim_cook_operation_in_store(
         true
     })?;
     Ok(outcome)
-}
-
-/// Record the immutable result of a completed cook side-effect operation.
-///
-/// Transitions the `(run_id, operation_key)` claim to `completed` and stores the
-/// result. Idempotent: completing an already-completed claim leaves the first
-/// recorded result intact. Returns an error if no claim was ever reserved (a
-/// terminal result without its durable lease is a lifecycle invariant break,
-/// mirroring [`record_provider_execution_terminal`]).
-pub fn complete_cook_operation(run_id: &str, operation_key: &str, result: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    complete_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
 }
 
 pub fn complete_cook_operation_in_store(
@@ -306,14 +274,6 @@ pub fn recover_completed_cook_operation_in_store(
         true
     })?;
     Ok(())
-}
-
-/// Terminalize a claimed operation that did not produce its external result.
-/// Failed claims retain their exact bounded diagnostic but are intentionally
-/// reclaimable by a later explicit continuation.
-pub fn fail_cook_operation(run_id: &str, operation_key: &str, result: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    fail_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
 }
 
 pub fn fail_cook_operation_in_store(

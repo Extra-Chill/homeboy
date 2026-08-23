@@ -270,6 +270,15 @@ impl AgentTaskLifecycleStore {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
     }
 
+    pub fn record_workspace_snapshot_fence_invalidation(
+        &self,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        error: &Error,
+    ) -> Result<AgentTaskRunRecord> {
+        super::record_workspace_snapshot_fence_invalidation_in_store(self, run_id, plan, error)
+    }
+
     pub fn record_lab_offload_planned(
         &self,
         input: super::LabOffloadProxyPlan<'_>,

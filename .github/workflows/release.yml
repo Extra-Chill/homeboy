@@ -328,15 +328,26 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.95.0
 
+      - name: Resolve Cargo build cache
+        id: cargo-cache
+        run: |
+          lock_digest="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          fingerprint="$(printf 'Cargo.lock:%s\n' "${lock_digest}" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "key=${RUNNER_OS}-cargo-build-${fingerprint}"
+            echo "paths<<HOMEBOY_CACHE_PATHS"
+            echo "${HOME}/.cargo/registry"
+            echo "${HOME}/.cargo/git"
+            echo "target"
+            echo "HOMEBOY_CACHE_PATHS"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-gate-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-release-gate-
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
+          restore-keys: ${{ runner.os }}-cargo-build-
 
       - name: Build homeboy
         run: cargo build --release

@@ -1274,6 +1274,12 @@ mod tests {
 
     use super::*;
 
+    /// A test is the entry point for its own unit of work, so resolving once
+    /// here is a boundary resolution (#7505).
+    fn test_config_root() -> std::path::PathBuf {
+        homeboy_core::paths::homeboy().expect("config root")
+    }
+
     fn initialize_git_checkout(checkout_root: &Path) {
         let status = Command::new("git")
             .args(["init", "--quiet"])
@@ -1449,7 +1455,7 @@ mod tests {
     }
 
     fn write_checkout_root_rig(rig_id: &str, component_path: &Path, checkout_root: &str) {
-        let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+        let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
         std::fs::create_dir_all(&rig_dir).expect("create rig dir");
         std::fs::write(
             rig_dir.join(format!("{rig_id}.json")),
@@ -1580,7 +1586,7 @@ mod tests {
             std::fs::create_dir_all(rig_package.join("rigs/jetpack-api-route-inventory"))
                 .expect("rig package");
             std::fs::create_dir_all(&component).expect("component checkout");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("jetpack-api-route-inventory.json"),
@@ -1732,7 +1738,7 @@ mod tests {
     #[test]
     fn default_component_selects_its_materialized_checkout() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("default-component.json"),
@@ -1796,7 +1802,7 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/woocommerce");
             std::fs::create_dir_all(checkout.join("plugins/woocommerce")).expect("checkout");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("woocommerce-performance.json"),
@@ -1853,7 +1859,7 @@ mod tests {
         // entry. Planning is network-free; the immutable fetch occurs only on
         // the selected Lab runner during the later sync phase.
         homeboy_core::test_support::with_isolated_home(|_| {
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             let base_sha = "0123456789abcdef0123456789abcdef01234567";
             let pr_sha = "89abcdef0123456789abcdef0123456789abcdef";
@@ -1925,7 +1931,7 @@ mod tests {
             let override_component = override_checkout.join("packages/example-component");
             std::fs::create_dir_all(checkout.join("packages/example-component")).expect("checkout");
             std::fs::create_dir_all(&override_component).expect("override checkout");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("example-monorepo.json"),
@@ -2015,7 +2021,7 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/example-component");
             std::fs::create_dir_all(&checkout).expect("checkout");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("example-fuzz.json"),
@@ -2069,7 +2075,7 @@ mod tests {
             let checkout_root = home.path().join("Developer/example");
             let component_path = checkout_root.join("projects/plugins/example-component");
             std::fs::create_dir_all(&component_path).expect("component path");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("example-fuzz.json"),
@@ -2130,7 +2136,7 @@ mod tests {
             let override_component = override_checkout.join("packages/example-component");
             std::fs::create_dir_all(checkout.join("packages/example-component")).expect("checkout");
             std::fs::create_dir_all(&override_component).expect("override checkout");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("example-monorepo.json"),
@@ -2268,7 +2274,7 @@ mod tests {
             let checkout = home.path().join("Developer/studio-web");
             std::fs::create_dir_all(checkout.join("rigs/studio-web-product-matrix"))
                 .expect("rig package");
-            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
                 rig_dir.join("studio-web-product-matrix.json"),
@@ -2284,7 +2290,7 @@ mod tests {
                 .to_string(),
             )
             .expect("save rig");
-            std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
+            std::fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
                 .expect("create rig sources");
             homeboy_rig::install::write_source_metadata(
                 &homeboy_core::paths::homeboy().expect("config root"),

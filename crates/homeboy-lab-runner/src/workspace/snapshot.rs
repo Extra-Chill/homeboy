@@ -821,7 +821,10 @@ pub(super) fn is_excluded(
     excludes.iter().any(|pattern| {
         let root_anchored = pattern.starts_with("./");
         let pattern = pattern.trim_start_matches("./");
-        let directory_pattern = pattern.trim_end_matches('/');
+        // `path/**` denotes the complete directory subtree. Match its root too
+        // so traversal and tar do not retain an empty directory after a late
+        // context artifact appears beneath it.
+        let directory_pattern = pattern.trim_end_matches("/**").trim_end_matches('/');
         pattern == rel
             || directory_pattern == rel
             || glob_match(pattern, rel)
@@ -2101,7 +2104,7 @@ pub(super) fn materialize_snapshot_stage(
     let archive_excludes = excludes
         .iter()
         .filter(|pattern| !is_root_input_exclude(pattern))
-        .cloned()
+        .flat_map(|pattern| snapshot_archive_excludes(pattern))
         .collect::<Vec<_>>();
     let source_archive = format!(
         "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - --null -T -",
@@ -2150,6 +2153,16 @@ fn is_root_input_exclude(pattern: &str) -> bool {
     };
     let root = pattern.trim_end_matches("/**").trim_end_matches('/');
     !root.is_empty() && !root.contains('/')
+}
+
+fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
+    let mut excludes = vec![pattern.to_string()];
+    if let Some(directory) = pattern.strip_suffix("/**") {
+        if !directory.is_empty() {
+            excludes.push(directory.to_string());
+        }
+    }
+    excludes
 }
 
 fn snapshot_manifest_tar_input(manifest: &SnapshotInputManifest) -> String {

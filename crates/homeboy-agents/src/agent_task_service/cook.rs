@@ -500,6 +500,11 @@ pub struct CookProgressEvent<'a> {
     pub attempt: u32,
     /// Controller-owned description of the phase.
     pub detail: Option<&'a str>,
+    /// The terminal Cook result, when this is the terminal progress event.
+    ///
+    /// This remains separate from `detail`, which is persisted as the Cook's
+    /// status string for durable readers.
+    pub terminal_success: Option<bool>,
     /// What the provider is doing right now, when it is observable.
     pub activity: Option<&'a CookProviderActivity>,
 }
@@ -531,6 +536,7 @@ fn report_cook_progress(
         attempt,
         detail,
         None,
+        None,
     )
 }
 
@@ -543,6 +549,7 @@ fn report_cook_progress_with_activity(
     attempt: u32,
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
+    terminal_success: Option<bool>,
 ) -> Result<()> {
     lifecycle_store.record_cook_progress_with_activity(
         run_id,
@@ -557,6 +564,7 @@ fn report_cook_progress_with_activity(
         run_id,
         attempt,
         detail,
+        terminal_success,
         activity,
     };
     if let Some(observer) = observer {
@@ -595,19 +603,6 @@ fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport
 /// with the finalization result after it is durable. A resumed pass revalidates
 /// the existing PR idempotently, including its live Git and GitHub identities
 /// (#8357).
-fn finalize_with_operation_claim(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    finalize: &mut dyn FnMut(
-        &AgentTaskCookServiceOptions,
-        &str,
-        &AgentTaskPromotionReport,
-    ) -> Result<Value>,
-) -> Result<Value> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    finalize_with_operation_claim_in_store(&lifecycle_store, options, run_id, promotion, finalize)
-}
 
 fn finalize_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -654,22 +649,6 @@ fn finalize_with_operation_claim_in_store(
             Ok(finalization)
         }
     }
-}
-
-/// Promote a cook attempt under a durable exactly-once operation claim.
-///
-/// `promote_or_load_attempt_in_store` already loads an already-persisted promotion, but
-/// the fresh-promote path performs its external effect (`promote_attempt`) and
-/// only then records the result. A controller crash in that window re-runs the
-/// effect on restart. The claim closes it: reserve `promote:<run_id>` before the
-/// effect, complete it after the result is durable, and on a resumed pass return
-/// the persisted promotion instead of repeating the effect (#8357).
-fn promote_with_operation_claim(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-) -> Result<AgentTaskPromotionReport> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    promote_with_operation_claim_in_store(&lifecycle_store, options, run_id)
 }
 
 fn promote_with_operation_claim_in_store(
@@ -4117,7 +4096,7 @@ fn run_cook_reported(
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
         let phase = result.value.disposition.phase();
-        if let Err(error) = report_cook_progress(
+        if let Err(error) = report_cook_progress_with_activity(
             lifecycle_store,
             durable_observer,
             &result.value.cook_id,
@@ -4125,6 +4104,8 @@ fn run_cook_reported(
             phase,
             attempt,
             Some(&result.value.status),
+            None,
+            (phase == "terminal").then_some(result.exit_code == 0),
         ) {
             return durable_cook_error_report_with_store(
                 store,
@@ -4330,6 +4311,9 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
+    if !store.recipe_exists(&options.cook_id) {
+        pin_initial_cook_workspace_base(&mut options)?;
+    }
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -4467,10 +4451,29 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        validate_cook_workspace(&options).map_err(|mut error| {
+        let workspace_base = validate_cook_workspace(&options).map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
+        if let Some(workspace_base) = workspace_base {
+            match workspace_base {
+                CookWorkspaceBaseValidation::Snapshot(snapshot) => {
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        "cook_workspace_base_snapshot",
+                        snapshot,
+                    )?;
+                }
+                CookWorkspaceBaseValidation::Convergence(evidence) => {
+                    record_cook_workspace_base_convergence(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        evidence,
+                    )?;
+                }
+            }
+        }
     }
     validate_cook_candidate_group(&options.initial_plan)?;
     // Reserve the source tree's projected copy before the scheduler creates its
@@ -4894,9 +4897,29 @@ fn run_cook_spine(
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                    validate_cook_workspace(&options)?;
+                let workspace_base = if options.attempt_dispatcher.is_none()
+                    || options.source_worktree_path.is_some()
+                {
+                    validate_cook_workspace(&options)?
+                } else {
+                    None
+                };
+                let base_snapshot = match workspace_base {
+                    Some(CookWorkspaceBaseValidation::Snapshot(snapshot)) => Some(snapshot),
+                    Some(CookWorkspaceBaseValidation::Convergence(evidence)) => {
+                        record_cook_workspace_base_convergence(lifecycle_store, &run_id, evidence)?;
+                        None
+                    }
+                    None => None,
                 }
+                .or_else(|| {
+                    lifecycle_store
+                        .read_record(&run_id)
+                        .ok()
+                        .and_then(|record| {
+                            record.metadata.get("cook_workspace_base_snapshot").cloned()
+                        })
+                });
                 if options.attempt_dispatcher.is_none() {
                     homeboy_core::cleanup::admit_reconstructable_artifact_work(
                         plan.tasks
@@ -4988,6 +5011,17 @@ fn run_cook_spine(
                     .as_ref()
                     .or(re_materialized_baseline.as_ref());
                 let mut dispatch_plan = plan.clone();
+                if let Some(snapshot) = base_snapshot {
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        lifecycle_store,
+                        &run_id,
+                        "cook_workspace_base_snapshot",
+                        snapshot.clone(),
+                    )?;
+                    for task in &mut dispatch_plan.tasks {
+                        task.metadata["cook_workspace_base_snapshot"] = snapshot.clone();
+                    }
+                }
                 if let Some(baseline) = effective_baseline {
                     for task in &mut dispatch_plan.tasks {
                         // The baseline is immutable evidence for this dispatch,
@@ -5114,6 +5148,7 @@ fn run_cook_spine(
                                             .unwrap_or("provider execution is still running"),
                                     ),
                                     (!activity.is_empty()).then_some(&activity),
+                                    None,
                                 );
                                 // Supervision evidence is written even when the
                                 // policy is undeclared: the resource timeline is
@@ -5495,6 +5530,45 @@ fn run_cook_spine(
             }
             Err(error) => return Err(error),
         };
+        if aggregate.outcomes.iter().any(|outcome| {
+            outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Failed
+                && outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.workspace_snapshot_invalidated"
+                        && diagnostic.data["pre_provider"] == Value::Bool(true)
+                })
+        }) {
+            let error = Error::validation_invalid_argument(
+                "workspace",
+                "Cook workspace snapshot was invalidated before provider execution",
+                Some(run_id.clone()),
+                None,
+            )
+            .with_retryable(true);
+            let transitioned = lifecycle_store
+                .record_workspace_snapshot_fence_invalidation(&run_id, &plan, &error)?;
+            if transitioned.metadata["pre_execution_failure"]["phase"]
+                == Value::String("workspace_snapshot_fence".to_string())
+                && transitioned.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
+                && transitioned.metadata["provider_executions_consumed"].as_u64() == Some(0)
+            {
+                let failure = pre_execution_failure_details(Some(&transitioned), &error);
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: format!("{:?}", transitioned.state),
+                    aggregate_path: transitioned.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(pre_execution_failure_report(
+                    cook_id,
+                    attempts,
+                    failure,
+                    error,
+                    Some(&run_id),
+                ));
+            }
+        }
         observed_budget_used.add(execution_budget_usage(&aggregate));
         let mut budget_used = observed_budget_used;
         budget_used.same_provider_retries = budget_used
@@ -5694,6 +5768,7 @@ fn run_cook_spine(
             })?;
             compare_gate_failures_to_verified_base(
                 &mut promotion,
+                std::path::Path::new(&repository_root),
                 std::path::Path::new(&repository_root),
                 &base_sha,
                 options.gates.gate_timeout(),
@@ -6072,6 +6147,21 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            AgentTaskCookLoopStatus::BaselineInconclusive => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "baseline_inconclusive",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "immutable baseline replay was inconclusive; repair the gate baseline setup or replay environment before rerunning Cook"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::NoChanges => {
                 return Ok(cook_report(CookReportInput {
                     cook_id,
@@ -6221,24 +6311,6 @@ fn run_cook_spine(
     }))
 }
 
-fn resumable_cook_run_id(
-    recipe: &super::AgentTaskCookRecipe,
-    cook_id: &str,
-    initial_run_id: &str,
-    requested_attempt: u32,
-    verification_pending_continuation: bool,
-) -> Option<String> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().ok()?;
-    resumable_cook_run_id_in_store(
-        &lifecycle_store,
-        recipe,
-        cook_id,
-        initial_run_id,
-        requested_attempt,
-        verification_pending_continuation,
-    )
-}
-
 fn resumable_cook_run_id_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     recipe: &super::AgentTaskCookRecipe,
@@ -6353,7 +6425,9 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 /// Validate the Cook target before a provider can run. An explicit source path
 /// is already the authoritative workspace; otherwise resolve the declared
 /// handle through the existing local/provider path.
-fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
+fn validate_cook_workspace(
+    options: &AgentTaskCookServiceOptions,
+) -> Result<Option<CookWorkspaceBaseValidation>> {
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
@@ -6476,18 +6550,146 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
     }
-    preflight_cook_workspace_base_ancestry(&target, &options.base)
-        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))?;
+    preflight_cook_workspace_base_ancestry_with_provider(&target, options)
+        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
+}
+
+/// Snapshot authority is passed to the scheduler, while convergence evidence is
+/// durable controller metadata. Keeping them distinct prevents provider details
+/// from being interpreted as an immutable workspace snapshot.
+#[derive(Debug)]
+enum CookWorkspaceBaseValidation {
+    Snapshot(Value),
+    Convergence(Value),
+}
+
+fn record_cook_workspace_base_convergence(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    evidence: Value,
+) -> Result<()> {
+    lifecycle_store.mutate_record(run_id, |record| {
+        record.metadata["cook_workspace_base_convergence"] = evidence;
+        true
+    })?;
     Ok(())
+}
+
+/// Capture the base once before a new Cook recipe freezes its execution
+/// lineage. Existing recipes retain their recorded boundary on every retry.
+fn pin_initial_cook_workspace_base(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    if options.task_base_sha.is_some() {
+        return Ok(());
+    }
+    let workspace = options
+        .source_worktree_path
+        .as_deref()
+        .or_else(|| {
+            std::path::Path::new(&options.to_worktree)
+                .is_dir()
+                .then_some(std::path::Path::new(&options.to_worktree))
+        })
+        .or_else(|| {
+            options
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.root.as_deref())
+                .map(std::path::Path::new)
+        });
+    let Some(workspace) = workspace.map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    pin_cook_workspace_base_at(options, &workspace)
+}
+
+fn pin_cook_workspace_base_at(
+    options: &mut AgentTaskCookServiceOptions,
+    workspace: &Path,
+) -> Result<()> {
+    if options.task_base_sha.is_some() {
+        return Ok(());
+    }
+    let Some(base) =
+        crate::agent_task_promotion::capture_declared_base(workspace, Some(&options.base))?
+    else {
+        return Ok(());
+    };
+    options.task_base_sha = Some(base.sha.clone());
+    options.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
+        "schema": "homeboy/cook-workspace-base/v1",
+        "base": base.base,
+        "sha": base.sha,
+    });
+    Ok(())
+}
+
+fn preflight_cook_workspace_base_ancestry_with_provider(
+    target: &Path,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<Option<CookWorkspaceBaseValidation>> {
+    let base = options.task_base_sha.as_deref().unwrap_or(&options.base);
+    match preflight_cook_workspace_base_ancestry(target, base) {
+        Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
+        Err(error)
+            if error.details["workspace_base_ancestry"]["direction"] == "behind"
+                && options.task_base_sha.is_some() =>
+        {
+            let config = homeboy_core::defaults::load_config();
+            let handle = if std::path::Path::new(&options.to_worktree).is_dir() {
+                let Some(resolution) =
+                    homeboy_core::worktree_providers::resolve_worktree_provider_path_from_config(
+                        target, &config,
+                    )?
+                else {
+                    return Err(error);
+                };
+                resolution.worktree.handle
+            } else {
+                options.to_worktree.clone()
+            };
+            let convergence = homeboy_core::worktree_providers::converge_apply_enabled_worktree_provider_to_base_from_config(
+                &handle,
+                base,
+                &config,
+            )?;
+            let snapshot =
+                preflight_cook_workspace_base_ancestry(target, base).map_err(|mut error| {
+                    error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
+                        "provider_id": convergence.provider_id,
+                        "handle": convergence.handle,
+                        "path": convergence.path,
+                        "base_sha": convergence.base_sha,
+                    });
+                    error
+                })?;
+            Ok(Some(match snapshot {
+                Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
+                None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
+                    "schema": "homeboy/cook-workspace-base-convergence/v1",
+                    "planned_base_sha": base,
+                    "provider_id": convergence.provider_id,
+                    "handle": convergence.handle,
+                    "path": convergence.path,
+                    "provider_evidence": convergence.evidence,
+                })),
+            }))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// A candidate diff is meaningful only when its destination contains the
 /// resolved base. Otherwise base-only files appear to be provider changes.
-fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<()> {
+/// A clean destination that is strictly behind is not mutated. Instead, the
+/// returned immutable base pin authorizes the scheduler's isolated attempt
+/// workspace. This keeps provider-managed destinations under their owner while
+/// ensuring provider output is based on the observed remote base.
+fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
         candidate_fingerprint(target.to_string_lossy().as_ref())?
     else {
-        return Ok(());
+        return Ok(None);
     };
     // A provider-owned Git destination can intentionally have no origin. When
     // origin is configured, resolve its authoritative base directly instead of
@@ -6498,12 +6700,27 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
         .output()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !origin.status.success() {
-        return Ok(());
+        return Ok(None);
     }
-    let Some(resolved_base) =
-        crate::agent_task_promotion::capture_declared_base(target, Some(base))?
-    else {
-        return Ok(());
+    let (declared_base, resolved_base) = if base.len() == 40
+        && base.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        (
+            base.to_string(),
+            homeboy_core::git::run_git(
+                target,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                "resolve pinned Cook base",
+            )?
+            .trim()
+            .to_string(),
+        )
+    } else {
+        let Some(base) = crate::agent_task_promotion::capture_declared_base(target, Some(base))?
+        else {
+            return Ok(None);
+        };
+        (base.base, base.sha)
     };
     let counts = homeboy_core::git::run_git(
         target,
@@ -6511,7 +6728,7 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
             "rev-list",
             "--left-right",
             "--count",
-            &format!("{}...HEAD", resolved_base.sha),
+            &format!("{resolved_base}...HEAD"),
         ],
         "compare Cook destination to resolved base",
     )?;
@@ -6525,26 +6742,92 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<(
             "could not classify Cook destination ancestry against resolved base".to_string(),
         ));
     };
-    if behind == 0 {
-        return Ok(());
+    let status = homeboy_core::git::run_git(
+        target,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify Cook destination cleanliness before base snapshot",
+    )?;
+    if !status.trim().is_empty() {
+        let mut error = Error::validation_invalid_argument(
+            "workspace",
+            "Cook destination has uncommitted changes; refusing provider execution",
+            Some(target.display().to_string()),
+            None,
+        );
+        error.details["workspace_base_ancestry"] = serde_json::json!({
+            "schema": "homeboy/cook-workspace-base-ancestry/v1",
+            "base": declared_base,
+            "resolved_base": resolved_base,
+            "destination_head": fingerprint.head,
+            "direction": "dirty",
+            "base_only_commits": behind,
+            "candidate_only_commits": ahead,
+            "next_action": "clean_destination_before_provider",
+        });
+        return Err(error);
     }
-    let direction = if ahead == 0 { "behind" } else { "diverged" };
+    if behind == 0 {
+        // An unchanged or ahead-only candidate already has a meaningful base
+        // relative to its source HEAD; preserve its existing dispatch path.
+        return Ok(None);
+    }
+    if ahead == 0 {
+        // A recipe-pinned base is controller authority to converge the managed
+        // provider checkout. An unpinned declared ref instead authorizes an
+        // isolated scheduler snapshot without mutating that checkout.
+        if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let direction = "behind";
+            let mut error = Error::validation_invalid_argument(
+                "base",
+                format!(
+                    "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
+                    base, resolved_base
+                ),
+                Some(target.display().to_string()),
+                Some(vec![format!(
+                    "Update the destination with `{}` and rerun Cook; provider execution has not started.",
+                    format!("git merge --ff-only {resolved_base}")
+                )]),
+            );
+            error.details["workspace_base_ancestry"] = serde_json::json!({
+                "schema": "homeboy/cook-workspace-base-ancestry/v1",
+                "base": base,
+                "resolved_base": resolved_base,
+                "destination_head": fingerprint.head,
+                "direction": direction,
+                "base_only_commits": behind,
+                "candidate_only_commits": ahead,
+                "next_action": "converge_destination_before_provider",
+            });
+            return Err(error.with_retryable(true));
+        }
+        return Ok(Some(serde_json::json!({
+            "schema": "homeboy/cook-workspace-base-snapshot/v1",
+            "base": declared_base,
+            "resolved_base": resolved_base,
+            "destination_head": fingerprint.head,
+            "base_only_commits": behind,
+            "candidate_only_commits": ahead,
+            "mode": "isolated_attempt_snapshot",
+        })));
+    }
+    let direction = "diverged";
     let mut error = Error::validation_invalid_argument(
         "base",
         format!(
             "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
-            resolved_base.base, resolved_base.sha
+            base, resolved_base
         ),
         Some(target.display().to_string()),
         Some(vec![format!(
             "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-            format!("git merge --ff-only {}", resolved_base.sha)
+            format!("git merge --ff-only {resolved_base}")
         )]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base-ancestry/v1",
-        "base": resolved_base.base,
-        "resolved_base": resolved_base.sha,
+        "base": base,
+        "resolved_base": resolved_base,
         "destination_head": fingerprint.head,
         "direction": direction,
         "base_only_commits": behind,
@@ -6850,6 +7133,14 @@ fn materialize_pending_cook_workspace(
     effective_lookup_timeout_ms: Option<u64>,
 ) -> Result<()> {
     restore_legacy_cook_provision(&mut options.initial_plan)?;
+    if options.task_base_sha.is_none() {
+        options.task_base_sha = options
+            .initial_plan
+            .metadata
+            .pointer("/cook_workspace_base/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
     let provider_id = |options: &AgentTaskCookServiceOptions| {
         options
             .initial_plan
@@ -6968,6 +7259,10 @@ fn materialize_pending_cook_workspace(
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
+    // Deferred provider materialization has no checkout at initial recipe
+    // persistence. Capture and persist this immutable boundary before Cook can
+    // admit or dispatch the materialized destination.
+    pin_cook_workspace_base_at(options, &target)?;
     validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
     for task in &mut options.initial_plan.tasks {
         task.workspace.root = Some(target.display().to_string());

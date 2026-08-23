@@ -79,6 +79,14 @@ use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBat
 
 use super::super::AgentTaskCommand;
 
+/// The tests below drive the store-rooted entry points. Resolving the store
+/// once here keeps the ambient lookup in one place and lets the ambient
+/// wrappers be deleted (#7505).
+fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+}
+
 #[test]
 fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
     with_isolated_home(|_| {
@@ -130,10 +138,20 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
 
         agent_task_lifecycle::submit_plan(&plan, Some(source_run_id)).expect("source attempt");
         agent_task_lifecycle::submit_plan(&plan, Some(retry_run_id)).expect("retry attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
-            .expect("source Cook identity");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
-            .expect("retry Cook identity");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("source Cook identity");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            retry_run_id,
+        )
+        .expect("retry Cook identity");
         let artifact = AgentTaskArtifact {
             id: "historical-patch".to_string(),
             kind: "patch".to_string(),
@@ -202,7 +220,8 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
             source_run_id,
         )
         .expect("controller projection");
-        agent_task_lifecycle::record_cook_finalization(
+        agent_task_lifecycle::record_cook_finalization_in_store(
+            &test_lifecycle_store(),
             source_run_id,
             json!({"status":"review_ready","pr_url":"https://example.test/pull/12971"}),
         )
@@ -266,8 +285,13 @@ fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
             .collect::<Vec<_>>();
         for (index, run_id) in run_ids.iter().enumerate() {
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("Cook attempt");
-            agent_task_lifecycle::record_cook_attempt(cook_id, (index + 1) as u32, run_id)
-                .expect("Cook index attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                (index + 1) as u32,
+                run_id,
+            )
+            .expect("Cook index attempt");
         }
         let retry_run_id = run_ids.last().expect("latest attempt");
         agent_task_lifecycle::rewrite_record_for_test(retry_run_id, |record| {
@@ -1142,8 +1166,13 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         homeboy::agents::agent_task_service::persist_initial_recipe(&options)
             .expect("persist immutable recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist provider attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
-            .expect("bind immutable Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind immutable Cook attempt");
         let executor = Arc::new(CountingCookExecutor::default());
         let before = continue_cook_with(
             CookContinueArgs {
@@ -1441,7 +1470,13 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         };
         homeboy::agents::agent_task_service::persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .unwrap();
         let provenance = |id: &str, path: &std::path::Path, patch: &str| AgentTaskArtifact {
             id: id.to_string(),
             kind: "patch".to_string(),
@@ -1656,7 +1691,13 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             .expect("persist Cook recipe");
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id))
             .expect("persist initial controller attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("record Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("record Cook attempt");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.metadata["cook_controller_failure"] = json!({
                 "code": "provider.to_worktree_failed",
@@ -1982,6 +2023,41 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retryable"], true);
         assert_eq!(record.metadata["transport_recovery"], "required");
+    });
+}
+
+#[test]
+fn unmaterialized_cook_run_requires_resume_without_execution_or_mutation() {
+    with_temp_home(|| {
+        let run_id = "run-cli-unmaterialized-cook";
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "blocked_runner_unavailable",
+            "runner disconnected",
+        )
+        .expect("record unmaterialized admission");
+        let before = agent_task_lifecycle::exact_record(run_id).expect("admission record");
+        let executor = Arc::new(CapturingExecutor::default());
+
+        let error = run_submitted_with_executor(run_id.to_string(), None, executor.clone())
+            .expect_err("unmaterialized parent requires fenced resume");
+
+        assert!(error.message.contains("fenced resume path"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message == format!("Run `homeboy agent-task resume {run_id}`.")));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id).expect("admission record after run"),
+            before,
+            "run must not create a runner job, mutate the parent, or consume provider work"
+        );
     });
 }
 
@@ -2458,10 +2534,20 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             .expect("persist source run");
         agent_task_lifecycle::submit_plan(&observed_plan, Some(run_id))
             .expect("persist review run");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
-            .expect("record source attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id)
-            .expect("record review attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("record source attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            run_id,
+        )
+        .expect("record review attempt");
 
         let source_promotion = json!({
             "schema": "homeboy/agent-task-promotion-report/v1",
@@ -3912,8 +3998,11 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             std::env::current_exe().expect("current test executable"),
             "dependent core must not pin the libtest harness"
         );
-        homeboy::agents::agent_task_lifecycle::validate_controller_runtime("run-next-a")
-            .expect("pinned controller identity validates");
+        homeboy::agents::agent_task_lifecycle::validate_controller_runtime_in_store(
+            &test_lifecycle_store(),
+            "run-next-a",
+        )
+        .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
         let (_value, exit_code) = run_next_with_executor_and_fanout(
@@ -4100,7 +4189,8 @@ fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cli-quarantine-diagnostic"))
             .expect("submitted");
-        homeboy::agents::agent_task_lifecycle::quarantine_queued_run_exact(
+        homeboy::agents::agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+            &test_lifecycle_store(),
             "run-cli-quarantine-diagnostic",
             "maintenance\nwindow\u{0000}",
         )
@@ -4196,8 +4286,13 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
             .expect("persist immutable Cook recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(source_run_id))
             .expect("persist source Cook attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
-            .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("bind source attempt to Cook");
         agent_task_lifecycle::record_pre_execution_failure(
             source_run_id,
             &plan,
@@ -4278,8 +4373,13 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
             .expect("persist immutable Cook recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(source_run_id))
             .expect("persist source Cook attempt");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
-            .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("bind source attempt to Cook");
         agent_task_lifecycle::record_pre_execution_failure(
             source_run_id,
             &plan,

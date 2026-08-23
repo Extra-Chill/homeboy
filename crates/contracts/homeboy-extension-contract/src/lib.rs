@@ -11,7 +11,8 @@
 
 pub use action_types::HttpMethod;
 pub use ci_config::{
-    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+    CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
+    CiJobSpec, CiLocalContext, CiProfileSpec,
 };
 pub use manifest_capability_config::AgentRuntimeManifestConfig;
 pub use manifest_capability_config::{DiscoveryMarkerConfig, ScriptsConfig};
@@ -32,6 +33,7 @@ pub mod bench_metric_preset;
 pub mod bench_responsiveness;
 pub mod bench_result;
 pub mod bench_results;
+pub mod bench_stage;
 pub mod capability;
 pub mod test_analysis;
 pub mod test_duration;
@@ -56,6 +58,10 @@ pub use bench_result::{
     RigPackageFreshness,
 };
 pub use bench_results::{BenchResults, BenchRunMetadata, BenchRunSnapshot, BenchScenario};
+pub use bench_stage::{
+    verify_stage_reuse, BenchStageArtifact, BenchStageEvidence, BenchStageInvalidation,
+    BenchStageReuse,
+};
 pub use capability::ExtensionCapability;
 pub use test_analysis::{
     FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure,

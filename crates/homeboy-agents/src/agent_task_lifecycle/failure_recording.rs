@@ -52,6 +52,64 @@ pub fn record_pre_execution_failure_in_store(
     Ok(record)
 }
 
+/// Replace only a scheduler-terminal snapshot fence failure with Cook's normal
+/// retryable pre-execution record. A provider ledger entry is authoritative: it
+/// permanently fences this path from rewriting real provider failures.
+pub fn record_workspace_snapshot_fence_invalidation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+        let record = lifecycle_store.read_record(&run_id)?;
+        let is_snapshot_invalidated =
+            lifecycle_store
+                .read_aggregate(&run_id)
+                .ok()
+                .is_some_and(|aggregate| {
+                    aggregate.outcomes.iter().any(|outcome| {
+                        outcome.status == AgentTaskOutcomeStatus::Failed
+                            && outcome.diagnostics.iter().any(|diagnostic| {
+                                diagnostic.class == "agent_task.workspace_snapshot_invalidated"
+                                    && diagnostic.data["pre_provider"]
+                                        == serde_json::Value::Bool(true)
+                            })
+                    })
+                });
+        let consumed = record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .unwrap_or(u64::MAX);
+        if record.state != AgentTaskRunState::Failed
+            || !is_snapshot_invalidated
+            || record.has_recorded_provider_progress()
+            || consumed != 0
+        {
+            return Ok((record, None));
+        }
+        record_pre_execution_failure_locked(
+            lifecycle_store,
+            record,
+            plan,
+            "workspace_snapshot_fence",
+            error,
+        )
+    })?;
+    if let Some(aggregate) = aggregate {
+        record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            None,
+        )?;
+    } else if record.state.is_terminal() {
+        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
+    }
+    Ok(record)
+}
+
 fn record_pre_execution_failure_locked(
     lifecycle_store: &AgentTaskLifecycleStore,
     mut record: AgentTaskRunRecord,

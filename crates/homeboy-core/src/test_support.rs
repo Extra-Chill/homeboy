@@ -2936,7 +2936,16 @@ mod tests {
     fn isolated_homes_share_the_read_only_controller_fixture_and_not_pins() {
         let first = with_isolated_home(|_| {
             let fixture = controller_runtime_test_executable();
-            let runtime = crate::controller_runtime::pin_current().expect("pin first fixture");
+            let runtime = crate::controller_runtime::pin_current_in_root(
+                &crate::controller_runtime::runtime_root_in(
+                    &crate::paths::PathRoots::from_environment()
+                        .expect("path roots")
+                        .data()
+                        .to_path_buf(),
+                )
+                .expect("runtime root"),
+            )
+            .expect("pin first fixture");
             let pin = runtime["originating"]["pinned_executable"]
                 .as_str()
                 .map(PathBuf::from)
@@ -2945,7 +2954,16 @@ mod tests {
         });
         let second = with_isolated_home(|_| {
             let fixture = controller_runtime_test_executable();
-            let runtime = crate::controller_runtime::pin_current().expect("pin second fixture");
+            let runtime = crate::controller_runtime::pin_current_in_root(
+                &crate::controller_runtime::runtime_root_in(
+                    &crate::paths::PathRoots::from_environment()
+                        .expect("path roots")
+                        .data()
+                        .to_path_buf(),
+                )
+                .expect("runtime root"),
+            )
+            .expect("pin second fixture");
             let pin = runtime["originating"]["pinned_executable"]
                 .as_str()
                 .map(PathBuf::from)

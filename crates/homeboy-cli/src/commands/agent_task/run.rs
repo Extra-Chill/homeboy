@@ -2049,7 +2049,11 @@ fn apply_explicit_local_continuation(
     let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
         return Ok(());
     };
-    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation(
+    let lifecycle_store =
+        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment(
+        )?;
+    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation_in_store(
+        &lifecycle_store,
         run_id,
         decision.clone(),
     )?;
@@ -2103,10 +2107,17 @@ where
         // Ordinary continuation consumes only the pending entry scheduled by
         // authoritative reconciliation. Failed and completed claims require an
         // explicit rearm and can never be silently replayed.
+        // The recipe membership check, the claim, and the state read are one
+        // decision, so all three have to name the same home (#7505).
+        let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
         let claim = if args.rearm {
-            agent_task_service::claim_continuation_for_recovery(&recipe.cook_id, &run_id)?
+            agent_task_service::claim_continuation_for_recovery_in_store(
+                &recipe_store,
+                &recipe.cook_id,
+                &run_id,
+            )?
         } else {
-            agent_task_service::claim_continuation_for(&recipe.cook_id, &run_id)?
+            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
         };
         let Some(claim) = claim else {
             return Ok((
@@ -2114,7 +2125,11 @@ where
                     &recipe.cook_id,
                     &run_id,
                     &format!("{:?}", record.state),
-                    agent_task_service::continuation_state(&recipe.cook_id, &run_id)?,
+                    agent_task_service::continuation_state_in_store(
+                        &recipe_store,
+                        &recipe.cook_id,
+                        &run_id,
+                    )?,
                 ),
                 0,
             ));
@@ -2257,14 +2272,25 @@ where
         > + Copy,
 {
     let operation_key = format!("retry-run:{run_id}");
-    match agent_task_lifecycle::claim_cook_operation(
+    // Claim, completion, and failure are one exactly-once operation-claim
+    // protocol, so all three have to name the same installation (#7505).
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    match agent_task_lifecycle::claim_cook_operation_in_store(
+        &lifecycle_store,
         run_id,
         &operation_key,
         Duration::from_secs(30),
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
         | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::status(run_id)?;
+            let record = agent_task_lifecycle::status_in_store(
+                &lifecycle_store,
+                run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
             Ok((cook_continuation_status(&recipe.cook_id, &record), 0))
         }
         agent_task_lifecycle::ClaimOutcome::Acquired => {
@@ -2301,7 +2327,8 @@ where
             })();
             match dispatched {
                 Ok((value, exit_code)) => {
-                    agent_task_lifecycle::complete_cook_operation(
+                    agent_task_lifecycle::complete_cook_operation_in_store(
+                        &lifecycle_store,
                         run_id,
                         &operation_key,
                         serde_json::json!({ "exit_code": exit_code }),
@@ -2309,7 +2336,8 @@ where
                     Ok((value, exit_code))
                 }
                 Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation(
+                    agent_task_lifecycle::fail_cook_operation_in_store(
+                        &lifecycle_store,
                         run_id,
                         &operation_key,
                         serde_json::json!({ "error": error.message.clone() }),
@@ -3533,11 +3561,16 @@ fn select_cook_repository_identity(
     candidates: &BTreeMap<String, CookRepositoryIdentity>,
 ) -> homeboy::core::Result<Option<CookRepositoryIdentity>> {
     let repository_name = normalize_repository_name(repository_name);
+    if let Some(candidate) = candidates
+        .values()
+        .find(|candidate| candidate.slug.eq_ignore_ascii_case(&repository_name))
+    {
+        return Ok(Some(candidate.clone()));
+    }
     let matches = candidates
         .values()
         .filter(|candidate| {
-            candidate.slug.eq_ignore_ascii_case(&repository_name)
-                || candidate.repository_name == repository_name
+            candidate.repository_name == repository_name
                 || candidate
                     .aliases
                     .iter()
@@ -4196,13 +4229,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         // struct on, so foreground clients (TTY, machine log, `--output` file)
         // all describe a running provider with the same bounded sentence.
         let activity = event.activity_summary();
+        let terminal_outcome =
+            event
+                .terminal_success
+                .map(|succeeded| if succeeded { "succeeded" } else { "failed" });
         progress
             .map(|progress| {
                 progress(
                     event.phase,
                     Some(event.cook_id),
                     Some(event.run_id),
-                    activity.as_deref(),
+                    terminal_outcome.or(activity.as_deref()),
                 )
             })
             .unwrap_or(Ok(()))
@@ -6679,6 +6716,18 @@ pub(super) fn run_submitted_with_executor(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    if agent_task_lifecycle::exact_record(&run_id)
+        .ok()
+        .is_some_and(|record| agent_task_lifecycle::is_unmaterialized_cook_admission(&record))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "unmaterialized Cook admission must continue through its fenced resume path",
+            Some(run_id.clone()),
+            Some(vec![format!("homeboy agent-task resume {run_id}")]),
+        )
+        .with_hint(format!("Run `homeboy agent-task resume {run_id}`.")));
+    }
     let result =
         agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
     Ok((
