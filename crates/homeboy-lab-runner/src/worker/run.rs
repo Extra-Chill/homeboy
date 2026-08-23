@@ -923,7 +923,9 @@ fn private_at_file_snapshot_directory() -> std::io::Result<std::path::PathBuf> {
     let root = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+            homeboy_core::paths::home_root()
+                .ok()
+                .map(|home| home.join(".local/share"))
         })
         .unwrap_or_else(std::env::temp_dir)
         .join("homeboy/reverse-runner-private");
@@ -1315,7 +1317,9 @@ fn materialize_command_assets(
     let root = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+            homeboy_core::paths::home_root()
+                .ok()
+                .map(|home| home.join(".local/share"))
         })
         .unwrap_or_else(std::env::temp_dir)
         .join("homeboy/reverse-runner-jobs")

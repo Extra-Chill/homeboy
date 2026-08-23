@@ -401,7 +401,7 @@ fn is_unmapped_controller_path(
     if include_existing_local && expanded.exists() {
         return true;
     }
-    std::env::var_os("HOME").is_some_and(|home| {
+    homeboy_core::paths::home_root().is_ok_and(|home| {
         path_is_under_local_root(value, &PathBuf::from(home).display().to_string())
     })
 }
@@ -513,7 +513,7 @@ fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &
 }
 
 fn local_runner_command_path() -> Option<OsString> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = homeboy_core::paths::home_root().ok();
     let existing_path = std::env::var_os("PATH");
     build_runner_command_path(home.as_deref(), existing_path.as_deref())
 }
