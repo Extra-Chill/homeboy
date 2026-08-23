@@ -297,7 +297,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
             runner_id: None,
             resources: resources(),
         };
-        let lease_dir = homeboy_core::paths::rig_leases_dir().expect("lease dir");
+        let lease_dir = homeboy_core::paths::rig_leases_dir_in_root(&test_config_root());
         std::fs::create_dir_all(&lease_dir).expect("create lease dir");
         std::fs::write(
             lease_dir.join("studio.json"),
@@ -315,7 +315,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
 }
 
 fn write_lease(lease: &RigRunLease) {
-    let lease_dir = homeboy_core::paths::rig_leases_dir().expect("lease dir");
+    let lease_dir = homeboy_core::paths::rig_leases_dir_in_root(&test_config_root());
     std::fs::create_dir_all(&lease_dir).expect("create lease dir");
     std::fs::write(
         lease_dir.join(format!("{}.json", lease.rig_id)),

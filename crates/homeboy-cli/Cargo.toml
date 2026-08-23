@@ -38,7 +38,6 @@ homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-re
 homeboy-lab-runner = { version = "0.1.0", path = "../homeboy-lab-runner" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-issues = { version = "0.1.0", path = "../homeboy-issues" }
-homeboy-triage = { version = "0.1.0", path = "../homeboy-triage" }
 homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }

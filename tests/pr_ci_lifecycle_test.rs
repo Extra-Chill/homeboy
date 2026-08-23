@@ -94,6 +94,7 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
         "workspace-tests-compile",
         "warning-clean",
         "windows-compile",
+        "external-resolver-fixtures",
         "rustfmt",
         "homeboy-fast",
         "homeboy",
@@ -114,6 +115,12 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     assert!(test.contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@"));
     assert!(test.contains("needs: [pr-state, ci-capacity-admission]"));
     assert!(test.contains("test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
+
+    let resolver_fixture = job_section(workflow, "external-resolver-fixtures");
+    assert!(resolver_fixture.contains("os: [ubuntu-latest, macos-14, windows-latest]"));
+    assert!(resolver_fixture.contains(
+        "cargo test --locked -p homeboy-cli --features test-support --test external_check_detail_resolver_fixture"
+    ));
 }
 
 #[test]

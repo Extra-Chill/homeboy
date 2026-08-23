@@ -13,6 +13,34 @@ pub struct CiCapability {
     pub profiles: BTreeMap<String, CiProfileSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub jobs: BTreeMap<String, CiJobSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CiCacheSpec>,
+}
+
+/// Reconstructable CI state owned by an extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CiCacheSpec {
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<CiCachePath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CiCachePath {
+    pub root: CiCachePathRoot,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiCachePathRoot {
+    Component,
+    Home,
+    HomeboyData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

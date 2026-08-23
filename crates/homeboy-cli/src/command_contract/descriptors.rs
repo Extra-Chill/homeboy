@@ -22,7 +22,6 @@ macro_rules! builtin_json_command_descriptors {
             (File, $crate::commands::file::run, CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) }),
             (Fleet, $crate::commands::fleet::run, CommandSpec { subcommand_safety: FLEET_SUBCOMMAND_SAFETY, ..command_spec("fleet", CommandJsonFamily::Ops) }),
             (Logs, $crate::commands::logs::run, command_spec("logs", CommandJsonFamily::Ops)),
-            (Triage, $crate::commands::triage::run, command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS))),
             (Deploy, $crate::commands::deploy::run, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS))),
             (Harvest, $crate::commands::harvest::run, command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"]))),
             (Component, $crate::commands::component::run, CommandSpec { subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY, ..command_spec("component", CommandJsonFamily::Workspace) }),

@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -33,10 +33,20 @@ struct GenerationRegistry<E> {
     generations: RollingGenerations<E>,
 }
 
-fn path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
+/// The registry file below an already-resolved config root.
+///
+/// Every path in this module hangs off one runner-sessions directory. The
+/// fallible ambient forms below each read the environment again, so a lock
+/// taken through one and a write performed through another are not guaranteed
+/// to name the same installation (#7505).
+fn path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
         .join(runner_id)
-        .join("generations.json"))
+        .join("generations.json")
+}
+
+fn path(runner_id: &str) -> Result<PathBuf> {
+    Ok(path_in_root(&paths::homeboy()?, runner_id))
 }
 
 fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
@@ -55,36 +65,57 @@ fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
         .join(format!("recovery-{generation}.lock")))
 }
 
-fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
+fn pending_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
         .join(runner_id)
-        .join("pending-replacement.json"))
+        .join("pending-replacement.json")
+}
+
+fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(pending_replacement_path_in_root(
+        &paths::homeboy()?,
+        runner_id,
+    ))
+}
+
+fn replacement_operation_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
+        .join(runner_id)
+        .join("replacement-operation.json")
 }
 
 fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
-        .join(runner_id)
-        .join("replacement-operation.json"))
+    Ok(replacement_operation_path_in_root(
+        &paths::homeboy()?,
+        runner_id,
+    ))
 }
 
-fn rejected_replacement_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
+fn rejected_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
         .join(runner_id)
         .join("rejected-replacements")
-        .join(format!("{}.json", uuid::Uuid::new_v4())))
+        .join(format!("{}.json", uuid::Uuid::new_v4()))
 }
 
-fn superseded_replacement_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
+fn superseded_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
         .join(runner_id)
         .join("superseded-replacements")
-        .join(format!("{}.json", uuid::Uuid::new_v4())))
+        .join(format!("{}.json", uuid::Uuid::new_v4()))
+}
+
+fn admission_reservation_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
+    paths::runner_sessions_dir_in_root(config_root)
+        .join(runner_id)
+        .join("admission-mutation-reservation.json")
 }
 
 fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(paths::runner_sessions_dir()?
-        .join(runner_id)
-        .join("admission-mutation-reservation.json"))
+    Ok(admission_reservation_path_in_root(
+        &paths::homeboy()?,
+        runner_id,
+    ))
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -264,6 +295,27 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
         path(runner_id)?.with_extension("lock"),
         runner_id,
         operation,
+    )
+}
+
+/// Serialize one runner's registry mutations under a lock, and hand the
+/// operation the config root that lock was taken against.
+///
+/// The lock exists to make a read-modify-write sequence atomic. That guarantee
+/// only holds if the lock file and the files it guards name the same
+/// installation. The ambient path helpers each read the environment
+/// independently, so a repoint between taking the lock and performing the write
+/// leaves the lock guarding one home while the mutation lands in another
+/// (#7505).
+fn with_rooted_registry_lock<T>(
+    runner_id: &str,
+    operation: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    let config_root = paths::homeboy()?;
+    with_lock(
+        path_in_root(&config_root, runner_id).with_extension("lock"),
+        runner_id,
+        || operation(&config_root),
     )
 }
 
@@ -798,8 +850,8 @@ pub(crate) fn record_unleased_candidate_reconciliation_replay(
     runner_id: &str,
     command: &str,
 ) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
+    with_rooted_registry_lock(runner_id, |config_root| {
+        let path = replacement_operation_path_in_root(config_root, runner_id);
         let mut operation: ReplacementOperation =
             serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
                 Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
@@ -812,7 +864,7 @@ pub(crate) fn record_unleased_candidate_reconciliation_replay(
             (Some("unleased-candidates"), Some(existing)) if existing == command => return Ok(()),
             (Some("ensure-running"), Some(previous_command)) => {
                 write_durable_json(
-                    &superseded_replacement_path(runner_id)?,
+                    &superseded_replacement_path_in_root(config_root, runner_id),
                     &SupersededReplacementEvidence {
                         schema: "homeboy/runner-replacement-operation-supersession/v1",
                         runner_id,
@@ -901,12 +953,12 @@ pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
 }
 
 fn retire_replacement(runner_id: &str) -> Result<String> {
-    with_registry_lock(runner_id, || {
+    with_rooted_registry_lock(runner_id, |config_root| {
         let operation_id = uuid::Uuid::new_v4().to_string();
         // Publish the successor receipt before releasing the old coordinates.
         // A crash can therefore leave both records, but never neither record.
         write_durable_json(
-            &replacement_operation_path(runner_id)?,
+            &replacement_operation_path_in_root(config_root, runner_id),
             &ReplacementOperation {
                 runner_id: runner_id.to_string(),
                 operation_id: operation_id.clone(),
@@ -914,7 +966,7 @@ fn retire_replacement(runner_id: &str) -> Result<String> {
                 kind: None,
             },
         )?;
-        let pending_path = pending_replacement_path(runner_id)?;
+        let pending_path = pending_replacement_path_in_root(config_root, runner_id);
         if pending_path.exists() {
             std::fs::remove_file(&pending_path).map_err(|error| {
                 Error::internal_io(
@@ -934,8 +986,8 @@ pub(crate) fn retire_rejected_state_loss_replacement(
     runner_id: &str,
     output: &homeboy_core::server::CommandOutput,
 ) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let operation_path = replacement_operation_path(runner_id)?;
+    with_rooted_registry_lock(runner_id, |config_root| {
+        let operation_path = replacement_operation_path_in_root(config_root, runner_id);
         let operation: ReplacementOperation =
             serde_json::from_slice(&std::fs::read(&operation_path).map_err(|error| {
                 Error::internal_io(
@@ -951,7 +1003,7 @@ pub(crate) fn retire_rejected_state_loss_replacement(
                 "refusing to retire a replacement operation that is not the rejected state-loss recovery",
             ));
         }
-        let evidence_path = rejected_replacement_path(runner_id)?;
+        let evidence_path = rejected_replacement_path_in_root(config_root, runner_id);
         write_durable_json(
             &evidence_path,
             &RejectedReplacementEvidence {
@@ -976,7 +1028,7 @@ pub(crate) fn retire_rejected_state_loss_replacement(
                 kind: None,
             },
         )?;
-        let pending_path = pending_replacement_path(runner_id)?;
+        let pending_path = pending_replacement_path_in_root(config_root, runner_id);
         if pending_path.exists() {
             std::fs::remove_file(&pending_path).map_err(|error| {
                 Error::internal_io(

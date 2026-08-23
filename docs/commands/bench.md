@@ -64,6 +64,32 @@ for prepared/seeded runtime snapshots. Core stores the metadata but concrete
 prepare, seed, snapshot, reset, rollback, and teardown implementations remain
 extension-owned. See `docs/architecture/lifecycle-contracts.md`.
 
+### Stage Evidence And Reuse
+
+Long-running benchmark runners can attach completed stages to
+`run_metadata.stages`. A stage identifies its producer and compatibility key,
+hashes every declared input, and lists the SHA-256 digest of every reusable
+artifact. Homeboy accepts a prior stage only when all of that evidence matches:
+the stage completed, producer and compatibility key agree, declared input hashes
+agree, and the current artifact bytes match their persisted digests.
+
+This is intentionally a narrow reuse boundary. A downstream override that is
+not declared as an upstream stage input leaves that upstream stage reusable; a
+changed declared input, missing artifact, or changed artifact byte invalidates
+the stage with a structured reason. Runners own their concrete stage commands
+and consume only verified artifact paths, keeping Homeboy's contract generic.
+
+```json
+{
+  "id": "generate-site",
+  "producer": "site-generator@4f8c",
+  "compatibility_key": "site-artifact-v1",
+  "input_hashes": { "fixture": "..." },
+  "artifacts": [{ "name": "site", "sha256": "..." }],
+  "completed": true
+}
+```
+
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
 baseline primitive (`homeboy.json` → `baselines.bench`) are shared with

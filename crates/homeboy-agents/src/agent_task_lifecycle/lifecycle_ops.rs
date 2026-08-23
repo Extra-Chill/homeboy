@@ -406,17 +406,6 @@ pub fn submit_plan_in_store(
     )
 }
 
-/// Persist the parent for a locally detached Cook before the detached process
-/// has prepared its first attempt. The parent uses the Cook ID itself, so the
-/// normal Cook-index alias takes over automatically once that attempt exists.
-///
-/// An empty plan is intentional: this record owns only the handoff lifecycle,
-/// while the detached Cook persists the immutable execution plan and attempt.
-pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_detached_cook_handoff_parent_in_store(&lifecycle_store, cook_id)
-}
-
 /// Persist a detached Cook's handoff parent inside an explicitly rooted store.
 ///
 /// Both admission guards read the store the parent is written into. The alias
@@ -471,22 +460,6 @@ pub fn record_detached_cook_handoff_parent_in_store(
         0,
         Some("waiting for the detached Cook to materialize its first attempt"),
     )
-}
-
-/// Persist a detached Cook while its Lab destination is not yet admissible.
-///
-/// The binding is deliberately assembled by the CLI from identities, immutable
-/// input references, and secret-free replay arguments. It never contains secret
-/// values or a redacted receipt that cannot replay. Reusing the Cook id for a
-/// different request is rejected before any destination can be provisioned.
-pub fn record_unmaterialized_cook_admission(
-    cook_id: &str,
-    binding: Value,
-    state: &str,
-    reason: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_unmaterialized_cook_admission_in_store(&lifecycle_store, cook_id, binding, state, reason)
 }
 
 /// Create a complete detached parent and immutable admission binding in the
@@ -624,6 +597,15 @@ fn unmaterialized_admission_value(
             "resume_trigger": "daemon-tick-or-runner-admission-event",
         },
     })
+}
+
+/// An unmaterialized admission has no executable task plan. It can progress
+/// only through its fenced admission reconciler.
+pub fn is_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
+    record
+        .metadata
+        .get("unmaterialized_cook_admission")
+        .is_some_and(Value::is_object)
 }
 
 pub fn record_unmaterialized_cook_admission_in_store(
@@ -1096,13 +1078,6 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     Ok(updated.unwrap_or(current))
 }
 
-/// Reject detached Cook work after the pre-spawn parent has been cancelled.
-/// The child reads this durable fence independently of launcher liveness.
-pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    require_detached_cook_handoff_fence_open_in_store(&lifecycle_store, cook_id)
-}
-
 /// Read the durable cancellation fence from an explicitly rooted store.
 ///
 /// The fence is a field on the handoff parent record, not a separate marker
@@ -1134,17 +1109,6 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
         ));
     }
     Ok(())
-}
-
-/// Attach the child identity only after it has been spawned. Cancellation uses
-/// this durable identity to stop preparation before an attempt exists.
-pub fn record_detached_cook_handoff_child(
-    cook_id: &str,
-    pid: u32,
-    start_identity: homeboy_core::process::ProcessStartIdentity,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_detached_cook_handoff_child_in_store(&lifecycle_store, cook_id, pid, start_identity)
 }
 
 /// Attach the spawned child's identity inside an explicitly rooted store.
@@ -1187,12 +1151,6 @@ pub fn record_detached_cook_handoff_child_in_store(
         true
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
-}
-
-/// Persist the daemon job that supervises this locally launched Cook.
-pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_detached_cook_supervisor_in_store(&lifecycle_store, cook_id, job_id)
 }
 
 /// Persist the supervising daemon job inside an explicitly rooted store.
@@ -1448,23 +1406,6 @@ pub fn record_local_cook_retry_child_in_store(
     Ok(())
 }
 
-/// Reserve the first attempt identity before its lifecycle record is submitted.
-///
-/// The record and Cook index are separate durable writes. This reservation keeps
-/// a supervisor that observes the child exit after the record write from
-/// terminalizing the handoff between those writes.
-pub fn reserve_detached_cook_handoff_materialization(
-    cook_id: &str,
-    attempt_run_id: &str,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reserve_detached_cook_handoff_materialization_in_store(
-        &lifecycle_store,
-        cook_id,
-        attempt_run_id,
-    )
-}
-
 /// Reserve a detached Cook's first attempt within its explicitly selected
 /// lifecycle roots.
 pub fn reserve_detached_cook_handoff_materialization_in_store(
@@ -1520,14 +1461,6 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
         ));
     }
     Ok(())
-}
-
-/// Cancel a submitted first child when its reserved handoff parent was
-/// cancelled before the Cook index could be published. The reservation is the
-/// durable link that keeps this otherwise-unindexed record reachable.
-pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(&lifecycle_store, cook_id)
 }
 
 pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
@@ -1932,18 +1865,7 @@ pub fn record_execution_placement_outcome_in_store(
     lifecycle_store.write_record(&record)
 }
 
-/// Replace a failed pre-provider attempt's placement with an explicitly
-/// authorized local continuation. The immutable Cook recipe remains the source
-/// of work; this records only the next execution's routing authority.
-pub fn transition_execution_placement_for_continuation(
-    run_id: &str,
-    replacement: homeboy_lab_runner_contract::ExecutionPlacementDecision,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    transition_execution_placement_for_continuation_in_store(&lifecycle_store, run_id, replacement)
-}
-
-/// [`transition_execution_placement_for_continuation`] against an explicitly
+/// `transition_execution_placement_for_continuation` against an explicitly
 /// rooted lifecycle store.
 pub fn transition_execution_placement_for_continuation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2057,6 +1979,13 @@ pub fn normalize_local_execution_placement_in_store(
 
 #[cfg(test)]
 mod execution_placement_tests {
+
+    /// Tests are the entry point for their own unit of work, so the store
+    /// resolves once here (#7505).
+    fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+    }
     use super::*;
     use homeboy_lab_runner_contract::{
         EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
@@ -2167,9 +2096,14 @@ mod execution_placement_tests {
                     authority: Some("operator --placement local".to_string()),
                 },
             );
-            transition_execution_placement_for_continuation("local-continuation", stale)
-                .expect_err("a stale placement decision is rejected");
-            transition_execution_placement_for_continuation(
+            transition_execution_placement_for_continuation_in_store(
+                &test_lifecycle_store(),
+                "local-continuation",
+                stale,
+            )
+            .expect_err("a stale placement decision is rejected");
+            transition_execution_placement_for_continuation_in_store(
+                &test_lifecycle_store(),
                 "local-continuation",
                 replacement.clone(),
             )
@@ -2194,8 +2128,12 @@ mod execution_placement_tests {
                 record.metadata["transport_admission_reset"]["replacement_decision_id"],
                 replacement.decision_id
             );
-            transition_execution_placement_for_continuation("local-continuation", replacement)
-                .expect_err("the placement transition cannot mint another admission reset");
+            transition_execution_placement_for_continuation_in_store(
+                &test_lifecycle_store(),
+                "local-continuation",
+                replacement,
+            )
+            .expect_err("the placement transition cannot mint another admission reset");
         });
     }
 
@@ -2217,7 +2155,8 @@ mod execution_placement_tests {
             )
             .expect("record pre-provider failure");
 
-            let error = transition_execution_placement_for_continuation(
+            let error = transition_execution_placement_for_continuation_in_store(
+                &test_lifecycle_store(),
                 "lab-only-continuation",
                 local_continuation(&prior),
             )
@@ -3393,18 +3332,6 @@ pub enum ProviderExecutionReservation {
     AlreadyReserved,
 }
 
-/// Durably reserve one provider execution before the scheduler blocks on the
-/// backend. A resumed controller must reconcile an existing reservation rather
-/// than dispatching the same `(task_id, attempt)` a second time.
-pub fn reserve_provider_execution(
-    run_id: &str,
-    task: &AgentTaskRequest,
-    attempt: u32,
-) -> Result<ProviderExecutionReservation> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
-}
-
 pub fn reserve_provider_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3825,45 +3752,6 @@ pub fn record_cook_terminal_result_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook terminal result was unchanged"))
 }
 
-/// Record the provider's terminal result before controller-owned patch
-/// harvesting. Harvesting can fail or be interrupted independently of the
-/// provider execution, so it must not leave this reservation running.
-pub fn record_provider_execution_terminal(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    state: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_with_model_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        state,
-        None,
-    )
-}
-
-/// Record a terminal provider result with its normalized concrete model.
-pub fn record_provider_execution_terminal_with_model(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    state: &str,
-    model: Option<&str>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_terminal_with_model_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        state,
-        model,
-    )
-}
-
 pub fn record_provider_execution_terminal_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -4024,24 +3912,6 @@ pub fn has_active_provider_execution_in_store(
                 .iter()
                 .any(|execution| execution["state"] == json!("running"))
         }))
-}
-
-/// Record the controller time spent after a provider returned and before its
-/// terminal outcome was fully harvested and finalized.
-pub fn record_provider_execution_cleanup_elapsed(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    elapsed_ms: u64,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_provider_execution_cleanup_elapsed_in_store(
-        &lifecycle_store,
-        run_id,
-        task_id,
-        attempt,
-        elapsed_ms,
-    )
 }
 
 pub fn record_provider_execution_cleanup_elapsed_in_store(
@@ -5645,17 +5515,7 @@ pub fn run_record_exists_readonly_in_store(
     lifecycle_store.record_exists_readonly(&sanitize_run_id(run_id))
 }
 
-/// Whether a durable run record exists for `run_id` after the same resolution
-/// `retry` applies (a cook id resolves to its latest run). The plain
-/// `run_record_exists` is an exact-match check, so a resolvable id (e.g. a cook
-/// id) reports absent even though `retry` would succeed — which previously made
-/// the Lab retry handoff silently fall through and ship an unrunnable
-/// `agent-task retry <id>` to a runner with no such record (#8390).
-pub fn run_record_exists_resolved(run_id: &str) -> Result<bool> {
-    store::record_exists(&resolve_run_id(run_id)?)
-}
-
-/// [`run_record_exists_resolved`] against explicitly injected durable lifecycle
+/// `run_record_exists_resolved` against explicitly injected durable lifecycle
 /// roots.
 pub fn run_record_exists_resolved_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -6483,15 +6343,6 @@ pub fn aggregate_source_in_store(
     Ok((raw, path))
 }
 
-pub fn record_cook_attempt(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-) -> Result<AgentTaskCookIndex> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_attempt_in_store(&lifecycle_store, cook_id, attempt, run_id)
-}
-
 pub fn record_cook_attempt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -6972,15 +6823,6 @@ fn select_cook_candidate_from_index(
         skipped_newer_attempts,
         skipped_newer_run_ids,
     })
-}
-
-pub(crate) fn update_cook_candidate_after_completion(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-    promotion: Option<Value>,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    update_cook_candidate_after_completion_in_store(&lifecycle_store, record, aggregate, promotion)
 }
 
 pub(crate) fn update_cook_candidate_after_completion_in_store(
@@ -7851,16 +7693,6 @@ pub fn record_manual_finalization_failure(
         Some(record) => Ok(record),
         None => store::read_record(&run_id),
     }
-}
-
-/// Checkpoint controller-owned recovery after a promoted, green candidate loses
-/// its publication base. The terminal provider result remains untouched.
-pub fn record_cook_moving_base_recovery(
-    run_id: &str,
-    recovery: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_moving_base_recovery_in_store(&lifecycle_store, run_id, recovery)
 }
 
 pub fn record_cook_moving_base_recovery_in_store(

@@ -386,13 +386,23 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
         let task = &plan.tasks[0];
 
         assert_eq!(
-            agent_task_lifecycle::reserve_provider_execution("provider-reservation", task, 1)
-                .expect("first reservation"),
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                "provider-reservation",
+                task,
+                1
+            )
+            .expect("first reservation"),
             agent_task_lifecycle::ProviderExecutionReservation::Acquired
         );
         assert_eq!(
-            agent_task_lifecycle::reserve_provider_execution("provider-reservation", task, 1)
-                .expect("restart observes reservation"),
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                "provider-reservation",
+                task,
+                1
+            )
+            .expect("restart observes reservation"),
             agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved
         );
         let calls = Arc::new(AtomicUsize::new(0));
@@ -406,7 +416,8 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
             0,
             "an existing reservation must be reconciled, never redispatched"
         );
-        agent_task_lifecycle::record_provider_execution_terminal(
+        agent_task_lifecycle::record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
             "provider-reservation",
             &task.task_id,
             1,
@@ -434,8 +445,13 @@ fn local_reservation_advances_heartbeat_to_execution_start() {
         agent_task_lifecycle::submit_plan(&plan, Some("local-heartbeat")).expect("run submitted");
         let task = &plan.tasks[0];
 
-        agent_task_lifecycle::reserve_provider_execution("local-heartbeat", task, 1)
-            .expect("reservation acquired");
+        agent_task_lifecycle::reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "local-heartbeat",
+            task,
+            1,
+        )
+        .expect("reservation acquired");
 
         let record = lifecycle_status("local-heartbeat").expect("durable record");
         let started_at = record.metadata["provider_executions"][0]["started_at"]
@@ -1488,8 +1504,11 @@ fn discovery_active_filters_to_queued_and_running_runs() {
 fn pending_detached_cook_handoff_is_discoverable_before_attempt_materialization() {
     with_isolated_home(|_| {
         let cook_id = "pending-detached-cook-handoff";
-        let parent = agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
-            .expect("persist handoff parent before child materialization");
+        let parent = agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("persist handoff parent before child materialization");
 
         // The handoff parent is the durable operator handle while no provider
         // attempt exists yet, so both discovery views must expose it.
@@ -1757,7 +1776,11 @@ fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_th
     with_isolated_home(|_| {
         let cook_id = "cook-reconcile-alias";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             // Model the durable parent/attempt link while both projections are
@@ -1816,7 +1839,11 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
             RunnerAuthorityFixture::configured_disconnected(),
         ));
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
@@ -1943,7 +1970,11 @@ fn scoped_reconcile_rejects_a_parent_child_link_with_disagreeing_cook_identity()
     with_isolated_home(|_| {
         let cook_id = "cook-reconcile-parent";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
@@ -1967,7 +1998,11 @@ fn scoped_reconcile_rejects_a_parent_child_link_without_cook_index_authority() {
     with_isolated_home(|_| {
         let cook_id = "cook-reconcile-unindexed";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
@@ -1990,7 +2025,11 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
     with_isolated_home(|_| {
         let cook_id = "cook-upgrade-unindexed";
         let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
@@ -2033,7 +2072,11 @@ fn scoped_reconcile_uses_validated_handoff_child_not_later_index_attempt() {
         let cook_id = "cook-reconcile-accepted-child";
         let attempt_one = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
         let attempt_two = agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
-        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
         for run_id in [&attempt_one, &attempt_two] {
             agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("attempt");
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
@@ -2151,8 +2194,13 @@ fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes(
                 let plan = discovery_plan();
                 agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit child");
                 agent_task_lifecycle::mark_running(run_id).expect("mark child running");
-                agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
-                    .expect("reserve provider execution");
+                agent_task_lifecycle::reserve_provider_execution_in_store(
+                    &test_lifecycle_store(),
+                    run_id,
+                    &plan.tasks[0],
+                    1,
+                )
+                .expect("reserve provider execution");
                 agent_task_lifecycle::record_provider_execution_process(
                     run_id,
                     &plan.tasks[0].task_id,
@@ -2537,8 +2585,13 @@ fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() 
         let plan = discovery_plan();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
         agent_task_lifecycle::mark_running(run_id).expect("running");
-        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
-            .expect("provider reserved");
+        agent_task_lifecycle::reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &plan.tasks[0],
+            1,
+        )
+        .expect("provider reserved");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             // Simulate a lagging lifecycle heartbeat after the provider owner
             // refreshed its durable execution ownership.
@@ -2571,8 +2624,13 @@ fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only
         let plan = discovery_plan();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
         agent_task_lifecycle::mark_running(run_id).expect("running");
-        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
-            .expect("provider reserved");
+        agent_task_lifecycle::reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &plan.tasks[0],
+            1,
+        )
+        .expect("provider reserved");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
             // Zero is not a process identity and must not be treated as a dead
@@ -2606,8 +2664,13 @@ fn upgrade_admission_classifies_a_proven_dead_provider_owner_as_stale() {
         let plan = discovery_plan();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
         agent_task_lifecycle::mark_running(run_id).expect("running");
-        agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
-            .expect("provider reserved");
+        agent_task_lifecycle::reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &plan.tasks[0],
+            1,
+        )
+        .expect("provider reserved");
         let mut owner = std::process::Command::new("sleep")
             .arg("60")
             .spawn()

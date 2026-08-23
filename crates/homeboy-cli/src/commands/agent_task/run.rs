@@ -2049,7 +2049,11 @@ fn apply_explicit_local_continuation(
     let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
         return Ok(());
     };
-    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation(
+    let lifecycle_store =
+        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment(
+        )?;
+    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation_in_store(
+        &lifecycle_store,
         run_id,
         decision.clone(),
     )?;
@@ -3557,11 +3561,16 @@ fn select_cook_repository_identity(
     candidates: &BTreeMap<String, CookRepositoryIdentity>,
 ) -> homeboy::core::Result<Option<CookRepositoryIdentity>> {
     let repository_name = normalize_repository_name(repository_name);
+    if let Some(candidate) = candidates
+        .values()
+        .find(|candidate| candidate.slug.eq_ignore_ascii_case(&repository_name))
+    {
+        return Ok(Some(candidate.clone()));
+    }
     let matches = candidates
         .values()
         .filter(|candidate| {
-            candidate.slug.eq_ignore_ascii_case(&repository_name)
-                || candidate.repository_name == repository_name
+            candidate.repository_name == repository_name
                 || candidate
                     .aliases
                     .iter()
@@ -4220,13 +4229,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         // struct on, so foreground clients (TTY, machine log, `--output` file)
         // all describe a running provider with the same bounded sentence.
         let activity = event.activity_summary();
+        let terminal_outcome =
+            event
+                .terminal_success
+                .map(|succeeded| if succeeded { "succeeded" } else { "failed" });
         progress
             .map(|progress| {
                 progress(
                     event.phase,
                     Some(event.cook_id),
                     Some(event.run_id),
-                    activity.as_deref(),
+                    terminal_outcome.or(activity.as_deref()),
                 )
             })
             .unwrap_or(Ok(()))
@@ -6703,6 +6716,18 @@ pub(super) fn run_submitted_with_executor(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    if agent_task_lifecycle::exact_record(&run_id)
+        .ok()
+        .is_some_and(|record| agent_task_lifecycle::is_unmaterialized_cook_admission(&record))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "unmaterialized Cook admission must continue through its fenced resume path",
+            Some(run_id.clone()),
+            Some(vec![format!("homeboy agent-task resume {run_id}")]),
+        )
+        .with_hint(format!("Run `homeboy agent-task resume {run_id}`.")));
+    }
     let result =
         agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
     Ok((

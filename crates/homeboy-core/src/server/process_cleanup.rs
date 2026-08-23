@@ -181,15 +181,25 @@ fn cleanup_process_group(
     if let Some(containment) = containment {
         match containment.cleanup_with_grace(Duration::from_millis(200), context) {
             Ok(cleanup) if cleanup.complete => {
-                return cleanup.warning.map(|warning| ProcessCleanupReport {
+                let warning = [cleanup.diagnostic, cleanup.warning]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return (!warning.is_empty()).then_some(ProcessCleanupReport {
                     incomplete: None,
                     warning: Some(warning),
                 });
             }
             Ok(cleanup) => {
+                let warning = [cleanup.diagnostic, cleanup.warning]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 return cleanup.detail.map(|incomplete| ProcessCleanupReport {
                     incomplete: Some(incomplete),
-                    warning: cleanup.warning,
+                    warning: (!warning.is_empty()).then_some(warning),
                 });
             }
             Err(error) => {

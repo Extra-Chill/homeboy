@@ -201,6 +201,8 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Aggregate: {path}"));
         }
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
+    } else if is_unmaterialized_cook_admission(payload) {
+        lines.push(format!("Next: homeboy agent-task resume {run_id}"));
     } else if state == "queued" && !is_transport_proxy(payload) {
         lines.push(format!("Next: homeboy agent-task run {run_id}"));
     } else if let Some(action) = transport_proxy_next_action(payload) {
@@ -382,6 +384,10 @@ fn cook_pr_url(payload: &Value) -> Option<&str> {
 fn receipt_pr_url<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
     let receipt = value_at(payload, path)?;
     string_value(receipt, &["pr_url"]).or_else(|| string_value(receipt, &["pull_request_url"]))
+}
+
+fn is_unmaterialized_cook_admission(payload: &Value) -> bool {
+    payload["metadata"]["unmaterialized_cook_admission"].is_object()
 }
 
 fn is_transport_proxy(payload: &Value) -> bool {
@@ -1408,6 +1414,31 @@ mod tests {
             assert!(!summary.contains("Cook completion:"), "{summary}");
             assert!(!summary.contains("PR finalized:"), "{summary}");
         }
+    }
+
+    #[test]
+    fn unmaterialized_admission_status_prescribes_resume_not_run() {
+        let payload = json!({
+            "run_id": "unmaterialized-cook",
+            "state": "blocked_runner_unavailable",
+            "tasks": [],
+            "artifact_refs": [],
+            "metadata": {
+                "unmaterialized_cook_admission": {
+                    "commands": {
+                        "status": "homeboy agent-task status unmaterialized-cook",
+                        "watch": "homeboy agent-task status unmaterialized-cook --watch",
+                        "cancel": "homeboy agent-task cancel unmaterialized-cook",
+                        "resume": "homeboy agent-task resume unmaterialized-cook"
+                    }
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
+        assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
     }
 
     #[test]
