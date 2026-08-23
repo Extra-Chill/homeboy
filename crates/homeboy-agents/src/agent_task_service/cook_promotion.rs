@@ -4120,8 +4120,8 @@ fn cook_selected_candidate_provenance(
 }
 
 /// Build recovery coordinates from durable controller records only. Provider
-/// output, gate output, and filesystem paths stay behind `diagnose` so a failed
-/// command envelope cannot disclose private evidence.
+/// failures contribute only a bounded, redacted causal command projection;
+/// expanded output remains behind `diagnose`.
 pub fn cook_failure_context(
     cook_id: &str,
     latest_run_id: Option<&str>,
@@ -4222,6 +4222,19 @@ pub fn cook_failure_context(
         .as_ref()
         .and_then(|record| record.metadata.get("cook_controller_failure"))
         .cloned();
+    let pre_execution_diagnostic = record.as_ref().and_then(|record| {
+        let failure = record.metadata.get("pre_execution_failure")?;
+        let details = failure.get("details")?;
+        homeboy_core::worktree_providers::compact_provider_failure_details(details).map(
+            |evidence| {
+                serde_json::json!({
+                    "code": failure.get("error_code"),
+                    "message": failure.get("message"),
+                    "worktree_provider_failure": evidence,
+                })
+            },
+        )
+    });
     let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
         (
             "promotion".to_string(),
@@ -4264,6 +4277,20 @@ pub fn cook_failure_context(
             "finalization".to_string(),
             "finalization_incomplete".to_string(),
             None,
+        )
+    } else if let Some(diagnostic) = pre_execution_diagnostic {
+        (
+            record
+                .as_ref()
+                .and_then(|record| record.metadata.pointer("/pre_execution_failure/phase"))
+                .and_then(Value::as_str)
+                .unwrap_or("pre_execution")
+                .to_string(),
+            diagnostic["code"]
+                .as_str()
+                .unwrap_or("pre_execution_failure")
+                .to_string(),
+            Some(diagnostic),
         )
     } else if let Some(diagnostic) = controller_diagnostic {
         (

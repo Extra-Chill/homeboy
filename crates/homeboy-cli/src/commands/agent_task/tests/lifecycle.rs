@@ -20,6 +20,49 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
             .is_empty());
     });
 }
+
+#[test]
+fn diagnose_projects_causal_pre_execution_provider_evidence() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-provider-pre-execution";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["pre_execution_failure"] = serde_json::json!({
+                "phase": "worktree_provider_lookup",
+                "error_code": "validation.invalid_argument",
+                "message": "worktree provider `fixture` ensure command failed with exit code 1",
+                "details": {
+                    "worktree_provider_operation": "ensure",
+                    "worktree_provider_replay_command": "fixture-provider ensure fixture@task",
+                    "command_evidence": {
+                        "command": "fixture-provider ensure fixture@task",
+                        "exit_code": 1,
+                        "stderr": "Error: Primary checkout for \"php-transformer\" does not exist. Clone it first.\nextra context",
+                    },
+                },
+            });
+        })
+        .expect("record provider failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose provider failure");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(diagnosis["root_cause"]["source"], "pre_execution_failure");
+        assert_eq!(
+            diagnosis["root_cause"]["details"],
+            serde_json::json!({
+                "operation": "ensure",
+                "exit_code": 1,
+                "replay_command": "fixture-provider ensure fixture@task",
+                "stderr_excerpt": "Error: Primary checkout for \"php-transformer\" does not exist. Clone it first.",
+            })
+        );
+    });
+}
 use clap::Parser;
 use homeboy::agents::agent_task_service::{
     AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,

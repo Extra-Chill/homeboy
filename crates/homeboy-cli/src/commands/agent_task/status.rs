@@ -5731,6 +5731,26 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             }),
         });
     }
+    if let Some(failure) = record.metadata.get("pre_execution_failure") {
+        let details = failure.get("details")?;
+        let provider_failure =
+            homeboy::core::worktree_providers::compact_provider_failure_details(details)?;
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: failure
+                .get("error_code")
+                .and_then(Value::as_str)
+                .unwrap_or("pre_execution_failure")
+                .to_string(),
+            message: failure
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Cook pre-execution failure")
+                .to_string(),
+            source: "pre_execution_failure".to_string(),
+            data: json!({ "worktree_provider_failure": provider_failure }),
+        });
+    }
     let diagnostic = record.metadata.get("cook_controller_failure")?;
     let cause = diagnostic
         .get("deepest_cause")
@@ -6756,6 +6776,8 @@ fn collected_diagnostic_value_with_details(
         }
     } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
+    } else if let Some(details) = item.data.get("worktree_provider_failure") {
+        value["details"] = details.clone();
     }
     if let Some(field) = item.data.get("field").filter(|field| !field.is_null()) {
         if let Some(field) = bounded_diagnostic_value(field) {
