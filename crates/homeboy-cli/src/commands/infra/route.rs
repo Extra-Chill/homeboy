@@ -2329,13 +2329,14 @@ fn run_split_placement_cook_with_runtime(
     let progress = |phase: &str,
                     cook_id: Option<&str>,
                     run_id: Option<&str>,
-                    activity: Option<&str>| {
+                    activity: Option<&str>,
+                    terminal_retry_command: Option<&str>| {
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
             }
         } else {
-            progress_reporter.report(phase, cook_id, run_id, activity);
+            progress_reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);
         }
         Ok(())
     };
@@ -2589,6 +2590,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                         "heartbeat",
                         None,
                         Some(&heartbeat_run_id),
+                        None,
                         None,
                     );
                 }

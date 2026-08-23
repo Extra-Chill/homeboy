@@ -4129,7 +4129,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None, None)?;
+            progress("preparing", None, None, None, None)?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -4231,6 +4231,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
                     Some(event.cook_id),
                     Some(event.run_id),
                     terminal_outcome.or(activity.as_deref()),
+                    event.terminal_retry_command,
                 )
             })
             .unwrap_or(Ok(()))
