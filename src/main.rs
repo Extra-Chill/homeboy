@@ -1,7 +1,26 @@
-use homeboy::cli_runtime::CliRuntime;
+use clap::{ArgMatches, Command};
+use homeboy::cli_runtime::{CliCapability, CliRuntime};
 
 static PRODUCT_CAPABILITIES: [&'static dyn homeboy::cli_runtime::CliCapability; 1] =
-    [&homeboy_triage::TRIAGE_CAPABILITY];
+    [&TRIAGE_CAPABILITY];
+
+struct TriageCapability;
+
+static TRIAGE_CAPABILITY: TriageCapability = TriageCapability;
+
+impl CliCapability for TriageCapability {
+    fn name(&self) -> &'static str {
+        homeboy_triage::COMMAND_NAME
+    }
+
+    fn command(&self) -> Command {
+        homeboy_triage::command()
+    }
+
+    fn run(&self, matches: &ArgMatches) -> homeboy::core::Result<(serde_json::Value, i32)> {
+        homeboy_triage::run_command(matches)
+    }
+}
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
