@@ -7,7 +7,8 @@ trap 'rm -rf "${tmp}"' EXIT
 
 workflow="${root}/.github/workflows/required-gates-ruleset.yml"
 grep -Fq 'workflow_dispatch:' "${workflow}"
-! grep -Fq 'schedule:' "${workflow}"
+grep -Fq 'schedule:' "${workflow}"
+grep -Fq "cron: '17 * * * *'" "${workflow}"
 grep -Fq 'environment: main-ruleset-administration' "${workflow}"
 grep -Fq -- '--operation audit' "${workflow}"
 grep -Fq -- '--operation reconcile' "${workflow}"
@@ -48,7 +49,7 @@ if run --operation audit --evidence "${tmp}/audit.json"; then
   echo 'audit accepted a drifted ruleset' >&2
   exit 1
 fi
-jq -e '.operation == "audit" and .changed == false and .matched == false' "${tmp}/audit.json" >/dev/null
+jq -e '.operation == "audit" and .policy_version == "required-gates-ruleset/v1" and (.policy_revision | length == 40) and (.policy_sha256 | length == 64) and .changed == false and .matched == false' "${tmp}/audit.json" >/dev/null
 test ! -s "${tmp}/gh.log" || ! grep -Fq -- '--method PUT' "${tmp}/gh.log"
 
 : > "${tmp}/gh.log"

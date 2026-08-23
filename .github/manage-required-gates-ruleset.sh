@@ -2,9 +2,10 @@
 # Audit or converge the one repository-owned main ruleset to its versioned policy.
 set -euo pipefail
 
-repo='Extra-Chill/homeboy'
-ruleset_id='13680120'
-config='.github/required-gates-ruleset.json'
+policy_version='required-gates-ruleset/v1'
+repo="${GITHUB_REPOSITORY:-Extra-Chill/homeboy}"
+ruleset_id="${GH_RULESET_ID:-13680120}"
+config="${REQUIRED_GATES_CONFIG:-.github/required-gates-ruleset.json}"
 operation=''
 evidence=''
 gh_bin="${GH_BIN:-gh}"
@@ -32,6 +33,8 @@ project_ruleset() {
 }
 
 desired="$(project_ruleset < "${config}")"
+policy_revision="$(git rev-parse HEAD)"
+policy_sha256="$(printf '%s\n' "${desired}" | shasum -a 256 | awk '{print $1}')"
 before="$(${gh_bin} api "repos/${repo}/rulesets/${ruleset_id}")"
 before_contract="$(project_ruleset <<< "${before}")"
 changed=false
@@ -54,6 +57,9 @@ fi
 jq -n \
   --arg repository "${repo}" \
   --arg ruleset_id "${ruleset_id}" \
+  --arg policy_version "${policy_version}" \
+  --arg policy_revision "${policy_revision}" \
+  --arg policy_sha256 "${policy_sha256}" \
   --arg operation "${operation}" \
   --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson before "${before}" \
@@ -61,7 +67,7 @@ jq -n \
   --argjson after "${after}" \
   --argjson changed "${changed}" \
   --argjson matched "${matched}" \
-  '{repository: $repository, ruleset_id: $ruleset_id, operation: $operation, timestamp: $timestamp, changed: $changed, matched: $matched, before: $before, desired: $desired, after: $after}' \
+  '{repository: $repository, ruleset_id: $ruleset_id, policy_version: $policy_version, policy_revision: $policy_revision, policy_sha256: $policy_sha256, operation: $operation, timestamp: $timestamp, changed: $changed, matched: $matched, before: $before, desired: $desired, after: $after}' \
   > "${evidence}"
 
 if [ "${matched}" != true ]; then

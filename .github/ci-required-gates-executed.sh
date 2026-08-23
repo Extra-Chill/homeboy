@@ -31,9 +31,12 @@
 #   dependency results - every gate job `ci.yml` names as a dependency concluded
 #                        `success`. Tokenless, structural, and here `skipped`
 #                        and `cancelled` are failures rather than silence.
-#   observed execution - every context in `.github/required-gates-ruleset.json`
-#                        appears in this run's job list with conclusion
-#                        `success`. This is the claim the declaration check
+#   observed execution - every non-terminal context in
+#                        `.github/required-gates-ruleset.json` appears in this
+#                        run's job list with conclusion `success`. The terminal
+#                        job cannot observe its own conclusion while it runs;
+#                        GitHub enforces that final required context itself.
+#                        This is the claim the declaration check
 #                        cannot make: a context can be declared by a job that
 #                        never ran (#10997's vacuous-declaration shape) or by a
 #                        job the whole run skipped (#12573's shape).
@@ -111,6 +114,7 @@ declared_contexts="$(jq -c '
   | sort
 ' "${config}")"
 declared_count="$(jq 'length' <<< "${declared_contexts}")"
+execution_contexts="$(jq -c '[.[] | select(. != "homeboy / Required Gates Executed")]' <<< "${declared_contexts}")"
 
 if [ "${declared_count}" -eq 0 ]; then
   echo "::error::required-gates policy declares no required checks, so execution cannot be verified"
@@ -161,7 +165,7 @@ if read_run_jobs; then
   # `${{ matrix.title }}`), so `homeboy / Audit` is simply absent rather than
   # present-and-skipped. Absent is therefore `not-executed`, which is exactly
   # the verdict wanted: the context produced no measurement.
-  execution="$(jq -c --argjson required "${declared_contexts}" '
+  execution="$(jq -c --argjson required "${execution_contexts}" '
     . as $jobs
     | [ $required[]
         | . as $context

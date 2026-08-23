@@ -1,6 +1,9 @@
 name: Required Gates Ruleset
 
 on:
+  schedule:
+    # Audit only. Reconciliation remains an explicit approved dispatch.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       operation:
