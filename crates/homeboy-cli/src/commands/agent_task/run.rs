@@ -1481,10 +1481,10 @@ mod preview_tests {
                 panic!("Cook command");
             };
             args.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
-                content: "@/not/a/prompt/file".to_string(),
+                content: "Inspect the task workspace.".to_string(),
                 source: "stdin".to_string(),
                 sha256: "sha256:fixture".to_string(),
-                size_bytes: "@/not/a/prompt/file".len(),
+                size_bytes: "Inspect the task workspace.".len(),
             });
             let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
 
