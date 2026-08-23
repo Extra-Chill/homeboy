@@ -104,17 +104,17 @@ fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
         })
         .expect("full status");
 
-        assert!(value["metadata"]
-            .get("automatic_artifact_retention")
-            .is_none());
-        assert_eq!(value["cleanup_evidence"][0]["count"], 10_000);
+        assert_eq!(value["schema"], "homeboy/agent-task-status-full/v2");
+        assert_eq!(value["evidence_graph"].as_array().map(Vec::len), Some(8));
         assert_eq!(
-            value["cleanup_evidence"][0]["ref"],
-            format!(
-                "homeboy://agent-task/run/{run_id}/status#metadata.automatic_artifact_retention"
-            )
+            value["evidence_graph"][0]["ref"],
+            format!("homeboy://agent-task/run/{run_id}/aggregate")
         );
-        assert!(value["tasks"].is_array());
+        assert!(value["evidence_graph"]
+            .as_array()
+            .expect("stable graph")
+            .iter()
+            .all(|entry| entry["export_command"].as_str().is_some()));
         assert!(!value.to_string().contains("/workspace/unrelated-9999"));
         assert!(value.to_string().len() < 16 * 1024);
 
