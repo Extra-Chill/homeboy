@@ -293,6 +293,7 @@ pub(super) fn exec_via_reverse_broker(
         },
         job,
         |_| Ok(()),
+        |_| Ok(()),
         |current| {
             fetch_daemon_job_resilient(&client, broker_url, &current.id.to_string()).map_err(
                 |err| {
@@ -312,7 +313,7 @@ pub(super) fn exec_via_reverse_broker(
                 },
             )
         },
-        |job_id| fetch_daemon_events(&client, broker_url, job_id),
+        |job| fetch_daemon_events(&client, broker_url, &job.id.to_string()),
         |job, events, result| {
             let request = crate::evidence::MirrorEvidenceRequest::new(
                 runner,
