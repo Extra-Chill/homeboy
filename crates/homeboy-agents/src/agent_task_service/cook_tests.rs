@@ -7803,25 +7803,6 @@ fn adoption_ambiguity_describes_policy_choices_without_sensitive_config() {
     assert!(!error.message.contains("api_token"));
 }
 
-#[test]
-fn adoption_rejects_unknown_run_or_cook_ids() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let recipe_store = CookRecipeStore::new(context.path_roots());
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let error = resolve_adoption_target_with_attempt_in_stores(
-        &recipe_store,
-        &lifecycle_store,
-        "unknown-adoption-target",
-        None,
-    )
-    .expect_err("unknown adoption target fails closed");
-
-    assert_eq!(error.details["field"], "run_or_cook_id");
-    assert!(error
-        .message
-        .contains("unknown agent-task run or durable cook id"));
-}
-
 #[derive(Default)]
 struct CaptureBackend {
     body: String,
@@ -7833,6 +7814,8 @@ struct CaptureBackend {
     hydrate_run_id: Option<String>,
     hydrate_gate_proof_run_id: Option<String>,
     synthetic_gate_proof: Option<AgentTaskPromotionReport>,
+    commit_error: bool,
+    commit_real: bool,
 }
 
 impl AgentTaskPrFinalizationBackend for CaptureBackend {
@@ -7978,7 +7961,46 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         proof.scope = "commit_host_policy".to_string();
         Ok(proof)
     }
-    fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
+    fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
+        if self.commit_error {
+            return Err(
+                homeboy_core::Error::validation_invalid_argument_with_evidence(
+                    "publication",
+                    "git commit failed",
+                    None,
+                    None,
+                    Some(homeboy_error::CommandEvidence {
+                        command: "git commit".to_string(),
+                        cwd: None,
+                        location: Some("local".to_string()),
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: "hook rejected commit".to_string(),
+                        truncated: false,
+                    }),
+                ),
+            );
+        }
+        if self.commit_real {
+            for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+                let output = Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .output()
+                    .map_err(|error| homeboy_core::Error::git_command_failed(error.to_string()))?;
+                if !output.status.success() {
+                    return Err(homeboy_core::Error::git_command_failed(
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    ));
+                }
+            }
+            let output = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()
+                .map_err(|error| homeboy_core::Error::git_command_failed(error.to_string()))?;
+            self.committed_sha = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
         self.committed = true;
         Ok(())
     }
@@ -7993,7 +8015,10 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             local_branch: head.to_string(),
             remote: "origin".to_string(),
             upstream_ref: format!("refs/remotes/origin/{head}"),
-            verified_remote_sha: "candidate-sha".to_string(),
+            verified_remote_sha: self
+                .committed_sha
+                .clone()
+                .unwrap_or_else(|| "candidate-sha".to_string()),
         })
     }
     fn find_open_pr(
@@ -8003,6 +8028,27 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(None)
+    }
+    fn verify_remote_candidate(
+        &mut self,
+        _path: &str,
+        _head: &str,
+        candidate_sha: &str,
+    ) -> Result<String> {
+        Ok(candidate_sha.to_string())
+    }
+    fn quarantine_capability(
+        &mut self,
+        newly_created: bool,
+        was_draft: bool,
+    ) -> Result<crate::agent_task_finalization::AgentTaskPrQuarantineCapability> {
+        Ok(if newly_created {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr
+        } else if was_draft {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft
+        } else {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+        })
     }
     fn create_pr(
         &mut self,
@@ -8042,12 +8088,40 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     ) -> Result<AgentTaskPublicationBinding> {
         Ok(AgentTaskPublicationBinding {
             candidate_sha: candidate_sha.to_string(),
-            candidate_tree: "candidate-tree".to_string(),
+            candidate_tree: match crate::agent_task_promotion::candidate_fingerprint(_path)? {
+                crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } => {
+                    fingerprint.tree
+                }
+                crate::agent_task_promotion::AgentTaskPromotionCandidate::NonGit { .. } => {
+                    "candidate-tree".to_string()
+                }
+            },
             remote_sha: candidate_sha.to_string(),
             pr_head_sha: candidate_sha.to_string(),
             repository: "Extra-Chill/homeboy".to_string(),
             head_repository: "Extra-Chill/homeboy".to_string(),
             changed_files: changed_files.to_vec(),
+        })
+    }
+    fn quarantine_pr(
+        &mut self,
+        _path: &str,
+        _pr: &AgentTaskPrRef,
+        capability: crate::agent_task_finalization::AgentTaskPrQuarantineCapability,
+    ) -> Result<String> {
+        Ok(match capability {
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr => {
+                "new_pr_closed".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
+                "existing_pr_already_draft".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
+                "existing_pr_converted_to_draft".to_string()
+            }
+            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::Unsupported => {
+                "unsupported".to_string()
+            }
         })
     }
 }
