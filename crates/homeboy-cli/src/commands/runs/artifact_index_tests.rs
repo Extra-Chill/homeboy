@@ -267,24 +267,27 @@ fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
                 .expect("record artifact");
         }
 
-        let (output, _) = handlers::artifacts_from_args(RunsArtifactsArgs {
-            run_id: run.id.clone(),
-            runner: None,
-            pull: false,
-            pull_dir: None,
-            token: None,
-            kind: None,
-            mime: None,
-            original_path: None,
-            path_suffix: None,
-            fixture: None,
-            surface: None,
-            scenario: None,
-            name_glob: None,
-            limit: 50,
-            offset: 0,
-            full: false,
-        })
+        let (output, _) = handlers::artifacts_from_args(
+            &test_store(),
+            RunsArtifactsArgs {
+                run_id: run.id.clone(),
+                runner: None,
+                pull: false,
+                pull_dir: None,
+                token: None,
+                kind: None,
+                mime: None,
+                original_path: None,
+                path_suffix: None,
+                fixture: None,
+                surface: None,
+                scenario: None,
+                name_glob: None,
+                limit: 50,
+                offset: 0,
+                full: false,
+            },
+        )
         .expect("bounded listing");
         let RunsOutput::Artifacts(output) = output else {
             panic!("artifacts output")
@@ -294,24 +297,27 @@ fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
         assert_eq!(page.total, 240);
         assert_eq!(page.next_offset, Some(50));
 
-        let (output, _) = handlers::artifacts_from_args(RunsArtifactsArgs {
-            run_id: run.id,
-            runner: None,
-            pull: false,
-            pull_dir: None,
-            token: None,
-            kind: Some("visual_diff".to_string()),
-            mime: Some("image/png".to_string()),
-            original_path: None,
-            path_suffix: Some("visual.png".to_string()),
-            fixture: Some("fixture-89".to_string()),
-            surface: Some("desktop".to_string()),
-            scenario: Some("visual-regression".to_string()),
-            name_glob: Some("visual_*".to_string()),
-            limit: 100,
-            offset: 0,
-            full: false,
-        })
+        let (output, _) = handlers::artifacts_from_args(
+            &test_store(),
+            RunsArtifactsArgs {
+                run_id: run.id,
+                runner: None,
+                pull: false,
+                pull_dir: None,
+                token: None,
+                kind: Some("visual_diff".to_string()),
+                mime: Some("image/png".to_string()),
+                original_path: None,
+                path_suffix: Some("visual.png".to_string()),
+                fixture: Some("fixture-89".to_string()),
+                surface: Some("desktop".to_string()),
+                scenario: Some("visual-regression".to_string()),
+                name_glob: Some("visual_*".to_string()),
+                limit: 100,
+                offset: 0,
+                full: false,
+            },
+        )
         .expect("filtered listing");
         let RunsOutput::Artifacts(output) = output else {
             panic!("artifacts output")
