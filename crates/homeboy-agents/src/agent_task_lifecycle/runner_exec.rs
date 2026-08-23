@@ -107,6 +107,7 @@ const COMMAND_RESULT_RUN_REF_LIMIT: usize = 32;
 const DESCENDANT_RUN_GRAPH_LIMIT: usize = 64;
 
 fn ensure_runner_exec_observation_run(
+    lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     runner_id: &str,
     remote_workspace: &str,
@@ -114,7 +115,7 @@ fn ensure_runner_exec_observation_run(
     runner_job_id: Option<&str>,
 ) -> Result<homeboy_core::observation::RunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_maintained()?;
     let mut run = match store.get_run(&run_id)? {
         Some(run)
             if run.metadata_json.get("kind").and_then(Value::as_str)
@@ -190,6 +191,7 @@ pub fn record_runner_exec_job_identity(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_runner_exec_observation_run(
+        &AgentTaskLifecycleStore::from_current_environment()?,
         run_id,
         runner_id,
         remote_workspace,
@@ -205,7 +207,29 @@ pub fn record_runner_exec_execution_record(
     run_id: &str,
     execution_record: &homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    record_runner_exec_execution_record_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        execution_record,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_execution_record`].
+///
+/// This is a read-modify-write of one observation row: read, `kind`-checked,
+/// mutated, written back. Read and write are the same row, so they have to
+/// be the same installation (#7505).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`]
+/// rather than the lifecycle opener: the ambient body used
+/// `ObservationStore::open_initialized()`, and the two differ in startup
+/// artifact maintenance.
+pub fn record_runner_exec_execution_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    execution_record: &homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(());
     };
@@ -266,7 +290,37 @@ pub fn ensure_generic_runner_exec_run(
     remote_workspace: &str,
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
-    ensure_runner_exec_observation_run(run_id, runner_id, remote_workspace, remote_command, None)
+    ensure_generic_runner_exec_run_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        runner_id,
+        remote_workspace,
+        remote_command,
+    )
+}
+
+/// The store-rooted counterpart of [`ensure_generic_runner_exec_run`].
+///
+/// This is the run's first durable write. Everything the caller records after
+/// it — declarations, execution record, promotions, terminal result — addresses
+/// the row created here, so creating it in one installation and appending to it
+/// from another would leave the later writes silently addressing nothing
+/// (#7505).
+pub fn ensure_generic_runner_exec_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<homeboy_core::observation::RunRecord> {
+    ensure_runner_exec_observation_run(
+        lifecycle_store,
+        run_id,
+        runner_id,
+        remote_workspace,
+        remote_command,
+        None,
+    )
 }
 
 /// Record a controller-side phase before work can reach a runner. This local
@@ -357,7 +411,33 @@ pub fn record_runner_exec_artifact_declarations(
     artifact_dirs: &[String],
     summaries: &[String],
 ) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    record_runner_exec_artifact_declarations_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        artifacts,
+        artifact_dirs,
+        summaries,
+    )
+}
+
+/// The store-rooted counterpart of [`record_runner_exec_artifact_declarations`].
+///
+/// This is a read-modify-write of one observation row: read, `kind`-checked,
+/// mutated, written back. Read and write are the same row, so they have to
+/// be the same installation (#7505).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`]
+/// rather than the lifecycle opener: the ambient body used
+/// `ObservationStore::open_initialized()`, and the two differ in startup
+/// artifact maintenance.
+pub fn record_runner_exec_artifact_declarations_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    artifacts: &[String],
+    artifact_dirs: &[String],
+    summaries: &[String],
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let run_id = sanitize_run_id(run_id);
     let Some(mut run) = store.get_run(&run_id)? else {
         return Err(Error::validation_invalid_argument(
@@ -1003,7 +1083,26 @@ fn bounded_required_string<'a>(value: &'a Value, field: &str, limit: usize) -> O
 /// Finish a synchronous transport that has no daemon job identity (diagnostic
 /// SSH/local execution) after its declared evidence is safely retained.
 pub fn finish_runner_exec_direct(run_id: &str, transport: &str, exit_code: i32) -> Result<bool> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    finish_runner_exec_direct_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        transport,
+        exit_code,
+    )
+}
+
+/// The store-rooted counterpart of [`finish_runner_exec_direct`].
+///
+/// This is the run's terminal commit. It reads the row, refuses if already
+/// terminal, and finishes it — the guard and the write are the same row, so a
+/// split root could finish a run the guard never inspected (#7505).
+pub fn finish_runner_exec_direct_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    transport: &str,
+    exit_code: i32,
+) -> Result<bool> {
+    let store = lifecycle_store.open_observation_maintained()?;
     let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(false);
     };

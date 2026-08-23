@@ -117,19 +117,37 @@ pub(super) fn exec_with_hydration(
             remote_path,
         )?;
     }
-    if let Some(run_id) = validated_run_id.as_deref() {
+    // One `runner exec` invocation is one unit of work over one installation.
+    // The eleven durable writes below used to open eleven independent ambient
+    // stores, so the run this command created and the run it finished were only
+    // the same row by coincidence of environment (#7505).
+    // Resolved only when there is a run to record against. `PathRoots` is
+    // fallible, and an invocation without `--run-id` writes nothing durable, so
+    // resolving unconditionally would fail commands that never needed a home.
+    let lifecycle_store = validated_run_id
+        .as_deref()
+        .map(|_| {
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment(
+            )
+        })
+        .transpose()?;
+    if let (Some(run_id), Some(lifecycle_store)) =
+        (validated_run_id.as_deref(), lifecycle_store.as_ref())
+    {
         let runner_config = runner::load(runner_id)?;
         let remote_cwd = cwd
             .as_deref()
             .or(runner_config.workspace_root.as_deref())
             .unwrap_or(".");
-        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
+            lifecycle_store,
             run_id,
             runner_id,
             remote_cwd,
             &prepared_command,
         )?;
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations(
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations_in_store(
+            lifecycle_store,
             run_id,
             &artifact_outputs,
             &artifact_dir_outputs,
@@ -142,7 +160,8 @@ pub(super) fn exec_with_hydration(
             .with_orchestration_provenance(Some(
                 runner::runner_exec_orchestration_provenance(runner_id)?,
             ));
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record_in_store(
+            lifecycle_store,
             run_id,
             &execution_record,
         )?;
@@ -189,15 +208,19 @@ pub(super) fn exec_with_hydration(
             read_only_artifact_access: read_only_artifact,
         },
     )?;
-    if let Some(run_id) = validated_run_id.as_deref() {
+    if let (Some(run_id), Some(lifecycle_store)) =
+        (validated_run_id.as_deref(), lifecycle_store.as_ref())
+    {
         if let Some(execution_record) = output.execution_record.as_ref() {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record_in_store(
+                lifecycle_store,
                 run_id,
                 execution_record,
             )?;
         }
         if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint_in_store(
+                lifecycle_store,
                 run_id,
                 &homeboy::core::api_jobs::RunnerJobLogSnapshot {
                     job: job.clone(),
@@ -212,7 +235,8 @@ pub(super) fn exec_with_hydration(
                 &output,
                 std::slice::from_ref(declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                lifecycle_store,
                 run_id,
                 "artifact",
                 declaration,
@@ -231,7 +255,8 @@ pub(super) fn exec_with_hydration(
                 &output,
                 std::slice::from_ref(declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                lifecycle_store,
                 run_id,
                 "artifact_dir",
                 declaration,
@@ -250,7 +275,8 @@ pub(super) fn exec_with_hydration(
                 &output,
                 std::slice::from_ref(declaration),
             )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
+                lifecycle_store,
                 run_id,
                 "summary",
                 declaration,
@@ -278,9 +304,14 @@ pub(super) fn exec_with_hydration(
             .chain(summaries.iter())
             .cloned()
             .collect::<Vec<_>>();
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(run_id, &retained)?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_in_store(
+            lifecycle_store,
+            run_id,
+            &retained,
+        )?;
         if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
-            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
+                lifecycle_store,
                 run_id,
                 &homeboy::core::api_jobs::RunnerJobLogSnapshot {
                     job: job.clone(),
@@ -291,7 +322,8 @@ pub(super) fn exec_with_hydration(
             output.mode,
             runner::RunnerExecMode::DiagnosticSsh | runner::RunnerExecMode::Local
         ) {
-            homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct(
+            homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct_in_store(
+                lifecycle_store,
                 run_id,
                 match output.mode {
                     runner::RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
