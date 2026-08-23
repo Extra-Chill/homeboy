@@ -734,16 +734,13 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     // Resource and Lab inventory are live execution inputs. Reading either here
     // made a read-only preview wait on the same unavailable control plane it was
     // intended to diagnose. Execution revalidates this admission after preview.
-    let admission = crate::commands::utils::resource_policy::CookPreviewPlacementAdmission {
-        schema: "homeboy/cook-preview-placement-admission/v1",
-        state: crate::commands::utils::resource_policy::CookPreviewPlacementAdmissionState::Indeterminate,
-        revalidate_before_execution: true,
-        blockers: Vec::new(),
-        deferred_to: Some("execution_placement_admission".to_string()),
-        recovery: None,
-    };
-    policy["admission"] =
-        serde_json::to_value(admission).expect("Cook preview placement admission serializes");
+    policy["admission"] = serde_json::json!({
+        "schema": "homeboy/cook-preview-placement-admission/v1",
+        "state": "indeterminate",
+        "revalidate_before_execution": true,
+        "blockers": [],
+        "deferred_to": "execution_placement_admission",
+    });
     policy
 }
 
