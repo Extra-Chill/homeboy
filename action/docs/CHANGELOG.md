@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.0] - 2026-08-23
+
+### Added
+- configure source build profiles
+
 ## [2.14.8] - 2026-08-22
 
 ### Changed
