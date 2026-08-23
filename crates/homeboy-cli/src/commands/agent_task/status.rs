@@ -1667,7 +1667,9 @@ pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
 }
 
 pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
-    let report = agent_task_lifecycle::reconcile_record_health(dry_run)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let report = agent_task_lifecycle::reconcile_record_health_in_store(&lifecycle_store, dry_run)?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
@@ -4039,7 +4041,10 @@ fn attach_collection_budget(
 }
 
 pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
-    let recovered = homeboy::agents::agent_task_lifecycle::recover_controller_runtime(
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let recovered = homeboy::agents::agent_task_lifecycle::recover_controller_runtime_in_store(
+        &lifecycle_store,
         &args.run_id,
         args.artifact.as_deref().map(std::path::Path::new),
         args.source.as_deref().map(std::path::Path::new),
@@ -4051,7 +4056,12 @@ pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
-    let record = homeboy::agents::agent_task_lifecycle::validate_controller_runtime(&args.run_id)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = homeboy::agents::agent_task_lifecycle::validate_controller_runtime_in_store(
+        &lifecycle_store,
+        &args.run_id,
+    )?;
     Ok((
         json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state, "executable": true }),
         0,
@@ -4578,12 +4588,21 @@ mod cancellation_outcome_tests {
 }
 
 pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::quarantine_queued_run_exact(&args.run_id, &args.reason)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+        &lifecycle_store,
+        &args.run_id,
+        &args.reason,
+    )?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
 pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::rearm_quarantined_run(&args.run_id)?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record =
+        agent_task_lifecycle::rearm_quarantined_run_in_store(&lifecycle_store, &args.run_id)?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 

@@ -129,11 +129,6 @@ fn legacy_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     store::record_from_run_allowing_legacy_schema(run)
 }
 
-pub fn reconcile_record_health(dry_run: bool) -> Result<AgentTaskRecordReconciliationReport> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    reconcile_record_health_in_store(&lifecycle_store, dry_run)
-}
-
 /// Quarantine only records whose durable plan and accepted handoff prove they
 /// came from the in-tree fixture executor. This deliberately does not migrate
 /// legacy records or touch unknown runner ownership: target-version bootstrap
@@ -168,7 +163,7 @@ pub fn quarantine_verified_fixture_runner_records() -> Result<usize> {
     Ok(quarantined)
 }
 
-/// [`reconcile_record_health`] against explicitly injected durable lifecycle
+/// `reconcile_record_health` against explicitly injected durable lifecycle
 /// roots.
 ///
 /// Despite reading like a report, this writes on every non-dry-run pass: it

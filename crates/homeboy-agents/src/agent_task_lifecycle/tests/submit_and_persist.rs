@@ -2582,8 +2582,9 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
             .expect("project v1 legacy pin");
             let before = status(&record.run_id).expect("record before migration");
 
-            let error = validate_controller_runtime(&record.run_id)
-                .expect_err("legacy migration fails closed");
+            let error =
+                validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
+                    .expect_err("legacy migration fails closed");
 
             assert!(
                 error.message.contains(expected_error),
@@ -4589,14 +4590,15 @@ fn record_health_recovers_after_interrupted_migration_without_changing_terminal_
             .expect("terminal malformed fixture");
 
         store::fail_next_record_write_for_test();
-        assert!(reconcile_record_health(false).is_err());
+        assert!(reconcile_record_health_in_store(&test_lifecycle_store(), false).is_err());
         assert_eq!(
             record_health_summary_in_store(&test_lifecycle_store(),)
                 .expect("still malformed")
                 .malformed,
             1
         );
-        let applied = reconcile_record_health(false).expect("retry migration");
+        let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
+            .expect("retry migration");
         assert_eq!(applied.migrated, 1);
         let repaired = status("interrupted-terminal").expect("repaired");
         assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
