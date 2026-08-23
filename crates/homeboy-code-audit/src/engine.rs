@@ -390,6 +390,9 @@ pub(super) fn audit_internal(
         plan.detector_enabled("dead_code")
             .then(|| DeadCodeReferenceAnalysis::build(root, reference_paths))
     });
+    let test_quality_findings = (plan.detector_enabled("test_coverage")
+        || plan.detector_enabled("test_topology"))
+    .then(|| crate::test_quality::run(root));
     let detector_context = DetectorRunContext {
         root,
         component_id,
@@ -399,6 +402,7 @@ pub(super) fn audit_internal(
         policy_fingerprints: policy_scan_fingerprints,
         source_snapshot: Some(&source_snapshot),
         dead_code_references: dead_code_references.as_ref(),
+        test_quality_findings: test_quality_findings.as_deref(),
     };
 
     // The duplication family stays hand-sequenced: it runs five timing spans and
@@ -924,6 +928,9 @@ fn audit_root_only(
     } else {
         None
     };
+    let test_quality_findings = (plan.detector_enabled("test_coverage")
+        || plan.detector_enabled("test_topology"))
+    .then(|| crate::test_quality::run(root));
 
     let detector_context = DetectorRunContext {
         root,
@@ -936,6 +943,7 @@ fn audit_root_only(
         policy_fingerprints: &[],
         source_snapshot: source_snapshot.as_ref(),
         dead_code_references: None,
+        test_quality_findings: test_quality_findings.as_deref(),
     };
 
     run_descriptor_detectors(

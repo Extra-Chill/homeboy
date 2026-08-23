@@ -47,6 +47,9 @@ pub(super) struct DetectorRunContext<'a> {
     /// root-only fast path when no snapshot-backed detector is enabled.
     pub(super) source_snapshot: Option<&'a CodebaseSnapshot>,
     pub(super) dead_code_references: Option<&'a DeadCodeReferenceAnalysis>,
+    /// The Rust test-quality walk is shared by topology and coverage so a full
+    /// audit classifies each test file once before descriptor fan-out.
+    pub(super) test_quality_findings: Option<&'a [Finding]>,
 }
 
 fn run_fingerprint_descriptor(
@@ -86,7 +89,10 @@ fn run_root_descriptor(
     context: &DetectorRunContext<'_>,
 ) -> Vec<Finding> {
     match runner {
-        RootDetectorRunner::TestTopology => test_topology::run(context.root),
+        RootDetectorRunner::TestTopology => context.test_quality_findings.map_or_else(
+            || test_topology::run(context.root),
+            test_topology::run_from_shared,
+        ),
         RootDetectorRunner::TestWiring => test_wiring::run(context.root, context.audit_config),
     }
 }
@@ -195,17 +201,27 @@ fn run_dead_code(context: &DetectorRunContext<'_>) -> Vec<Finding> {
 /// that declares a `test_mapping` for the component, matching the prior
 /// hand-wired loop's "first extension wins, then stop" behavior.
 fn run_test_coverage(context: &DetectorRunContext<'_>) -> Vec<Finding> {
+    let standalone_vacuity = context.test_quality_findings.map_or_else(
+        || test_coverage::run_vacuity(context.root),
+        test_coverage::run_vacuity_from_shared,
+    );
     let Some(comp) = super::component_provider::resolve_by_id(context.component_id) else {
-        return Vec::new();
+        return standalone_vacuity;
     };
     for ext_id in &comp.extension_ids {
         if let Some(ext_manifest) = super::extension_manifests::load_audit_manifest(ext_id) {
             if let Some(test_mapping) = &ext_manifest.test_mapping {
-                return test_coverage::run(context.root, context.all_fingerprints, test_mapping);
+                let mut findings = standalone_vacuity;
+                findings.extend(test_coverage::analyze_test_coverage(
+                    context.root,
+                    context.all_fingerprints,
+                    test_mapping,
+                ));
+                return findings;
             }
         }
     }
-    Vec::new()
+    standalone_vacuity
 }
 
 fn extend_descriptor_findings(
@@ -481,6 +497,7 @@ mod tests {
             policy_fingerprints: &[],
             source_snapshot: None,
             dead_code_references: None,
+            test_quality_findings: None,
         };
 
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
@@ -531,6 +548,7 @@ mod tests {
             policy_fingerprints: &fingerprints,
             source_snapshot: None,
             dead_code_references: None,
+            test_quality_findings: None,
         };
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
         let mut timing = AuditTiming::default();
@@ -578,6 +596,7 @@ mod tests {
             policy_fingerprints: &fingerprints,
             source_snapshot: None,
             dead_code_references: None,
+            test_quality_findings: None,
         };
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
 
