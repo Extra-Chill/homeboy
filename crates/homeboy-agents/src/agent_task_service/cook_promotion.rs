@@ -901,30 +901,15 @@ pub fn record_replacement_gate_proof(
         ));
     }
     replacement.normalize_gate_outcome();
-    if replacement.status != AgentTaskPromotionStatus::Applied
-        || replacement.deterministic_gates.is_empty()
-        || replacement.verified_base.is_none()
-        || replacement.deterministic_gates.iter().any(|gate| {
-            gate.command.is_empty()
-                || gate.exit_code != 0
-                || gate.candidate_checkout.is_none()
-                || !replacement
-                    .command_evidence
-                    .iter()
-                    .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
-        })
-    {
-        return Err(Error::validation_invalid_argument(
-            "replacement_gate_proof",
-            "replacement proof requires every green gate to have matching zero-exit command evidence, plus candidate checkout and verified base",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
+    validate_replacement_proof_finalization_eligibility(run_id, &replacement)?;
+    validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
     let expected_candidate = original.provenance.get("candidate");
     let observed_candidate = replacement.provenance.get("candidate");
     let same_candidate = observed_candidate == expected_candidate
-        && (original.provenance.get("candidate_checkout").is_none()
+        && (original
+            .provenance
+            .get("candidate_checkout")
+            .is_none_or(Value::is_null)
             || replacement.provenance.get("candidate_checkout")
                 == original.provenance.get("candidate_checkout"));
     let drifted = serde_json::json!({
@@ -1044,6 +1029,162 @@ fn bounded_candidate_fingerprint(candidate: Option<&Value>) -> Value {
     })
 }
 
+/// Older failed promotions did not retain the checkout used by their gates.
+/// Their immutable candidate fingerprint remains sufficient to authenticate a
+/// replacement checkout, but only when its tree and candidate digest match.
+fn validate_legacy_replacement_candidate_checkout(
+    run_id: &str,
+    original: &AgentTaskPromotionReport,
+    replacement: &AgentTaskPromotionReport,
+) -> Result<()> {
+    if original
+        .provenance
+        .get("candidate_checkout")
+        .is_some_and(|checkout| !checkout.is_null())
+    {
+        return Ok(());
+    }
+    let failed = |predicate: &'static str| {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            format!("legacy replacement checkout is not proven: failed `{predicate}`"),
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] = serde_json::json!(predicate);
+        error
+    };
+    let fingerprint = original
+        .provenance
+        .pointer("/candidate/fingerprint")
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let head = fingerprint
+        .get("head")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let tree = fingerprint
+        .get("tree")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let sha256 = fingerprint
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
+    let checkout = replacement
+        .provenance
+        .get("candidate_checkout")
+        .ok_or_else(|| failed("legacy_candidate_checkout"))?;
+    if checkout.get("tree").and_then(Value::as_str) != Some(tree)
+        || checkout.get("candidate_sha256").and_then(Value::as_str) != Some(sha256)
+    {
+        return Err(failed("legacy_candidate_checkout_fingerprint"));
+    }
+    if replacement.provenance.get("candidate") != original.provenance.get("candidate") {
+        return Err(failed("legacy_candidate_fingerprint"));
+    }
+    if let Some(adopted) = original
+        .provenance
+        .pointer("/adoption/candidate_ref")
+        .and_then(Value::as_str)
+    {
+        if adopted != head {
+            return Err(failed("legacy_candidate_adoption"));
+        }
+    }
+    Ok(())
+}
+
+/// Admission and recovery share the same gate facts: an accepted replacement
+/// must be able to hydrate a reviewer-runnable finalization dossier.
+fn validate_replacement_proof_finalization_eligibility(
+    run_id: &str,
+    replacement: &AgentTaskPromotionReport,
+) -> Result<()> {
+    let failed = |predicate: &'static str, gate_id: Option<&str>| {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            format!("replacement proof is not finalization-eligible: failed `{predicate}`"),
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] = serde_json::json!(predicate);
+        if let Some(gate_id) = gate_id {
+            error.details["gate_id"] = serde_json::json!(gate_id);
+        }
+        error
+    };
+
+    if replacement.status != AgentTaskPromotionStatus::Applied {
+        return Err(failed("applied_status", None));
+    }
+    if replacement.deterministic_gates.is_empty() {
+        return Err(failed("non_empty_deterministic_gates", None));
+    }
+    if replacement.verified_base.is_none() {
+        return Err(failed("verified_base", None));
+    }
+    if !replacement.finalization_eligible(false) {
+        return Err(failed("green_gate_status", None));
+    }
+    let candidate_checkout = replacement.provenance.get("candidate_checkout");
+    for gate in &replacement.deterministic_gates {
+        if gate.command.is_empty() {
+            return Err(failed("command", Some(&gate.id)));
+        }
+        if !replacement
+            .command_evidence
+            .iter()
+            .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
+        {
+            return Err(failed("matching_command_evidence", Some(&gate.id)));
+        }
+        if candidate_checkout.is_none()
+            || gate
+                .candidate_checkout
+                .as_ref()
+                .and_then(|checkout| serde_json::to_value(checkout).ok())
+                .as_ref()
+                != candidate_checkout
+        {
+            return Err(failed("candidate_checkout", Some(&gate.id)));
+        }
+    }
+    let visible_gates = replacement
+        .deterministic_gates
+        .iter()
+        .filter(|gate| gate.visibility == homeboy_core::gate::HomeboyGateVisibility::Visible)
+        .collect::<Vec<_>>();
+    if visible_gates.is_empty() {
+        return Err(failed("visibility", None));
+    }
+    let shell_gates = visible_gates
+        .iter()
+        .copied()
+        .filter(|gate| matches!(gate.command.as_slice(), [shell, flag, _] if shell == "sh" && flag == "-lc"))
+        .collect::<Vec<_>>();
+    if shell_gates.is_empty() {
+        return Err(failed("shell_command", None));
+    }
+    let candidate_bound_gates = shell_gates
+        .iter()
+        .copied()
+        .filter(|gate| replacement.has_visible_passed_gate_for_command(&gate.command[2]))
+        .collect::<Vec<_>>();
+    if candidate_bound_gates.is_empty() {
+        return Err(failed("candidate_checkout", None));
+    }
+    if !candidate_bound_gates
+        .iter()
+        .any(|gate| crate::agent_task_review_dossier::reviewer_runnable_command(&gate.command[2]))
+    {
+        return Err(failed("reviewer_runnable_command", None));
+    }
+    Ok(())
+}
+
 /// Execute corrected gates against the exact failed applied candidate and record
 /// the resulting #11290 replacement proof without replaying provider work or
 /// applying the patch again.
@@ -1150,6 +1291,21 @@ fn verify_replacement_gates_owned(
             Some(run_id.to_string()),
             None,
         ));
+    }
+    if !gates
+        .verify
+        .iter()
+        .any(|command| crate::agent_task_review_dossier::reviewer_runnable_command(command))
+    {
+        let mut error = Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "replacement verification requires a reviewer-runnable visible gate before shell execution",
+            Some(run_id.to_string()),
+            None,
+        );
+        error.details["failed_eligibility_predicate"] =
+            serde_json::json!("reviewer_runnable_command");
+        return Err(error);
     }
     let target_path = original.target.path.as_deref().or_else(|| {
         original.provenance.get("worktree_path").and_then(Value::as_str)

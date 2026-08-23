@@ -12515,10 +12515,12 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             "test \"$(cat ../figma-transformer/tracked.txt)\" = promoted; printf ran >> {}",
             gate_log.display()
         );
+        let reviewer_gate = "test \"$(cat tracked.txt)\" = promoted".to_string();
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
-                verify: vec![gate.clone()],
+                verify: vec![reviewer_gate.clone()],
+                private_verify: vec![gate.clone()],
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -12538,17 +12540,26 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             vec!["figma-transformer/tracked.txt"]
         );
         assert_eq!(
-            replacement.deterministic_gates[0]
+            replacement.deterministic_gates[1]
                 .cwd
                 .as_ref()
                 .expect("gate cwd evidence")
                 .effective,
             target.join("php-transformer").display().to_string()
         );
-        assert_eq!(replacement.deterministic_gates.len(), 1);
+        assert_eq!(replacement.deterministic_gates.len(), 2);
         assert_eq!(
             replacement.deterministic_gates[0].command,
+            vec!["sh".to_string(), "-lc".to_string(), reviewer_gate]
+        );
+        assert_eq!(
+            replacement.deterministic_gates[1].command,
             vec!["sh".to_string(), "-lc".to_string(), gate]
+        );
+        assert_eq!(
+            replacement.deterministic_gates[1].visibility,
+            homeboy_core::gate::HomeboyGateVisibility::Private,
+            "a private required gate remains durable runtime evidence"
         );
         let replay = verify_replacement_gates(
             "cook-verify-replacement",
@@ -14943,15 +14954,20 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
 fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_republishing() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-11290";
-        let run_id = "cook-11290-attempt-1";
+        let failed_run_id = "cook-11290-attempt-1";
+        let run_id = "cook-11290-attempt-2";
         let target = tempfile::tempdir().expect("fixture target");
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
         options.head = Some("fix/8058".to_string());
         options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(failed_run_id))
+            .expect("submit failed attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, failed_run_id)
+            .expect("link failed attempt");
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
-        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link recipe attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id).expect("link retry attempt");
         seed_patch_alias_aggregate(
             run_id,
             &options.initial_plan,
@@ -14968,6 +14984,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         failed.deterministic_gates[0].exit_code = 1;
         failed.deterministic_gates[0].stderr = "rustup infrastructure failure".to_string();
         failed.provenance["candidate"] = serde_json::json!({"kind": "git", "fingerprint": {"head": "candidate", "tree": "candidate-tree", "sha256": "candidate-sha"}});
+        let legacy_checkout = failed.provenance["candidate_checkout"].take();
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
             .expect("record immutable failed evidence");
 
@@ -14977,6 +14994,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded;
         replacement.deterministic_gates[0].exit_code = 0;
         replacement.deterministic_gates[0].stderr.clear();
+        replacement.provenance["candidate_checkout"] = legacy_checkout;
         replacement.command_evidence = vec![
             crate::agent_task_promotion::AgentTaskPromotionCommandReport {
                 command: vec![
@@ -15016,9 +15034,80 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             Some("Chris approved external proof".to_string()),
         )
         .expect_err("each gate needs matching command evidence");
-        assert!(error
-            .message
-            .contains("matching zero-exit command evidence"));
+        assert!(error.message.contains("matching_command_evidence"));
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "matching_command_evidence"
+        );
+
+        let mut private_gate = replacement.clone();
+        private_gate.deterministic_gates[0].visibility =
+            homeboy_core::gate::HomeboyGateVisibility::Private;
+        let error = record_replacement_gate_proof(
+            run_id,
+            private_gate,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("private gates cannot hydrate reviewer test instructions");
+        assert_eq!(error.details["failed_eligibility_predicate"], "visibility");
+
+        let mut unrelated_legacy_checkout = replacement.clone();
+        unrelated_legacy_checkout.provenance["candidate_checkout"]["tree"] =
+            serde_json::json!("other-tree");
+        unrelated_legacy_checkout.provenance["candidate_checkout"]["candidate_sha256"] =
+            serde_json::json!("other-sha");
+        unrelated_legacy_checkout.deterministic_gates[0].candidate_checkout = Some(
+            serde_json::from_value(
+                unrelated_legacy_checkout.provenance["candidate_checkout"].clone(),
+            )
+            .unwrap(),
+        );
+        let error = record_replacement_gate_proof(
+            run_id,
+            unrelated_legacy_checkout,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("legacy replacement checkout must match the original immutable fingerprint");
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "legacy_candidate_checkout_fingerprint"
+        );
+
+        let mut mixed_gates = replacement.clone();
+        let mut unbound_private_gate = mixed_gates.deterministic_gates[0].clone();
+        unbound_private_gate.id = "private-unbound".to_string();
+        unbound_private_gate.visibility = homeboy_core::gate::HomeboyGateVisibility::Private;
+        unbound_private_gate.command = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "cargo test private-replacement-gate".to_string(),
+        ];
+        unbound_private_gate
+            .candidate_checkout
+            .as_mut()
+            .unwrap()
+            .commit = "other-candidate".to_string();
+        mixed_gates.command_evidence.push(
+            crate::agent_task_promotion::AgentTaskPromotionCommandReport {
+                command: unbound_private_gate.command.clone(),
+                exit_code: 0,
+                stdout: "passed".to_string(),
+                stderr: String::new(),
+                capture: Default::default(),
+            },
+        );
+        mixed_gates.deterministic_gates.push(unbound_private_gate);
+        let error = record_replacement_gate_proof(
+            run_id,
+            mixed_gates,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("an unbound private gate cannot be persisted beside a valid visible gate");
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "candidate_checkout"
+        );
+        assert_eq!(error.details["gate_id"], "private-unbound");
 
         let replacement_for_finalization = replacement.clone();
         let replacement_for_replay = replacement.clone();
@@ -15040,6 +15129,11 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         );
         let record = agent_task_lifecycle::status(run_id).expect("read durable evidence");
         assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(run_id),
+            "recovery selects the retry attempt that owns the latest accepted proof"
+        );
         let original_history = &record.metadata["promotions"][0];
         assert!(original_history["deterministic_gates"][0]["stderr"]
             .as_str()
@@ -15068,6 +15162,19 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["environment_policy"][0]["environment"]["mode"],
             "inherit"
+        );
+
+        let mut preflight_backend = CaptureBackend {
+            synthetic_gate_proof: Some(replacement_for_finalization.clone()),
+            ..Default::default()
+        };
+        let preflight =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
+                .expect("replacement proof hydrates preflight from retry attempt");
+        assert_eq!(preflight["status"], "validated");
+        assert_eq!(
+            preflight["review_dossier"]["how_to_test"][0]["command"],
+            "cargo test --locked agent_task_promotion --lib"
         );
 
         let mut backend = CaptureBackend {
