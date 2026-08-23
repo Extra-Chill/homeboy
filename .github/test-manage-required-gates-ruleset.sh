@@ -119,7 +119,7 @@ if run_reconcile "${tmp}/missing-checks.json" "${tmp}/missing-check-failure.json
 fi
 jq -e '.outcome == "failed" and .stage == "check-run" and .reason == "canonical successful required check is absent"' "${tmp}/missing-check-failure.json" >/dev/null
 
-if GH_BIN="${tmp}/gh" GH_LOG="${tmp}/gh.log" GH_STATE="${tmp}/state.json" GITHUB_REPOSITORY=Extra-Chill/homeboy \
+if GH_BIN="${tmp}/gh" GH_LOG="${tmp}/gh.log" GH_STATE="${tmp}/state.json" GH_TOKEN='' GITHUB_REPOSITORY=Extra-Chill/homeboy \
   bash "${root}/.github/reconcile-required-gates-ruleset.sh" --evidence "${tmp}/token-failure.json"; then
   echo 'reconcile accepted a missing administration token' >&2
   exit 1
