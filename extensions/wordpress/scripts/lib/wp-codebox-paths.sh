@@ -59,10 +59,6 @@ homeboy_wp_codebox_resolve_bin() {
         candidates+=("$bin")
     fi
 
-    while IFS= read -r candidate; do
-        [ -n "$candidate" ] && candidates+=("$candidate")
-    done < <(homeboy_wp_codebox_managed_cli_candidates)
-
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
     fi
@@ -79,6 +75,36 @@ homeboy_wp_codebox_resolve_bin() {
     if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
         candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
     fi
+
+    # Explicit configuration is an operator pin. Without one, a managed source
+    # checkout owns resolution; an incomplete checkout is repaired, never
+    # bypassed through PATH by a possibly incompatible global installation.
+    for candidate in "${candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${candidates[0]}." >&2
+        echo "       Re-run the WordPress extension setup or correct the explicit binary setting." >&2
+        return 1
+    fi
+
+    if [ -d "$(homeboy_wp_codebox_managed_install_root)/source" ]; then
+        candidate="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
+        if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        echo "Error: the managed WP Codebox cache is incomplete; its built CLI entrypoint is missing at ${candidate}." >&2
+        echo "       Re-run the WordPress extension setup to rebuild it." >&2
+        return 1
+    fi
+
+    candidates=()
 
     while IFS= read -r candidate; do
         [ -n "$candidate" ] && candidates+=("$candidate")
@@ -98,12 +124,7 @@ homeboy_wp_codebox_resolve_bin() {
         fi
     done
 
-    if homeboy_wp_codebox_managed_cache_is_incomplete; then
-        local managed_cli
-        managed_cli="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
-        echo "Error: the managed WP Codebox cache is incomplete; its built CLI entrypoint is missing at ${managed_cli}." >&2
-        echo "       Re-run the WordPress extension setup to rebuild it, or set HOMEBOY_WP_CODEBOX_BIN / settings wp_codebox_bin to a working CLI." >&2
-    elif ! command -v wp-codebox >/dev/null 2>&1; then
+    if ! command -v wp-codebox >/dev/null 2>&1; then
         if [ "$config_label" = "config" ]; then
             echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
         else

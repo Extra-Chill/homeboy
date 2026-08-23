@@ -32,6 +32,10 @@ if [ "${1:-}" = "--version" ]; then
     printf '%s\n' "${FAKE_WP_CODEBOX_VERSION-0.21.0}"
     exit 0
 fi
+if [ "${1:-}" = "runtime" ] && [ "${2:-}" = "descriptor" ] && [ "${3:-}" = "--json" ]; then
+    printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    exit 0
+fi
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
@@ -136,6 +140,7 @@ while [ "$#" -gt 0 ]; do
 cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 console.log('wp-codebox source stub');
 NODE
             chmod +x "${prefix}/packages/cli/dist/index.js"
@@ -539,6 +544,7 @@ printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: 
 cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 console.log('current wp-codebox');
 NODE
 chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"

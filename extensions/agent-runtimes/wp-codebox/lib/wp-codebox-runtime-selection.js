@@ -7,6 +7,9 @@ const { spawnSync } = require('node:child_process');
 
 const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require('../wp-codebox.json');
 
+const BROWSER_PREVIEW_SCHEMA = 'wp-codebox/browser-contained-site-open/v1';
+const MANAGED_IDENTITY_SCHEMA = 'homeboy/wp-codebox-managed-runtime-identity/v1';
+
 function selectWpCodeboxRuntime(options = {}) {
   const env = options.env || process.env;
   const settings = { ...settingsFromEnv(env), ...(options.settings || {}) };
@@ -64,6 +67,13 @@ function preflightWpCodeboxRuntime(options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure(selection, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
+  const descriptor = probeRuntimeDescriptor(selection.selected.path, options);
+  if (!browserPreviewReady(descriptor)) {
+    return failure(selection, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
+  }
+  if (selection.selected.source === 'managed' && !managedIdentityMatches(selection.selected.path, options)) {
+    return failure(selection, requiredVersion, version, 'wp_codebox_managed_source_identity_invalid', 'homeboy extension setup wordpress');
+  }
   return { ready: true, required_version: requiredVersion, selected: { ...selection.selected, version }, candidates: selection.candidates, remediation: '' };
 }
 
@@ -86,7 +96,44 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
+  if (!browserPreviewReady(probeRuntimeDescriptor(binary, options, args))) {
+    return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
+  }
   return { ready: true, required_version: requiredVersion, selected: { ...selected, version }, candidates: {}, remediation: '' };
+}
+
+function probeRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
+  const invocation = wpCodeboxCommand(bin);
+  const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, ...prefixArgs, 'runtime', 'descriptor', '--json'], {
+    encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
+  });
+  if (result.error || result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function browserPreviewReady(descriptor) {
+  return descriptor?.schema === 'wp-codebox/runtime-descriptor/v1'
+    && descriptor?.readiness?.status === 'available'
+    && descriptor?.readiness?.browserRuntime?.status === 'ready'
+    && descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen === BROWSER_PREVIEW_SCHEMA;
+}
+
+function managedIdentityMatches(bin, options = {}) {
+  const source = path.resolve(bin, '../../../../');
+  const identityPath = path.join(source, '.homeboy-runtime-identity.json');
+  let identity;
+  try {
+    identity = JSON.parse((options.fs || fs).readFileSync(identityPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (identity?.schema !== MANAGED_IDENTITY_SCHEMA || identity?.source_sha?.length !== 40 || !Array.isArray(identity.required_capabilities) || !identity.required_capabilities.includes(BROWSER_PREVIEW_SCHEMA)) return false;
+  const result = (options.spawnSync || spawnSync)('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: options.timeoutMs || 5_000 });
+  return result.status === 0 && result.stdout.trim() === identity.source_sha;
 }
 
 function failure(selection, requiredVersion, version, reason, remediation) {
@@ -212,6 +259,8 @@ function settingsFromEnv(env) {
 
 module.exports = {
   REQUIRED_WP_CODEBOX_VERSION,
+  BROWSER_PREVIEW_SCHEMA,
+  MANAGED_IDENTITY_SCHEMA,
   compareVersions,
   parseVersion,
   preflightWpCodeboxCommand,

@@ -14,10 +14,25 @@ const run = (env) => {
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 };
-const executable = (file, version) => {
+const executable = (file, version, browserPreview = true) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(version)});\n`);
+  fs.writeFileSync(file, `#!/usr/bin/env node
+if (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(version)});
+else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify(${JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: browserPreview ? 'ready' : 'unavailable' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: browserPreview ? 'wp-codebox/browser-contained-site-open/v1' : '' } } } })}));
+else process.exit(1);
+`);
   fs.chmodSync(file, 0o755);
+};
+const managedRuntime = (root, version, browserPreview = true) => {
+  const source = path.join(root, 'source');
+  const cli = path.join(source, 'packages/cli/dist/index.js');
+  executable(cli, version, browserPreview);
+  spawnSync('git', ['init', '-q'], { cwd: source });
+  spawnSync('git', ['add', '.'], { cwd: source });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: source });
+  const sha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(path.join(source, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: sha, required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+  return cli;
 };
 
 try {
@@ -51,7 +66,7 @@ try {
 
   const healthy = path.join(temp, 'healthy');
   const managedCli = path.join(healthy, 'source/packages/cli/dist/index.js');
-  executable(managedCli, '0.19.0');
+  managedRuntime(healthy, '0.19.0');
   const managed = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: healthy, HOMEBOY_WP_CODEBOX_BIN: '', PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(managed.ready, false);
   assert.equal(managed.classification, 'wp_codebox_version_too_old');
@@ -60,13 +75,21 @@ try {
   assert.equal(managed.identity.version, '0.19.0');
 
   const cachedCurrent = path.join(temp, 'cached-current');
-  const cachedCli = path.join(cachedCurrent, 'source/packages/cli/dist/index.js');
-  executable(cachedCli, '0.21.0');
+  const cachedCli = managedRuntime(cachedCurrent, '0.21.0');
   const cached = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: cachedCurrent, PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(cached.ready, true);
   assert.equal(cached.identity.executable, cachedCli);
   assert.equal(cached.identity.source, 'managed');
   assert.equal(cached.identity.version, '0.21.0');
+
+  const staleBuild = path.join(temp, 'stale-build');
+  managedRuntime(staleBuild, '0.21.0');
+  fs.writeFileSync(path.join(staleBuild, 'source', '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: '0'.repeat(40), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+  assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: staleBuild, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_managed_source_identity_invalid');
+
+  const missingCapability = path.join(temp, 'missing-capability');
+  managedRuntime(missingCapability, '0.21.0', false);
+  assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: missingCapability, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_browser_preview_capability_missing');
 
   const override = path.join(temp, 'override');
   executable(override, '0.21.0');

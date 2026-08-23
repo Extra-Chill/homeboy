@@ -120,14 +120,17 @@ exit 65
 SH
 chmod +x "$STALE_BIN"
 
+set +e
 managed_output=$(WP_CODEBOX_CALLS="$CALLS" \
     HOME="$MANAGED_HOME" \
     HOMEBOY_WP_CODEBOX_BIN="$STALE_BIN" \
     HOMEBOY_SETTINGS_JSON="{\"wp_codebox_bin\":\"$STALE_BIN\"}" \
     bash "$DOCTOR" --json 2>&1)
+managed_status=$?
+set -e
 
-if [[ "$managed_output" != *"managed wp-codebox doctor"* ]]; then
-    echo "Expected managed WP Codebox cache to outrank stale legacy env/settings" >&2
+if [ "$managed_status" -eq 0 ] || [[ "$managed_output" != *"configured WP Codebox binary is unavailable"* ]]; then
+    echo "Expected stale explicit WP Codebox config to fail without falling back to managed cache" >&2
     echo "$managed_output" >&2
     exit 1
 fi
@@ -175,8 +178,8 @@ if [ "$missing_status" -eq 0 ]; then
     exit 1
 fi
 
-if [[ "$missing_output" != *"wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox"* ]]; then
-    echo "Expected actionable missing WP Codebox guidance" >&2
+if [[ "$missing_output" != *"configured WP Codebox binary is unavailable"* ]]; then
+    echo "Expected fail-closed configured WP Codebox guidance" >&2
     echo "$missing_output" >&2
     exit 1
 fi
