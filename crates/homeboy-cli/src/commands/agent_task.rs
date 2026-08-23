@@ -230,7 +230,11 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 ) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
-        AgentTaskCommand::Cook(cook_args) => {
+        AgentTaskCommand::Cook(mut cook_args) => {
+            // Consume a redirected prompt before routing can hand Cook to another
+            // process. The captured value, rather than stdin, is then the input
+            // every preview and execution path compiles.
+            run::snapshot_cook_prompt(&mut cook_args)?;
             if cook_args.preview {
                 return run::preview_cook(*cook_args, provenance);
             }
