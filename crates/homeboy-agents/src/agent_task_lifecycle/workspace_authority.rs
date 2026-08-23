@@ -348,10 +348,6 @@ fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> St
     format!("{:x}", digest.finalize())
 }
 
-pub(crate) fn persist_terminal_from_record(record: &AgentTaskRunRecord) -> Result<()> {
-    WorkspaceTerminalAuthorityStore::from_environment()?.persist_terminal_from_record(record)
-}
-
 fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {
     WorkspaceTerminalAuthorityStore::from_environment()?.persist(receipt)
 }

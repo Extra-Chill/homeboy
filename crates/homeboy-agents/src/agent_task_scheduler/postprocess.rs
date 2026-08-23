@@ -155,6 +155,28 @@ fn start_or_reconcile_worker(
     start_or_reconcile_worker_with_retry(plan, step, run_id, outcomes, fingerprint, true)
 }
 
+/// Its only call site is the `#[cfg(not(test))]` spawn below, so a lib-test
+/// build compiles it out. Gate the definition the same way rather than let a
+/// module-wide suppression hide the whole file.
+#[cfg(not(test))]
+fn postprocess_worker_executable() -> PathBuf {
+    let configured = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER").map(PathBuf::from);
+    // Archive-replayed integration tests execute from a rooted helper copy while
+    // their compile-time override can still name the discarded build output.
+    // Prefer the configured executable when it exists; otherwise use the live
+    // test helper path inherited by the child.
+    if let Some(worker) = configured.as_ref().filter(|worker| worker.is_file()) {
+        return worker.clone();
+    }
+    if let Some(worker) = std::env::var_os("CARGO_BIN_EXE_homeboy")
+        .map(PathBuf::from)
+        .filter(|worker| worker.is_file())
+    {
+        return worker;
+    }
+    configured.unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"))
+}
+
 fn start_or_reconcile_worker_with_retry(
     plan: &AgentTaskPlan,
     step: &AgentTaskArtifactPostprocessStep,
@@ -250,24 +272,6 @@ fn start_or_reconcile_worker_with_retry(
     }
     #[cfg(not(test))]
     Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
-}
-
-fn postprocess_worker_executable() -> PathBuf {
-    let configured = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER").map(PathBuf::from);
-    // Archive-replayed integration tests execute from a rooted helper copy while
-    // their compile-time override can still name the discarded build output.
-    // Prefer the configured executable when it exists; otherwise use the live
-    // test helper path inherited by the child.
-    if let Some(worker) = configured.as_ref().filter(|worker| worker.is_file()) {
-        return worker.clone();
-    }
-    if let Some(worker) = std::env::var_os("CARGO_BIN_EXE_homeboy")
-        .map(PathBuf::from)
-        .filter(|worker| worker.is_file())
-    {
-        return worker;
-    }
-    configured.unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"))
 }
 
 /// A restarted scheduler must adopt the durable worker it finds. The worker owns
@@ -974,7 +978,6 @@ const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
 const COMPLETION_SCHEMA: &str = "homeboy/agent-task-postprocess-completion/v1";
 const WORKER_REQUEST_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-request/v1";
 const WORKER_SPAWN_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-spawn/v1";
-const CLAIM_STALE_AFTER_SECS: u64 = 300;
 const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
 struct PostprocessClaimGuard {

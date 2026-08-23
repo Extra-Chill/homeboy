@@ -4,6 +4,7 @@
 //! evidence. Public URLs are opaque references supplied by a preview/tunnel
 //! provider, keeping this contract independent of any product integration.
 
+use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
@@ -12,7 +13,6 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
     terminate_isolated_process_group_with_grace, terminate_process_tree_with_grace,
@@ -316,25 +316,6 @@ impl AgentTaskServiceSupervisor {
             listener,
         });
         Ok(())
-    }
-
-    pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
-        let values = self.records().into_iter().map(|record| (record.id.clone(), json!({
-            "local_url": record.local_url, "public_url": record.public_url,
-            "browser_origin_probe": record.browser_origin_evidence,
-            "lease_ref": format!("managed-service:{}", record.id),
-            "readiness_attempts": record.readiness_attempts,
-            "endpoint_ownership": record.provenance["endpoint_ownership"],
-            "service_owner": { "pid": record.pid, "process_group_id": record.process_group_id, "runner_id": record.owner_runner_id, "runner_job_id": record.owner_runner_job_id },
-        }))).collect::<serde_json::Map<_, _>>();
-        if !inputs.is_object() {
-            *inputs = json!({});
-        }
-        inputs["services"] = Value::Object(values.clone());
-        if !metadata.is_object() {
-            *metadata = json!({});
-        }
-        metadata["managed_services"] = Value::Object(values);
     }
 
     pub(super) fn records(&self) -> Vec<AgentTaskManagedServiceRecord> {

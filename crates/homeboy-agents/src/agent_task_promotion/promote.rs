@@ -587,21 +587,6 @@ fn verify_patch_is_present(
     Ok(report)
 }
 
-pub(crate) fn promote_with_provider(
-    options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
-) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
-}
-
-pub(super) fn promote_with_provider_and_checkpoint(
-    options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
-    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, None)
-}
-
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     options: AgentTaskPromotionOptions,
@@ -1164,13 +1149,6 @@ fn gate_feedback_baseline_for_artifact(
         }
     }
     Ok(baseline)
-}
-
-/// Replace a runner-local baseline path with the controller artifact-store
-/// identity before a follow-up can reuse a dirty destination. Older baselines
-/// without source identity retain their existing strict path/hash contract.
-pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
-    bind_gate_feedback_baseline_internal(baseline, None)
 }
 
 fn bind_gate_feedback_baseline_internal(

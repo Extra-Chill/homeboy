@@ -201,29 +201,6 @@ pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
     )
 }
 
-pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
-    B: AgentTaskPrFinalizationBackend,
->(
-    cook_or_run_id: &str,
-    candidate_ref: &str,
-    adoption: AgentTaskCandidateAdoptionOptions,
-    reconstruct_dispatcher: impl FnOnce(
-        &Value,
-    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    executor: SharedAgentTaskExecutor,
-    backend: &mut B,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
-        cook_or_run_id,
-        None,
-        candidate_ref,
-        adoption,
-        reconstruct_dispatcher,
-        executor,
-        backend,
-    )
-}
-
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     B: AgentTaskPrFinalizationBackend,
 >(
@@ -1018,15 +995,6 @@ fn reusable_applied_adoption_promotion(
     )
 }
 
-pub(crate) fn candidate_adoption_source(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    source_request: &AgentTaskRequest,
-) -> Result<(String, Option<PathBuf>, Option<Value>)> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    candidate_adoption_source_in_store(&lifecycle_store, record, source_request)
-}
-
 pub(crate) fn candidate_adoption_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -1078,39 +1046,6 @@ pub(crate) fn concrete_adoption_ai_model(value: &str) -> Result<String> {
         ));
     }
     Ok(normalized.to_string())
-}
-
-/// Resolve an existing run first, then recover a deterministic persisted
-/// attempt when a controller stopped after writing its recipe and before
-/// writing the run.
-pub(crate) fn resolve_adoption_target(
-    cook_or_run_id: &str,
-) -> Result<(
-    agent_task_lifecycle::AgentTaskRunRecord,
-    super::AgentTaskCookRecipe,
-)> {
-    resolve_adoption_target_with_attempt(cook_or_run_id, None)
-}
-
-/// Resolve an adoption target, optionally selecting a numbered attempt from a
-/// durable Cook recipe. The selector is needed when attempt one shares its ID
-/// with the logical Cook and later attempts have different policies.
-pub(crate) fn resolve_adoption_target_with_attempt(
-    cook_or_run_id: &str,
-    selected_attempt: Option<u32>,
-) -> Result<(
-    agent_task_lifecycle::AgentTaskRunRecord,
-    super::AgentTaskCookRecipe,
-)> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    resolve_adoption_target_with_attempt_in_stores(
-        &recipe_store,
-        &lifecycle_store,
-        cook_or_run_id,
-        selected_attempt,
-    )
 }
 
 /// Visible to the rest of `agent_task_service` so Cook's tests can resolve an

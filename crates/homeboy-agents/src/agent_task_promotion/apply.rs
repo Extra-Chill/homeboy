@@ -454,10 +454,6 @@ impl ExternalPromotionWorkspaceProvider {
         self.provenance.as_ref()
     }
 
-    pub(super) fn invocation(&self) -> Option<&CommandInvocation> {
-        self.invocation.as_ref()
-    }
-
     fn resolve_configured_fallback(
         &mut self,
         request: &AgentTaskPromotionApplyRequest,

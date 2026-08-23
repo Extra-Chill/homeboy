@@ -44,13 +44,6 @@ impl HarvestExecutionContext {
         )
     }
 
-    fn from_transport_values(
-        source: Option<&str>,
-        lab: Option<&str>,
-    ) -> homeboy_core::Result<Self> {
-        Self::from_transport_values_with_runner_execution(source, lab, false)
-    }
-
     fn from_transport_values_with_runner_execution(
         source: Option<&str>,
         lab: Option<&str>,
@@ -817,40 +810,6 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::process::Command;
-
-    #[test]
-    fn harvest_context_resolves_direct_lab_transport_references() {
-        let directory = tempfile::tempdir().expect("transport directory");
-        let source = serde_json::to_vec(&homeboy_core::source_snapshot::existing_remote(
-            "runner-a",
-            "/runner/workspace",
-            None,
-        ))
-        .expect("source snapshot");
-        let lab = br#"{"schema":"fixture/lab-offload/v1","runner_id":"runner-a"}"#;
-        let reference = |name: &str, payload: &[u8]| {
-            let path = directory.path().join(name);
-            fs::write(&path, payload).expect("write transport payload");
-            serde_json::json!({
-                "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
-                "path": path,
-                "sha256": format!("{:x}", Sha256::digest(payload)),
-            })
-            .to_string()
-        };
-
-        let context = HarvestExecutionContext::from_transport_values(
-            Some(&reference("source.json", &source)),
-            Some(&reference("lab.json", lab)),
-        )
-        .expect("referenced transport");
-
-        assert_eq!(
-            context.source_snapshot.expect("source").runner_id,
-            "runner-a"
-        );
-        assert_eq!(context.lab_offload.expect("lab")["runner_id"], "runner-a");
-    }
 
     #[test]
     fn generic_runner_exec_snapshot_stays_with_the_outer_command() {
