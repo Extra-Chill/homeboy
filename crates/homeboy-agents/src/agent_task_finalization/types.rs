@@ -263,6 +263,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub manual_finalization: bool,
     /// A recovered manual preflight may only publish the immutable candidate it validated.
     pub expected_candidate_sha: Option<String>,
+    /// A command gate may only finalize the committed candidate it observed.
+    pub verified_candidate_sha: Option<String>,
     pub protected_branches: Vec<String>,
     /// Create a draft PR for a new publication. Existing PR state is preserved.
     pub draft_pr: bool,

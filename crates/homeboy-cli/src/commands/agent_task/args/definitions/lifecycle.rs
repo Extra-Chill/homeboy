@@ -554,6 +554,9 @@ pub struct FinalizePrArgs {
     pub evidence: review::FinalizePrEvidenceArgs,
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
     pub gate_results: Vec<String>,
+    /// Execute one deterministic verification command against the committed manual candidate.
+    #[arg(long, value_name = "COMMAND")]
+    pub verify: Option<String>,
     #[arg(long = "changed-file", value_name = "PATH")]
     pub changed_files: Vec<String>,
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]

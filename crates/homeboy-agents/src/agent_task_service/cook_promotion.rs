@@ -2438,6 +2438,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
         expected_candidate_sha: None,
+        verified_candidate_sha: None,
         protected_branches: options.protected_branches.clone(),
         draft_pr: options.draft_pr,
     })
@@ -3301,6 +3302,7 @@ fn manual_finalization_options(
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: true,
         expected_candidate_sha,
+        verified_candidate_sha: None,
         protected_branches: vec![
             "main".to_string(),
             "master".to_string(),
