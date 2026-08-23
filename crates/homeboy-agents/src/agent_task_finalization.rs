@@ -38,6 +38,14 @@ pub fn preflight_pr(
     preflight_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
 }
 
+/// Reached only from `#[cfg(test)]` finalization fixtures, which assert that a
+/// real candidate fingerprint is validated before publication. Production
+/// calls `backend::validate_real_candidate_fingerprint` directly.
+#[cfg(test)]
+fn validate_real_candidate_fingerprint(options: &AgentTaskPrFinalizationOptions) -> Result<()> {
+    backend::validate_real_candidate_fingerprint(options)
+}
+
 pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
