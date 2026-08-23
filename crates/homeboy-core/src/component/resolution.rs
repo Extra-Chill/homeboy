@@ -151,7 +151,8 @@ pub enum RegisteredPrimaryPathResolution {
 ///
 /// A path must canonicalize and exactly equal a registered `local_path` to
 /// resolve as [`RegisteredPrimaryPathResolution::Primary`]. A checkout sharing
-/// a git common directory or origin URL is related but not a primary.
+/// a git common directory, the conventional component-worktree name, or its
+/// origin URL is related but not a primary.
 pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryPathResolution> {
     let expanded = shellexpand::tilde(input);
     let path = Path::new(expanded.as_ref()).canonicalize();
@@ -175,7 +176,10 @@ pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryP
 
         let remote_matches = input_remote.is_some()
             && input_remote == crate::git::remote_origin_url(&registered_path);
-        if same_git_common_dir(&registered_path, &path) || remote_matches {
+        if same_git_common_dir(&registered_path, &path)
+            || is_named_component_worktree(&component.id, &registered_path, &path)
+            || remote_matches
+        {
             related.push(component.id);
         }
     }
@@ -516,6 +520,16 @@ fn prefer_cwd_for_component(
         .map(Some);
     }
 
+    if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
+        return portable_component_for_checkout(
+            config_root,
+            component_id,
+            &cwd_git_root,
+            &registered,
+        )
+        .map(Some);
+    }
+
     Ok(None)
 }
 
@@ -787,9 +801,10 @@ fn component_is_registered(component_id: &str) -> bool {
 }
 
 /// Resolve a bare path to the registered component whose checkout owns it as a
-/// worktree — shared git common dir or an unambiguous origin remote. Returns
-/// the canonical component projected onto the checkout path. `None` when the
-/// path is not related to a registered component (#9895).
+/// worktree — shared git common dir, `<component>@<branch>` naming, or an
+/// unambiguous origin remote. Returns the canonical component projected onto
+/// the checkout path. `None` when the path is not related to a registered
+/// component (#9895).
 fn registered_component_for_worktree_path(
     config_root: Option<&Path>,
     dir: &Path,
@@ -818,7 +833,9 @@ fn registered_component_for_worktree_path(
         let remote_matches = input_remote.is_some()
             && input_remote == crate::git::remote_origin_url(&registered_path);
         if !registered_is_contained
-            && (same_git_common_dir(&registered_path, &cwd_git_root) || remote_matches)
+            && (same_git_common_dir(&registered_path, &cwd_git_root)
+                || is_named_component_worktree(&registered.id, &registered_path, &cwd_git_root)
+                || remote_matches)
         {
             candidates.push(registered);
         }
@@ -2604,7 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_does_not_infer_identity_from_a_worktree_like_basename() {
+    fn target_spec_prefers_named_sibling_worktree_for_registered_component() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
             let primary = dir.path().join("registered");
@@ -2618,10 +2635,10 @@ mod tests {
             with_cwd(&worktree, || {
                 let target = resolve_target(TargetSpec::new(Some("registered"), None))
                     .expect("named worktree target");
-                let canonical_primary = primary.canonicalize().expect("canonical primary");
+                let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
 
                 assert_eq!(target.component_id, "registered");
-                assert_eq!(target.source_path, canonical_primary);
+                assert_eq!(target.source_path, canonical_worktree);
                 assert_eq!(
                     target.component.local_path,
                     target.source_path.to_string_lossy()
