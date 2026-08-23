@@ -241,7 +241,7 @@ impl CookRecipeStore {
     }
 }
 
-fn default_store() -> Result<CookRecipeStore> {
+pub(crate) fn default_store() -> Result<CookRecipeStore> {
     CookRecipeStore::from_current_data_root()
 }
 
