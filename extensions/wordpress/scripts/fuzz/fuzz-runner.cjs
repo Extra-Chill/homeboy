@@ -111,7 +111,7 @@ async function buildRunnerResult(env) {
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const env = wpCodeboxRuntimeEnv(process.env);
-	const command = wpCodeboxCommand(env);
+	const command = wpCodeboxRuntimeCommand(env);
 	const manifest = await discoverRuntimeContractManifest(env);
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
@@ -125,7 +125,7 @@ async function runWpCodeboxAgentTask(request) {
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
 
 	const args = wpCodeboxInvocationArgs(invocation, inputFile);
-	const result = await spawnJson(command, args, {
+	const result = await spawnJson(command[0], [...command.slice(1), ...args], {
 		cwd: process.cwd(),
 		env,
 	});
@@ -190,7 +190,7 @@ function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
 async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, options = {}) {
 	const inputFile = path.join(tempDir, `${invocation.command}-request.json`);
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
-	return spawnJson(command, wpCodeboxPublicRuntimeArgs(invocation, inputFile), {
+	return spawnJson(command[0], [...command.slice(1), ...wpCodeboxPublicRuntimeArgs(invocation, inputFile)], {
 		cwd: process.cwd(),
 		env: options.env || process.env,
 	});
@@ -239,6 +239,10 @@ function resolveWpCodeboxRuntimePath(options = {}) {
 function wpCodeboxRuntimeEnv(env) {
 	const nextEnv = { ...env };
 	const manifestDefaults = installedExtensionSettingDefaults(nextEnv);
+	if (!nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_BIN) {
+		const settings = parseJsonObject(nextEnv.HOMEBOY_SETTINGS_JSON);
+		nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_BIN = settings?.wp_codebox_bin || manifestDefaults.wp_codebox_bin || '';
+	}
 	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
 		const settings = parseJsonObject(nextEnv.HOMEBOY_SETTINGS_JSON);
 		if (settings?.wp_codebox_core_module) {
@@ -275,37 +279,27 @@ function discoverWpCodeboxCoreModule(env) {
 	return '';
 }
 
-function discoverWpCodeboxBin(env) {
-	const installRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
-	for (const candidate of [
-		path.join(installRoot, 'source', 'packages', 'cli', 'dist', 'index.js'),
-		path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-cli', 'dist', 'index.js'),
-		path.join(installRoot, 'release', 'wp-codebox-cli', 'dist', 'index.js'),
-		path.join(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-cli', 'dist', 'index.js'),
-	]) {
-		if (fs.existsSync(candidate)) {
-			return candidate;
-		}
+function wpCodeboxRuntimeCommand(env) {
+	const {
+		preflightWpCodeboxCommand,
+		preflightWpCodeboxRuntime,
+		wpCodeboxCommand,
+	} = require(path.join(resolveWpCodeboxRuntimePath({ env }), 'lib', 'wp-codebox-runtime-selection.js'));
+	const runtimePreflight = preflightWpCodeboxRuntime({ env });
+	if (!runtimePreflight.ready) {
+		throw wpCodeboxPreflightError(runtimePreflight);
 	}
-	return '';
+	const invocation = wpCodeboxCommand(runtimePreflight.selected.path);
+	const command = [invocation.command, ...invocation.args];
+	const preflight = preflightWpCodeboxCommand(command, { env });
+	if (!preflight.ready) {
+		throw wpCodeboxPreflightError(preflight);
+	}
+	return command;
 }
 
-function wpCodeboxCommand(env) {
-	if (env.HOMEBOY_WP_CODEBOX_BIN) {
-		const configuredInstallRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT;
-		if (!configuredInstallRoot || pathIsInside(env.HOMEBOY_WP_CODEBOX_BIN, configuredInstallRoot)) {
-			return env.HOMEBOY_WP_CODEBOX_BIN;
-		}
-		const discoveredBin = discoverWpCodeboxBin(env);
-		return discoveredBin || env.HOMEBOY_WP_CODEBOX_BIN;
-	}
-	const settings = parseJsonObject(env.HOMEBOY_SETTINGS_JSON);
-	const manifestDefaults = installedExtensionSettingDefaults(env);
-	return env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
-		|| settings?.wp_codebox_bin
-		|| manifestDefaults.wp_codebox_bin
-		|| discoverWpCodeboxBin(env)
-		|| 'wp-codebox';
+function wpCodeboxPreflightError(preflight) {
+	return new Error(`WP Codebox ${preflight.reason}: required >=${preflight.required_version}, observed ${preflight.selected.version || 'unavailable'} at ${preflight.selected.path || 'no executable'}. Run ${preflight.remediation}.`);
 }
 
 function installedExtensionSettingDefaults(env) {
@@ -372,15 +366,6 @@ function readInstalledExtensionManifest(env) {
 		}
 	}
 	return {};
-}
-
-function pathIsInside(value, root) {
-	if (!value || !root) {
-		return false;
-	}
-	const resolvedValue = path.resolve(String(value));
-	const resolvedRoot = path.resolve(String(root));
-	return resolvedValue === resolvedRoot || resolvedValue.startsWith(`${resolvedRoot}${path.sep}`);
 }
 
 function parseJsonObject(value) {
@@ -511,7 +496,6 @@ function findFuzzSuiteResult(value) {
 module.exports = {
 	resolveWpCodeboxRuntimePath,
 	wpCodeboxRuntimeEnv,
-	discoverWpCodeboxBin,
-	wpCodeboxCommand,
+	wpCodeboxRuntimeCommand,
 	installedExtensionSettingDefaults,
 };

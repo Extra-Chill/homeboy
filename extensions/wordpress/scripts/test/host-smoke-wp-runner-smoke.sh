@@ -47,10 +47,27 @@ cat > "$FAKE_CODEBOX" <<'JS'
 'use strict';
 const fs = require('fs');
 const args = process.argv.slice(2);
+if (args[0] === 'commands') {
+  process.stdout.write('commands\n');
+  process.exit(0);
+}
+if (args.includes('--version')) {
+  process.stdout.write('0.21.0');
+  process.exit(0);
+}
+if (args[0] === 'runtime' && args[1] === 'descriptor' && args.includes('--json')) {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+  }));
+  process.exit(0);
+}
 const recipeIdx = args.indexOf('--recipe');
 const recipe = JSON.parse(fs.readFileSync(args[recipeIdx + 1], 'utf8'));
 const captureDir = process.env.FAKE_CODEBOX_CAPTURE_DIR;
 fs.writeFileSync(`${captureDir}/recipe-${Date.now()}-${Math.random().toString(36).slice(2)}.json`, JSON.stringify(recipe, null, 2));
+fs.writeFileSync(`${captureDir}/argv-${Date.now()}-${Math.random().toString(36).slice(2)}.json`, JSON.stringify(process.argv.slice(1), null, 2));
 const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
 fs.copyFileSync(codeFileArg.slice('code-file='.length), `${captureDir}/wrapper.php`);
 // The run-php step's code-file is a wrapper that requires the smoke; we emit a
@@ -60,6 +77,7 @@ process.stdout.write(JSON.stringify({
   executions: [{ command: 'wordpress.run-php', exitCode: 0, stdout: 'OK fake smoke passed\n', stderr: '' }],
 }));
 JS
+chmod +x "$FAKE_CODEBOX"
 
 make_component() {
     local target="$1"
@@ -72,6 +90,42 @@ PHP
 
 component="${TMPDIR}/component"
 make_component "$component"
+
+# Managed cache state is validated before a recipe is created. An update lock
+# and a missing identity both fail closed instead of selecting another runtime.
+MANAGED_CACHE="${TMPDIR}/managed-cache"
+MANAGED_CLI="${MANAGED_CACHE}/source/packages/cli/dist/index.js"
+mkdir -p "$(dirname "$MANAGED_CLI")"
+cp "$FAKE_CODEBOX" "$MANAGED_CLI"
+mkdir -p "${MANAGED_CACHE}/source.update-lock"
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_WP_CODEBOX_INSTALL_DIR="$MANAGED_CACHE" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/updating.out" 2>&1
+updating_exit=$?
+set -e
+if [ "$updating_exit" -eq 0 ] || ! grep -Fq 'managed WP Codebox cache is updating' "${TMPDIR}/updating.out"; then
+    echo "Expected the managed update lock to reject host-smoke execution" >&2
+    cat "${TMPDIR}/updating.out" >&2
+    exit 1
+fi
+rmdir "${MANAGED_CACHE}/source.update-lock"
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_WP_CODEBOX_INSTALL_DIR="$MANAGED_CACHE" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/tampered.out" 2>&1
+tampered_exit=$?
+set -e
+if [ "$tampered_exit" -eq 0 ] || ! grep -Fq 'wp_codebox_managed_source_identity_invalid' "${TMPDIR}/tampered.out"; then
+    echo "Expected a managed runtime without a verified identity to reject host-smoke execution" >&2
+    exit 1
+fi
 
 # --- Default backend run: no implicit discovery of ad hoc smoke files.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
@@ -103,12 +157,15 @@ assert_contains "${TMPDIR}/direct.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
 # The captured recipe must mount the plugin into wp-content/plugins and run the
 # smoke via wordpress.run-php (real WordPress booted).
 captured_recipe="$(ls "${CAPTURE_DIR}"/recipe-*.json | head -1)"
+captured_argv="$(ls "${CAPTURE_DIR}"/argv-*.json | head -1)"
 assert_contains "$captured_recipe" "wordpress.run-php"
 assert_contains "$captured_recipe" "/wordpress/wp-content/plugins/component"
 assert_contains "$captured_recipe" "workspace-recipe/v1"
 assert_contains "${CAPTURE_DIR}/wrapper.php" "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");"
 assert_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(\$homeboy_smoke_stderr"
 assert_not_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(STDERR"
+assert_contains "$captured_argv" "$FAKE_CODEBOX"
+assert_contains "$captured_argv" "recipe-run"
 
 # --- Child environment contract: runtime and dependency roots are sandbox
 # paths, even when their host checkout paths need shell quoting/translation.
@@ -201,6 +258,9 @@ FAKE_CODEBOX_FAIL="${TMPDIR}/fake-wp-codebox-fail.cjs"
 cat > "$FAKE_CODEBOX_FAIL" <<'JS'
 #!/usr/bin/env node
 'use strict';
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args[0] === 'runtime' && args[1] === 'descriptor') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 process.stdout.write(JSON.stringify({
   success: false,
   executions: [{ command: 'wordpress.run-php', exitCode: 1, stdout: '', stderr: 'smoke threw\n' }],
@@ -244,6 +304,8 @@ cat > "$FAKE_CODEBOX_BETA_FAIL" <<'JS'
 'use strict';
 const fs = require('fs');
 const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args[0] === 'runtime' && args[1] === 'descriptor') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 const recipe = JSON.parse(fs.readFileSync(args[args.indexOf('--recipe') + 1], 'utf8'));
 const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
 const wrapper = fs.readFileSync(codeFileArg.slice('code-file='.length), 'utf8');
@@ -284,6 +346,9 @@ cat > "$FAKE_CODEBOX_HANG" <<'JS'
 'use strict';
 const fs = require('fs');
 const { spawn } = require('child_process');
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args[0] === 'runtime' && args[1] === 'descriptor') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1e9);'], { stdio: 'inherit' });
 fs.writeFileSync(process.env.FIXTURE_PIDS_PATH, JSON.stringify({ descendant: descendant.pid }));
 process.on('SIGTERM', () => process.exit(0));
