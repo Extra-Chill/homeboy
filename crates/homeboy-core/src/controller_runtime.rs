@@ -724,6 +724,7 @@ fn pin_current_unlocked() -> Result<Value> {
 /// Pin the currently executing controller while participating in the FIFO
 /// admission queue.  Use this instead of `pin_current()` when concurrent cook
 /// requests must wait their turn rather than fast-fail.
+#[cfg(test)]
 pub fn pin_current_queued(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
@@ -897,6 +898,23 @@ fn runtime_pin(
 /// active-generation pointer is diagnostic state only: every fresh run must
 /// retain the executable that created it, rather than inherit a previous
 /// controller's selection.
+/// Ambient admission entry points, retained for this module's own tests only.
+///
+/// These resolve the runtime root from process-global state. That is the exact
+/// split `tests/nextest_shard_parallelism_test.rs` recorded: a test holding a
+/// `HermeticTestContext` store while production code beneath it read the
+/// admission lease out of the real `$HOME`, so one test observed another's
+/// `controller_admission.owner`. `HermeticTestContext` does not mutate the
+/// environment, so process-per-test isolation cannot help there.
+///
+/// Every production caller now supplies a root, so the `#[cfg(test)]` gate below
+/// is the compiler enforcing that: production cannot reach ambient admission
+/// even by accident, and a future caller that tries will fail to build rather
+/// than fail a shard at random (#7505).
+///
+/// The module's own tests keep using them through `with_isolated_home`, which
+/// mutates `HOME` and is therefore safe under process-per-test.
+#[cfg(test)]
 pub fn admit_current() -> Result<RuntimeAdmission> {
     admit_current_for(&format!("controller-{}", Uuid::new_v4()))
 }
@@ -904,6 +922,7 @@ pub fn admit_current() -> Result<RuntimeAdmission> {
 /// Admit a durable controller request in FIFO order. The request ID is normally
 /// the agent-task run ID, which lets another controller observe or cancel a
 /// waiting admission after the original process has exited.
+#[cfg(test)]
 pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
     admit_current_for_with_cancellation_check(request_id, || Ok(false))
 }
@@ -911,6 +930,7 @@ pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
 /// Admit a request while checking the caller's durable lifecycle state at the
 /// queue claim boundary. The check runs under the queue lock, after the
 /// advisory lock is acquired and before ownership can be published.
+#[cfg(test)]
 pub fn admit_current_for_with_cancellation_check(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
@@ -960,6 +980,7 @@ pub fn admit_current_for_with_cancellation_check_in_root(
 }
 
 /// Return the durable admission view used by lifecycle status output.
+#[cfg(test)]
 pub fn admission_status(request_id: &str) -> Result<Value> {
     admission_status_at(&runtime_root()?, request_id)
 }
@@ -1013,6 +1034,7 @@ fn admission_status_at_lock_path(lock_path: &Path, request_id: &str) -> Result<V
 
 /// Remove a waiting request. An owner is intentionally never force-released:
 /// the advisory lock remains the authority while a process is alive.
+#[cfg(test)]
 pub fn cancel_admission(request_id: &str) -> Result<()> {
     cancel_admission_at(&runtime_root()?, request_id)
 }

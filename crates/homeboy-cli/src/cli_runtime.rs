@@ -1015,11 +1015,14 @@ fn delegate_agent_task_cook_to_pinned_runtime(
     }
 
     let request_id = format!("seal-{}", Uuid::new_v4());
-    let pinned =
-        crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(&request_id, || {
-            Ok(false)
-        })
-        .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
+    // Boundary: sealing the controller for a cook is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
+        roots.data(),
+        &request_id,
+        || Ok(false),
+    )
+    .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
     let status = ProcessCommand::new(&pinned)
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned)

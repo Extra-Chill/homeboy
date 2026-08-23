@@ -2266,13 +2266,15 @@ where
     A: RuntimeAdmissionEvidence,
 {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let admission_status =
+        crate::agent_task_service::cook_pre_execution::store_admission_status(&lifecycle_store);
     submit_plan_with_runtime_admission_in_store(
         &lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
         None,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        Some(&admission_status),
         admit_runtime,
     )
 }
@@ -2999,11 +3001,19 @@ pub fn runner_pinned_runtime_for_mutation(run_id: &str) -> Result<Option<RunnerP
 /// FIFO admission queue so concurrent seals wait their turn instead of
 /// fast-failing.
 pub fn pin_current_controller_runtime(
+    data_root: &std::path::Path,
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<std::path::PathBuf> {
-    let runtime =
-        homeboy_core::controller_runtime::pin_current_queued(request_id, cancellation_requested)?;
+    // The seal joins the FIFO admission queue, and that queue's lock lives under
+    // the runtime root. Taking the caller's data root is what keeps two
+    // installations from serializing against each other's queue (#7505).
+    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
+    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root(
+        &runtime_root,
+        request_id,
+        cancellation_requested,
+    )?;
     runtime
         .pointer("/originating/pinned_executable")
         .and_then(Value::as_str)
