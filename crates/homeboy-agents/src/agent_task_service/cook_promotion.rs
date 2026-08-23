@@ -65,6 +65,35 @@ fn component_workspace_path(options: &AgentTaskCookServiceOptions) -> Option<Pat
     homeboy_core::resolve_contained_local_path(source, component_cwd, "component_cwd").ok()
 }
 
+fn replacement_component_workspace(
+    original: &AgentTaskPromotionReport,
+    target: &std::path::Path,
+) -> Result<Option<PathBuf>> {
+    let Some(cwd) = original
+        .deterministic_gates
+        .iter()
+        .find_map(|gate| gate.cwd.as_ref())
+    else {
+        return Ok(None);
+    };
+    let relative = PathBuf::from(&cwd.effective)
+        .strip_prefix(&cwd.requested)
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "replacement_gate.cwd",
+                "persisted effective gate cwd is outside its requested worktree root",
+                Some(cwd.effective.clone()),
+                None,
+            )
+        })?
+        .to_path_buf();
+    Ok(Some(homeboy_core::resolve_contained_local_path(
+        target,
+        relative,
+        "replacement_gate.cwd",
+    )?))
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
@@ -1088,12 +1117,13 @@ fn verify_replacement_gates_owned(
     // side effects, so a dead owner after this point must recover with external
     // candidate-bound proof rather than replaying an unknown partial execution.
     mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
+    let replacement_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: None,
+            source_worktree_path: replacement_workspace,
             base_ref: Some(verified_base.base.clone()),
             task_base_sha: inputs
                 .and_then(|value| value.get("task_base_sha"))
