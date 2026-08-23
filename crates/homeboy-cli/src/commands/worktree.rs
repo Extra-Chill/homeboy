@@ -536,10 +536,78 @@ fn worktree_cleanup_actionable(
 #[cfg(test)]
 mod tests {
     use clap::{error::ErrorKind, Parser};
+    use homeboy::core::worktree::{
+        CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCreateAction,
+        WorktreeCreateEvidence, WorktreeCreateOutput, WorktreeCreateReconciliation,
+    };
 
     use crate::cli_surface::{Cli, Commands};
 
-    use super::{cleanup_is_dry_run, WorktreeCommand};
+    use super::{cleanup_is_dry_run, WorktreeCommand, WorktreeOutput};
+
+    fn create_output(reconciliation: Option<WorktreeCreateReconciliation>) -> WorktreeCreateOutput {
+        let identity = homeboy::core::worktree::WorkspaceIdentity::new(
+            "task-worktree",
+            "fixture/fixture@branch",
+        )
+        .expect("workspace identity");
+        WorktreeCreateOutput {
+            record: TaskWorktreeRecord {
+                id: "fixture@branch".to_string(),
+                component_id: "fixture".to_string(),
+                source_checkout: "/tmp/source".to_string(),
+                worktree_path: "/tmp/fixture@branch".to_string(),
+                branch: "branch".to_string(),
+                base_ref: "HEAD".to_string(),
+                workspace_identity: Some(identity),
+                task_url: None,
+                run_id: None,
+                cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+                branch_cleanup_intent: Default::default(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                state: TaskWorktreeState::Active,
+                lifecycle_revision: 0,
+                terminal_workspace_authority: None,
+            },
+            reconciliation,
+        }
+    }
+
+    #[test]
+    fn worktree_create_serialization_preserves_outer_action_and_adds_restore_detail() {
+        let created = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
+            .expect("serialize created output");
+        let existing = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
+            .expect("serialize existing output");
+        let evidence = WorktreeCreateEvidence {
+            task_worktree_id: "fixture@branch".to_string(),
+            component_id: "fixture".to_string(),
+            source_checkout: "/tmp/source".to_string(),
+            worktree_path: "/tmp/fixture@branch".to_string(),
+            branch: "branch".to_string(),
+            workspace_identity: homeboy::core::worktree::WorkspaceIdentity::new(
+                "task-worktree",
+                "fixture/fixture@branch",
+            )
+            .expect("workspace identity"),
+            git_registration: "registered".to_string(),
+        };
+        let restored = serde_json::to_value(WorktreeOutput::Create(create_output(Some(
+            WorktreeCreateReconciliation {
+                action: WorktreeCreateAction::Restored,
+                previous: evidence.clone(),
+                current: evidence,
+            },
+        ))))
+        .expect("serialize restored output");
+
+        assert_eq!(created["action"], "create");
+        assert_eq!(existing["action"], "create");
+        assert!(created.get("reconciliation").is_none());
+        assert!(existing.get("reconciliation").is_none());
+        assert_eq!(restored["action"], "create");
+        assert_eq!(restored["reconciliation"]["action"], "restored");
+    }
 
     #[test]
     fn worktree_cleanup_bare_is_a_plan() {

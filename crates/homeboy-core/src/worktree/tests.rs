@@ -332,6 +332,242 @@ fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
     .expect("component registration");
 }
 
+fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateOptions) {
+    let parent = home.join("Developer");
+    let source = parent.join(id);
+    fs::create_dir_all(&source).expect("source directory");
+    run_git(&source, &["init", "-q"]);
+    run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+    run_git(&source, &["config", "user.name", "Homeboy Test"]);
+    fs::write(source.join("README.md"), "initial\n").expect("initial file");
+    fs::write(source.join("homeboy.json"), format!(r#"{{"id":"{id}"}}"#))
+        .expect("component manifest");
+    run_git(&source, &["add", "."]);
+    run_git(&source, &["commit", "-q", "-m", "initial"]);
+    write_component_registration(home, id, &source);
+    (
+        source,
+        WorktreeCreateOptions {
+            component_id: id.to_string(),
+            branch: "fix/restore".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: Some("https://example.com/tasks/restore".to_string()),
+            run_id: None,
+            cleanup_policy: None,
+        },
+    )
+}
+
+#[test]
+fn create_restores_missing_active_record_from_an_unclaimed_existing_branch() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "restore-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+
+        let restored = create(options).expect("restore task worktree");
+
+        let reconciliation = restored.reconciliation.expect("restore evidence");
+        assert_eq!(reconciliation.action, WorktreeCreateAction::Restored);
+        assert_eq!(reconciliation.previous.git_registration, "missing");
+        assert_eq!(reconciliation.current.git_registration, "registered");
+        assert!(path.exists());
+        assert_eq!(
+            git::run_git(&path, &["branch", "--show-current"], "git branch")
+                .unwrap()
+                .trim(),
+            "fix/restore"
+        );
+    });
+}
+
+#[test]
+fn create_returns_existing_matching_task_worktree_idempotently() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, options) = registered_create_fixture(home.path(), "existing-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let existing = create(options).expect("reuse task worktree");
+
+        assert_eq!(existing.record, created.record);
+        assert!(created.reconciliation.is_none());
+        assert!(existing.reconciliation.is_none());
+    });
+}
+
+#[test]
+fn create_reuses_existing_worktree_with_a_relative_gitdir_pointer() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "relative-existing-fixture");
+        run_git(&source, &["config", "worktree.useRelativePaths", "true"]);
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        let pointer = fs::read_to_string(path.join(".git")).expect("worktree pointer");
+
+        let existing = create(options).expect("reuse relative-pointer worktree");
+
+        assert!(pointer
+            .trim_start_matches("gitdir:")
+            .trim()
+            .starts_with(".."));
+        assert_eq!(existing.record, created.record);
+        assert!(existing.reconciliation.is_none());
+    });
+}
+
+#[test]
+fn create_restores_worktree_with_relative_gitdir_pointers() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "relative-restore-fixture");
+        run_git(&source, &["config", "worktree.useRelativePaths", "true"]);
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+
+        let restored = create(options).expect("restore relative-pointer worktree");
+        let pointer = fs::read_to_string(path.join(".git")).expect("restored worktree pointer");
+
+        assert!(pointer
+            .trim_start_matches("gitdir:")
+            .trim()
+            .starts_with(".."));
+        assert_eq!(
+            restored.reconciliation.expect("restore evidence").action,
+            WorktreeCreateAction::Restored
+        );
+    });
+}
+
+#[test]
+fn create_refuses_a_replaced_path_without_mutating_it() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "replaced-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(created.record.worktree_path);
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+        fs::create_dir(&path).expect("replacement directory");
+        fs::write(path.join("sentinel"), "replacement\n").expect("replacement sentinel");
+
+        let error = create(options).expect_err("replacement is not a linked worktree");
+
+        assert!(error.message.contains("not registered"));
+        assert_eq!(
+            fs::read_to_string(path.join("sentinel")).unwrap(),
+            "replacement\n"
+        );
+    });
+}
+
+#[test]
+fn create_refuses_branch_claimed_by_another_worktree_path() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "conflict-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(created.record.worktree_path);
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+        let other = source.with_file_name("another-owner");
+        run_git(
+            &source,
+            &["worktree", "add", &other.to_string_lossy(), "fix/restore"],
+        );
+
+        let error = create(options).expect_err("branch ownership conflict");
+
+        assert!(error.message.contains("already claimed"));
+        assert!(error
+            .details
+            .get("tried")
+            .and_then(serde_json::Value::as_array)
+            .expect("bounded ownership evidence")
+            .iter()
+            .any(|item| item == &format!("owner_path={}", other.display())));
+    });
+}
+
+#[test]
+fn create_prunes_only_a_proven_prunable_registration_before_restoring() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, options) = registered_create_fixture(home.path(), "prunable-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::remove_dir_all(&path).expect("remove path but retain git registration");
+
+        let restored = create(options).expect("prune and restore task worktree");
+
+        let reconciliation = restored.reconciliation.expect("restore evidence");
+        assert_eq!(reconciliation.action, WorktreeCreateAction::Restored);
+        assert_eq!(reconciliation.previous.git_registration, "missing");
+        assert!(path.exists());
+    });
+}
+
+#[test]
+fn create_exact_stale_relative_cleanup_preserves_foreign_registration() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "exact-cleanup-fixture");
+        run_git(&source, &["config", "worktree.useRelativePaths", "true"]);
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        let foreign = source.with_file_name("foreign-prunable-worktree");
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "foreign/prunable",
+                &foreign.to_string_lossy(),
+            ],
+        );
+        fs::remove_dir_all(&path).expect("remove target path");
+        fs::remove_dir_all(&foreign).expect("remove foreign path");
+
+        let restored = create(options).expect("exact cleanup and restore");
+        let porcelain = git::run_git(
+            &source,
+            &["worktree", "list", "--porcelain"],
+            "git worktree list",
+        )
+        .expect("worktree registrations");
+
+        assert_eq!(
+            restored.reconciliation.expect("restore evidence").action,
+            WorktreeCreateAction::Restored
+        );
+        assert!(porcelain.contains(&format!("worktree {}", foreign.display())));
+        assert!(porcelain.contains("prunable"));
+    });
+}
+
+#[test]
+fn create_restoration_preserves_dirty_source_and_unpushed_branch_commit() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "preserve-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::write(path.join("candidate.txt"), "candidate\n").expect("candidate change");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-q", "-m", "candidate"]);
+        fs::write(source.join("source-dirty.txt"), "dirty\n").expect("dirty source");
+        run_git(
+            &source,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        );
+
+        let restored = create(options).expect("restore without discarding local state");
+
+        assert_eq!(
+            restored.reconciliation.expect("restore evidence").action,
+            WorktreeCreateAction::Restored
+        );
+        assert!(source.join("source-dirty.txt").exists());
+        assert_eq!(
+            fs::read_to_string(path.join("candidate.txt")).unwrap(),
+            "candidate\n"
+        );
+    });
+}
+
 #[test]
 fn metadata_round_trips_and_lists() {
     let dir = tempfile::tempdir().unwrap();

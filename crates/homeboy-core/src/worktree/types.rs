@@ -299,9 +299,37 @@ pub struct WorktreeSafetyReport {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeCreateAction {
+    Created,
+    Existing,
+    Restored,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeCreateEvidence {
+    pub task_worktree_id: String,
+    pub component_id: String,
+    pub source_checkout: String,
+    pub worktree_path: String,
+    pub branch: String,
+    pub workspace_identity: WorkspaceIdentity,
+    pub git_registration: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeCreateReconciliation {
+    pub action: WorktreeCreateAction,
+    pub previous: WorktreeCreateEvidence,
+    pub current: WorktreeCreateEvidence,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeCreateOutput {
     pub record: TaskWorktreeRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<WorktreeCreateReconciliation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
