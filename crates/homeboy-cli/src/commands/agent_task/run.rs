@@ -4138,7 +4138,11 @@ pub(super) fn resolve_dispatch_prompt(
 pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
     if args.prompt_snapshot.is_some()
         || args.attempt_plan.is_some()
-        || args.dispatch.prompt.as_deref() != Some("-")
+        || !args
+            .dispatch
+            .prompt
+            .as_deref()
+            .is_some_and(|spec| spec.trim() == "-")
     {
         return Ok(());
     }
