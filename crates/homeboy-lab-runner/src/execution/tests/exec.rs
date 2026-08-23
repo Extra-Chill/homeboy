@@ -10,6 +10,7 @@ use homeboy_core::runner_execution_envelope::{
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[test]
 fn extension_runtime_home_keeps_homeboy_data_on_the_runner() {
@@ -23,9 +24,51 @@ fn extension_runtime_home_keeps_homeboy_data_on_the_runner() {
 }
 
 #[test]
-fn runner_child_inherits_the_daemon_state_selector() {
-    assert!(
-        inherited_runner_process_env_keys().contains(&homeboy_core::paths::DAEMON_STATE_DIR_ENV)
+fn runner_child_environment_keeps_daemon_state_with_redirected_home() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let daemon_state_dir = workspace.path().join("daemon-state");
+    let _env_lock = homeboy_core::test_support::env_lock();
+    let _daemon_state = homeboy_core::test_support::EnvVarGuard::set(
+        homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+        daemon_state_dir.as_os_str(),
+    );
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        runner_id: "lab".to_string(),
+        runner: Some(local_runner(workspace.path().display().to_string())),
+        cwd: Some(workspace.path().display().to_string()),
+        project_id: None,
+        command: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' \"${}\"",
+                homeboy_core::paths::DAEMON_STATE_DIR_ENV
+            ),
+        ],
+        env: HashMap::from([("HOME".to_string(), "/runner/job/home".to_string())]),
+        secret_env_names: Vec::new(),
+        secret_env_plan: None,
+        capture_patch: false,
+        raw_exec: false,
+        source_snapshot: None,
+        require_paths: Vec::new(),
+        validate_require_paths_on_host: false,
+    })
+    .expect("prepare daemon child");
+    let temp_owner = homeboy_core::engine::temp::RuntimeTempOwner::allocate(
+        "homeboy-runner-tmp",
+        "runner_execution",
+    )
+    .expect("allocate child temp owner");
+    let mut child = Command::new(&plan.command[0]);
+    child.args(&plan.command[1..]).current_dir(&plan.cwd);
+    apply_runner_process_env(&mut child, &plan, &temp_owner).expect("prepare child environment");
+
+    let output = child.output().expect("run child");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("daemon state output"),
+        daemon_state_dir.display().to_string()
     );
 }
 
