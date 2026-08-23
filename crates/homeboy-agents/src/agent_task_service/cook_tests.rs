@@ -3805,6 +3805,105 @@ fn batch_cook_options(
     }
 }
 
+#[test]
+fn workspace_base_ancestry_preflight_rejects_behind_and_diverged_without_attributing_base_files() {
+    let remote = tempfile::tempdir().expect("bare origin");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(remote.path(), &["init", "--bare"]);
+    let output = Command::new("git")
+        .args([
+            "clone",
+            remote.path().to_str().unwrap(),
+            workspace.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone origin");
+    assert!(
+        output.status.success(),
+        "clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Test"]);
+    git(workspace.path(), &["checkout", "-b", "main"]);
+    std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
+    git(workspace.path(), &["add", "base.txt"]);
+    git(workspace.path(), &["commit", "-m", "base"]);
+    git(workspace.path(), &["push", "-u", "origin", "main"]);
+    git(workspace.path(), &["checkout", "-b", "candidate"]);
+    git(workspace.path(), &["checkout", "main"]);
+    std::fs::write(workspace.path().join("newer-base.txt"), "base only\n").unwrap();
+    git(workspace.path(), &["add", "newer-base.txt"]);
+    git(workspace.path(), &["commit", "-m", "advance base"]);
+    git(workspace.path(), &["push"]);
+    git(workspace.path(), &["checkout", "candidate"]);
+
+    let behind = preflight_cook_workspace_base_ancestry(workspace.path(), "main")
+        .expect_err("strictly behind destination is rejected before provider execution");
+    assert_eq!(
+        behind.details["workspace_base_ancestry"]["direction"],
+        "behind"
+    );
+    assert_eq!(
+        behind.details["workspace_base_ancestry"]["base_only_commits"],
+        1
+    );
+    assert_eq!(
+        behind.details["workspace_base_ancestry"]["candidate_only_commits"],
+        0
+    );
+    assert_eq!(
+        behind.details["workspace_base_ancestry"]["next_action"],
+        "converge_destination_before_provider"
+    );
+
+    git(workspace.path(), &["merge", "--ff-only", "origin/main"]);
+    preflight_cook_workspace_base_ancestry(workspace.path(), "main")
+        .expect("clean intentional no-change destination is equivalent to its resolved base");
+    std::fs::write(workspace.path().join("candidate.txt"), "candidate only\n").unwrap();
+    git(workspace.path(), &["add", "candidate.txt"]);
+    git(workspace.path(), &["commit", "-m", "candidate"]);
+    preflight_cook_workspace_base_ancestry(workspace.path(), "main")
+        .expect("ahead destination retains a candidate relative to the resolved base");
+
+    git(workspace.path(), &["checkout", "main"]);
+    std::fs::write(workspace.path().join("newer-base-2.txt"), "base only\n").unwrap();
+    git(workspace.path(), &["add", "newer-base-2.txt"]);
+    git(workspace.path(), &["commit", "-m", "advance base again"]);
+    git(workspace.path(), &["push"]);
+    git(workspace.path(), &["checkout", "candidate"]);
+    let diverged = preflight_cook_workspace_base_ancestry(workspace.path(), "main")
+        .expect_err("diverged destination is rejected before provider execution");
+    assert_eq!(
+        diverged.details["workspace_base_ancestry"]["direction"],
+        "diverged"
+    );
+    assert_eq!(
+        diverged.details["workspace_base_ancestry"]["base_only_commits"],
+        1
+    );
+    assert_eq!(
+        diverged.details["workspace_base_ancestry"]["candidate_only_commits"],
+        1
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {

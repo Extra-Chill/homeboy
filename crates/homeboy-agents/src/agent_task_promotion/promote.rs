@@ -2207,7 +2207,7 @@ fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
     Ok(path.is_dir().then_some(path))
 }
 
-fn capture_declared_base(
+pub(crate) fn capture_declared_base(
     worktree_path: &Path,
     base_ref: Option<&str>,
 ) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
