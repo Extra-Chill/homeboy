@@ -595,19 +595,6 @@ fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport
 /// with the finalization result after it is durable. A resumed pass revalidates
 /// the existing PR idempotently, including its live Git and GitHub identities
 /// (#8357).
-fn finalize_with_operation_claim(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    finalize: &mut dyn FnMut(
-        &AgentTaskCookServiceOptions,
-        &str,
-        &AgentTaskPromotionReport,
-    ) -> Result<Value>,
-) -> Result<Value> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    finalize_with_operation_claim_in_store(&lifecycle_store, options, run_id, promotion, finalize)
-}
 
 fn finalize_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -654,22 +641,6 @@ fn finalize_with_operation_claim_in_store(
             Ok(finalization)
         }
     }
-}
-
-/// Promote a cook attempt under a durable exactly-once operation claim.
-///
-/// `promote_or_load_attempt_in_store` already loads an already-persisted promotion, but
-/// the fresh-promote path performs its external effect (`promote_attempt`) and
-/// only then records the result. A controller crash in that window re-runs the
-/// effect on restart. The claim closes it: reserve `promote:<run_id>` before the
-/// effect, complete it after the result is durable, and on a resumed pass return
-/// the persisted promotion instead of repeating the effect (#8357).
-fn promote_with_operation_claim(
-    options: &AgentTaskCookServiceOptions,
-    run_id: &str,
-) -> Result<AgentTaskPromotionReport> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    promote_with_operation_claim_in_store(&lifecycle_store, options, run_id)
 }
 
 fn promote_with_operation_claim_in_store(
@@ -6219,24 +6190,6 @@ fn run_cook_spine(
         exit_code: 1,
         invocation_latest_run_id: Some(&run_id),
     }))
-}
-
-fn resumable_cook_run_id(
-    recipe: &super::AgentTaskCookRecipe,
-    cook_id: &str,
-    initial_run_id: &str,
-    requested_attempt: u32,
-    verification_pending_continuation: bool,
-) -> Option<String> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().ok()?;
-    resumable_cook_run_id_in_store(
-        &lifecycle_store,
-        recipe,
-        cook_id,
-        initial_run_id,
-        requested_attempt,
-        verification_pending_continuation,
-    )
 }
 
 fn resumable_cook_run_id_in_store(

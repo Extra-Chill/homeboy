@@ -427,8 +427,10 @@ fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
     let _home = HomeGuard::new();
     fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources dir"))
         .expect("rig sources dir");
-    fs::create_dir_all(homeboy_core::paths::stack_sources().expect("stack sources dir"))
-        .expect("stack sources dir");
+    fs::create_dir_all(homeboy_core::paths::stack_sources_in_root(
+        &test_config_root(),
+    ))
+    .expect("stack sources dir");
     fs::write(
         homeboy_core::paths::rig_sources()
             .expect("rig sources dir")
