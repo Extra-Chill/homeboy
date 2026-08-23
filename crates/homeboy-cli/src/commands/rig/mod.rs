@@ -538,7 +538,9 @@ fn install(
     all: bool,
     _reinstall: bool,
 ) -> CmdResult<RigCommandOutput> {
-    let result = rig::install(source, id, all)?;
+    // Boundary: one `homeboy rig install` is one unit of work (#7505).
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let result = rig::install(roots.config(), source, id, all)?;
     Ok((
         RigCommandOutput::Install(RigInstallOutput {
             command: "rig.install",
