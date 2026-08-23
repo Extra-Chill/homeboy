@@ -7249,17 +7249,34 @@ fn materialize_pending_cook_workspace(
                 1,
                 Some("starting controller-owned provider workspace materialization"),
             )?;
-            let provision = provision_pending_cook_workspace(lifecycle_store, options, &config)?;
-            // Pin the provider that performed the durable mutation. A later
-            // continuation re-resolves this exact destination through its owner.
-            options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
-                Value::String(provision.resolution.provider_id);
-            agent_task_lifecycle::persist_controller_plan_in_store(
-                lifecycle_store,
-                &options.initial_run_id,
-                &options.initial_plan,
-            )?;
-            resolve(options)?
+            match provision_pending_cook_workspace(lifecycle_store, options, &config) {
+                Ok(provision) => {
+                    // Pin the provider that performed the durable mutation. A later
+                    // continuation re-resolves this exact destination through its owner.
+                    options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
+                        Value::String(provision.resolution.provider_id);
+                    agent_task_lifecycle::persist_controller_plan_in_store(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        &options.initial_plan,
+                    )?;
+                    resolve(options)?
+                }
+                Err(ensure_error) if provider_ensure_timeout(&ensure_error) => {
+                    // Ensure is a mutation and must never be retried after its
+                    // result is unknown. It may still have created the exact
+                    // destination before timing out, so reconcile once through
+                    // the read-only resolve contract.
+                    match resolve(options) {
+                        Ok(identity) => identity,
+                        Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {
+                            return Err(resolve_error);
+                        }
+                        Err(_) => return Err(ensure_error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         Err(error) => return Err(error),
     };
@@ -7489,6 +7506,11 @@ fn provider_resolve_timeout(error: &Error) -> bool {
         && error.details["worktree_provider_operation"]
             .as_str()
             .is_some_and(|operation| operation.starts_with("resolve"))
+}
+
+fn provider_ensure_timeout(error: &Error) -> bool {
+    error.details["worktree_provider_call_classification"] == "timeout"
+        && error.details["worktree_provider_operation"] == "ensure"
 }
 
 fn known_cwd_recovery_command(options: &AgentTaskCookServiceOptions) -> Option<String> {

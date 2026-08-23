@@ -6095,6 +6095,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
         // The detached dispatcher keeps the resumed Cook test focused on its
         // durable retry and workspace lifecycle rather than local execution.
         options.initial_run_id = run_id.to_string();
+        options.task_base_sha = Some("fixture-base".to_string());
         options.max_attempts = 2;
         options.gates.verify = vec!["npm test".to_string()];
         options.initial_plan.tasks[0].metadata["worktree_provision"] = serde_json::json!({
@@ -6171,7 +6172,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
             .expect("reserve a Cook-owned retry successor");
         assert_eq!(retry.record.metadata["retry_of"], run_id);
         assert_eq!(retry.record.metadata["cook_id"], cook_id);
-        assert_eq!(retry.record.metadata["cook_attempt"], 2);
+        assert_eq!(retry.record.metadata["cook_attempt"], 1);
         let recipe = super::super::load_recipe(cook_id).expect("same Cook recipe owns retry");
         assert_eq!(recipe.attempts.len(), 2);
         assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
@@ -6232,7 +6233,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
 
 #[cfg(unix)]
 #[test]
-fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission() {
+fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -6287,13 +6288,15 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
         }
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let created = provider_dir.path().join("created");
+        let ensure_count = provider_dir.path().join("ensure-count");
         let provider = provider_dir.path().join("provider");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}'\n  ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  printf '1\\n' >> '{}'\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}' && sleep 1\n  ;;\nesac\n",
                 created.display(),
                 workspace.display(),
+                ensure_count.display(),
                 source.display(),
                 workspace.display(),
                 created.display(),
@@ -6314,7 +6317,7 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
                 kind: homeboy_core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
+                mutation_timeout_ms: 100,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
@@ -6357,6 +6360,8 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
         let run_id = "durable-ensure-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
+        // This fixture has no remote; base capture is outside ensure reconciliation.
+        options.task_base_sha = Some("fixture-base".to_string());
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -6379,10 +6384,18 @@ fn pinned_missing_provider_ensures_an_unattached_branch_after_durable_admission(
             .expect("persist recipe in the injected recipe store");
         materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
             .expect("materialize run in the injected lifecycle store");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
-            .expect("materialize the ensured workspace in the injected lifecycle store");
+        materialize_pending_cook_workspace_with_retry(&lifecycle_store, &mut options)
+            .expect("reconcile the workspace created before the ensure timeout");
 
         assert!(created.exists(), "ensure ran after durable Cook admission");
+        assert_eq!(
+            std::fs::read_to_string(&ensure_count)
+                .expect("ensure count")
+                .lines()
+                .count(),
+            1,
+            "a timed-out ensure is reconciled, not repeated"
+        );
         assert!(recipe_store.recipe_exists(cook_id));
         let record = lifecycle_store
             .read_record(run_id)
