@@ -76,11 +76,6 @@ pub fn stack_sources_in_root(config_root: &Path) -> PathBuf {
     rig_registry_root_in_root(config_root).join("stack-sources")
 }
 
-/// Stack source metadata directory (~/.config/homeboy/stack-sources/)
-pub fn stack_sources() -> Result<PathBuf> {
-    Ok(stack_sources_in_root(&homeboy()?))
-}
-
 /// Stack source metadata file below an already-resolved config root.
 pub fn stack_source_metadata_in_root(config_root: &Path, id: &str) -> PathBuf {
     stack_sources_in_root(config_root).join(format!("{}.json", id))

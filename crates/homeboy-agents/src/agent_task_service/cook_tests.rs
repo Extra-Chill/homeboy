@@ -11155,7 +11155,14 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
         );
         let recipe = super::super::load_recipe(cook_id).expect("load recipe");
         assert_eq!(
-            resumable_cook_run_id(&recipe, cook_id, first_run_id, 1, false),
+            resumable_cook_run_id_in_store(
+                &test_lifecycle_store(),
+                &recipe,
+                cook_id,
+                first_run_id,
+                1,
+                false
+            ),
             Some(second_run_id.to_string()),
             "continuation must keep the selected substantive attempt, not the latest alias"
         );
@@ -11236,7 +11243,14 @@ fn cook_alias_continuation_starts_from_failed_gate_feedback_attempt() {
         );
         let recipe = super::super::load_recipe(cook_id).expect("load recipe");
         assert_eq!(
-            resumable_cook_run_id(&recipe, cook_id, &continuation_run_id, 2, false),
+            resumable_cook_run_id_in_store(
+                &test_lifecycle_store(),
+                &recipe,
+                cook_id,
+                &continuation_run_id,
+                2,
+                false
+            ),
             None,
             "continuation resumes attempt 2 so the remaining budget reaches attempt 3"
         );
@@ -13592,7 +13606,9 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
                 .is_none()
         );
 
-        let first = promote_with_operation_claim(&options, run_id).unwrap();
+        let first =
+            promote_with_operation_claim_in_store(&test_lifecycle_store(), &options, run_id)
+                .unwrap();
         assert_eq!(first.source.run_id.as_deref(), Some(run_id));
 
         // The claim is now completed with the promotion result.
@@ -13604,7 +13620,9 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
 
         // A resumed pass replays the same promotion via AlreadyCompleted without
         // re-running the effect.
-        let replayed = promote_with_operation_claim(&options, run_id).unwrap();
+        let replayed =
+            promote_with_operation_claim_in_store(&test_lifecycle_store(), &options, run_id)
+                .unwrap();
         assert_eq!(replayed.source.run_id, first.source.run_id);
         assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
     });
@@ -13743,15 +13761,27 @@ fn finalization_operation_claim_revalidates_completed_publication() {
                 Ok(serde_json::json!({"status": "review_ready", "run_id": rid}))
             };
 
-        let first =
-            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
+        let first = finalize_with_operation_claim_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            &promotion,
+            &mut finalize,
+        )
+        .unwrap();
         assert_eq!(first["status"], "review_ready");
         assert_eq!(finalize_calls.load(Ordering::SeqCst), 1);
 
         // A resumed pass must re-read publication identities rather than trust a
         // prior durable report.
-        let replayed =
-            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
+        let replayed = finalize_with_operation_claim_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            &promotion,
+            &mut finalize,
+        )
+        .unwrap();
         assert_eq!(replayed["status"], "review_ready");
         assert_eq!(
             finalize_calls.load(Ordering::SeqCst),
