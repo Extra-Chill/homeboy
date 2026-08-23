@@ -1,9 +1,11 @@
 use std::fs;
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
+    prepared_source_cache_command, prepared_source_view_command,
     reuse_compatible_snapshot_workspace, save_prepared_source_cache, sync_workspace,
     workspace_snapshot_scan_command, workspace_snapshots,
 };
@@ -13,6 +15,33 @@ use crate::workspace::types::{
 use crate::workspace::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(unix)]
+fn make_cache_fixture_writable(root: &std::path::Path) {
+    let status = Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(root)
+        .status()
+        .expect("restore fixture permissions");
+    assert!(status.success(), "restore fixture permissions");
+}
+
+#[cfg(not(unix))]
+fn make_cache_fixture_writable(root: &std::path::Path) {
+    fn restore(path: &std::path::Path) -> std::io::Result<()> {
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+        if path.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                restore(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    restore(root).expect("restore fixture permissions");
+}
 
 #[test]
 fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
@@ -413,12 +442,16 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
             "hydrated\n",
         )
         .expect("simulate dependency hydration");
-        save_prepared_source_cache(
+        let lifecycle = save_prepared_source_cache(
             "lab-local-prepared-cache",
             &first.local_path,
             &first.remote_path,
         )
         .expect("save immutable prepared source");
+        assert!(lifecycle
+            .observations
+            .iter()
+            .any(|entry| entry.contains("event=created")));
 
         options.run_isolation_token = Some("job-two".to_string());
         let (second, _) = sync_workspace("lab-local-prepared-cache", options)
@@ -462,6 +495,7 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
             .expect("prepared cache directory")
             .next()
             .is_some());
+        make_cache_fixture_writable(&runner_root.path().join("_lab_prepared_sources"));
     });
 }
 
@@ -520,7 +554,77 @@ fn prepared_source_cache_retains_a_bounded_completed_working_set() {
             })
             .count();
         assert_eq!(completed, 8);
+        make_cache_fixture_writable(&cache_root);
     });
+}
+
+#[test]
+#[cfg(unix)]
+fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    let root = tempfile::tempdir().expect("cache root");
+    let cache_root = root.path().join("_lab_prepared_sources");
+    let cache = cache_root.join("cache-locked");
+    fs::create_dir_all(cache.join(".homeboy")).expect("cache");
+    fs::write(cache.join(".homeboy/prepared-source-ready"), "").expect("ready marker");
+    fs::write(cache.join("marker"), "cached\n").expect("cache marker");
+    for index in 0..8 {
+        let entry = cache_root.join(format!("cache-new-{index}"));
+        fs::create_dir_all(entry.join(".homeboy")).expect("newer cache");
+        fs::write(entry.join(".homeboy/prepared-source-ready"), "").expect("ready marker");
+    }
+    let tools = tempfile::tempdir().expect("tool shims");
+    let started = root.path().join("copy-started");
+    let release = root.path().join("copy-release");
+    let cp = tools.path().join("cp");
+    fs::write(&cp, "#!/bin/sh\n: > \"$HOMEBOY_COPY_STARTED\"\nwhile [ ! -f \"$HOMEBOY_COPY_RELEASE\" ]; do sleep 0.01; done\nexec /bin/cp \"$@\"\n").expect("cp shim");
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755)).expect("cp shim permissions");
+    let destination = root.path().join("view");
+    let mut view = Command::new("sh")
+        .args([
+            "-c",
+            &prepared_source_view_command(cache.to_str().unwrap(), destination.to_str().unwrap()),
+        ])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                tools.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOMEBOY_COPY_STARTED", &started)
+        .env("HOMEBOY_COPY_RELEASE", &release)
+        .spawn()
+        .expect("start materialization");
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(started.exists(), "materialization acquired the cache lock");
+    let prune = Command::new("sh")
+        .args([
+            "-c",
+            &prepared_source_cache_command(
+                cache.to_str().unwrap(),
+                cache_root.to_str().unwrap(),
+                cache.to_str().unwrap(),
+            ),
+        ])
+        .output()
+        .expect("run concurrent prune");
+    assert!(prune.status.success(), "{prune:?}");
+    assert!(cache.exists(), "prune must defer a lock-owned cache");
+    fs::write(&release, "").expect("release copy");
+    assert!(view.wait().expect("wait materialization").success());
+    assert!(destination.join("marker").is_file());
 }
 
 #[test]
