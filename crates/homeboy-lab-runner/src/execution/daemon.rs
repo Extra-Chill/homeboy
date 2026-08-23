@@ -224,6 +224,9 @@ pub(super) fn exec_via_daemon(
                     )?;
                 }
             }
+            Ok(())
+        },
+        |job| {
             if let Some(run_id) = run_id.as_deref() {
                 let token = uuid::Uuid::new_v4().to_string();
                 let store = lease_store
@@ -283,7 +286,11 @@ pub(super) fn exec_via_daemon(
             *daemon_endpoint.borrow_mut() = endpoint;
             Ok(refreshed)
         },
-        |job_id| fetch_daemon_events(&client, &daemon_endpoint.borrow(), job_id),
+        |job| {
+            fetch_daemon_events(&client, &daemon_endpoint.borrow(), &job.id.to_string()).map_err(
+                |error| lab_terminal_result_transport_error(runner, &cwd, &command, job, error),
+            )
+        },
         |job, events, result| {
             let request = crate::evidence::MirrorEvidenceRequest::new(
                 runner,
