@@ -12515,7 +12515,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             "test \"$(cat ../figma-transformer/tracked.txt)\" = promoted; printf ran >> {}",
             gate_log.display()
         );
-        let reviewer_gate = "test \"$(cat tracked.txt)\" = promoted".to_string();
+        let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
