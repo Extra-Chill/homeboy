@@ -921,8 +921,9 @@ pub fn record_replacement_gate_proof(
             None,
         ));
     }
-    let same_candidate = replacement.provenance.get("candidate")
-        == original.provenance.get("candidate")
+    let expected_candidate = original.provenance.get("candidate");
+    let observed_candidate = replacement.provenance.get("candidate");
+    let same_candidate = observed_candidate == expected_candidate
         && (original.provenance.get("candidate_checkout").is_none()
             || replacement.provenance.get("candidate_checkout")
                 == original.provenance.get("candidate_checkout"));
@@ -946,6 +947,10 @@ pub fn record_replacement_gate_proof(
             None,
         );
         error.details["drift"] = drifted;
+        error.details["candidate_fingerprint"] = serde_json::json!({
+            "expected": bounded_candidate_fingerprint(expected_candidate),
+            "observed": bounded_candidate_fingerprint(observed_candidate),
+        });
         return Err(error);
     }
     let record = agent_task_lifecycle::status(run_id)?;
@@ -1001,6 +1006,42 @@ pub fn record_replacement_gate_proof(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )?;
     Ok(replacement)
+}
+
+fn bounded_candidate_fingerprint(candidate: Option<&Value>) -> Value {
+    const MAX_CHANGED_FILES: usize = 32;
+
+    let Some(candidate) = candidate else {
+        return Value::Null;
+    };
+    let Some(fingerprint) = candidate.get("fingerprint") else {
+        return serde_json::json!({ "kind": candidate.get("kind") });
+    };
+    let changed_files = fingerprint
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .take(MAX_CHANGED_FILES)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "kind": candidate.get("kind"),
+        "schema": fingerprint.get("schema"),
+        "target_path": fingerprint.get("target_path"),
+        "head": fingerprint.get("head"),
+        "base": fingerprint.get("base"),
+        "tree": fingerprint.get("tree"),
+        "sha256": fingerprint.get("sha256"),
+        "changed_files": changed_files,
+        "changed_files_truncated": fingerprint
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .is_some_and(|files| files.len() > MAX_CHANGED_FILES),
+    })
 }
 
 /// Execute corrected gates against the exact failed applied candidate and record
@@ -1141,13 +1182,15 @@ fn verify_replacement_gates_owned(
     // side effects, so a dead owner after this point must recover with external
     // candidate-bound proof rather than replaying an unknown partial execution.
     mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
-    let replacement_workspace = replacement_component_workspace(&original, &target_path)?;
+    let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
-            source_worktree_path: replacement_workspace,
+            // Candidate identity remains rooted at the persisted promotion target.
+            // The corrected gate workspace is passed separately below.
+            source_worktree_path: None,
             base_ref: Some(verified_base.base.clone()),
             task_base_sha: inputs
                 .and_then(|value| value.get("task_base_sha"))
@@ -1168,6 +1211,7 @@ fn verify_replacement_gates_owned(
         &target_path,
         &serde_json::to_value(&original)
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        replacement_gate_workspace.as_deref(),
         &observation_store,
     )?;
     // #11290's import boundary requires command evidence for each green gate.
@@ -4120,8 +4164,8 @@ fn cook_selected_candidate_provenance(
 }
 
 /// Build recovery coordinates from durable controller records only. Provider
-/// output, gate output, and filesystem paths stay behind `diagnose` so a failed
-/// command envelope cannot disclose private evidence.
+/// failures contribute only a bounded, redacted causal command projection;
+/// expanded output remains behind `diagnose`.
 pub fn cook_failure_context(
     cook_id: &str,
     latest_run_id: Option<&str>,
@@ -4222,6 +4266,19 @@ pub fn cook_failure_context(
         .as_ref()
         .and_then(|record| record.metadata.get("cook_controller_failure"))
         .cloned();
+    let pre_execution_diagnostic = record.as_ref().and_then(|record| {
+        let failure = record.metadata.get("pre_execution_failure")?;
+        let details = failure.get("details")?;
+        homeboy_core::worktree_providers::compact_provider_failure_details(details).map(
+            |evidence| {
+                serde_json::json!({
+                    "code": failure.get("error_code"),
+                    "message": failure.get("message"),
+                    "worktree_provider_failure": evidence,
+                })
+            },
+        )
+    });
     let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
         (
             "promotion".to_string(),
@@ -4264,6 +4321,20 @@ pub fn cook_failure_context(
             "finalization".to_string(),
             "finalization_incomplete".to_string(),
             None,
+        )
+    } else if let Some(diagnostic) = pre_execution_diagnostic {
+        (
+            record
+                .as_ref()
+                .and_then(|record| record.metadata.pointer("/pre_execution_failure/phase"))
+                .and_then(Value::as_str)
+                .unwrap_or("pre_execution")
+                .to_string(),
+            diagnostic["code"]
+                .as_str()
+                .unwrap_or("pre_execution_failure")
+                .to_string(),
+            Some(diagnostic),
         )
     } else if let Some(diagnostic) = controller_diagnostic {
         (

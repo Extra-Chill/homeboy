@@ -7207,10 +7207,9 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
                 let run_id = options.initial_run_id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    crate::agent_task_service::retry(&run_id, None, false, false)
-                        .expect("concurrent retry converges")
-                        .record
-                        .run_id
+                    let retry = crate::agent_task_service::retry(&run_id, None, false, false)
+                        .expect("concurrent retry converges");
+                    (retry.record.run_id, retry.created)
                 })
             })
             .collect::<Vec<_>>();
@@ -7219,13 +7218,18 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
             .map(|retry| retry.join().expect("retry thread"))
             .collect::<Vec<_>>();
 
-        assert!(run_ids.iter().all(|run_id| run_id == &run_ids[0]));
+        assert!(run_ids.iter().all(|(run_id, _)| run_id == &run_ids[0].0));
+        assert_eq!(
+            run_ids.iter().filter(|(_, created)| *created).count(),
+            1,
+            "only the reservation owner may launch the local retry child"
+        );
         let recipe = super::super::load_recipe(&options.cook_id).expect("bound recipe");
         let index = agent_task_lifecycle::cook_index(&options.cook_id).expect("bound index");
         assert_eq!(recipe.attempts.len(), 2);
-        assert_eq!(recipe.attempts[1].run_id, run_ids[0]);
+        assert_eq!(recipe.attempts[1].run_id, run_ids[0].0.as_str());
         assert_eq!(index.attempts.len(), 2);
-        assert_eq!(index.latest_run_id, run_ids[0]);
+        assert_eq!(index.latest_run_id, run_ids[0].0.as_str());
         assert_eq!(
             agent_task_lifecycle::list_records()
                 .expect("durable lifecycle records")
@@ -12426,7 +12430,12 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
                 .expect("run git")
                 .success());
         }
-        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        std::fs::create_dir_all(source.join("figma-transformer"))
+            .expect("create changed component");
+        std::fs::create_dir_all(source.join("php-transformer")).expect("create gate component");
+        std::fs::write(source.join("figma-transformer/tracked.txt"), "base\n").expect("write base");
+        std::fs::write(source.join("php-transformer/gate.txt"), "gate\n")
+            .expect("write gate component");
         assert!(Command::new("git")
             .args(["add", "."])
             .current_dir(&source)
@@ -12446,7 +12455,8 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             .status()
             .expect("create candidate")
             .success());
-        std::fs::write(target.join("tracked.txt"), "promoted\n").expect("write candidate");
+        std::fs::write(target.join("figma-transformer/tracked.txt"), "promoted\n")
+            .expect("write candidate");
 
         let mut options = batch_cook_options(
             "cook-verify-replacement",
@@ -12486,9 +12496,23 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         agent_task_lifecycle::record_promotion("run-verify-replacement", failed)
             .expect("align source task evidence");
 
+        agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
+            let cwd = serde_json::json!({
+                "requested": target,
+                "effective": target.join("php-transformer"),
+            });
+            record.metadata["latest_promotion"]["deterministic_gates"][0]["cwd"] = cwd.clone();
+            let history = record.metadata["promotions"]
+                .as_array_mut()
+                .expect("promotion history");
+            history.last_mut().expect("failed promotion history")["deterministic_gates"][0]
+                ["cwd"] = cwd;
+        })
+        .expect("persist sibling gate cwd");
+
         let gate_log = temp.path().join("replacement-gate-runs");
         let gate = format!(
-            "test \"$(cat tracked.txt)\" = promoted; printf ran >> {}",
+            "test \"$(cat ../figma-transformer/tracked.txt)\" = promoted; printf ran >> {}",
             gate_log.display()
         );
         let replacement = verify_replacement_gates(
@@ -12502,6 +12526,25 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         .expect("replacement gates complete");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(
+            replacement.provenance["candidate"]["fingerprint"]["target_path"],
+            serde_json::json!(std::fs::canonicalize(&target)
+                .expect("canonical candidate root")
+                .display()
+                .to_string())
+        );
+        assert_eq!(
+            replacement.changed_files,
+            vec!["figma-transformer/tracked.txt"]
+        );
+        assert_eq!(
+            replacement.deterministic_gates[0]
+                .cwd
+                .as_ref()
+                .expect("gate cwd evidence")
+                .effective,
+            target.join("php-transformer").display().to_string()
+        );
         assert_eq!(replacement.deterministic_gates.len(), 1);
         assert_eq!(
             replacement.deterministic_gates[0].command,

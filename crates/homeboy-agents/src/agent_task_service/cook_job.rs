@@ -73,6 +73,14 @@ pub struct AgentTaskCookJobRequest {
     pub cook_id: String,
     pub child_pid: u32,
     pub child_start_identity: ProcessStartIdentity,
+    /// A retry has an existing Cook alias but needs a fresh durable supervisor.
+    /// Initial Cook jobs retain the Cook id as their owner identity.
+    #[serde(default)]
+    pub supervisor_id: Option<String>,
+    /// The retry run this supervisor is allowed to observe. Unlike the Cook
+    /// alias, it never advances when a later retry becomes the index latest.
+    #[serde(default)]
+    pub pinned_retry_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,15 +128,25 @@ impl AgentTaskCookJob {
                 "cook jobs require the detached child's process id",
             ));
         }
+        let run_id = request.pinned_retry_run_id.clone();
         Ok(Self {
             schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
             // The cook id is already unique and is the durable identity of this
             // work, so replaying a submit converges on one job rather than
             // creating a second supervisor for the same child.
-            idempotency_key: format!("agent-task-cook:{}", request.cook_id),
+            idempotency_key: format!(
+                "agent-task-cook:{}",
+                request
+                    .pinned_retry_run_id
+                    .as_deref()
+                    .unwrap_or_else(|| request
+                        .supervisor_id
+                        .as_deref()
+                        .unwrap_or(&request.cook_id))
+            ),
             request,
             phase: AgentTaskCookJobPhase::Queued,
-            run_id: None,
+            run_id,
             terminal_state: None,
         })
     }
@@ -314,8 +332,14 @@ impl ControllerJobDriver for CookJobDriver {
         if job.phase == AgentTaskCookJobPhase::Completed {
             return Ok(());
         }
-        agent_task_lifecycle::cancel_run(&job.request.cook_id, Some("controller job cancelled"))
-            .map(|_| ())
+        // A retry supervisor owns one immutable attempt. Resolving its Cook
+        // alias here could instead cancel a later retry that became latest.
+        let run_id = job
+            .request
+            .pinned_retry_run_id
+            .as_deref()
+            .unwrap_or(&job.request.cook_id);
+        agent_task_lifecycle::cancel_run(run_id, Some("controller job cancelled")).map(|_| ())
     }
 }
 
@@ -357,6 +381,9 @@ impl CookJobDriver {
                 let lifecycle_store =
                     agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
                 let mut record = lifecycle_store.read_record(run_id)?;
+                if record.state.is_terminal() {
+                    return job.observe_terminal(Some(record.run_id));
+                }
                 if record.runner_id().is_some() && record.runner_job_id().is_some() {
                     agent_task_lifecycle::reconcile_runner_job_state_in_store(
                         &lifecycle_store,
@@ -419,12 +446,36 @@ impl AgentTaskCookJob {
     /// as `Failed` rather than dressed up as a success, mirroring the launcher's
     /// existing `exited_before_handoff` honesty.
     fn observe_terminal(&mut self, run_id: Option<String>) -> Result<Value> {
-        let run_id = run_id.or_else(|| latest_run_id(&self.request.cook_id));
+        let run_id = run_id
+            .or_else(|| self.request.pinned_retry_run_id.clone())
+            .or_else(|| latest_run_id(&self.request.cook_id));
         if run_id.is_none() {
             agent_task_lifecycle::fail_detached_cook_handoff_parent(
                 &self.request.cook_id,
                 "detached Cook exited before materializing its first attempt",
             )?;
+        }
+        // A retry supervisor is attached to an existing queued attempt rather
+        // than an initial handoff parent. If its launcher exits before provider
+        // execution, retain the normal zero-provider terminal outcome.
+        if self.request.supervisor_id.is_some() {
+            if let Some(run_id) = run_id.as_deref() {
+                let lifecycle_store =
+                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                let record = lifecycle_store.read_record(run_id)?;
+                if !record.state.is_terminal() {
+                    let plan = lifecycle_store.read_controller_plan(run_id)?;
+                    agent_task_lifecycle::record_pre_execution_failure_in_store(
+                        &lifecycle_store,
+                        run_id,
+                        &plan,
+                        "local_retry_supervisor",
+                        &homeboy_core::Error::internal_unexpected(
+                            "local Cook retry launcher exited before provider execution",
+                        ),
+                    )?;
+                }
+            }
         }
         let observed = run_id
             .as_deref()
@@ -490,6 +541,32 @@ pub fn cook_job_submission(
         cook_id: cook_id.to_string(),
         child_pid,
         child_start_identity: child_start_identity.clone(),
+        supervisor_id: None,
+        pinned_retry_run_id: None,
+    })?;
+    Ok(json!({
+        "type": AGENT_TASK_COOK_JOB_TYPE,
+        "version": AGENT_TASK_COOK_JOB_VERSION,
+        "idempotency_key": job.idempotency_key,
+        "request": job.to_checkpoint()?,
+    }))
+}
+
+/// Build a retry-specific supervisor submission. The Cook alias remains the
+/// cancellation target while the retry run is the one-shot supervisor owner.
+pub fn cook_retry_job_submission(
+    cook_id: &str,
+    run_id: &str,
+    child_pid: u32,
+    child_start_identity: &ProcessStartIdentity,
+) -> Result<Value> {
+    let job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
+        schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
+        cook_id: cook_id.to_string(),
+        child_pid,
+        child_start_identity: child_start_identity.clone(),
+        supervisor_id: Some(run_id.to_string()),
+        pinned_retry_run_id: Some(run_id.to_string()),
     })?;
     Ok(json!({
         "type": AGENT_TASK_COOK_JOB_TYPE,
@@ -510,6 +587,37 @@ mod tests {
 
     fn submission(cook_id: &str, pid: u32) -> Value {
         cook_job_submission(cook_id, pid, &IDENTITY).expect("build cook job submission")
+    }
+
+    #[test]
+    fn retry_supervisors_are_owned_by_the_exact_retry_run() {
+        let first = cook_retry_job_submission("cook-retry", "cook-retry-attempt-2", 1, &IDENTITY)
+            .expect("first retry submission");
+        let replay = cook_retry_job_submission("cook-retry", "cook-retry-attempt-2", 2, &IDENTITY)
+            .expect("replayed retry submission");
+        let successor =
+            cook_retry_job_submission("cook-retry", "cook-retry-attempt-3", 3, &IDENTITY)
+                .expect("successor retry submission");
+
+        assert_eq!(
+            first["idempotency_key"],
+            "agent-task-cook:cook-retry-attempt-2"
+        );
+        assert_eq!(first["idempotency_key"], replay["idempotency_key"]);
+        assert_ne!(first["idempotency_key"], successor["idempotency_key"]);
+        let first_job = AgentTaskCookJob::parse(first["request"].clone()).expect("first job");
+        let successor_job =
+            AgentTaskCookJob::parse(successor["request"].clone()).expect("successor job");
+        assert_eq!(first_job.run_id.as_deref(), Some("cook-retry-attempt-2"));
+        assert_eq!(
+            successor_job.run_id.as_deref(),
+            Some("cook-retry-attempt-3")
+        );
+        assert_ne!(first_job.run_id, successor_job.run_id);
+        assert_eq!(
+            first_job.request.pinned_retry_run_id.as_deref(),
+            first_job.run_id.as_deref()
+        );
     }
 
     fn request_of(cook_id: &str, pid: u32) -> Value {
@@ -755,6 +863,45 @@ mod tests {
                     homeboy_core::process::ProcessIdentityState::Dead
                 ),
                 "a cancelled cook job must leave no live child"
+            );
+        });
+    }
+
+    #[test]
+    fn cancelling_a_retry_supervisor_targets_its_pinned_attempt_not_the_latest() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-retry-cancel";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new("retry-cancel", Vec::new());
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist handoff parent");
+            for (attempt, run_id) in [
+                (1, "cook-retry-cancel-attempt-1"),
+                (2, "cook-retry-cancel-attempt-2"),
+                (3, "cook-retry-cancel-attempt-3"),
+            ] {
+                agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+                agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                    .expect("index attempt");
+            }
+
+            let submission =
+                cook_retry_job_submission(cook_id, "cook-retry-cancel-attempt-2", 4242, &IDENTITY)
+                    .expect("build retry supervisor submission");
+            CookJobDriver
+                .cancel(&submission["request"])
+                .expect("cancel pinned retry supervisor");
+
+            assert_eq!(
+                agent_task_lifecycle::exact_record("cook-retry-cancel-attempt-2")
+                    .expect("read cancelled pinned attempt")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record("cook-retry-cancel-attempt-3")
+                    .expect("read latest attempt")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
             );
         });
     }
