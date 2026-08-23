@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.355.5] - 2026-08-23
+
+### Changed
+- use dev profile for release planning
+- Restore missing managed worktrees
+
 ## [0.355.4] - 2026-08-23
 
 ### Changed
