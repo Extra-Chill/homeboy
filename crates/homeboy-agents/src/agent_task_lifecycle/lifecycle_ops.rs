@@ -5682,24 +5682,6 @@ pub(crate) fn retry_with_force_in_store(
     )
 }
 
-pub(crate) fn retry_with_force_and_metadata_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    requested_run_id: Option<&str>,
-    force: bool,
-    metadata: serde_json::Map<String, Value>,
-) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner_in_store(
-        lifecycle_store,
-        run_id,
-        requested_run_id,
-        force,
-        true,
-        Some(metadata),
-        None,
-    )
-}
-
 /// Reserve a retry after revalidating the action while the lineage lock is held.
 pub(crate) fn retry_with_force_and_metadata_and_preflight_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
