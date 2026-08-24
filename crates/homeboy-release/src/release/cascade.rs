@@ -28,13 +28,13 @@ use super::types::ReleaseCommandInput;
 /// declared pin on a just-released upstream. Receives the released coordinates
 /// in the action payload's `dependency` block (see
 /// [`build_update_dependency_payload`]).
-pub const UPDATE_DEPENDENCY_ACTION: &str = "release.update_dependency";
+pub(crate) const UPDATE_DEPENDENCY_ACTION: &str = "release.update_dependency";
 
 /// Bump type used for a dependent released purely because an upstream changed.
 /// Passing this as the release bump override also permits a release with no new
 /// commits since the last tag (a pure dependency bump), instead of skipping
 /// with "no releasable commits".
-pub const DEPENDENCY_BUMP: &str = "patch";
+pub(crate) const DEPENDENCY_BUMP: &str = "patch";
 
 /// Released coordinates for one component in the cascade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,40 +47,40 @@ pub struct ReleasedCoordinates {
 
 /// One incoming dependency edge into a downstream dependent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CascadeEdge {
+pub(crate) struct CascadeEdge {
     /// The upstream (released) component this edge depends on.
-    pub upstream: String,
+    pub(crate) upstream: String,
     /// The package name that links upstream → downstream.
-    pub package: String,
+    pub(crate) package: String,
 }
 
 /// A downstream dependent to update and release, with every incoming dependency
 /// edge collapsed so the dependent is released at most once per cascade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CascadeTarget {
-    pub downstream: String,
-    pub downstream_path: String,
-    pub incoming: Vec<CascadeEdge>,
+pub(crate) struct CascadeTarget {
+    pub(crate) downstream: String,
+    pub(crate) downstream_path: String,
+    pub(crate) incoming: Vec<CascadeEdge>,
 }
 
 /// Per-dependent outcome of a cascade run.
 #[derive(Debug, Clone, Serialize)]
 pub struct CascadeStepResult {
-    pub downstream: String,
+    pub(crate) downstream: String,
     /// Packages whose pin was updated on this dependent.
-    pub updated_packages: Vec<String>,
-    pub status: String,
+    pub(crate) updated_packages: Vec<String>,
+    pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_version: Option<String>,
+    pub(crate) new_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
+    pub(crate) tag: Option<String>,
 }
 
 /// Aggregate result of a cascade run.
 #[derive(Debug, Clone, Serialize)]
 pub struct CascadeResult {
-    pub upstream: String,
-    pub released: Vec<CascadeStepResult>,
+    pub(crate) upstream: String,
+    pub(crate) released: Vec<CascadeStepResult>,
 }
 
 /// Collapse an ordered (BFS / topological) dependency stack plan into a

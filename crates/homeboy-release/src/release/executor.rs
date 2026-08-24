@@ -554,7 +554,7 @@ mod tests {
     use super::package::store_artifacts_from_output;
     use super::{github_release, package_preflight, run_cleanup, run_package, PackageRequest};
     use crate::release::types::ReleaseState;
-    use crate::release::{ReleaseArtifact, ReleaseStepStatus};
+    use crate::release::types::{ReleaseArtifact, ReleaseStepStatus};
     use homeboy_core::component::Component;
     use homeboy_core::git::release_download::GitHubRepo;
     use homeboy_extension::ExtensionManifest;

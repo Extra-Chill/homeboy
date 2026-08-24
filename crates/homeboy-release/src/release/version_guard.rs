@@ -16,7 +16,7 @@ pub struct VersionMutation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseOwnedMutationViolation {
-    pub file: String,
+    pub(crate) file: String,
     pub message: String,
 }
 
@@ -113,7 +113,7 @@ pub(crate) fn derived_lockfiles(targets: &[VersionTarget]) -> BTreeSet<String> {
         .collect()
 }
 
-pub fn release_owned_lockfiles(component: &Component) -> BTreeSet<String> {
+pub(crate) fn release_owned_lockfiles(component: &Component) -> BTreeSet<String> {
     let mut lockfiles = derived_lockfiles(component.version_targets.as_deref().unwrap_or_default());
     lockfiles.extend(homeboy_core::component::drift::extension_declared_lockfile_paths(component));
     lockfiles
