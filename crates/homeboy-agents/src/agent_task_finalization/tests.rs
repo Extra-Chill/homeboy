@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use super::backend::validate_real_candidate_fingerprint;
 use super::*;
 use crate::{
     agent_task::{

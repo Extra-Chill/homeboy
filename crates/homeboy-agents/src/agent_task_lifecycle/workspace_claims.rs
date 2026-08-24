@@ -13,7 +13,6 @@ use homeboy_core::worktree::{
     TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -934,13 +933,14 @@ fn composite_acquisition_intent_dir() -> Result<std::path::PathBuf> {
 }
 
 fn composite_acquisition_intent_path(workspace: &WorkspaceIdentity) -> Result<std::path::PathBuf> {
-    let mut digest = Sha256::new();
-    digest.update(workspace.schema.as_bytes());
-    digest.update([0]);
-    digest.update(workspace.kind.as_bytes());
-    digest.update([0]);
-    digest.update(workspace.locator.as_bytes());
-    Ok(composite_acquisition_intent_dir()?.join(format!("{:x}.json", digest.finalize())))
+    // This digest is the on-disk filename, so its bytes are a compatibility
+    // surface -- see the pinned assertions in `content_hash`.
+    let digest = homeboy_engine_primitives::content_hash::nul_separated_digest([
+        workspace.schema.as_str(),
+        workspace.kind.as_str(),
+        workspace.locator.as_str(),
+    ]);
+    Ok(composite_acquisition_intent_dir()?.join(format!("{digest}.json")))
 }
 
 fn write_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Result<()> {
@@ -1298,12 +1298,6 @@ pub(crate) fn register_local_workspace_owner_in_store(
     )
 }
 
-pub(crate) fn renew_local_workspace_owner(
-    lease: &WorkspaceOwnerLease,
-) -> Result<WorkspaceOwnerLease> {
-    store()?.renew_owner(lease, LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS, now_ms())
-}
-
 pub(crate) fn validate_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     lease: &WorkspaceOwnerLease,
@@ -1331,43 +1325,6 @@ pub(crate) fn renew_record_workspace_owner_in_store(
     let renewed = store.renew_owner(lease, LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS, now_ms())?;
     record.workspace_lifecycle_revision = renewed.lifecycle_revision;
     record.workspace_owner_lease = Some(renewed);
-    Ok(())
-}
-
-/// The store-rooted counterpart of [`ensure_record_workspace_owner`].
-///
-/// Validating an existing lease and registering its replacement are one
-/// decision: "is this record still the owner, and if not, make it one." The
-/// ambient form resolved a claim store for each half, so a repoint between them
-/// could reject a live lease in one home and register its successor in another,
-/// leaving two installations each believing they own the workspace (#7505).
-pub(crate) fn ensure_record_workspace_owner_in_store(
-    store: &WorkspaceClaimStore,
-    record: &mut AgentTaskRunRecord,
-) -> Result<()> {
-    let Some(identity) = record.workspace_identity.clone() else {
-        return Ok(());
-    };
-    identity.verify()?;
-    if let Some(lease) = record.workspace_owner_lease.as_ref() {
-        if lease.workspace == identity
-            && lease.owner_id == record.run_id
-            && lease.lifecycle_revision == record.workspace_lifecycle_revision
-            && validate_local_workspace_owner_in_store(store, lease)?
-        {
-            return Ok(());
-        }
-    }
-    record.workspace_owner_lease = Some(register_local_workspace_owner_in_store(
-        store,
-        identity,
-        &record.run_id,
-    )?);
-    record.workspace_lifecycle_revision = record
-        .workspace_owner_lease
-        .as_ref()
-        .expect("registered owner lease")
-        .lifecycle_revision;
     Ok(())
 }
 

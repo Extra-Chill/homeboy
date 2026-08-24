@@ -87,6 +87,15 @@ impl LintBaselineProvenance {
             exclude_sniffs,
         }
     }
+
+    fn permits_legacy_full_baseline(&self) -> bool {
+        self.scope == "full"
+            && self.files.is_empty()
+            && self.category.is_none()
+            && !self.errors_only
+            && self.sniffs.is_none()
+            && self.exclude_sniffs.is_none()
+    }
 }
 
 struct LintFingerprint<'a>(&'a HomeboyFinding);
@@ -205,6 +214,26 @@ pub fn load_baseline_for_scope(
 ) -> Option<LintBaseline> {
     let config = config(source_path, provenance);
     generic::load::<LintBaselineMetadata>(&config).unwrap_or_default()
+}
+
+/// Load the scope-specific baseline, falling back to the pre-scope full-tree
+/// baseline only when this run measures that same unfiltered population.
+pub fn load_baseline_for_scope_or_legacy_full(
+    source_path: &Path,
+    provenance: &mut LintBaselineProvenance,
+) -> Option<LintBaseline> {
+    if let Some(baseline) = load_baseline_for_scope(source_path, Some(provenance)) {
+        return Some(baseline);
+    }
+
+    if provenance.permits_legacy_full_baseline() {
+        if let Some(baseline) = load_baseline(source_path) {
+            provenance.baseline_key = BASELINE_KEY.to_string();
+            return Some(baseline);
+        }
+    }
+
+    None
 }
 
 pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> BaselineComparison {
@@ -357,6 +386,143 @@ mod tests {
 
         assert_eq!(comparison.new_items.len(), 1);
         assert_eq!(comparison.new_items[0].fingerprint, "id-2");
+    }
+
+    #[test]
+    fn scoped_full_baseline_is_preferred_over_legacy_baseline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut provenance = LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["eslint".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        save_baseline(
+            dir.path(),
+            "legacy",
+            &[lint_finding("legacy", "lint", "legacy")],
+        )
+        .expect("save legacy baseline");
+        save_baseline_for_scope(
+            dir.path(),
+            "scoped",
+            &[lint_finding("scoped", "lint", "scoped")],
+            Some(&provenance),
+        )
+        .expect("save scoped baseline");
+
+        let baseline = load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance)
+            .expect("load scoped baseline");
+
+        assert_eq!(baseline.context_id, "scoped");
+        assert_ne!(provenance.baseline_key, BASELINE_KEY);
+    }
+
+    #[test]
+    fn equivalent_full_scope_falls_back_to_legacy_baseline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut provenance = LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["eslint".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        save_baseline(
+            dir.path(),
+            "legacy",
+            &[lint_finding("legacy", "lint", "legacy")],
+        )
+        .expect("save legacy baseline");
+
+        let baseline = load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance)
+            .expect("load legacy baseline");
+
+        assert_eq!(baseline.context_id, "legacy");
+        assert_eq!(provenance.baseline_key, BASELINE_KEY);
+    }
+
+    #[test]
+    fn scoped_or_filtered_runs_do_not_fall_back_to_legacy_baseline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        save_baseline(
+            dir.path(),
+            "legacy",
+            &[lint_finding("legacy", "lint", "legacy")],
+        )
+        .expect("save legacy baseline");
+        let cases = [
+            (
+                vec!["changed.rs".to_string()],
+                "changed",
+                None,
+                false,
+                None,
+                None,
+            ),
+            (
+                vec!["src/lib.rs".to_string()],
+                "file",
+                None,
+                false,
+                None,
+                None,
+            ),
+            (
+                vec!["src/**/*.rs".to_string()],
+                "glob",
+                None,
+                false,
+                None,
+                None,
+            ),
+            (
+                Vec::new(),
+                "full",
+                Some("style".to_string()),
+                false,
+                None,
+                None,
+            ),
+            (Vec::new(), "full", None, true, None, None),
+            (
+                Vec::new(),
+                "full",
+                None,
+                false,
+                Some("Rule.One".to_string()),
+                None,
+            ),
+            (
+                Vec::new(),
+                "full",
+                None,
+                false,
+                None,
+                Some("Rule.Two".to_string()),
+            ),
+        ];
+
+        for (files, scope, category, errors_only, sniffs, exclude_sniffs) in cases {
+            let mut provenance = LintBaselineProvenance::new(
+                files,
+                vec!["eslint".to_string()],
+                scope,
+                category,
+                errors_only,
+                sniffs,
+                exclude_sniffs,
+            );
+            let scoped_key = provenance.baseline_key.clone();
+
+            assert!(load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance).is_none());
+            assert_eq!(provenance.baseline_key, scoped_key);
+        }
     }
 
     #[test]

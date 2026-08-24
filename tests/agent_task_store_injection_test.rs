@@ -714,7 +714,7 @@ fn function_regions(lines: &[&str], start: usize, indent: usize) -> Option<(Stri
 /// away is that `update_cook_candidate_after_completion` has an `_in_store`
 /// sibling and resolves a root of its own.
 const PRE_FIX_RECORD_AGGREGATE: &str = r#"
-pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(),
+pub(crate) fn update_cook_candidate_after_completion(
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
@@ -745,7 +745,7 @@ pub(crate) fn record_aggregate_in_store(
     crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
     lifecycle_store.write_aggregate_and_record(record, aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
-    update_cook_candidate_after_completion_in_store(&test_lifecycle_store(), record, aggregate, None)?;
+    update_cook_candidate_after_completion(record, aggregate, None)?;
     Ok(record.clone())
 }
 "#;
@@ -753,7 +753,7 @@ pub(crate) fn record_aggregate_in_store(
 /// The same region as #12618 merged it: one call rerouted to the rooted sibling,
 /// with a comment that names the ambient function it stopped calling.
 const FIXED_RECORD_AGGREGATE: &str = r#"
-pub(crate) fn update_cook_candidate_after_completion_in_store(&test_lifecycle_store(),
+pub(crate) fn update_cook_candidate_after_completion(
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
@@ -819,9 +819,7 @@ fn the_ambient_reach_check_catches_the_pre_fix_record_aggregate_in_store() {
         findings[0].reaches
     );
     assert!(
-        findings[0].reaches[0].starts_with(
-            "`update_cook_candidate_after_completion_in_store(&test_lifecycle_store(), `"
-        ),
+        findings[0].reaches[0].starts_with("`update_cook_candidate_after_completion(`"),
         "the reach must name the ambient call, not something incidental: {}",
         findings[0].reaches[0]
     );

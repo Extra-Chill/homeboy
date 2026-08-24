@@ -173,9 +173,9 @@ pub(super) fn validate_release_version_floor(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReleaseVersionBaseline {
-    pub source: String,
-    pub authoritative: String,
-    pub tag: Option<String>,
+    pub(crate) source: String,
+    pub(crate) authoritative: String,
+    pub(crate) tag: Option<String>,
 }
 
 /// Resolve the version from which Homeboy may safely advance a release.

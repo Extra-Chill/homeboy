@@ -318,8 +318,8 @@
             "value": "python3"
           },
           {
-            "value": "node",
-            "context": "string_literal"
+            "context": "string_literal",
+            "value": "node"
           },
           {
             "value": "opencode"
@@ -565,7 +565,6 @@
   "audit_rules": {
     "layer_rules": [
       {
-        "name": "contracts-own-no-process-execution",
         "forbid": {
           "glob": "crates/contracts/**",
           "patterns": [
@@ -574,10 +573,10 @@
             "reqwest::",
             "tokio::spawn"
           ]
-        }
+        },
+        "name": "contracts-own-no-process-execution"
       },
       {
-        "name": "engine-primitives-own-no-domain-crates",
         "forbid": {
           "glob": "crates/homeboy-engine-primitives/src/**",
           "patterns": [
@@ -586,30 +585,30 @@
             "homeboy_agents::",
             "homeboy_rig::"
           ]
-        }
+        },
+        "name": "engine-primitives-own-no-domain-crates"
       },
       {
-        "name": "cli-surface-owns-no-process-execution",
         "forbid": {
           "glob": "crates/homeboy-cli/src/cli_surface/**",
           "patterns": [
             "std::process::Command",
             "std::process::exit"
           ]
-        }
+        },
+        "name": "cli-surface-owns-no-process-execution"
       },
       {
-        "name": "command-contract-owns-no-process-execution",
         "forbid": {
           "glob": "crates/homeboy-cli/src/command_contract/**",
           "patterns": [
             "std::process::Command",
             "std::process::exit"
           ]
-        }
+        },
+        "name": "command-contract-owns-no-process-execution"
       },
       {
-        "name": "rig-owns-no-service-implementation",
         "forbid": {
           "glob": "crates/homeboy-rig/src/**",
           "patterns": [
@@ -618,7 +617,8 @@
             "hyper::Server",
             "axum::serve"
           ]
-        }
+        },
+        "name": "rig-owns-no-service-implementation"
       }
     ]
   },
@@ -635,7 +635,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-07-27T04:11:26Z",
-      "item_count": 1137,
+      "item_count": 1128,
       "known_fingerprints": [
         "Commands::crates/homeboy-cli/src/commands/agent_task_dispatch.rs::MissingMethod",
         "Src::crates/contracts/homeboy-audit-contract/src/finding.rs::MissingMethod",
@@ -662,6 +662,12 @@
         "command_wrapper_bypass::crates/homeboy-core/src/git/pr_refresh.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-core/src/hygiene.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-core/src/worktree_providers.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/orchestration/preflight.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/orchestration_tag_checkout.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/planning.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/preparation.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/provenance.rs::CommandWrapperBypass",
+        "command_wrapper_bypass::crates/homeboy-deploy/src/types.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-extension/src/trace/canonicality.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-extension/src/trace/run/provenance.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-lab-runner/src/git_dependency_materialization.rs::CommandWrapperBypass",
@@ -673,12 +679,6 @@
         "command_wrapper_bypass::crates/homeboy-lab-runner/src/workspace/git.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-lab-runner/src/workspace/provenance.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-lab-runner/src/workspace/snapshot.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/orchestration/preflight.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/orchestration_tag_checkout.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/planning.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/preparation.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/provenance.rs::CommandWrapperBypass",
-        "command_wrapper_bypass::crates/homeboy-deploy/src/types.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-release/src/release/checkout_guard.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-release/src/release/executor/version_targets.rs::CommandWrapperBypass",
         "command_wrapper_bypass::crates/homeboy-release/src/release/planning_git.rs::CommandWrapperBypass",
@@ -737,18 +737,17 @@
         "constant_bypass_literal::crates/homeboy-cli/src/commands/fuzz/execution.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/fuzz/replay.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/issues.rs::ConstantBypassLiteral",
-        "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/bench.rs::ConstantBypassLiteral",
-        "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/trace.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runner/types.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/fuzz_compare.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/remote_artifact.rs::ConstantBypassLiteral",
+        "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/bench.rs::ConstantBypassLiteral",
+        "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/trace.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/types.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/watch.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs_summary.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/schedule.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/trace/bundle.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/trace/compare_bundle.rs::ConstantBypassLiteral",
-        "constant_bypass_literal::crates/homeboy-cli/src/commands/triage.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/utils/response.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-code-audit/src/report.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-core/src/agent_runtime_manifest.rs::ConstantBypassLiteral",
@@ -768,6 +767,7 @@
         "constant_bypass_literal::crates/homeboy-core/src/proof/validation.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-core/src/runner_execution_envelope.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-core/src/test_support.rs::ConstantBypassLiteral",
+        "constant_bypass_literal::crates/homeboy-deploy/src/planning.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-engine-primitives/src/identifier.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-extension/src/bench/report.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-extension/src/bench/run/list.rs::ConstantBypassLiteral",
@@ -797,7 +797,6 @@
         "constant_bypass_literal::crates/homeboy-lab-runner/src/worker/result.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-lab-runner/src/workspace/provenance.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-refactor/src/plan/sources/extension_source.rs::ConstantBypassLiteral",
-        "constant_bypass_literal::crates/homeboy-deploy/src/planning.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-release/src/release/cascade.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-release/src/release/executor/artifacts.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-release/src/release/executor/github_release/gh_cli.rs::ConstantBypassLiteral",
@@ -853,9 +852,6 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/fuzz/inspect.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `fuzz_failure_diagnostic`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/project.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wp-content` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/refactor.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `render_formatting_findings`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `phpcs` appears at line <line> in behavioral context `render_lint_section`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `phpstan` appears at line <line> in behavioral context `render_lint_section`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runner/cli.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `compact_exec_stdout`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runner/doctor/probes.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `.cargo` appears at line <line> in behavioral context `remote_preferred_homeboy_candidate`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runner/doctor/probes.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `remote_preferred_homeboy_candidate`::CoreBoundaryLeak",
@@ -868,6 +864,9 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/gh_actions.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `actions/` appears at line <line> in behavioral context `list_run_artifacts`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/gh_actions.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `actions/` appears at line <line> in behavioral context `list_workflow_runs`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/gh_actions.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `actions/` appears at line <line> in behavioral context `split_headers_and_body`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `render_formatting_findings`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `phpcs` appears at line <line> in behavioral context `render_lint_section`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/runs/report/failure_digest.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `phpstan` appears at line <line> in behavioral context `render_lint_section`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/tunnel.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node` appears at line <line> in behavioral context `portability_contract`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/upgrade.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-cli/src/commands/upgrade.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homebrew` appears at line <line> in behavioral context `run`::CoreBoundaryLeak",
@@ -922,6 +921,12 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-core/src/setup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `pnpm` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-core/src/setup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `yarn` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-core/src/test_support.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/permissions.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wp-content` appears at line <line> in behavioral context `fix_deployed_ownership`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/policy.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/safety_and_artifact.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/transfer.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `upload_directory`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/version_overrides.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `archive_install_override`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/version_overrides.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node` appears at line <line> in behavioral context `archive_install_override`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-engine-primitives/src/codebase_scan.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-engine-primitives/src/codebase_scan.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-engine-primitives/src/edit_op_apply.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `apply_edit_ops_to_content`::CoreBoundaryLeak",
@@ -1041,12 +1046,6 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-refactor/src/plan/generate/signatures.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `primary_type_name_from_declaration`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-refactor/src/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `propagate`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-refactor/src/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/permissions.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wp-content` appears at line <line> in behavioral context `fix_deployed_ownership`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/policy.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/safety_and_artifact.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/transfer.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `upload_directory`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/version_overrides.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node_modules` appears at line <line> in behavioral context `archive_install_override`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-deploy/src/version_overrides.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `node` appears at line <line> in behavioral context `archive_install_override`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/cascade.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `composer` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/execution_dispatch.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `composer` appears at line <line> in behavioral context `dependency_preflight_result`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/execution_dispatch.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `composer` appears at line <line> in behavioral context `remove_ignored_untracked_composer_lock`::CoreBoundaryLeak",
@@ -1072,8 +1071,6 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `package.json` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `pnpm` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `yarn` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-version/src/version/default_pattern_for_file.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `build_init_warnings`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::crates/homeboy-version/src/version/default_pattern_for_file.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `detect_unconfigured_patterns`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-release/src/release/version_guard.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-rig/src/lint.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `claude` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-rig/src/lint.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `claude` appears at line <line> in behavioral context `unknown_top_level_field_failures`::CoreBoundaryLeak",
@@ -1108,6 +1105,8 @@
         "core_boundary_leak:core-agnostic-source::crates/homeboy-upgrade/src/upgrade/helpers.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homebrew` appears at line <line> in behavioral context `detect_install_method_from_exe_path`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-upgrade/src/upgrade/types.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homebrew` appears at line <line> in behavioral context `deserialize`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::crates/homeboy-upgrade/src/upgrade/types.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homebrew` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-version/src/version/default_pattern_for_file.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `build_init_warnings`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::crates/homeboy-version/src/version/default_pattern_for_file.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `detect_unconfigured_patterns`::CoreBoundaryLeak",
         "core_boundary_leak:detector-agnostic-source::crates/homeboy-code-audit/src/detectors/command_wrapper_bypass.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `Rust` appears at line <line> in behavioral context `f`::CoreBoundaryLeak",
         "core_boundary_leak:detector-agnostic-source::crates/homeboy-code-audit/src/detectors/command_wrapper_bypass.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `Rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:detector-agnostic-source::crates/homeboy-code-audit/src/detectors/command_wrapper_bypass.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `f`::CoreBoundaryLeak",
@@ -1136,9 +1135,9 @@
         "dead_code::crates/homeboy-cli/src/command_contract/constants.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/ci/failure_log_triage.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/infra/output_runtime.rs::UnreferencedExport",
-        "dead_code::crates/homeboy-cli/src/commands/runs/report/browser_evidence_compare/implementation/reader.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/runs/gh_actions.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/runs/gh_actions_cache.rs::UnreferencedExport",
+        "dead_code::crates/homeboy-cli/src/commands/runs/report/browser_evidence_compare/implementation/reader.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/utils/execution_provenance.rs::UnreferencedExport",
         "dead_code::crates/homeboy-cli/src/commands/utils/response.rs::UnreferencedExport",
         "dead_code::crates/homeboy-code-audit/src/baseline.rs::UnreferencedExport",
@@ -1156,6 +1155,7 @@
         "dead_code::crates/homeboy-core/src/runtime_promotion.rs::UnreferencedExport",
         "dead_code::crates/homeboy-core/src/schedule/execution.rs::UnreferencedExport",
         "dead_code::crates/homeboy-core/src/schedule/ticker.rs::UnreferencedExport",
+        "dead_code::crates/homeboy-deploy/src/preparation.rs::DeadCodeMarker",
         "dead_code::crates/homeboy-extension/src/bench/responsiveness.rs::UnreferencedExport",
         "dead_code::crates/homeboy-lab-runner/src/dev_run.rs::UnreferencedExport",
         "dead_code::crates/homeboy-lab-runner/src/lab_staging_controller.rs::UnreferencedExport",
@@ -1168,7 +1168,6 @@
         "dead_code::crates/homeboy-lab-runner/src/workspace/types.rs::UnreferencedExport",
         "dead_code::crates/homeboy-paths/src/rigs.rs::UnreferencedExport",
         "dead_code::crates/homeboy-refactor/src/edit_op_tagged.rs::UnreferencedExport",
-        "dead_code::crates/homeboy-deploy/src/preparation.rs::DeadCodeMarker",
         "dead_code::crates/homeboy-release/src/release/cascade.rs::UnreferencedExport",
         "dead_code::crates/homeboy-release/src/release/version_guard.rs::UnreferencedExport",
         "dead_code::crates/homeboy-rig/src/lint.rs::UnreferencedExport",
@@ -1185,10 +1184,10 @@
         "direct_aggregate_construction::crates/homeboy-core/src/component/resolution.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-core/src/defaults.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-core/src/runner_execution_envelope.rs::DirectAggregateConstruction",
-        "direct_aggregate_construction::crates/homeboy-lab-runner/src/lab/offload/workspace_stage.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-deploy/src/content_manifest.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-deploy/src/orchestration/modes.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-deploy/src/orchestration/smoke_check.rs::DirectAggregateConstruction",
+        "direct_aggregate_construction::crates/homeboy-lab-runner/src/lab/offload/workspace_stage.rs::DirectAggregateConstruction",
         "direct_aggregate_construction::crates/homeboy-release/src/release/execution_dispatch.rs::DirectAggregateConstruction",
         "docs::docs/architecture/core-runner-output-parse.md::StaleDocReference",
         "docs::docs/architecture/runner-contract.md::StaleDocReference",
@@ -1270,6 +1269,9 @@
         "intra-method-duplication::crates/homeboy-core/src/observation/store/artifacts.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-core/src/server/client/local_exec.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-core/src/worktree_providers.rs::IntraMethodDuplicate",
+        "intra-method-duplication::crates/homeboy-deploy/src/execution/preflight.rs::IntraMethodDuplicate",
+        "intra-method-duplication::crates/homeboy-deploy/src/orchestration_ref_checkout.rs::IntraMethodDuplicate",
+        "intra-method-duplication::crates/homeboy-deploy/src/planning.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-extension/src/bench/artifact_persistence.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-extension/src/bench/run/results.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-extension/src/bench/run/workflow.rs::IntraMethodDuplicate",
@@ -1307,9 +1309,6 @@
         "intra-method-duplication::crates/homeboy-lab-runner/src/workspace/materializer.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-lab-runner/src/workspace/snapshot.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-refactor/src/rename/engine.rs::IntraMethodDuplicate",
-        "intra-method-duplication::crates/homeboy-deploy/src/execution/preflight.rs::IntraMethodDuplicate",
-        "intra-method-duplication::crates/homeboy-deploy/src/orchestration_ref_checkout.rs::IntraMethodDuplicate",
-        "intra-method-duplication::crates/homeboy-deploy/src/planning.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-release/src/release/execution_projection.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-release/src/release/executor/github_release/gh_cli.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-release/src/release/executor/github_release/run.rs::IntraMethodDuplicate",
@@ -1354,18 +1353,18 @@
         "output_capture::tests/readonly_cli_lock_test.rs::UnboundedOutputCapture",
         "parallel-implementation::crates/homeboy-agents/src/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-cli/src/commands/agent_task/fanout.rs::ParallelImplementation",
-        "parallel-implementation::crates/homeboy-cli/src/commands/runs/report/browser_evidence_compare/implementation/visual.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-cli/src/commands/runs/reconcile.rs::ParallelImplementation",
+        "parallel-implementation::crates/homeboy-cli/src/commands/runs/report/browser_evidence_compare/implementation/visual.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-cli/src/commands/runs/types.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-cli/src/commands/utils/response.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-core/src/http_api.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-core/src/runtime_promotion.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-core/src/source_snapshot.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-core/src/test_support.rs::ParallelImplementation",
+        "parallel-implementation::crates/homeboy-deploy/src/content_manifest.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-lab-runner/src/workspace/util.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-refactor/src/collapse.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-refactor/src/propagate.rs::ParallelImplementation",
-        "parallel-implementation::crates/homeboy-deploy/src/content_manifest.rs::ParallelImplementation",
         "parallel-implementation::crates/homeboy-rig/src/dependency_materialization_cache.rs::ParallelImplementation",
         "parallel_runner_setup::crates/homeboy-core/src/api_jobs/runner_job_preparation.rs::ParallelRunnerSetup",
         "remote_execution_preflight::crates/homeboy-cli/src/commands/infra/route.rs::RemoteExecutionPreflight",
@@ -1463,6 +1462,10 @@
         "skeleton-duplication::crates/homeboy-core/src/resource_lifecycle_index.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-core/src/runtime_package.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-core/src/test_support.rs::SkeletonDuplicate",
+        "skeleton-duplication::crates/homeboy-deploy/src/orchestration/preflight.rs::SkeletonDuplicate",
+        "skeleton-duplication::crates/homeboy-deploy/src/preparation.rs::SkeletonDuplicate",
+        "skeleton-duplication::crates/homeboy-deploy/src/types.rs::SkeletonDuplicate",
+        "skeleton-duplication::crates/homeboy-deploy/src/version_overrides.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-extension/src/bench/run/memory_timeline.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-extension/src/bench/run_metadata.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-extension/src/lifecycle/install_sources.rs::SkeletonDuplicate",
@@ -1497,10 +1500,6 @@
         "skeleton-duplication::crates/homeboy-lab-runner/src/workspace/util.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-refactor/src/plan/sources/lint_scope.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-refactor/src/rename/casing.rs::SkeletonDuplicate",
-        "skeleton-duplication::crates/homeboy-deploy/src/orchestration/preflight.rs::SkeletonDuplicate",
-        "skeleton-duplication::crates/homeboy-deploy/src/preparation.rs::SkeletonDuplicate",
-        "skeleton-duplication::crates/homeboy-deploy/src/types.rs::SkeletonDuplicate",
-        "skeleton-duplication::crates/homeboy-deploy/src/version_overrides.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-release/src/release/executor/github_release/gh_cli.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-release/src/release/executor/lockfile_guard.rs::SkeletonDuplicate",
         "skeleton-duplication::crates/homeboy-release/src/release/executor/prepare.rs::SkeletonDuplicate",
@@ -1673,6 +1672,9 @@
         "structural::crates/homeboy-core/src/test_support.rs::HighItemCount",
         "structural::crates/homeboy-core/src/worktree_providers.rs::GodFile",
         "structural::crates/homeboy-core/src::DirectorySprawl",
+        "structural::crates/homeboy-deploy/src/orchestration/mod.rs::GodFile",
+        "structural::crates/homeboy-deploy/src/planning.rs::GodFile",
+        "structural::crates/homeboy-deploy/src/preparation.rs::GodFile",
         "structural::crates/homeboy-engine-primitives/src/command.rs::HighItemCount",
         "structural::crates/homeboy-error/src/lib.rs::HighItemCount",
         "structural::crates/homeboy-extension/src/bench/parsing/mod.rs::GodFile",
@@ -1726,9 +1728,6 @@
         "structural::crates/homeboy-paths/src/lib.rs::HighItemCount",
         "structural::crates/homeboy-refactor/src/rename/tests.rs::GodFile",
         "structural::crates/homeboy-refactor/src/rename/tests.rs::HighItemCount",
-        "structural::crates/homeboy-deploy/src/orchestration/mod.rs::GodFile",
-        "structural::crates/homeboy-deploy/src/planning.rs::GodFile",
-        "structural::crates/homeboy-deploy/src/preparation.rs::GodFile",
         "structural::crates/homeboy-release/src/release/execution_dispatch.rs::GodFile",
         "structural::crates/homeboy-release/src/release/executor.rs::GodFile",
         "structural::crates/homeboy-release/src/release/executor/github_release/gh_cli.rs::GodFile",
@@ -1795,9 +1794,9 @@
         "policy_sections": [
           {
             "audit_policy": "core_boundary_leak:core-agnostic-source",
+            "fingerprint_prefix": "core_boundary_leak:core-agnostic-source",
             "issue": "#3498",
             "key": "core_boundary_leak:core-agnostic-source/core-boundary",
-            "fingerprint_prefix": "core_boundary_leak:core-agnostic-source",
             "known_fingerprints": [],
             "rationale": "Scoped source-policy/core-boundary debt baseline for reviewable ratchets.",
             "scope": "core-boundary"
@@ -1818,9 +1817,9 @@
   "extensions": {
     "rust": {
       "settings": {
-        "rust_test_runner": "nextest",
         "rust_cargo_test_threads": 1,
-        "rust_nextest_shard_threads": 0
+        "rust_nextest_shard_threads": 0,
+        "rust_test_runner": "nextest"
       }
     }
   },

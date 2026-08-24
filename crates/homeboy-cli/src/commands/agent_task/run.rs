@@ -2415,6 +2415,29 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
+    // A terminal legacy candidate with no model can never finalize. Reject it
+    // before reconciliation can enqueue a continuation or reserve promotion.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if lifecycle_store
+        .read_record(&run_id)
+        .is_ok_and(|record| record.state.is_terminal())
+    {
+        if let Err(error) =
+            agent_task_service_direct::validate_cook_attempt_model_provenance(&run_id)
+        {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "model_provenance",
+                    &error,
+                ),
+                1,
+            ));
+        }
+    }
     let record = match agent_task_service::reconcile_recipe_attempt_for_continuation(
         &recipe, &run_id,
     ) {
@@ -3091,7 +3114,7 @@ pub(crate) fn resolve_cook_destination(
             "--task-url <url> is required when --to-worktree is omitted".to_string(),
         ])
     })?;
-    let task_url = canonical_cook_task_url(task_url);
+    let task_url = homeboy::core::worktree_providers::normalize_task_url(task_url);
     args.dispatch.task_url = Some(task_url.clone());
     let config = defaults::load_config();
     // Resolve the requested branch before task discovery. An explicit --head is
@@ -3873,7 +3896,7 @@ fn repository_identity_error(
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
-    let issue = canonical_cook_task_url(task_url);
+    let issue = homeboy::core::worktree_providers::normalize_task_url(task_url);
     let issue = issue.as_str();
     let Some((repository, number)) = issue.rsplit_once("/issues/") else {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -3904,16 +3927,6 @@ fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
         ));
     }
     Ok(format!("fix/issue-{number}-{}", slugify_cook_branch(repo)))
-}
-
-fn canonical_cook_task_url(task_url: &str) -> String {
-    task_url
-        .trim()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string()
 }
 
 fn slugify_cook_branch(value: &str) -> String {
@@ -4214,7 +4227,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None, None, None)?;
+            progress(
+                "preparing",
+                Some(&cook_id),
+                Some(&run_id),
+                Some("preparing durable Cook inputs"),
+                None,
+            )?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -4292,11 +4311,16 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
-    let selected_model = initial_plan
-        .tasks
-        .first()
-        .and_then(|task| task.executor.model())
-        .map(str::to_string);
+    let selected_identity = initial_plan.tasks.first().map(|task| {
+        (
+            task.executor.backend.clone(),
+            task.executor.selector.clone(),
+            task.executor.model().map(str::to_string),
+        )
+    });
+    let selected_model = selected_identity
+        .as_ref()
+        .and_then(|(_, _, model)| model.clone());
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
@@ -4348,9 +4372,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             protected_branches: args.protected_branches,
             ai_tool: super::fanout::resolve_ai_tool_disclosure(
                 &args.ai_tool,
-                args.dispatch.backend.as_deref(),
-                args.dispatch.selector.as_deref(),
-                args.dispatch.model.as_deref(),
+                selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
+                selected_identity
+                    .as_ref()
+                    .and_then(|(_, selector, _)| selector.as_deref()),
+                selected_model.as_deref(),
             ),
             // Model identity comes only from explicit/config/rotation selection
             // (`--model`, provider profile). Disclosure text like
@@ -4928,7 +4954,7 @@ pub(crate) fn compile_cook_plan(
         }
     }
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
-        .validate_explicit_models(&plan)?;
+        .validate_selected_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
         for task in &mut plan.tasks {

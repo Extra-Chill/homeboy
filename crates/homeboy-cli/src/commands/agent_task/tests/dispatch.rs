@@ -173,7 +173,7 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"project@task-216\",\"path\":\"{}\",\"branch\":\"fix/216-persist-task\",\"task_url\":\"https://example.test/owner/project/issues/216\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"project@task-216\",\"path\":\"{}\",\"branch\":\"fix/216-persist-task\",\"task_url\":\"HTTPS://EXAMPLE.TEST/owner/Project/issues/216/?provider=1#result\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
                 workspace.path().display()
             ),
         )
@@ -226,7 +226,7 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
             "--repo".to_string(),
             "project".to_string(),
             "--task-url".to_string(),
-            "https://example.test/owner/project/issues/216".to_string(),
+            " HTTPS://example.test/owner/Project/issues/216/?source=cook#details ".to_string(),
             "--head".to_string(),
             "fix/216-persist-task".to_string(),
             "--no-finalize".to_string(),

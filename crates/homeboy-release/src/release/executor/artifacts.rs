@@ -1178,7 +1178,7 @@ mod tests {
     use crate::release::executor::github_release::github_release_publications;
     use crate::release::types::ReleaseArtifact;
     use crate::release::types::ReleaseState;
-    use crate::release::ReleaseStepStatus;
+    use crate::release::types::ReleaseStepStatus;
 
     #[test]
     fn test_run_artifact_inventory() {

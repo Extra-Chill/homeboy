@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
@@ -20,10 +21,9 @@ use homeboy_core::process::{
 };
 use serde_json::{json, Value};
 
-use super::{
-    AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
-    AgentTaskManagedServiceReadinessKind,
-};
+#[cfg(test)]
+use super::AgentTaskManagedServiceLifecycle;
+use super::{AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceReadinessKind};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentTaskManagedServiceRecord {
@@ -126,7 +126,15 @@ struct RunningService {
     child: Child,
     containment: homeboy_core::process::ProcessContainment,
     record: AgentTaskManagedServiceRecord,
+    #[allow(
+        dead_code,
+        reason = "Held to keep the port lease and listener alive until RunningService drops."
+    )]
     port_lease: Option<PortLease>,
+    #[allow(
+        dead_code,
+        reason = "Held to keep the port lease and listener alive until RunningService drops."
+    )]
     listener: Option<TcpListener>,
 }
 
@@ -320,6 +328,10 @@ impl AgentTaskServiceSupervisor {
         Ok(())
     }
 
+    #[allow(
+        dead_code,
+        reason = "Binds the out-of-process supervisor's services; #[cfg(test)] start() returns Local, so no test reaches this path."
+    )]
     pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
         let values = self.records().into_iter().map(|record| (record.id.clone(), json!({
             "local_url": record.local_url, "public_url": record.public_url,

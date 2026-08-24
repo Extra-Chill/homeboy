@@ -645,14 +645,10 @@ mod runner_enrichment_tests {
             kind: "bench".to_string(),
             component_id: Some("homeboy".to_string()),
             started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: None,
             status: RunStatus::Running.as_str().to_string(),
             command: Some("homeboy bench".to_string()),
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: metadata,
+            ..Default::default()
         }
     }
 

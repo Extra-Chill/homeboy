@@ -4,6 +4,10 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,6 +75,17 @@ use super::AgentTaskRunResult;
 /// controller finishes promoting and records the result within it; a crashed
 /// controller's lease elapses so a resumed pass can reconcile and continue.
 const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+#[cfg(test)]
+static WORKSPACE_BASE_CAPTURE_HOOK: LazyLock<Mutex<Option<Arc<WorkspaceBaseCaptureHook>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+struct WorkspaceBaseCaptureHook {
+    workspace: PathBuf,
+    count: AtomicUsize,
+    fail_after_recipe_persistence: std::sync::atomic::AtomicBool,
+}
 
 /// Render the public CLI continuation route.
 ///
@@ -2590,7 +2605,7 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             &request,
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
-    catalog.validate_explicit_models(&options.initial_plan)?;
+    catalog.validate_selected_models(&options.initial_plan)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.initial_plan,
         catalog.providers(),
@@ -3828,6 +3843,10 @@ pub fn terminal_review_form_continuation_is_eligible(
 /// This deliberately stops before recipe/lifecycle materialization, transport
 /// preparation, provider dispatch, and finalization.
 pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    // Continuation can lead directly to promotion/finalization. Apply the same
+    // durable model-provenance boundary here so it cannot admit a legacy null
+    // model candidate that publication will deterministically reject.
+    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
     let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
@@ -4492,17 +4511,27 @@ fn run_cook_spine(
         &options,
         recipe_materialization.created,
     )?;
+    // Reject a known-invalid managed workspace before base capture reaches its
+    // remote. Detached first handoffs have no local source path and remain
+    // eligible for runner-owned materialization below.
+    if cook_attempt_needs_execution_with_store(lifecycle_store, &options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+    {
+        validate_cook_workspace(&options).map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
+    }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    if recipe_materialization.created && options.task_base_sha.is_none() {
-        pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
-            |error| {
-                let mut error = with_pre_execution_phase(error, "workspace_base_capture");
-                error.details["cook_materialized_by_invocation"] = Value::Bool(true);
-                error
-            },
-        )?;
-    }
+    pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
+        |error| {
+            let mut error = with_pre_execution_phase(error, "workspace_base_capture");
+            error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+            error
+        },
+    )?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -6671,14 +6700,59 @@ fn pin_and_persist_initial_cook_workspace_base(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    pin_initial_cook_workspace_base(options)?;
-    let Some(task_base_sha) = options.task_base_sha.as_ref() else {
-        return Ok(());
-    };
-    let mut recipe = store.load_recipe(&options.cook_id)?;
+    let cook_id = options.cook_id.clone();
+    store.with_workspace_base_capture_lock(&cook_id, || {
+        let mut recipe = store.load_recipe(&options.cook_id)?;
+        if recipe.finalization["task_base_sha"].is_string() {
+            apply_persisted_task_base(options, &recipe)?;
+            return reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe);
+        }
+
+        pin_initial_cook_workspace_base(options)?;
+        let Some(task_base_sha) = options.task_base_sha.as_ref() else {
+            return Ok(());
+        };
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == options.initial_run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_recipe.attempts",
+                    "initial Cook recipe is missing its materialized attempt",
+                    Some(options.initial_run_id.clone()),
+                    None,
+                )
+            })?;
+        attempt.plan = options.initial_plan.clone();
+        recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
+        store.persist_recipe(&recipe)?;
+        #[cfg(test)]
+        if WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("workspace base capture hook")
+            .as_ref()
+            .is_some_and(|hook| {
+                hook.fail_after_recipe_persistence
+                    .swap(false, Ordering::SeqCst)
+            })
+        {
+            return Err(Error::internal_unexpected(
+                "test interruption after Cook recipe base persistence",
+            ));
+        }
+        reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe)
+    })
+}
+
+fn reconcile_persisted_task_base_plan(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+) -> Result<()> {
     let attempt = recipe
         .attempts
-        .iter_mut()
+        .iter()
         .find(|attempt| attempt.run_id == options.initial_run_id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -6688,14 +6762,46 @@ fn pin_and_persist_initial_cook_workspace_base(
                 None,
             )
         })?;
-    attempt.plan = options.initial_plan.clone();
-    recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
-    store.persist_recipe(&recipe)?;
-    agent_task_lifecycle::persist_controller_plan_in_store(
-        lifecycle_store,
-        &options.initial_run_id,
-        &options.initial_plan,
-    )
+    // The recipe write precedes the controller plan write. After an interruption,
+    // its immutable attempt plan is the only authority needed to repair that
+    // second projection without touching origin.
+    if lifecycle_store
+        .read_controller_plan(&options.initial_run_id)
+        .ok()
+        .as_ref()
+        != Some(&attempt.plan)
+    {
+        agent_task_lifecycle::persist_controller_plan_in_store(
+            lifecycle_store,
+            &options.initial_run_id,
+            &attempt.plan,
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_persisted_task_base(
+    options: &mut AgentTaskCookServiceOptions,
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+) -> Result<()> {
+    let task_base_sha = recipe.finalization["task_base_sha"]
+        .as_str()
+        .ok_or_else(|| Error::internal_json("persisted Cook task base is not a string", None))?;
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == options.initial_run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "initial Cook recipe is missing its materialized attempt",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    options.task_base_sha = Some(task_base_sha.to_string());
+    options.initial_plan = attempt.plan.clone();
+    Ok(())
 }
 
 fn pin_cook_workspace_base_at(
@@ -6704,6 +6810,15 @@ fn pin_cook_workspace_base_at(
 ) -> Result<()> {
     if options.task_base_sha.is_some() {
         return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(counter) = WORKSPACE_BASE_CAPTURE_HOOK
+        .lock()
+        .expect("workspace base capture counter")
+        .clone()
+        .filter(|counter| counter.workspace == workspace)
+    {
+        counter.count.fetch_add(1, Ordering::SeqCst);
     }
     let Some(base) =
         crate::agent_task_promotion::capture_declared_base(workspace, Some(&options.base))?

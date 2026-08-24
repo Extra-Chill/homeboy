@@ -83,7 +83,7 @@ pub(super) fn plan_components(
 }
 
 pub(super) struct DeployComponentPlan {
-    pub plan: HomeboyPlan,
+    pub(crate) plan: HomeboyPlan,
     components: HashMap<String, Component>,
 }
 
@@ -638,7 +638,7 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
 ///
 /// Status/dashboard callers batch baseline detection separately so repeated
 /// component probes do not repeat the same tag fetch and baseline discovery.
-pub fn calculate_release_state_from_baseline(
+pub(crate) fn calculate_release_state_from_baseline(
     component: &Component,
     baseline: &git::BaselineInfo,
 ) -> Option<ReleaseState> {
@@ -666,13 +666,13 @@ pub fn calculate_release_state_from_baseline(
     })
 }
 
-pub fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
+pub(crate) fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
     state
         .map(ReleaseState::status)
         .unwrap_or(ReleaseStateStatus::Unknown)
 }
 
-pub fn bucket_release_states<'a, I>(components: I) -> ReleaseStateBuckets
+pub(crate) fn bucket_release_states<'a, I>(components: I) -> ReleaseStateBuckets
 where
     I: IntoIterator<Item = (&'a str, Option<&'a ReleaseState>)>,
 {
@@ -701,18 +701,18 @@ where
 /// Carries the human-readable reason so check-mode output can report
 /// `skipped: <reason>` per component instead of aborting the whole pass.
 pub(super) struct ExtensionSkippedComponent {
-    pub id: String,
-    pub reason: String,
+    pub(crate) id: String,
+    pub(crate) reason: String,
 }
 
 /// Result of loading project components, including skipped (non-deployable) component IDs.
 pub(super) struct LoadedComponents {
-    pub deployable: Vec<Component>,
-    pub skipped: Vec<String>,
+    pub(crate) deployable: Vec<Component>,
+    pub(crate) skipped: Vec<String>,
     /// Components skipped because this host cannot resolve them (missing
     /// extension, unresolvable artifact, or absent local checkout). Only
     /// populated in check mode; every other mode treats these as hard errors.
-    pub extension_skipped: Vec<ExtensionSkippedComponent>,
+    pub(crate) extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
 /// Load effective project components, resolve artifact paths via extension patterns,
