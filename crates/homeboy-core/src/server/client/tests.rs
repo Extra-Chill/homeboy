@@ -17,7 +17,7 @@ use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
     execute_command_with_stdin_timeout, execute_command_with_writer_factory,
     run_command_with_stdin_source, run_ssh_with_child, wrap_command_with_secret_env_read_loop,
-    wrap_timed_remote_command, SECRET_ENV_STDIN_SENTINEL,
+    wrap_owned_remote_command, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandObservation, CommandOutput, SshClient};
 
@@ -147,8 +147,8 @@ fn small_secret_stdin_payload_completes_successfully() {
 }
 
 #[test]
-fn timed_ssh_envelope_owns_remote_descendant_cleanup() {
-    let envelope = wrap_timed_remote_command("sleep 30 & printf terminal-result");
+fn ssh_envelope_owns_remote_descendant_cleanup() {
+    let envelope = wrap_owned_remote_command("sleep 30 & printf terminal-result");
 
     assert!(envelope.contains("setsid sh -c"));
     assert!(envelope.contains("exec 3<&0"));
@@ -170,7 +170,7 @@ fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants
     command
         .args([
             "-c",
-            &wrap_timed_remote_command(&format!(
+            &wrap_owned_remote_command(&format!(
                 "input=$(cat); sleep 30 & descendant=$!; printf '%s' \"$descendant\" > {}; printf '{{\"success\":true,\"data\":{{\"input\":\"%s\",\"action\":\"stop\",\"stopped\":true}}}}\\n' \"$input\"",
                 crate::engine::shell::quote_path(&descendant_pid_path.to_string_lossy())
             )),
@@ -214,7 +214,7 @@ fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants
 fn timed_remote_wrapper_preserves_piped_stdin() {
     let mut command = Command::new("sh");
     command
-        .args(["-c", &wrap_timed_remote_command("cat")])
+        .args(["-c", &wrap_owned_remote_command("cat")])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
@@ -251,7 +251,7 @@ fn timed_and_untimed_paths_preserve_identical_stdin_bytes() {
     timed
         .args([
             "-c",
-            &wrap_timed_remote_command(&format!(
+            &wrap_owned_remote_command(&format!(
                 "cat > {}",
                 crate::engine::shell::quote_path(&timed_target.path().to_string_lossy())
             )),
@@ -283,7 +283,7 @@ fn timed_remote_wrapper_with_idle_pipe_and_fast_exit_is_bounded() {
     let (reader, _producer) = idle_pipe();
     let mut command = Command::new("sh");
     command
-        .args(["-c", &wrap_timed_remote_command("exit 0")])
+        .args(["-c", &wrap_owned_remote_command("exit 0")])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
@@ -871,19 +871,34 @@ fn managed_session_connect_builds_master_command() {
 
 #[cfg(unix)]
 #[test]
-fn successful_ssh_child_with_delayed_eof_reaps_descendant_before_drain() {
+fn successful_owned_remote_shell_with_delayed_eof_reaps_descendant_before_drain() {
     let marker =
         std::env::temp_dir().join(format!("homeboy-ssh-stream-drain-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
+    let fixture = tempfile::tempdir().expect("setsid fixture");
+    let setsid = fixture.path().join("setsid");
+    std::fs::write(
+        &setsid,
+        "#!/usr/bin/env python3\nimport os, signal, sys\npid = os.fork()\nif pid:\n    _, status = os.waitpid(pid, 0)\n    os.killpg(pid, signal.SIGTERM)\n    sys.exit(os.waitstatus_to_exitcode(status))\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
+    )
+    .expect("write setsid fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
+        .expect("make setsid fixture executable");
+    let mut paths = vec![fixture.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
     let mut command = Command::new("sh");
     command
         .args([
             "-c",
-            &format!(
+            &wrap_owned_remote_command(&format!(
                 "sleep 5 & printf '%s' \"$!\" > {}; printf snapshot-output",
                 crate::engine::shell::quote_path(&marker.to_string_lossy())
-            ),
+            )),
         ])
+        .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
