@@ -162,6 +162,43 @@ exit 1
 }
 
 #[test]
+fn full_scope_legacy_baseline_is_compared_with_legacy_provenance() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let finding = homeboy_core::finding::HomeboyFinding::builder("eslint", "known finding")
+            .fingerprint("known")
+            .build();
+        crate::lint::baseline::save_baseline(source.path(), "legacy", &[finding])
+            .expect("save legacy baseline");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"eslint","message":"known finding","fingerprint":"known","file":"src/lib.rs"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+        );
+
+        let workflow = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("run dir"),
+        )
+        .expect("workflow result");
+
+        assert_eq!(workflow.status, "passed");
+        assert_eq!(workflow.exit_code, 0);
+        let provenance = workflow
+            .baseline_provenance
+            .as_ref()
+            .expect("baseline provenance");
+        assert!(provenance.compared);
+        assert_eq!(provenance.baseline_key, "lint");
+    });
+}
+
+#[test]
 fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
