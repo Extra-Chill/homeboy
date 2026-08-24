@@ -129,6 +129,7 @@
     "test:wp-codebox-database-service": "node tests/wp-codebox-database-service-smoke.mjs",
     "test:wp-codebox-native-database-canary": "node tests/wp-codebox-native-database-canary.mjs",
     "test:wp-codebox-doctor": "bash scripts/test/wp-codebox-doctor-smoke.sh",
+    "test:wp-codebox-setup-freshness": "bash scripts/build/inspect-wp-codebox-freshness-smoke.sh && bash scripts/build/setup-wp-codebox-smoke.sh",
     "test:host-smoke-wp-runtime": "bash scripts/test/host-smoke-wp-runtime-e2e.sh",
     "test:test-shard-replay": "bash scripts/test/test-shard-replay-smoke.sh",
     "test:extension-composer-vendor-integrity": "bash tests/extension-composer-vendor-integrity-smoke.sh",

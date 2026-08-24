@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.1] - 2026-08-24
+
+### Fixed
+- verify managed WP Codebox freshness
+
 ## [3.38.0] - 2026-08-23
 
 ### Added

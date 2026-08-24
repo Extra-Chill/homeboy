@@ -48,7 +48,6 @@ homeboy_wp_codebox_component_relative_path() {
 homeboy_wp_codebox_resolve_bin() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local config_label="${2:-settings}"
-    local bin=""
     local candidate=""
 
     for candidate in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}" "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}"; do
