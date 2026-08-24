@@ -847,6 +847,7 @@ fn reached_freeze_boundary_in_store(
     Ok(reached)
 }
 
+#[cfg(test)]
 fn ensure_correction_is_safe(
     existing: &AgentTaskCookRecipe,
     requested: &AgentTaskCookRecipe,
@@ -1486,6 +1487,7 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
 /// the cause lives in the lifecycle record. Both are parameters so the caller
 /// pairs them; resolving either one here would let a rearm recorded in one home
 /// leave the stale cause standing in the other (#7505).
+#[cfg(test)]
 fn rearm_failed_terminal_continuation_in_store(
     store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
