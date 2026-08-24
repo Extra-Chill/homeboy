@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.3] - 2026-08-24
+
+### Changed
+- collapse two parallel-implementation clusters
+- repair stale baseline fingerprint
+
+### Fixed
+- normalize task provider resolution
+- validate and prune stale baseline rows
+- reject invalid terminal evidence
+- recognize registered linked extension sources
+- break repeated pre-provider failures
+
 ## [0.359.2] - 2026-08-24
 
 ### Fixed
