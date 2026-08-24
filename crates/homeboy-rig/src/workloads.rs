@@ -105,7 +105,7 @@ pub fn required_component_id_for_workload(
 /// - `path` matching no declared workload → error naming the declared paths
 /// - no `path` and zero or multiple workloads carrying a contract → error
 /// - selected workload declares no `lifecycle` → error
-pub fn workload_lifecycle_contract<'a>(
+pub(crate) fn workload_lifecycle_contract<'a>(
     rig_spec: &'a RigSpec,
     reference: &LifecycleWorkloadRef,
 ) -> Result<&'a LifecycleContract> {

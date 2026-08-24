@@ -34,7 +34,7 @@ pub(super) use command_step::run_command_step;
 /// writes, instead of a second copy that can drift.
 pub(super) use lifecycle_step::step_key as lifecycle_step_key;
 
-pub fn run_pipeline(
+pub(crate) fn run_pipeline(
     state_store: &RigStateStore,
     rig: &RigSpec,
     name: &str,
@@ -43,7 +43,7 @@ pub fn run_pipeline(
     run_pipeline_with_settings(state_store, rig, name, fail_fast, &[])
 }
 
-pub fn run_pipeline_with_settings(
+pub(crate) fn run_pipeline_with_settings(
     state_store: &RigStateStore,
     rig: &RigSpec,
     name: &str,
@@ -63,7 +63,7 @@ pub fn run_pipeline_with_settings(
     )
 }
 
-pub fn run_pipeline_check_groups(
+pub(crate) fn run_pipeline_check_groups(
     state_store: &RigStateStore,
     rig: &RigSpec,
     groups: &[String],
@@ -91,7 +91,7 @@ pub fn run_pipeline_check_groups(
     )
 }
 
-pub fn run_prepare_requirement_steps(
+pub(crate) fn run_prepare_requirement_steps(
     rig: &RigSpec,
     phase: &str,
     settings: &[(String, String)],
@@ -165,7 +165,7 @@ fn is_prepare_requirement_step(step: &PipelineStep, phase: &str) -> bool {
     )
 }
 
-pub fn cleanup_shared_paths(state_store: &RigStateStore, rig: &RigSpec) -> Result<()> {
+pub(crate) fn cleanup_shared_paths(state_store: &RigStateStore, rig: &RigSpec) -> Result<()> {
     fs_step::cleanup_shared_paths(state_store, rig)
 }
 

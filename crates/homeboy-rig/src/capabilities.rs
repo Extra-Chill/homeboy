@@ -11,13 +11,21 @@ use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 use homeboy_lab_runner_contract::RunnerToolCapabilityRequirement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RigRequirementCheckPlan {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
+pub(crate) struct RigRequirementCheckPlan {
     pub kind: String,
     pub label: String,
     pub target: String,
 }
 
-pub fn plan_requirement_checks(rig: &RigSpec) -> Vec<RigRequirementCheckPlan> {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
+pub(crate) fn plan_requirement_checks(rig: &RigSpec) -> Vec<RigRequirementCheckPlan> {
     rig.requirements
         .executables
         .iter()
@@ -39,7 +47,7 @@ pub fn plan_requirement_checks(rig: &RigSpec) -> Vec<RigRequirementCheckPlan> {
         .collect()
 }
 
-pub fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
+pub(crate) fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
     let mut steps = Vec::new();
 
     for requirement in &rig.requirements.executables {
@@ -66,7 +74,11 @@ pub fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
     }
 }
 
-pub fn runner_capability_preflight(
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
+pub(crate) fn runner_capability_preflight(
     rig: &RigSpec,
     command: &str,
 ) -> Option<RunnerCapabilityPreflight> {
@@ -107,6 +119,10 @@ pub fn runner_capability_preflight(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
 fn effective_tool_command(tool: &super::spec::RunnerToolRequirementSpec) -> String {
     if !tool.command.trim().is_empty() {
         return tool.command.trim().to_string();

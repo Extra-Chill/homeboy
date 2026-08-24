@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
@@ -18,7 +18,7 @@ use super::spec::RigResourcesSpec;
 
 /// Snapshot of a rig's running state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RigState {
+pub(crate) struct RigState {
     /// Timestamp of last successful `rig up`, RFC3339.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_up: Option<String>,
@@ -62,7 +62,7 @@ pub struct RigState {
 
 /// One live lifecycle snapshot handle owned by this rig.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LifecycleSnapshotState {
+pub(crate) struct LifecycleSnapshotState {
     /// Pipeline step that captured the handle — the step `id` when declared,
     /// otherwise the component id, otherwise `lifecycle`. A successful
     /// `teardown` step reaps the handles it owns by this key.
@@ -98,7 +98,7 @@ pub struct MaterializedRigState {
 
 /// Per-service state: PID, start time, health.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceState {
+pub(crate) struct ServiceState {
     /// Running process ID. `None` if the service isn't started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
@@ -113,7 +113,7 @@ pub struct ServiceState {
 
 /// Per-shared-path ownership marker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SharedPathState {
+pub(crate) struct SharedPathState {
     /// Expanded target path the rig linked to when it created the symlink.
     pub target: String,
 
@@ -132,47 +132,42 @@ pub struct SharedPathState {
 /// Service logs live beneath the same per-rig state directory, so the store owns
 /// those paths too.
 #[derive(Debug, Clone)]
-pub struct RigStateStore {
+pub(crate) struct RigStateStore {
     config_root: PathBuf,
 }
 
 impl RigStateStore {
     /// Bind the store to an already-resolved config root.
-    pub fn in_root(config_root: impl Into<PathBuf>) -> Self {
+    pub(crate) fn in_root(config_root: impl Into<PathBuf>) -> Self {
         Self {
             config_root: config_root.into(),
         }
     }
 
     /// Bind the store to the config root of an already-resolved [`PathRoots`].
-    pub fn in_roots(roots: &paths::PathRoots) -> Self {
+    pub(crate) fn in_roots(roots: &paths::PathRoots) -> Self {
         Self::in_root(roots.config())
     }
 
-    /// The config root this store reads and writes beneath.
-    pub fn config_root(&self) -> &Path {
-        &self.config_root
-    }
-
     /// Per-rig state directory (`<config_root>/rigs/{id}.state/`).
-    pub fn state_dir(&self, rig_id: &str) -> PathBuf {
+    pub(crate) fn state_dir(&self, rig_id: &str) -> PathBuf {
         paths::rig_state_dir_in_root(&self.config_root, rig_id)
     }
 
     /// Per-rig service log directory.
-    pub fn logs_dir(&self, rig_id: &str) -> PathBuf {
+    pub(crate) fn logs_dir(&self, rig_id: &str) -> PathBuf {
         paths::rig_logs_dir_in_root(&self.config_root, rig_id)
     }
 
     /// Log file for one supervised service.
-    pub fn log_file(&self, rig_id: &str, service_id: &str) -> PathBuf {
+    pub(crate) fn log_file(&self, rig_id: &str, service_id: &str) -> PathBuf {
         self.logs_dir(rig_id).join(format!("{}.log", service_id))
     }
 
     /// Load state for a rig, returning a default (empty) state if the file
     /// doesn't exist. Missing state is not an error — it just means the rig
     /// hasn't been brought up yet on this machine.
-    pub fn load(&self, rig_id: &str) -> Result<RigState> {
+    pub(crate) fn load(&self, rig_id: &str) -> Result<RigState> {
         let path = paths::rig_state_file_in_root(&self.config_root, rig_id);
         if !path.exists() {
             return Ok(RigState::default());
@@ -197,7 +192,7 @@ impl RigStateStore {
     }
 
     /// Persist state to disk. Creates the state directory if needed.
-    pub fn save(&self, rig_id: &str, state: &RigState) -> Result<()> {
+    pub(crate) fn save(&self, rig_id: &str, state: &RigState) -> Result<()> {
         let dir = self.state_dir(rig_id);
         fs::create_dir_all(&dir).map_err(|e| {
             Error::internal_unexpected(format!(

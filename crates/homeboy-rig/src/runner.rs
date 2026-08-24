@@ -130,13 +130,13 @@ pub struct RepairResourceReport {
 }
 
 /// `repaired` — drift this rig owned and corrected.
-pub const REPAIR_STATUS_REPAIRED: &str = "repaired";
+pub(crate) const REPAIR_STATUS_REPAIRED: &str = "repaired";
 /// `unchanged` — the resource is already healthy.
-pub const REPAIR_STATUS_UNCHANGED: &str = "unchanged";
+pub(crate) const REPAIR_STATUS_UNCHANGED: &str = "unchanged";
 /// `blocked` — drift repair refuses to touch; needs manual attention.
-pub const REPAIR_STATUS_BLOCKED: &str = "blocked";
+pub(crate) const REPAIR_STATUS_BLOCKED: &str = "blocked";
 /// `skipped` — declared, but outside what `repair` manages.
-pub const REPAIR_STATUS_SKIPPED: &str = "skipped";
+pub(crate) const REPAIR_STATUS_SKIPPED: &str = "skipped";
 
 /// Report from `rig status`.
 #[derive(Debug, Clone, Serialize)]
@@ -694,7 +694,11 @@ fn merge_prepare_outcomes(
 /// Tear down a rig. Runs the `down` pipeline if defined, then stops every
 /// service the rig knows about (belt + suspenders — spec authors sometimes
 /// forget to add `service stop` steps to `down`).
-pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
+pub(crate) fn run_down(rig: &RigSpec) -> Result<DownReport> {
     run_down_with_settings(rig, &[])
 }
 

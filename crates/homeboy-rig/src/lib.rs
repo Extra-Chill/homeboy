@@ -18,110 +18,125 @@
 //! lifecycle automation, extension-registered service kinds, spec sharing.
 
 pub mod app;
-pub mod artifact_index;
-pub mod capabilities;
+mod artifact_index;
+mod capabilities;
 pub mod check;
-pub mod component_resolution;
-pub mod dependency_materialization_cache;
+mod component_resolution;
+mod dependency_materialization_cache;
 mod discovery;
 pub mod expand;
 pub mod install;
 mod json_config;
 pub mod lease;
 pub mod lint;
-pub mod local_artifact;
-pub mod pipeline;
+mod local_artifact;
+mod pipeline;
 pub mod provider;
-pub mod resource_lifecycle;
-pub mod runner;
-pub mod service;
-pub mod source;
+mod resource_lifecycle;
+mod runner;
+mod service;
+mod source;
 pub mod spec;
-pub mod stack;
-pub mod state;
-pub mod toolchain;
+mod stack;
+mod state;
+mod toolchain;
 pub mod trace_experiment;
-pub mod workloads;
+mod workloads;
 
 #[cfg(test)]
 #[path = "../../../tests/core/rig/support.rs"]
 mod rig_test_support;
 
-pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
+pub use app::AppLauncherAction;
+pub use app::{AppLauncherOptions, AppLauncherReport};
+// Reachable through `RigRunArtifactIndex`'s public fields.
 pub use artifact_index::{
-    for_run as artifact_index_for_run,
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
-    RigRunArtifactRef, RigRunFailedStepRef,
 };
-pub use capabilities::{
-    evaluate_requirements, plan_requirement_checks, runner_capability_preflight,
-    RigRequirementCheckPlan,
-};
+pub use artifact_index::{RigRunArtifactRef, RigRunFailedStepRef};
+// `tests/core/rig/runner_observation_test.rs` drives this through the alias;
+// production builds the index via `artifact_index_for_run_with_artifacts`.
+#[allow(unused_imports)]
+pub(crate) use artifact_index::for_run as artifact_index_for_run;
+
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
-    default_materialize_source_root, discover_rigs, discover_stacks, install, materialize_rig_spec,
-    materialize_rig_spec_with_default_source_root, package_content_hash, read_source_metadata,
-    read_source_metadata_in_root, read_stack_source_metadata_in_root, DiscoveredRig,
+    default_materialize_source_root, discover_rigs, install, materialize_rig_spec,
+    materialize_rig_spec_with_default_source_root, read_source_metadata,
+    read_source_metadata_in_root,
+};
+pub use install::{
+    discover_stacks, package_content_hash, read_stack_source_metadata_in_root, DiscoveredRig,
     DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata, StackSourceMetadata,
 };
-pub use lease::{
-    acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
-    release_active_run_lease, ActiveRigRunLease, ReleaseLeaseOutcome, RigRunLease,
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use lease::{
+    acquire_active_run_lease, acquire_active_run_lease_with_settings, RigRunLease,
     RIG_LEASE_TTL_ENV,
 };
-pub use local_artifact::{
-    register_current_run_artifact, LocalArtifactRegistration, RIG_ARTIFACT_MANIFEST_ENV,
-};
-pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
-pub use resource_lifecycle::{
-    lifecycle_snapshot_lifecycle_records, rig_resource_lifecycle_index,
-    rig_resource_lifecycle_records, RigResourceLifecycleOptions, LIFECYCLE_SNAPSHOT_RESOURCE_KIND,
-};
+pub use lease::{active_run_leases, release_active_run_lease, ReleaseLeaseOutcome};
+
+pub use local_artifact::{register_current_run_artifact, LocalArtifactRegistration};
+pub use pipeline::PipelineOutcome;
+pub use pipeline::PipelineStepOutcome;
+
 pub use runner::{
     head_sha_and_branch, preflight_effective_component_checkouts, record_effective_component_path,
     run_bench_prepare, run_check, run_check_groups, run_check_groups_with_settings,
-    run_check_with_settings, run_down, run_down_with_settings, run_fuzz_prepare, run_lint,
-    run_repair, run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport, DownReport,
-    FuzzPrepareReport, RepairReport, RepairResourceReport, RigComponentStatusReport,
-    RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,
+    run_check_with_settings, run_down_with_settings, run_fuzz_prepare, run_lint, run_repair,
+    run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport, DownReport,
+    FuzzPrepareReport, RepairReport, RigStatusReport, UpReport,
 };
-pub use service::{DiscoveredProcess, ServiceStatus};
+// Reachable through `RepairReport`/`RigStatusReport` public fields.
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use runner::run_down;
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub use runner::SymlinkStatusState;
+pub use runner::{RepairResourceReport, RigComponentStatusReport, SymlinkStatusReport};
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use service::ServiceStatus;
 pub use source::{
     list_sources, remove_source, update_all_sources, update_source, update_source_for_rig,
+    RigSourceListResult, RigSourceRemoveResult, RigSourceUpdateResult,
+};
+pub use source::{
     InvalidRigSourceMetadata, OrphanedRigSourceStack, RemovedRigSourceRig, RemovedRigSourceStack,
-    RigSourceGroup, RigSourceListResult, RigSourceRecoveryAction, RigSourceRemoveResult,
-    RigSourceRig, RigSourceStack, RigSourceUpdateResult, RigSourceUpdatedRig,
+    RigSourceGroup, RigSourceRecoveryAction, RigSourceRig, RigSourceStack, RigSourceUpdatedRig,
     RigSourceUpdatedStack, SkippedRigSourceRig, SkippedRigSourceStack, SkippedRigSourceUpdate,
 };
 pub use spec::{
     normalize_dependency_materialization_steps, validate_dependency_materialization_steps,
-    AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, ArtifactPostprocessSpec, BenchSpec,
-    CheckSpec, ComponentSpec, DependencyMaterializationArtifactSpec,
-    DependencyMaterializationLogSpec, DependencyMaterializationOutputKind,
-    DependencyMaterializationOutputSpec, DependencyMaterializationSafety,
-    DependencyMaterializationStepSpec, DiscoverSpec, ExecutableRequirementSpec,
-    FilesystemAssertionKind, FilesystemAssertionSpec, LabStackPrSpec, LabStackRef, LabStackSpec,
-    LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
-    LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadKind,
-    LifecycleWorkloadRef, NewerThanSpec, NormalizedDependencyMaterializationStep, PatchOp,
-    PipelineStep, RigRequirementsSpec, RigResourceRetentionSpec, RigResourcesSpec, RigSpec,
-    RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
-    SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
-    TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
-    TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
-    TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
-    WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
-    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
-    RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+    AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, CheckSpec,
+    DependencyMaterializationArtifactSpec, DependencyMaterializationLogSpec,
+    DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec, DiscoverSpec,
+    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, LifecycleContract,
+    LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus,
+    LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadKind, LifecycleWorkloadRef,
+    NewerThanSpec, NormalizedDependencyMaterializationStep, PatchOp, RigRequirementsSpec,
+    RigResourceRetentionSpec, RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp,
+    SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig, TraceExperimentArtifactSpec,
+    TraceExperimentCommandSpec, TracePhaseTemplateSpec, TracePublicPreviewMode, WorkloadSpec,
+    RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE, RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS,
+    RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS, RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
-pub use stack::{
-    plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,
-    RigStackSyncReport,
+pub use spec::{
+    ArtifactPostprocessSpec, BenchSpec, ComponentSpec, LabStackPrSpec, LabStackRef, LabStackSpec,
+    PipelineStep, RigResourcesSpec, RigSpec, TraceDependencySpec, TraceExperimentSpec,
+    TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
+    TraceProfileSpec, TracePublicPreviewSpec, TraceVariantSpec,
 };
-pub use state::{
-    ComponentSnapshot, LifecycleSnapshotState, MaterializedRigState, RigState, RigStateSnapshot,
-    RigStateStore, ServiceState,
-};
+pub use stack::RigStackSyncEntry;
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use stack::{plan_stack_sync, run_component_sync};
+pub use stack::{run_sync, RigStackSyncReport};
+pub use state::MaterializedRigState;
+pub use state::{ComponentSnapshot, RigStateSnapshot};
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use state::{LifecycleSnapshotState, RigState, ServiceState};
+#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
+pub(crate) use workloads::workload_lifecycle_contract;
+pub use workloads::RigWorkloadPathExpansion;
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,
     component_extension_ids_for_workload, component_ids_for_workload,
@@ -129,8 +144,8 @@ pub use workloads::{
     extension_workload_inputs, invocation_requirements_for_extension_workloads,
     required_component_id_for_workload, required_extension_ids_for_workload,
     runner_capabilities_for_extension, trace_dependencies_for_extension,
-    workload_lifecycle_contract, workload_path_expansions_for_extension, workloads_for_extension,
-    RigExtensionWorkloadInputs, RigWorkloadKind, RigWorkloadPathExpansion,
+    workload_path_expansions_for_extension, workloads_for_extension, RigExtensionWorkloadInputs,
+    RigWorkloadKind,
 };
 
 use discovery::discover_rigs_for_install;

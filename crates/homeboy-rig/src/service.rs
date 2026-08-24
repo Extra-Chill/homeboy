@@ -28,14 +28,14 @@ use homeboy_core::error::Result;
 /// chatty service filled the disk and nothing reclaimed it (#11128). The other
 /// runtime byte producers carry a size and a count bound
 /// (`runtime_run_max_bytes` / `runtime_run_max_count`); this is the same shape.
-pub const RIG_LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const RIG_LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Rotated generations retained beside the live log.
 ///
 /// The bound that matters is the product: at most
 /// `RIG_LOG_MAX_BYTES * (RIG_LOG_MAX_GENERATIONS + 1)` per service, plus
 /// whatever the live process appends before its next start.
-pub const RIG_LOG_MAX_GENERATIONS: usize = 3;
+pub(crate) const RIG_LOG_MAX_GENERATIONS: usize = 3;
 
 /// Size-bounded rotation for supervised service logs.
 ///
@@ -118,7 +118,7 @@ pub(crate) mod log_rotation {
 
 /// Live status of a service as seen at probe time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServiceStatus {
+pub(crate) enum ServiceStatus {
     Running(u32),
     Stopped,
     /// PID recorded but process is gone — state is stale.
@@ -127,7 +127,7 @@ pub enum ServiceStatus {
 
 /// One discovered process — its PID and start time (seconds since epoch).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredProcess {
+pub(crate) struct DiscoveredProcess {
     pub pid: u32,
     pub started_at_epoch: u64,
 }
@@ -135,17 +135,17 @@ pub struct DiscoveredProcess {
 /// Start a service if it isn't already running. Idempotent.
 ///
 /// Returns the PID of the running (or newly started) process.
-pub fn start(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
+pub(crate) fn start(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
     platform::start(state_store, rig, service_id)
 }
 
 /// Stop a running service. Idempotent — if not running, returns immediately.
-pub fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
+pub(crate) fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
     platform::stop(state_store, rig, service_id)
 }
 
 /// Report current service status, cross-referencing rig state with live PID.
-pub fn status(
+pub(crate) fn status(
     state_store: &RigStateStore,
     rig_id: &str,
     service_id: &str,
@@ -154,7 +154,7 @@ pub fn status(
 }
 
 /// Log file path for a supervised service.
-pub fn log_path(
+pub(crate) fn log_path(
     state_store: &RigStateStore,
     rig_id: &str,
     service_id: &str,
@@ -162,28 +162,16 @@ pub fn log_path(
     Ok(state_store.log_file(rig_id, service_id))
 }
 
-/// Find the newest process whose command line contains `pattern`.
-///
-/// Used by `external` services (`stop` discovery) and the `newer_than`
-/// check (`process_start` time source). Returns `Ok(None)` when no
-/// process matches — both callers treat that as "nothing to do."
-///
-/// Implementation: shells out to `ps -axo pid=,lstart=,args=` and filters
-/// the output locally. We pick the newest match (largest start-time) so a stale +
-/// fresh pair surfaces the fresh one to consumers (the rig wants to know
-/// "is the live daemon stale?").
-pub fn discover_newest(pattern: &str) -> Result<Option<DiscoveredProcess>> {
-    platform::discover_newest(pattern, &[])
-}
-
 /// Find the newest process matching a full discovery spec.
-pub fn discover_newest_for_spec(discover: &DiscoverSpec) -> Result<Option<DiscoveredProcess>> {
+pub(crate) fn discover_newest_for_spec(
+    discover: &DiscoverSpec,
+) -> Result<Option<DiscoveredProcess>> {
     platform::discover_newest(&discover.pattern, &discover.argv_contains)
 }
 
 /// `discover_newest`, but returning the PID only. Convenience used by
 /// `service::stop` for the `external` kind.
-pub fn discover_external_pid(discover: &DiscoverSpec) -> Result<Option<u32>> {
+pub(crate) fn discover_external_pid(discover: &DiscoverSpec) -> Result<Option<u32>> {
     Ok(discover_newest_for_spec(discover)?.map(|p| p.pid))
 }
 
@@ -194,7 +182,11 @@ pub fn discover_external_pid(discover: &DiscoverSpec) -> Result<Option<u32>> {
 /// without needing to drive a real `ps` invocation. Production callers
 /// only see this through `discover_newest`.
 #[cfg(unix)]
-pub fn parse_etime_seconds(s: &str) -> Option<u64> {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by the rig test suite"
+)]
+pub(crate) fn parse_etime_seconds(s: &str) -> Option<u64> {
     platform::parse_etime_seconds(s)
 }
 
@@ -213,7 +205,11 @@ mod platform {
     use super::ServiceStatus;
     use homeboy_core::error::{Error, Result};
 
-    pub fn start(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
+    pub(crate) fn start(
+        state_store: &RigStateStore,
+        rig: &RigSpec,
+        service_id: &str,
+    ) -> Result<u32> {
         let spec = rig.services.get(service_id).ok_or_else(|| {
             Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
         })?;
@@ -297,7 +293,7 @@ mod platform {
         Ok(pid)
     }
 
-    pub fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
+    pub(crate) fn stop(state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
         let spec = rig.services.get(service_id).ok_or_else(|| {
             Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
         })?;
@@ -358,7 +354,7 @@ mod platform {
         Ok(())
     }
 
-    pub fn status(
+    pub(crate) fn status(
         state_store: &RigStateStore,
         rig_id: &str,
         service_id: &str,
@@ -540,7 +536,7 @@ mod platform {
     /// (macOS) and procps `ps` (Linux). `etimes` (integer seconds) is
     /// procps-only, so the text format is the portable choice. Newest
     /// match = smallest elapsed seconds.
-    pub fn discover_newest(
+    pub(crate) fn discover_newest(
         pattern: &str,
         argv_contains: &[String],
     ) -> Result<Option<super::DiscoveredProcess>> {
@@ -673,15 +669,23 @@ mod platform {
 
     const UNSUPPORTED: &str = "rig services are not supported on this platform (Unix only)";
 
-    pub fn start(_state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<u32> {
+    pub(crate) fn start(
+        _state_store: &RigStateStore,
+        rig: &RigSpec,
+        service_id: &str,
+    ) -> Result<u32> {
         Err(Error::rig_service_failed(&rig.id, service_id, UNSUPPORTED))
     }
 
-    pub fn stop(_state_store: &RigStateStore, rig: &RigSpec, service_id: &str) -> Result<()> {
+    pub(crate) fn stop(
+        _state_store: &RigStateStore,
+        rig: &RigSpec,
+        service_id: &str,
+    ) -> Result<()> {
         Err(Error::rig_service_failed(&rig.id, service_id, UNSUPPORTED))
     }
 
-    pub fn status(
+    pub(crate) fn status(
         _state_store: &RigStateStore,
         rig_id: &str,
         service_id: &str,
@@ -689,7 +693,7 @@ mod platform {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
     }
 
-    pub fn log_file_path(
+    pub(crate) fn log_file_path(
         _state_store: &RigStateStore,
         rig_id: &str,
         service_id: &str,
@@ -697,7 +701,7 @@ mod platform {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
     }
 
-    pub fn discover_newest(
+    pub(crate) fn discover_newest(
         _pattern: &str,
         _argv_contains: &[String],
     ) -> Result<Option<super::DiscoveredProcess>> {

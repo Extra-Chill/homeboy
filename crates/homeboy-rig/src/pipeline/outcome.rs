@@ -25,7 +25,7 @@ pub struct PipelineOutcome {
 }
 
 impl PipelineOutcome {
-    pub fn is_success(&self) -> bool {
+    pub(crate) fn is_success(&self) -> bool {
         self.failed == 0
     }
 }

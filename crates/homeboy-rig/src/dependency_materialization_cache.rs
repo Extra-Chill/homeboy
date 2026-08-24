@@ -66,13 +66,13 @@ struct Output {
     bytes: u64,
 }
 
-pub enum CacheResult {
+pub(crate) enum CacheResult {
     Hit { bytes: u64 },
     Miss { reason: String },
     Saved { bytes: u64 },
 }
 
-pub struct DependencyMaterializationCache {
+pub(crate) struct DependencyMaterializationCache {
     root: PathBuf,
     entry: PathBuf,
     key: String,
@@ -82,7 +82,7 @@ pub struct DependencyMaterializationCache {
 }
 
 impl DependencyMaterializationCache {
-    pub fn new(
+    pub(crate) fn new(
         rig: &RigSpec,
         step: &DependencyMaterializationStepSpec,
         settings: &[(String, String)],
@@ -114,7 +114,7 @@ impl DependencyMaterializationCache {
     /// triple, the resolved toolchain executables, and the step's own declared
     /// environment describe the machine the materialization ran on, which is
     /// what makes the entry safe to reuse. That is identity, not location.
-    pub fn new_in_roots(
+    pub(crate) fn new_in_roots(
         data_root: &Path,
         rig: &RigSpec,
         step: &DependencyMaterializationStepSpec,
@@ -237,7 +237,7 @@ impl DependencyMaterializationCache {
         }))
     }
 
-    pub fn restore(&self) -> Result<CacheResult> {
+    pub(crate) fn restore(&self) -> Result<CacheResult> {
         let _lock = self.lock()?;
         let manifest_path = self.entry.join("manifest.json");
         let manifest: Manifest = match read_json::<Manifest>(&manifest_path) {
@@ -307,11 +307,15 @@ impl DependencyMaterializationCache {
         self.evidence(CacheResult::Hit { bytes })
     }
 
-    pub fn key(&self) -> &str {
+    #[allow(
+        dead_code,
+        reason = "no production caller; exercised by the rig test suite"
+    )]
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         let _lock = self.lock()?;
         let staging = self
             .root
@@ -421,7 +425,7 @@ impl DependencyMaterializationCache {
 // the observation store the index is recorded into (#7505).
 
 /// [`cache_root`] below an explicitly injected data root.
-pub fn cache_root_in_roots(data_root: &Path) -> PathBuf {
+pub(crate) fn cache_root_in_roots(data_root: &Path) -> PathBuf {
     data_root
         .join("cache")
         .join("dependency-materialization")
@@ -593,7 +597,7 @@ static RESTORE_PUBLISH_FAILURE_AFTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(usize::MAX);
 
 #[cfg(test)]
-pub fn inject_restore_publish_failure_after(publishes: usize) {
+pub(crate) fn inject_restore_publish_failure_after(publishes: usize) {
     RESTORE_PUBLISH_FAILURE_AFTER.store(publishes, std::sync::atomic::Ordering::SeqCst);
 }
 

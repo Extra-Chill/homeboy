@@ -33,7 +33,7 @@ const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[
     "venv",
 ];
 
-pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
+pub(crate) fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
     let Some(root) = package_lint_root(rig) else {
         return Ok(empty_outcome());
     };

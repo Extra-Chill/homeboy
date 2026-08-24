@@ -21,7 +21,7 @@ pub fn expand_vars(rig: &RigSpec, input: &str) -> String {
 
 /// Expand variables + tilde in a string, with rig settings materialized as
 /// `HOMEBOY_SETTINGS_<KEY>` values for `${env.*}` lookups.
-pub fn expand_vars_with_settings(
+pub(crate) fn expand_vars_with_settings(
     rig: &RigSpec,
     input: &str,
     settings: &[(String, String)],
@@ -36,7 +36,7 @@ pub fn expand_resources(rig: &RigSpec) -> RigResourcesSpec {
 }
 
 /// Return a copy of the rig resource declarations with expandable string entries expanded.
-pub fn expand_resources_with_settings(
+pub(crate) fn expand_resources_with_settings(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> RigResourcesSpec {
@@ -185,7 +185,7 @@ pub(crate) fn unsupported_component_interpolations(input: &str) -> Vec<String> {
 /// Settings override inherited process env for their own `HOMEBOY_SETTINGS_*`
 /// names. That matches bench setting semantics: an explicit CLI setting is the
 /// effective value for this invocation.
-pub fn settings_env(settings: &[(String, String)]) -> BTreeMap<String, String> {
+pub(crate) fn settings_env(settings: &[(String, String)]) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for (key, value) in settings {
         env.insert(

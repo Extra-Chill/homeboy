@@ -17,11 +17,11 @@ impl WorkloadSpec {
     /// Every other `WorkloadSpec` field has had an accessor since the type was
     /// introduced; `lifecycle` did not, which is why the contract was parsed
     /// and serialized but never reachable from an execution path.
-    pub fn lifecycle(&self) -> Option<&LifecycleContract> {
+    pub(crate) fn lifecycle(&self) -> Option<&LifecycleContract> {
         self.lifecycle.as_ref()
     }
 
-    pub fn env_provider_extensions(&self) -> &[String] {
+    pub(crate) fn env_provider_extensions(&self) -> &[String] {
         &self.env_provider_extensions
     }
 
@@ -29,15 +29,15 @@ impl WorkloadSpec {
         self.public_preview.as_ref()
     }
 
-    pub fn check_groups(&self) -> Option<&[String]> {
+    pub(crate) fn check_groups(&self) -> Option<&[String]> {
         self.check_groups.as_deref()
     }
 
-    pub fn port_range_size(&self) -> Option<u16> {
+    pub(crate) fn port_range_size(&self) -> Option<u16> {
         self.port_range_size
     }
 
-    pub fn named_leases(&self) -> &[String] {
+    pub(crate) fn named_leases(&self) -> &[String] {
         &self.named_leases
     }
 
@@ -72,11 +72,11 @@ impl WorkloadSpec {
         &self.trace_probes
     }
 
-    pub fn trace_dependencies(&self) -> &[TraceDependencySpec] {
+    pub(crate) fn trace_dependencies(&self) -> &[TraceDependencySpec] {
         &self.dependencies
     }
 
-    pub fn runner_capabilities(&self) -> &[String] {
+    pub(crate) fn runner_capabilities(&self) -> &[String] {
         &self.runner_capabilities
     }
 }
