@@ -7939,6 +7939,52 @@ fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> AgentTaskCoo
 }
 
 #[test]
+fn generic_lab_replay_service_retry_is_rejected_before_reserving_a_successor() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-generic-lab-replay", 2);
+        let mut replay_plan = options.initial_plan.clone();
+        replay_plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": "/workspace",
+                "content_identity": "snapshot:recorded",
+            },
+        });
+        agent_task_lifecycle::persist_controller_plan_in_store(
+            &test_lifecycle_store(),
+            &options.initial_run_id,
+            &replay_plan,
+        )
+        .expect("persist generic Lab replay plan");
+        let before = agent_task_lifecycle::read_records_with_health()
+            .expect("read source record")
+            .0
+            .len();
+
+        let error = crate::agent_task_service::retry(
+            &options.initial_run_id,
+            Some("cook-generic-lab-replay-attempt-2"),
+            false,
+            false,
+        )
+        .expect_err("service retry requires controller workspace preflight");
+
+        assert!(error
+            .message
+            .contains("generic Lab replay requires controller workspace preflight"));
+        assert_eq!(
+            agent_task_lifecycle::read_records_with_health()
+                .expect("read records after rejected retry")
+                .0
+                .len(),
+            before,
+            "the rejected replay must not reserve a successor"
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_rejects_a_lifecycle_reservation_collision_without_recipe_mutation()
 {
     homeboy_core::test_support::with_isolated_home(|_| {

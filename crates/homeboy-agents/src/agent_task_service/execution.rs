@@ -1100,6 +1100,35 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
+    retry_with_preflight(run_id, new_run_id, run, force, |plan| {
+        if plan.metadata.get("generic_lab_command_replay").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                "generic Lab replay requires controller workspace preflight",
+                Some(plan.plan_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Reserve a retry only after the caller has revalidated the persisted action.
+///
+/// Generic Lab replays need controller-owned workspace validation that this
+/// crate cannot perform. The ordinary service entry point rejects them; the
+/// Lab route supplies that validation through this boundary before any retry
+/// reservation or Cook recovery can mutate durable state.
+pub fn retry_with_preflight<F>(
+    run_id: &str,
+    new_run_id: Option<&str>,
+    run: bool,
+    force: bool,
+    preflight: F,
+) -> Result<AgentTaskRetryServiceResult>
+where
+    F: FnOnce(&AgentTaskPlan) -> Result<()>,
+{
     // One lifecycle store for the whole retry. Reserving the successor,
     // proving the reservation is exact, persisting the controller plan, and
     // binding the Cook attempt are one durable lineage: a successor reserved in
@@ -1111,6 +1140,9 @@ pub fn retry(
         &lifecycle_store,
         run_id,
     )?;
+    let source_plan =
+        agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
+    preflight(&source_plan)?;
     let recovered_replacement = config::with_config_lock(|| {
         let Some(cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);

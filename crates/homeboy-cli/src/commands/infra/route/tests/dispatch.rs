@@ -208,6 +208,124 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
 }
 
 #[test]
+fn generic_lab_replay_retry_rejects_a_changed_workspace_before_reserving_a_successor() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        git_init(source.path());
+        let args = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "--detach-after-handoff".to_string(),
+            "bench".to_string(),
+            "blocks-engine".to_string(),
+            "--run-id".to_string(),
+            "changed-generic-replay".to_string(),
+        ];
+        let cli = Cli::parse_from(&args);
+        let command = lab_offload_command(&cli.command)
+            .expect("bench contract")
+            .expect("portable bench");
+        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+            .expect("placement decision");
+        let handoff =
+            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
+                .expect("persist detached bench handoff");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &handoff.run_id,
+            &handoff.plan,
+            "lab_daemon_admission",
+            &Error::internal_unexpected("daemon unavailable"),
+        )
+        .expect("persist pre-provider failure");
+        std::fs::write(source.path().join("changed.txt"), "changed\n").expect("change workspace");
+        let retry_args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            handoff.run_id.clone(),
+            "--run".to_string(),
+            "--new-run-id".to_string(),
+            "changed-generic-replay-retry".to_string(),
+        ];
+        let error = match materialize_agent_task_retry_handoff(
+            &Cli::parse_from(&retry_args),
+            &retry_args,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("changed workspace must reject replay before retry reservation"),
+        };
+
+        assert!(error.message.contains("content no longer matches"));
+        assert_eq!(
+            agent_task_lifecycle::run_record_exists("changed-generic-replay-retry")
+                .expect("check retry reservation"),
+            false,
+            "the changed replay workspace must not reserve a successor"
+        );
+    });
+}
+
+#[test]
+fn generic_lab_replay_retry_rejects_a_missing_workspace_before_reserving_a_successor() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        git_init(source.path());
+        let args = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "--detach-after-handoff".to_string(),
+            "bench".to_string(),
+            "blocks-engine".to_string(),
+            "--run-id".to_string(),
+            "missing-generic-replay".to_string(),
+        ];
+        let cli = Cli::parse_from(&args);
+        let command = lab_offload_command(&cli.command)
+            .expect("bench contract")
+            .expect("portable bench");
+        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+            .expect("placement decision");
+        let handoff =
+            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
+                .expect("persist detached bench handoff");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &handoff.run_id,
+            &handoff.plan,
+            "lab_daemon_admission",
+            &Error::internal_unexpected("daemon unavailable"),
+        )
+        .expect("persist pre-provider failure");
+        std::fs::remove_dir_all(source.path()).expect("remove workspace");
+        let retry_args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            handoff.run_id.clone(),
+            "--run".to_string(),
+            "--new-run-id".to_string(),
+            "missing-generic-replay-retry".to_string(),
+        ];
+        let error = match materialize_agent_task_retry_handoff(
+            &Cli::parse_from(&retry_args),
+            &retry_args,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing workspace must reject replay before retry reservation"),
+        };
+
+        assert!(error.message.contains("could not revalidate"));
+        assert_eq!(
+            agent_task_lifecycle::run_record_exists("missing-generic-replay-retry")
+                .expect("check retry reservation"),
+            false,
+            "the missing replay workspace must not reserve a successor"
+        );
+    });
+}
+
+#[test]
 fn explicit_local_promotion_defers_target_resolution_to_promotion() {
     let args = [
         "homeboy",

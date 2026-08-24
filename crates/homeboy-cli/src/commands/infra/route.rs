@@ -3954,11 +3954,12 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let retry_result = crate::agents::agent_task_service::retry(
+    let retry_result = crate::agents::agent_task_service::retry_with_preflight(
         &retry.run_id,
         retry.new_run_id.as_deref(),
         true,
         retry.force,
+        validate_generic_lab_command_replay_workspace,
     )?;
     if !retry_result.run {
         return Ok(None);
@@ -3967,23 +3968,6 @@ fn materialize_agent_task_retry_handoff(
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
-        let current_identity =
-            homeboy::runner::controller_workspace_materialization_identity(&primary_workspace)?;
-        if current_identity != replay.materialization.content_identity {
-            let error = Error::validation_invalid_argument(
-                "workspace",
-                "agent-task retry refused a source workspace whose content no longer matches the persisted Lab replay identity",
-                Some(primary_workspace.display().to_string()),
-                Some(vec!["Restore the recorded workspace content or reissue the original command as a new run.".to_string()]),
-            );
-            agent_task_lifecycle::record_pre_execution_failure(
-                &record.run_id,
-                &plan,
-                "validate_retry_workspace_identity",
-                &error,
-            )?;
-            return Err(error);
-        }
         return Ok(Some(AgentTaskRetryHandoff {
             args: replay.normalized_args,
             run_id: record.run_id,
@@ -4036,6 +4020,39 @@ fn materialize_agent_task_retry_handoff(
         primary_workspace,
         replays_generic_command: false,
     }))
+}
+
+fn validate_generic_lab_command_replay_workspace(
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    let Some(replay) = generic_lab_command_replay(plan)? else {
+        return Ok(());
+    };
+    let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
+    let current_identity = homeboy::runner::controller_workspace_materialization_identity(
+        &primary_workspace,
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry could not revalidate the persisted Lab replay workspace",
+            Some(primary_workspace.display().to_string()),
+            Some(vec![
+                error.message,
+                "Restore the recorded workspace content or reissue the original command as a new run."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    if current_identity != replay.materialization.content_identity {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry refused a source workspace whose content no longer matches the persisted Lab replay identity",
+            Some(primary_workspace.display().to_string()),
+            Some(vec!["Restore the recorded workspace content or reissue the original command as a new run.".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
