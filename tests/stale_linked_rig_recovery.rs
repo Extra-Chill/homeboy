@@ -147,6 +147,7 @@ fn install_then_remove_source_a(context: &HermeticTestContext, source_a: &Path) 
     fs::remove_dir_all(source_a).expect("remove source A");
 }
 
+#[cfg(unix)]
 #[test]
 fn bench_repairs_missing_linked_rig_source_from_path_override() {
     let context = HermeticTestContext::new();
