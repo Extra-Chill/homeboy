@@ -29,7 +29,8 @@ use super::super::cook_recipe::{
 };
 use super::*;
 use crate::agent_task::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskWorkspace,
 };
 use crate::agent_task_finalization::{
     AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationReport,
@@ -7936,6 +7937,94 @@ fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> AgentTaskCoo
     )
     .expect("record retryable environment failure");
     options
+}
+
+fn retryable_lab_pre_provider_cook(cook_id: &str, message: &str) -> AgentTaskCookServiceOptions {
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = format!("{cook_id}-attempt-1");
+    options.max_attempts = 2;
+    options.initial_plan.tasks[0].executor.backend = "homeboy-lab".to_string();
+    options.initial_plan.tasks[0].source_refs = vec![AgentTaskSourceRef {
+        kind: "git".to_string(),
+        uri: "https://example.test/workload.git".to_string(),
+        revision: Some("source-a".to_string()),
+    }];
+    super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+    super::super::materialize_initial_cook_attempt(&options).expect("materialize first attempt");
+    agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+        record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+        record.metadata["runner_generation"] = serde_json::json!("generation-a");
+        record.metadata["source_checkout"] = serde_json::json!({ "commit": "source-a" });
+    })
+    .expect("seed Lab identity");
+    agent_task_lifecycle::record_pre_execution_failure(
+        &options.initial_run_id,
+        &options.initial_plan,
+        "lab_workspace_stage",
+        &Error::internal_io(message, None).with_retryable(true),
+    )
+    .expect("record Lab pre-provider failure");
+    options
+}
+
+#[test]
+fn snapshot_divergence_opens_a_per_cook_circuit_until_source_identity_changes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_lab_pre_provider_cook(
+            "snapshot-circuit",
+            "source and staged snapshot manifests differ; refusing a mixed snapshot",
+        );
+        let source =
+            agent_task_lifecycle::exact_record(&options.initial_run_id).expect("source record");
+        assert!(source.metadata["lab_pre_execution_circuit"].is_object());
+        agent_task_lifecycle::admit_lab_pre_execution_replay(&source, &options.initial_plan)
+            .expect_err("direct admission rejects identical identity");
+        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect_err("identical snapshot replay is refused before reservation");
+        assert_eq!(error.details["field"], "lab_pre_execution_circuit_breaker");
+        assert_eq!(
+            error.details["action"],
+            "repair_lab_pre_execution_and_retry"
+        );
+        assert_eq!(
+            agent_task_lifecycle::list_records().expect("records").len(),
+            1
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&options.initial_run_id)
+                .expect("source record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["source_checkout"] = serde_json::json!({ "commit": "source-b" });
+        })
+        .expect("record refreshed source identity");
+        let replay = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("changed source identity reopens only this Cook");
+        assert_eq!(replay.record.metadata["cook_id"], options.cook_id);
+    });
+}
+
+#[test]
+fn ssh_cleanup_circuit_reopens_when_the_runner_generation_changes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_lab_pre_provider_cook(
+            "ssh-cleanup-circuit",
+            "Homeboy SSH stream drain exceeded its cleanup deadline.",
+        );
+        assert!(
+            crate::agent_task_service::retry(&options.initial_run_id, None, false, false).is_err()
+        );
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["runner_generation"] = serde_json::json!("generation-b");
+        })
+        .expect("record reconnected runner generation");
+        let replay = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("new runner generation reopens the SSH cleanup circuit");
+        assert_eq!(replay.record.metadata["retry_of"], options.initial_run_id);
+    });
 }
 
 #[test]
