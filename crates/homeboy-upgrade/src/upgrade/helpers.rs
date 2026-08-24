@@ -482,19 +482,44 @@ pub fn run_upgrade_with_method(
         }
     }
 
-    // Packaged installers still own their download-and-swap command. Keep their
-    // established full-operation lease until that contract is moved in-process;
-    // source builds use the narrower lease at the final rename instead.
-    let controller_mutation_lease = (install_method != InstallMethod::Source)
-        .then(|| {
-            homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")
-        })
-        .transpose()?;
-    let controller_upgrade =
-        run_controller_mutation_after_runner_preflight(runner_preflight, || {
-            if let Some(lease) = &controller_mutation_lease {
-                lease.assert_generation()?;
+    // Keep the same promotion authority from compatibility revalidation through
+    // the controller swap. Source builds retain their isolated build target, but
+    // their final install shares this lease rather than opening a TOCTOU window.
+    let controller_mutation_lease =
+        homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")?;
+    controller_mutation_lease.assert_generation()?;
+    let extension_revalidation = (!skip_extensions)
+        .then(|| preflight_extensions_for_upgrade(&candidate_version))
+        .unwrap_or_default();
+    if !extension_revalidation.is_empty() {
+        return Ok(extension_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            &candidate_version,
+            extension_revalidation,
+        ));
+    }
+    let controller_upgrade = run_controller_mutation_after_runner_preflight(
+        runner_preflight,
+        || {
+            controller_mutation_lease.assert_generation()?;
+            if skip_runners {
+                Ok(Vec::new())
+            } else {
+                super::with_runner_upgrade(|provider| {
+                    provider.preflight_configured_runners_for_upgrade(
+                        runner_method_override,
+                        source_upgrade_path.as_deref(),
+                        source_upgrade_path.is_some(),
+                        runner_targets,
+                        &candidate_version,
+                        &extension::available_extension_ids(),
+                    )
+                })
             }
+        },
+        || {
             execute_upgrade(
                 install_method,
                 source_upgrade_path.as_deref(),
@@ -502,8 +527,10 @@ pub fn run_upgrade_with_method(
                 force,
                 previous_build_identity.as_deref(),
                 selected_release.as_ref(),
+                Some(&controller_mutation_lease),
             )
-        })?;
+        },
+    )?;
     let (success, new_version, new_build_identity, source_revision, superseded) =
         match controller_upgrade {
             Ok(result) => result,
@@ -690,13 +717,17 @@ fn source_upgrade_noop_result(
 
 fn run_controller_mutation_after_runner_preflight<T>(
     runner_preflight: Vec<RunnerUpgradeEntry>,
+    revalidate_runners: impl FnOnce() -> Result<Vec<RunnerUpgradeEntry>>,
     mutate_controller: impl FnOnce() -> Result<T>,
 ) -> Result<std::result::Result<T, Vec<RunnerUpgradeEntry>>> {
-    if runner_preflight.is_empty() {
-        return mutate_controller().map(Ok);
+    if !runner_preflight.is_empty() {
+        return Ok(Err(runner_preflight));
     }
-
-    Ok(Err(runner_preflight))
+    let revalidation = revalidate_runners()?;
+    if !revalidation.is_empty() {
+        return Ok(Err(revalidation));
+    }
+    mutate_controller().map(Ok)
 }
 
 fn runner_preflight_failure_result(
@@ -2135,41 +2166,58 @@ fn is_lowercase_hex(value: &str, length: usize) -> bool {
 #[cfg(test)]
 mod runner_source_upgrade_tests {
     use super::*;
+    use std::cell::RefCell;
     use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
-    fn runner_preflight_failure_does_not_invoke_controller_mutation() {
-        let mut controller_mutated = false;
+    fn changed_runner_compatibility_revalidation_precedes_controller_mutation() {
+        let events = RefCell::new(Vec::new());
+        let changed_manifest_requires_homeboy = ">=3.0.0";
         let result = run_controller_mutation_after_runner_preflight(
-            vec![RunnerUpgradeEntry {
-                runner_id: "lab-a".to_string(),
-                homeboy_path: "homeboy".to_string(),
-                success: false,
-                upgraded: false,
-                previous_version: None,
-                new_version: None,
-                bare_homeboy_version: None,
-                path_drift: None,
-                recovery_commands: Vec::new(),
-                extensions_synced: Vec::new(),
-                extensions_skipped: Vec::new(),
-                extensions_failed: Vec::new(),
-                stale_daemon: None,
-                daemon_previous_version: None,
-                daemon_new_version: None,
-                exit_code: 1,
-                detail: "runner preflight materialization failed".to_string(),
-            }],
+            Vec::new(),
             || {
-                controller_mutated = true;
+                events.borrow_mut().push("runner manifest revalidation");
+                let compatible = homeboy_extension::evaluate_core_compatibility_for_version(
+                    Some(changed_manifest_requires_homeboy),
+                    None,
+                    "2.1.0",
+                )?
+                .status
+                    != "incompatible";
+                Ok((!compatible)
+                    .then(|| RunnerUpgradeEntry {
+                        runner_id: "lab-a".to_string(),
+                        homeboy_path: "homeboy".to_string(),
+                        success: false,
+                        upgraded: false,
+                        previous_version: None,
+                        new_version: None,
+                        bare_homeboy_version: None,
+                        path_drift: None,
+                        recovery_commands: Vec::new(),
+                        extensions_synced: Vec::new(),
+                        extensions_skipped: Vec::new(),
+                        extensions_failed: Vec::new(),
+                        stale_daemon: None,
+                        daemon_previous_version: None,
+                        daemon_new_version: None,
+                        exit_code: 1,
+                        detail: "runner manifest changed to an incompatible requirement"
+                            .to_string(),
+                    })
+                    .into_iter()
+                    .collect())
+            },
+            || {
+                events.borrow_mut().push("controller mutation");
                 Ok(())
             },
         )
         .expect("preflight evaluation");
 
-        assert!(!controller_mutated, "controller build/install must not run");
         let runners_skipped = result.unwrap_err();
+        assert_eq!(*events.borrow(), ["runner manifest revalidation"]);
         assert_eq!(runners_skipped[0].runner_id, "lab-a");
         let upgrade = runner_preflight_failure_result(
             InstallMethod::Source,

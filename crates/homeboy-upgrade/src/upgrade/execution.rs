@@ -122,6 +122,7 @@ pub(crate) fn execute_upgrade(
     force: bool,
     previous_build_identity: Option<&str>,
     selected_release: Option<&SelectedRelease>,
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
@@ -196,6 +197,7 @@ pub(crate) fn execute_upgrade(
                 force,
                 previous_build_identity,
                 source_revision,
+                promotion_lease,
             );
         }
         InstallMethod::Binary => {
@@ -482,16 +484,24 @@ fn complete_source_upgrade(
     force: bool,
     previous_build_identity: Option<&str>,
     source_revision: Option<String>,
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
     })?;
     // Builds may finish in any order. Only promotion is serialized, and the
     // installed target is re-read while holding that lease before the rename.
-    let promotion_lease = homeboy_core::runtime_promotion::acquire(
-        "controller source promotion",
-        replacement_target.display().to_string(),
-    )?;
+    let owned_promotion_lease;
+    let promotion_lease = match promotion_lease {
+        Some(lease) => lease,
+        None => {
+            owned_promotion_lease = homeboy_core::runtime_promotion::acquire(
+                "controller source promotion",
+                replacement_target.display().to_string(),
+            )?;
+            &owned_promotion_lease
+        }
+    };
     let active_identity = installed_target_build_identity()?;
     if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root) {
         let active = active_identity.expect("identity checked above");
