@@ -157,12 +157,13 @@ printf 'renderer failed before producing markdown\n' >&2
 exit 1
 STUB
 chmod +x "${BIN_DIR}/homeboy"
-export RESULTS='{"review lint":"fail"}'
+export RESULTS='{"review lint":"fail","review test":"timeout"}'
 
 bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
 
 grep -F "## Failure digest unavailable" "${DIGEST_FILE}" >/dev/null
 grep -F '`homeboy review lint`: **fail** (result: `review-lint.json`)' "${DIGEST_FILE}" >/dev/null
+grep -F '`homeboy review test`: **timeout** (result: `review-test.json`)' "${DIGEST_FILE}" >/dev/null
 grep -F "renderer failed before producing markdown" "${DIGEST_FILE}" >/dev/null
 grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
 

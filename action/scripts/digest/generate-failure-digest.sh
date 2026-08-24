@@ -144,13 +144,16 @@ append_timeout_triage_to_digest() {
 write_fallback_digest() {
   local digest_file="$1"
   local renderer_stderr_file="$2"
-  local failed_commands diagnostics command
+  local failed_commands="" diagnostics command status
 
-  failed_commands="$(jq -r '
+  while IFS=$'\t' read -r command status; do
+    [ -n "${command}" ] || continue
+    failed_commands+="- \`homeboy ${command}\`: **${status}** (result: \`$(command_result_filename "${command}")\`)"$'\n'
+  done < <(jq -r '
     to_entries[]
     | select(.value == "fail" or .value == "timeout")
-    | "- `homeboy " + .key + "`: **" + .value + "** (result: `" + (.key | gsub(" "; "-") | gsub("/"; "-")) + ".json`)"
-  ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
+    | [.key, .value] | @tsv
+  ' <<< "${RESULTS_JSON}" 2>/dev/null || true)
   diagnostics="$(tail -c 4000 "${renderer_stderr_file}" 2>/dev/null | python3 "${SCRIPT_DIR}/../pr/comment/sanitize-timeout-diagnostic.py" || true)"
 
   {
