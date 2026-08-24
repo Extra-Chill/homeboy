@@ -21,6 +21,7 @@ use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::finding::HomeboyFinding;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 struct LintRunEvidence {
     findings: Vec<HomeboyFinding>,
@@ -228,7 +229,29 @@ pub fn run_main_lint_workflow(
     // Baseline lifecycle
     let baseline_context = baseline_provenance(&args, scoped_plan.as_ref(), &producer_summaries);
     let (baseline_comparison, baseline_exit_override, baseline_provenance) =
-        process_baseline(source_path, &args, &lint_findings, baseline_context)?;
+        if args.changed_since.is_some()
+            && !args.baseline_flags.baseline
+            && !args.baseline_flags.ignore_baseline
+        {
+            match process_changed_since_baseline(
+                component,
+                source_path,
+                &args,
+                &baseline_context,
+                &lint_findings,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!(
+                    "[lint] Changed-since baseline unavailable; preserving full finding set: {}",
+                    error.message
+                );
+                    (None, None, baseline_context)
+                }
+            }
+        } else {
+            process_baseline(source_path, &args, &lint_findings, baseline_context)?
+        };
 
     let harness_error = lint_exit_code != 0
         && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
@@ -675,4 +698,93 @@ fn process_baseline(
     }
 
     Ok((baseline_comparison, baseline_exit_override, provenance))
+}
+
+/// Run the same changed-file scope from the resolved merge base in an isolated
+/// checkout. A persisted baseline cannot represent arbitrary PR ancestry.
+fn process_changed_since_baseline(
+    component: &Component,
+    source_path: &Path,
+    args: &LintRunWorkflowArgs,
+    provenance: &lint_baseline::LintBaselineProvenance,
+    lint_findings: &[HomeboyFinding],
+) -> homeboy_core::Result<(
+    Option<lint_baseline::BaselineComparison>,
+    Option<i32>,
+    lint_baseline::LintBaselineProvenance,
+)> {
+    let changed_since = args
+        .changed_since
+        .as_deref()
+        .expect("changed-since baseline only runs with a git ref");
+    let source = source_path.to_string_lossy();
+    let base_ref = homeboy_core::git::resolve_merge_base(&source, changed_since)?;
+    let repo_root = PathBuf::from(homeboy_core::git::get_git_root(&source)?);
+    let component_suffix = source_path.strip_prefix(&repo_root).map_err(|_| {
+        homeboy_core::Error::git_command_failed(format!(
+            "component path {} is outside repository {}",
+            source_path.display(),
+            repo_root.display()
+        ))
+    })?;
+    let changed_files = provenance.files.clone();
+    let checkout_root = tempfile::tempdir().map_err(|error| {
+        homeboy_core::Error::internal_io(
+            format!("create changed-since baseline checkout: {error}"),
+            Some("lint.changed_since_baseline".to_string()),
+        )
+    })?;
+    let checkout = checkout_root.path().join("base");
+    let add = Command::new("git")
+        .current_dir(&repo_root)
+        .args(["worktree", "add", "--detach", "--quiet"])
+        .arg(&checkout)
+        .arg(&base_ref)
+        .output()
+        .map_err(|error| homeboy_core::Error::git_command_failed(error.to_string()))?;
+    if !add.status.success() {
+        return Err(homeboy_core::Error::git_command_failed(format!(
+            "git worktree add baseline {}: {}",
+            base_ref,
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+
+    let baseline_component_path = checkout.join(component_suffix);
+    let mut baseline_component = component.clone();
+    baseline_component.local_path = baseline_component_path.to_string_lossy().to_string();
+    let mut baseline_args = args.clone();
+    baseline_args.path_override = Some(baseline_component.local_path.clone());
+    baseline_args.changed_only = true;
+    baseline_args.changed_since = None;
+    baseline_args.precomputed_changed_files = Some(changed_files);
+    baseline_args.baseline_flags.ignore_baseline = true;
+    let baseline_run_dir = RunDir::create()?;
+    let baseline_result = run_main_lint_workflow(
+        &baseline_component,
+        &baseline_component_path,
+        baseline_args,
+        &baseline_run_dir,
+    );
+    let remove = Command::new("git")
+        .current_dir(&repo_root)
+        .args(["worktree", "remove", "--force"])
+        .arg(&checkout)
+        .output();
+    if let Ok(remove) = remove {
+        if !remove.status.success() {
+            eprintln!(
+                "[lint] Failed to remove changed-since baseline checkout: {}",
+                String::from_utf8_lossy(&remove.stderr).trim()
+            );
+        }
+    }
+    let baseline_findings = baseline_result?.findings.unwrap_or_default();
+
+    let mut provenance = provenance.clone();
+    provenance.compared = true;
+    provenance.base_ref = Some(base_ref);
+    let comparison = lint_baseline::compare_against_findings(lint_findings, &baseline_findings);
+    let exit_override = Some(if comparison.drift_increased { 1 } else { 0 });
+    Ok((Some(comparison), exit_override, provenance))
 }
