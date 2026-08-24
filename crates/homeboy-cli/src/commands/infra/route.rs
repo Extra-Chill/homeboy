@@ -3606,8 +3606,7 @@ fn materialize_generic_detached_lab_handoff(
             Some(vec![error.to_string()]),
         )
     })?;
-    let content_identity =
-        homeboy::runner::controller_workspace_materialization_identity(&canonical_root)?;
+    let content_identity = homeboy::runner::generic_lab_replay_artifact_identity(&canonical_root)?;
     let repository_remote =
         homeboy::core::git::release_download::detect_remote_url(&canonical_root);
     let revision = homeboy::core::git::head_sha(&canonical_root);
@@ -4037,9 +4036,19 @@ pub(crate) fn validate_generic_lab_command_replay_workspace(
         return Ok(());
     };
     let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
-    let current_identity = homeboy::runner::controller_workspace_materialization_identity(
-        &primary_workspace,
-    )
+    if !replay
+        .materialization
+        .content_identity
+        .starts_with("replay-artifact:sha256:")
+    {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "agent-task retry uses a legacy Lab replay identity that cannot attest an immutable transfer artifact",
+            Some(primary_workspace.display().to_string()),
+            Some(vec!["Reissue the command as a new Lab run to create an immutable replay artifact.".to_string()]),
+        ));
+    }
+    let current_identity = homeboy::runner::generic_lab_replay_artifact_identity(&primary_workspace)
     .map_err(|error| {
         Error::validation_invalid_argument(
             "workspace",

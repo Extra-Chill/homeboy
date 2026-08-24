@@ -326,6 +326,38 @@ fn generic_lab_replay_retry_rejects_a_missing_workspace_before_reserving_a_succe
 }
 
 #[test]
+fn generic_lab_replay_legacy_identity_fails_closed_before_execution() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        git_init(source.path());
+        let cli = Cli::parse_from(["homeboy", "bench", "blocks-engine"]);
+        let command = lab_offload_command(&cli.command)
+            .expect("bench contract")
+            .expect("portable bench");
+        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+            .expect("placement decision");
+        let handoff = materialize_generic_detached_lab_handoff(
+            &[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "blocks-engine".to_string(),
+            ],
+            source.path(),
+            &command,
+            decision,
+        )
+        .expect("persist replay plan");
+        let mut legacy = handoff.plan;
+        legacy.metadata["generic_lab_command_replay"]["materialization"]["content_identity"] =
+            serde_json::json!("snapshot:legacy");
+
+        let error = validate_generic_lab_command_replay_workspace(&legacy)
+            .expect_err("legacy identity must not reach replay execution");
+        assert!(error.message.contains("legacy Lab replay identity"));
+    });
+}
+
+#[test]
 fn explicit_local_promotion_defers_target_resolution_to_promotion() {
     let args = [
         "homeboy",

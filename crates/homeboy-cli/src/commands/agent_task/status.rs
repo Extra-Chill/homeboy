@@ -7662,15 +7662,20 @@ mod tests {
     fn stale_generic_lab_replay_status_has_no_executable_action() {
         crate::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
-            std::fs::write(workspace.path().join("workspace.txt"), "current")
+            std::fs::write(workspace.path().join("workspace.txt"), "recorded")
                 .expect("write workspace");
+            let recorded_identity =
+                homeboy::runner::generic_lab_replay_artifact_identity(workspace.path())
+                    .expect("record replay artifact identity");
+            std::fs::write(workspace.path().join("workspace.txt"), "current")
+                .expect("change workspace");
             let mut plan = AgentTaskPlan::new("stale-generic-lab-replay", Vec::new());
             plan.metadata["generic_lab_command_replay"] = json!({
                 "schema": "homeboy/generic-lab-command-replay/v1",
                 "normalized_args": ["homeboy", "bench"],
                 "materialization": {
                     "canonical_root": workspace.path(),
-                    "content_identity": "snapshot:stale",
+                    "content_identity": recorded_identity,
                 },
             });
             agent_task_lifecycle::submit_plan(&plan, Some("stale-generic-lab-replay"))

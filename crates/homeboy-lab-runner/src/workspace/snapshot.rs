@@ -1809,6 +1809,90 @@ pub(crate) fn copy_snapshot_to_directory(
     )
 }
 
+/// A replay-only controller artifact. Its directory is the sole source passed
+/// to transport after the mutable workspace has been read and sealed.
+#[derive(Debug)]
+pub(crate) struct ImmutableReplaySnapshot {
+    stage: tempfile::TempDir,
+    pub(crate) identity: String,
+}
+
+impl ImmutableReplaySnapshot {
+    pub(crate) fn path(&self) -> PathBuf {
+        self.stage.path().join("source")
+    }
+}
+
+/// Seal a replay artifact using exactly the selected transfer filter. Replay
+/// deliberately has a stricter policy than ordinary snapshot staging: a link
+/// has no stable bytes at this boundary, and `tar -h` must never choose its
+/// target after the attestation has completed.
+pub(crate) fn immutable_replay_snapshot(
+    source: &Path,
+    excludes: &[String],
+) -> Result<ImmutableReplaySnapshot> {
+    reject_replay_symlinks(source, source, excludes)?;
+    let manifest = snapshot_input_manifest(source, excludes)?;
+    let stage = materialize_snapshot_stage(source, excludes, &manifest, None)?;
+    let staged = stage.path().join("source");
+    let identity = replay_artifact_identity(&staged, excludes)?;
+    Ok(ImmutableReplaySnapshot { stage, identity })
+}
+
+pub(crate) fn replay_artifact_identity(path: &Path, excludes: &[String]) -> Result<String> {
+    let content = workspace_content_hash(path, excludes)?;
+    let mut policy = excludes.to_vec();
+    policy.sort();
+    policy.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(b"homeboy/lab-replay-artifact/v1\0");
+    hasher.update(content.as_bytes());
+    hasher.update(b"\0");
+    for exclude in policy {
+        hasher.update(exclude.as_bytes());
+        hasher.update(b"\0");
+    }
+    Ok(format!("replay-artifact:sha256:{:x}", hasher.finalize()))
+}
+
+fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Result<()> {
+    for entry in fs::read_dir(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read replay snapshot directory".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read replay snapshot entry".to_string()),
+            )
+        })?;
+        let entry_path = entry.path();
+        if is_excluded(root, &entry_path, excludes, &[]) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect replay snapshot entry".to_string()),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "Lab replay artifact refused a symlink; replay artifacts require materialized regular files and directories",
+                Some(entry_path.display().to_string()),
+                Some(vec!["Replace the symlink with workspace-owned files, or reissue the command as a new Lab run.".to_string()]),
+            ));
+        }
+        if metadata.is_dir() {
+            reject_replay_symlinks(root, &entry_path, excludes)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -> Result<()> {
     for reserved in RESERVED_RUNNER_WORKSPACE_PATHS.iter().copied() {
         let reserved_path = local_path.join(reserved);

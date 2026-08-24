@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    materialize_snapshot_piped, materialize_snapshot_stage,
+    immutable_replay_snapshot, materialize_snapshot_piped, materialize_snapshot_stage,
     register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
     snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
     synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
@@ -1666,6 +1666,64 @@ fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
     let entries = fs::read_to_string(archive_list.path()).expect("tar input list");
     assert!(entries.contains("runtime-overlays"));
     assert!(entries.contains("other"));
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_replay_snapshot_rejects_external_symlinks_before_staging() {
+    use std::os::unix::fs::symlink;
+
+    let source = tempfile::tempdir().expect("source");
+    let external = tempfile::NamedTempFile::new().expect("external");
+    symlink(external.path(), source.path().join("external-link")).expect("link external file");
+
+    let error = immutable_replay_snapshot(source.path(), &[])
+        .expect_err("external symlink must not enter replay artifact");
+    assert!(error.message.contains("refused a symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_replay_snapshot_rejects_untracked_internal_symlinks_before_staging() {
+    use std::os::unix::fs::symlink;
+
+    let source = tempfile::tempdir().expect("source");
+    fs::write(source.path().join("tracked.txt"), "workspace bytes").expect("workspace file");
+    symlink("tracked.txt", source.path().join("untracked-link")).expect("link workspace file");
+
+    let error = immutable_replay_snapshot(source.path(), &[])
+        .expect_err("untracked symlink must not enter replay artifact");
+    assert!(error.message.contains("refused a symlink"));
+}
+
+#[test]
+fn immutable_replay_snapshot_is_unchanged_when_source_is_mutated_and_restored() {
+    let source = tempfile::tempdir().expect("source");
+    let input = source.path().join("input.txt");
+    fs::write(&input, "recorded").expect("write input");
+    let snapshot = immutable_replay_snapshot(source.path(), &[]).expect("seal replay artifact");
+
+    fs::write(&input, "transfer-time mutation").expect("mutate source");
+    fs::write(&input, "recorded").expect("restore source");
+
+    assert_eq!(
+        fs::read_to_string(snapshot.path().join("input.txt")).expect("read sealed artifact"),
+        "recorded"
+    );
+}
+
+#[test]
+fn immutable_replay_snapshot_identity_and_bytes_honor_exclusions() {
+    let source = tempfile::tempdir().expect("source");
+    fs::write(source.path().join("included.txt"), "included").expect("included input");
+    fs::write(source.path().join("excluded.txt"), "first").expect("excluded input");
+    let excludes = vec!["excluded.txt".to_string()];
+    let first = immutable_replay_snapshot(source.path(), &excludes).expect("first artifact");
+    fs::write(source.path().join("excluded.txt"), "second").expect("change excluded input");
+    let second = immutable_replay_snapshot(source.path(), &excludes).expect("second artifact");
+
+    assert_eq!(first.identity, second.identity);
+    assert!(!second.path().join("excluded.txt").exists());
 }
 
 #[test]

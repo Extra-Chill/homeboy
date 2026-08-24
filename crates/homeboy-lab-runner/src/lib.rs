@@ -221,6 +221,24 @@ pub fn controller_workspace_materialization_identity(
 ) -> homeboy_core::error::Result<String> {
     workspace::snapshot_identity(path, &[], &[])
 }
+
+/// The generic Lab replay contract is an artifact digest, not a mutable
+/// controller-workspace observation. Callers which only have the historical
+/// `snapshot:` identity must recover through a fresh run.
+pub fn generic_lab_replay_artifact_identity(
+    path: &std::path::Path,
+) -> homeboy_core::error::Result<String> {
+    let mut excludes = workspace::DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    for exclude in homeboy_core::source_snapshot::policy_for_path(path).sync_excludes {
+        if !excludes.contains(&exclude) {
+            excludes.push(exclude);
+        }
+    }
+    workspace::replay_artifact_identity(path, &excludes)
+}
 pub(crate) use workspace::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
