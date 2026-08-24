@@ -933,6 +933,16 @@ fn fixture_preflight_decision(
     Ok(finalize_placement(&result.placement, task, source_path))
 }
 
+#[cfg(test)]
+fn placement_decision(
+    cli: &Cli,
+    runner_id: Option<&str>,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    fixture_preflight_decision(cli, runner_id, task, source_path)
+}
+
 fn authoritative_lab_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
     let mut args = args.iter().skip(1);
     while let Some(argument) = args.next() {
