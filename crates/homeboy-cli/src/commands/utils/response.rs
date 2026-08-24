@@ -6,6 +6,8 @@ use homeboy::core::error::{ExecutableAction, Hint, ACTIONS_DETAILS_KEY};
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::fmt::Write as _;
+use std::path::Path;
 
 use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
@@ -1331,10 +1333,238 @@ pub(crate) fn write_json_to_file_for_identity(
     }
 }
 
+/// Materialize Homeboy-owned Test evidence beside the command result that the
+/// action uploads. Keeping this at the writer prevents stdout envelopes,
+/// observations, and review projections from becoming competing producers.
+pub(crate) fn write_test_evidence_sidecars(
+    result: &Result<Value>,
+    path: &str,
+    identity: &CommandIdentity,
+) -> Result<()> {
+    let command = match (identity.command.as_str(), identity.operation.as_deref()) {
+        ("review", Some("test")) => "review test".to_string(),
+        ("test", _) => "test".to_string(),
+        _ => return Ok(()),
+    };
+    let evidence = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("test_runtime_evidence"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let (inventory, outcomes) = match evidence {
+        Some(homeboy_extension_contract::test_results::TestRuntimeEvidence::Complete {
+            runner,
+            runner_fingerprint,
+            workspace_fingerprint,
+            execution_fingerprint,
+            mut tests,
+            mut failed_test_ids,
+        }) => {
+            tests.sort_by(|left, right| left.id.cmp(&right.id));
+            failed_test_ids.sort();
+            let canonical = canonical_test_inventory(
+                &command,
+                &runner,
+                &runner_fingerprint,
+                &workspace_fingerprint,
+                &execution_fingerprint,
+                &tests,
+            );
+            let inventory_fingerprint =
+                homeboy_engine_primitives::content_hash::sha256_hex(canonical.as_bytes());
+            (
+                serde_json::json!({
+                    "schema": "homeboy/test-inventory/v1",
+                    "command": command,
+                    "runner": runner,
+                    "runner_fingerprint": runner_fingerprint,
+                    "workspace_fingerprint": workspace_fingerprint,
+                    "execution_fingerprint": execution_fingerprint,
+                    "inventory_fingerprint": inventory_fingerprint,
+                    "tests": tests,
+                }),
+                serde_json::json!({
+                    "schema": "homeboy/test-outcomes/v1",
+                    "command": command,
+                    "runner": runner,
+                    "runner_fingerprint": runner_fingerprint,
+                    "workspace_fingerprint": workspace_fingerprint,
+                    "execution_fingerprint": execution_fingerprint,
+                    "inventory_fingerprint": inventory_fingerprint,
+                    "failed_test_ids": failed_test_ids,
+                }),
+            )
+        }
+        Some(homeboy_extension_contract::test_results::TestRuntimeEvidence::InvalidEvidence {
+            reason,
+        }) => invalid_test_evidence_pair(&command, &reason),
+        None => invalid_test_evidence_pair(
+            &command,
+            "Test adapter did not expose normalized runtime identity evidence",
+        ),
+    };
+
+    let result_path = Path::new(path);
+    let stem = result_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "output",
+                "Test evidence sidecars require an output path with a UTF-8 file stem",
+                Some(path.to_string()),
+                None,
+            )
+        })?;
+    let sidecars = [
+        (
+            result_path.with_file_name(format!("{stem}.test-inventory.json")),
+            inventory,
+        ),
+        (
+            result_path.with_file_name(format!("{stem}.test-outcomes.json")),
+            outcomes,
+        ),
+    ];
+    for (sidecar, payload) in &sidecars {
+        let json = serde_json::to_string_pretty(&payload).map_err(|error| {
+            cleanup_test_evidence_sidecars(&sidecars);
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize Test evidence sidecar".to_string()),
+            )
+        })?;
+        if let Err(error) = write_output_file_atomically(
+            sidecar.to_string_lossy().as_ref(),
+            json,
+            OutputWriteOptions::artifact(),
+        ) {
+            cleanup_test_evidence_sidecars(&sidecars);
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "write paired Test evidence sidecar {}",
+                    sidecar.display()
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_test_evidence_sidecars(sidecars: &[(std::path::PathBuf, Value); 2]) {
+    for (path, _) in sidecars {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn invalid_test_evidence_pair(command: &str, reason: &str) -> (Value, Value) {
+    let invalid = serde_json::json!({"type": "invalid_evidence", "reason": reason});
+    (
+        serde_json::json!({
+            "schema": "homeboy/test-inventory/v1",
+            "command": command,
+            "invalid_evidence": invalid,
+        }),
+        serde_json::json!({
+            "schema": "homeboy/test-outcomes/v1",
+            "command": command,
+            "invalid_evidence": invalid,
+        }),
+    )
+}
+
+fn canonical_test_inventory(
+    command: &str,
+    runner: &str,
+    runner_fingerprint: &str,
+    workspace_fingerprint: &str,
+    execution_fingerprint: &str,
+    tests: &[homeboy_extension_contract::test_results::TestRuntimeIdentity],
+) -> String {
+    let mut json = String::new();
+    json.push_str("{\"command\":");
+    append_python_json_string(&mut json, command);
+    json.push_str(",\"execution_fingerprint\":");
+    append_python_json_string(&mut json, execution_fingerprint);
+    json.push_str(",\"runner\":");
+    append_python_json_string(&mut json, runner);
+    json.push_str(",\"runner_fingerprint\":");
+    append_python_json_string(&mut json, runner_fingerprint);
+    json.push_str(",\"schema\":\"homeboy/test-inventory/v1\",\"tests\":[");
+    for (index, test) in tests.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        json.push_str("{\"id\":");
+        append_python_json_string(&mut json, &test.id);
+        json.push('}');
+    }
+    json.push_str("],\"workspace_fingerprint\":");
+    append_python_json_string(&mut json, workspace_fingerprint);
+    json.push('}');
+    json
+}
+
+fn append_python_json_string(json: &mut String, value: &str) {
+    json.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\u{08}' => json.push_str("\\b"),
+            '\u{0c}' => json.push_str("\\f"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            character if character.is_ascii() && !character.is_control() => json.push(character),
+            character if character.is_ascii() => {
+                write!(json, "\\u{:04x}", character as u32).expect("write to string");
+            }
+            character => {
+                for unit in character.encode_utf16(&mut [0; 2]) {
+                    write!(json, "\\u{unit:04x}").expect("write to string");
+                }
+            }
+        }
+    }
+    json.push('"');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn runtime_inventory_fingerprint_matches_python_json_for_unicode_and_controls() {
+        let tests = vec![
+            homeboy_extension_contract::test_results::TestRuntimeIdentity {
+                id: "suite::\u{7f}".to_string(),
+            },
+            homeboy_extension_contract::test_results::TestRuntimeIdentity {
+                id: "suite::é".to_string(),
+            },
+            homeboy_extension_contract::test_results::TestRuntimeIdentity {
+                id: "suite::😀".to_string(),
+            },
+        ];
+        let canonical = canonical_test_inventory(
+            "review test",
+            "nëxtest",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &"c".repeat(64),
+            &tests,
+        );
+
+        assert_eq!(
+            homeboy_engine_primitives::content_hash::sha256_hex(canonical.as_bytes()),
+            "417bc578ff1d306e03003ea1f91a50f01d4afc06b17cf1ec986c6ac0ef1fd0ac"
+        );
+    }
 
     /// #10310 collapsed `CommandEvidenceRef` onto `CommandArtifactRef`. They
     /// were the same four fields with the same serde attributes; only the

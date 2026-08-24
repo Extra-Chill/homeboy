@@ -23,25 +23,20 @@ use homeboy_engine_primitives::local_files;
 use homeboy_engine_primitives::measurement::{Measurement, Verdict};
 use homeboy_engine_primitives::output_parse::ParseSpec;
 pub use homeboy_extension_contract::test_results::{
-    TestInventoryOutput, TestInventoryRejection, TestRunWorkflowResult,
+    TestInventoryOutput, TestInventoryRejection, TestRunWorkflowResult, TestRuntimeEvidence,
+    TestRuntimeIdentity,
 };
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
-use serde::Deserialize;
-#[cfg(unix)]
-use serde::Serialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::collections::BTreeMap;
-#[cfg(unix)]
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct TestRunWorkflowArgs {
@@ -72,7 +67,7 @@ const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXT
 const NO_TESTS_APPLICABLE_STEP: &str = "test";
 const TEST_INVENTORY_ONLY_ENV: &str = "HOMEBOY_TEST_INVENTORY_ONLY";
 const TEST_INVENTORY_FILE_ENV: &str = "HOMEBOY_TEST_INVENTORY_FILE";
-#[cfg(unix)]
+const TEST_SHARD_MANIFEST_ENV: &str = "HOMEBOY_TEST_SHARD_MANIFEST";
 const TEST_INVENTORY_SCHEMA: &str = "homeboy/test-inventory/v1";
 #[cfg(unix)]
 const TEST_INVENTORY_FILE: &str = "test-inventory.json";
@@ -82,6 +77,286 @@ const TEST_INVENTORY_PUBLIC_FILE: &str = "homeboy-test-inventory.json";
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 const MAX_CHANGED_TEST_FILES_ENV: &str = "HOMEBOY_MAX_CHANGED_TEST_FILES";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestShardManifest {
+    schema: String,
+    id: String,
+    runner: String,
+    runner_fingerprint: String,
+    workspace_fingerprint: String,
+    inventory_fingerprint: String,
+    tests: Vec<String>,
+    #[serde(default, rename = "estimated_duration_ms")]
+    _estimated_duration_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+struct RuntimeTestPlan {
+    runner: String,
+    runner_fingerprint: String,
+    workspace_fingerprint: String,
+    execution_fingerprint: String,
+    tests: Vec<String>,
+}
+
+fn runtime_test_evidence(
+    ci_env: &[(String, String)],
+    source_path: &Path,
+    inventory_profile: Option<&InventoryProfile>,
+    runner_succeeded: bool,
+    counts: Option<&TestCounts>,
+    failures: Option<&TestAnalysisInput>,
+    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
+) -> TestRuntimeEvidence {
+    let invalid = |reason: &str| TestRuntimeEvidence::InvalidEvidence {
+        reason: reason.to_string(),
+    };
+    let plan = match runtime_test_plan(ci_env, source_path, inventory_profile, internal_plan) {
+        Ok(plan) => plan,
+        Err(reason) => return invalid(reason),
+    };
+
+    let mut failed_test_ids = failures
+        .map(|input| {
+            input
+                .failures
+                .iter()
+                .map(|failure| failure.test_name.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if failed_test_ids
+        .iter()
+        .any(|id| id.is_empty() || id == "unknown test")
+    {
+        return invalid("failed-test detail parser did not expose stable test IDs");
+    }
+    failed_test_ids.sort();
+    if failed_test_ids.windows(2).any(|ids| ids[0] == ids[1]) {
+        return invalid("failed-test detail parser exposed duplicate test IDs");
+    }
+    if failed_test_ids
+        .iter()
+        .any(|id| plan.tests.binary_search(id).is_err())
+    {
+        return invalid("observed failed test ID is absent from the runtime plan");
+    }
+    if !runner_succeeded {
+        let Some(counts) = counts else {
+            return invalid("failed test command did not expose structured TestCounts");
+        };
+        if failed_test_ids.is_empty() {
+            return invalid("failed test command did not expose an observed failed test ID");
+        }
+        if counts.failed as usize != failed_test_ids.len() {
+            return invalid("failed-test detail IDs do not account for every reported failure");
+        }
+    } else if !failed_test_ids.is_empty() {
+        return invalid("successful test command exposed failed-test detail IDs");
+    }
+
+    TestRuntimeEvidence::Complete {
+        runner: plan.runner,
+        runner_fingerprint: plan.runner_fingerprint,
+        workspace_fingerprint: plan.workspace_fingerprint,
+        execution_fingerprint: plan.execution_fingerprint,
+        tests: plan
+            .tests
+            .into_iter()
+            .map(|id| TestRuntimeIdentity { id })
+            .collect(),
+        failed_test_ids,
+    }
+}
+
+fn runtime_test_plan(
+    ci_env: &[(String, String)],
+    source_path: &Path,
+    inventory_profile: Option<&InventoryProfile>,
+    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
+) -> Result<RuntimeTestPlan, &'static str> {
+    if let Some(path) = runtime_evidence_path(ci_env, TEST_SHARD_MANIFEST_ENV) {
+        let Some(profile) = inventory_profile else {
+            return Err("runtime shard manifest cannot be bound to this extension");
+        };
+        return runtime_plan_from_shard(path, source_path, profile);
+    }
+    let Some(path) = runtime_evidence_path(ci_env, TEST_INVENTORY_FILE_ENV) else {
+        return internal_plan.unwrap_or(Err(
+            "test adapter did not provide an exact runtime test plan",
+        ));
+    };
+    let Some(profile) = inventory_profile else {
+        return Err("test adapter inventory cannot be bound to this extension");
+    };
+    runtime_plan_from_inventory(path, source_path, profile)
+}
+
+fn runtime_evidence_path<'a>(ci_env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    ci_env
+        .iter()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.trim()))
+        .filter(|path| !path.is_empty())
+}
+
+fn runtime_plan_from_shard(
+    path: &str,
+    source_path: &Path,
+    profile: &InventoryProfile,
+) -> Result<RuntimeTestPlan, &'static str> {
+    let raw = std::fs::read(path).map_err(|_| "runtime shard manifest is missing or unreadable")?;
+    let mut manifest = serde_json::from_slice::<TestShardManifest>(&raw)
+        .map_err(|_| "runtime shard manifest is malformed")?;
+    if manifest.schema != "homeboy/test-shard-manifest/v1"
+        || manifest.id.trim().is_empty()
+        || manifest.runner.trim().is_empty()
+        || !canonical_sha256(&manifest.runner_fingerprint)
+        || !canonical_sha256(&manifest.workspace_fingerprint)
+        || !canonical_sha256(&manifest.inventory_fingerprint)
+        || manifest.tests.is_empty()
+        || manifest.tests.iter().any(|id| id.trim().is_empty())
+    {
+        return Err("runtime shard manifest violates the identity/provenance contract");
+    }
+    manifest
+        .tests
+        .iter_mut()
+        .for_each(|id| *id = id.trim().to_string());
+    manifest.tests.sort();
+    if manifest.tests.windows(2).any(|ids| ids[0] == ids[1]) {
+        return Err("runtime shard manifest contains duplicate test IDs");
+    }
+    let workspace_root = inventory_workspace_root(source_path, profile)
+        .ok_or("runtime shard manifest workspace cannot be resolved")?;
+    if workspace_fingerprint(&workspace_root, profile).as_deref()
+        != Some(manifest.workspace_fingerprint.as_str())
+        || runner_fingerprint(&workspace_root, &manifest.runner, profile).as_deref()
+            != Some(manifest.runner_fingerprint.as_str())
+    {
+        return Err("runtime shard manifest provenance does not match the current execution");
+    }
+    let execution_fingerprint = execution_fingerprint(
+        "shard_manifest",
+        &manifest.id,
+        &manifest.runner,
+        &manifest.runner_fingerprint,
+        &manifest.workspace_fingerprint,
+        &manifest.inventory_fingerprint,
+        &manifest.tests,
+    );
+    Ok(RuntimeTestPlan {
+        runner: manifest.runner,
+        runner_fingerprint: manifest.runner_fingerprint,
+        workspace_fingerprint: manifest.workspace_fingerprint,
+        execution_fingerprint,
+        tests: manifest.tests,
+    })
+}
+
+fn runtime_plan_from_inventory(
+    path: &str,
+    source_path: &Path,
+    profile: &InventoryProfile,
+) -> Result<RuntimeTestPlan, &'static str> {
+    let raw =
+        std::fs::read(path).map_err(|_| "runtime adapter inventory is missing or unreadable")?;
+    runtime_plan_from_inventory_bytes(&raw, source_path, profile)
+}
+
+fn runtime_plan_from_inventory_bytes(
+    raw: &[u8],
+    source_path: &Path,
+    profile: &InventoryProfile,
+) -> Result<RuntimeTestPlan, &'static str> {
+    let inventory = serde_json::from_slice::<TestInventoryEvidence>(&raw)
+        .map_err(|_| "runtime adapter inventory is malformed")?;
+    if inventory.schema != TEST_INVENTORY_SCHEMA
+        || inventory.runner.trim().is_empty()
+        || !canonical_sha256(&inventory.runner_fingerprint)
+        || !canonical_sha256(&inventory.workspace_fingerprint)
+        || !canonical_sha256(&inventory.inventory_fingerprint)
+        || inventory.tests.is_empty()
+        || inventory.tests.iter().any(|test| {
+            test.id.trim().is_empty()
+                || !matches!(
+                    test.expected_outcome.as_deref(),
+                    Some("executed" | "skipped")
+                )
+        })
+        || homeboy_engine_primitives::content_hash::sha256_hex(&canonical_inventory_json(
+            &inventory,
+        )) != inventory.inventory_fingerprint
+    {
+        return Err("runtime adapter inventory violates the identity/fingerprint contract");
+    }
+    let workspace_root = inventory_workspace_root(source_path, profile)
+        .ok_or("runtime adapter inventory workspace cannot be resolved")?;
+    if workspace_fingerprint(&workspace_root, profile).as_deref()
+        != Some(inventory.workspace_fingerprint.as_str())
+        || runner_fingerprint(&workspace_root, &inventory.runner, profile).as_deref()
+            != Some(inventory.runner_fingerprint.as_str())
+    {
+        return Err("runtime adapter inventory provenance does not match the current execution");
+    }
+    let mut tests = inventory
+        .tests
+        .iter()
+        .filter(|test| test.expected_outcome.as_deref() == Some("executed"))
+        .map(|test| test.id.trim().to_string())
+        .collect::<Vec<_>>();
+    tests.sort();
+    if tests.is_empty() || tests.windows(2).any(|ids| ids[0] == ids[1]) {
+        return Err("runtime adapter inventory has no unique executed test IDs");
+    }
+    let execution_fingerprint = execution_fingerprint(
+        "adapter_inventory",
+        &inventory.inventory_fingerprint,
+        &inventory.runner,
+        &inventory.runner_fingerprint,
+        &inventory.workspace_fingerprint,
+        &inventory.inventory_fingerprint,
+        &tests,
+    );
+    Ok(RuntimeTestPlan {
+        runner: inventory.runner,
+        runner_fingerprint: inventory.runner_fingerprint,
+        workspace_fingerprint: inventory.workspace_fingerprint,
+        execution_fingerprint,
+        tests,
+    })
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    homeboy_engine_primitives::content_hash::is_sha256_hex(value)
+        && value == value.to_ascii_lowercase()
+}
+
+fn execution_fingerprint(
+    source: &str,
+    source_id: &str,
+    runner: &str,
+    runner_fingerprint: &str,
+    workspace_fingerprint: &str,
+    inventory_fingerprint: &str,
+    tests: &[String],
+) -> String {
+    let canonical = serde_json::json!({
+        "inventory_fingerprint": inventory_fingerprint,
+        "runner": runner,
+        "runner_fingerprint": runner_fingerprint,
+        "source": source,
+        "source_id": source_id,
+        "tests": tests,
+        "workspace_fingerprint": workspace_fingerprint,
+    });
+    homeboy_engine_primitives::content_hash::sha256_hex(
+        serde_json::to_vec(&canonical)
+            .expect("runtime execution provenance serializes")
+            .as_slice(),
+    )
+}
 
 pub(crate) fn test_timeout() -> Duration {
     std::env::var("HOMEBOY_TEST_TIMEOUT_SECONDS")
@@ -115,7 +390,6 @@ struct NoTestsApplicableEvidence {
     reason: String,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TestInventoryEvidence {
@@ -129,7 +403,6 @@ struct TestInventoryEvidence {
     fallback_reason: Option<String>,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TestInventoryTest {
@@ -153,7 +426,6 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
 /// Every one of these was Cargo-derived and unreachable for other toolchains
 /// before #12394. `InventoryProfile::cargo()` reproduces that behaviour exactly,
 /// and is what an extension without a `test.inventory` block still gets.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InventoryProfile {
     /// Marker files identifying the workspace root, searched upward. Empty
@@ -166,7 +438,6 @@ struct InventoryProfile {
     runner_commands: BTreeMap<String, Vec<String>>,
 }
 
-#[cfg(unix)]
 impl InventoryProfile {
     fn cargo() -> Self {
         Self {
@@ -262,13 +533,16 @@ fn test_inventory_binding(
     source_path: &Path,
     run_dir: &RunDir,
     profile: &InventoryProfile,
+    require_public_path: bool,
 ) -> Result<TestInventoryBinding, TestInventoryRejection> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let child_path = run_dir.path().join(TEST_INVENTORY_FILE);
     let workspace_root = inventory_workspace_root(source_path, profile)
         .ok_or(TestInventoryRejection::BindingUnavailable)?;
-    requested_test_inventory_path(ci_env, &workspace_root)?;
+    if require_public_path {
+        requested_test_inventory_path(ci_env, &workspace_root)?;
+    }
     let project_root = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -315,7 +589,6 @@ fn test_inventory_binding(
 /// With no declared markers this asks Cargo, preserving the original
 /// behaviour. With markers it walks upward from the component source path for
 /// the first ancestor holding one, which needs no toolchain subprocess.
-#[cfg(unix)]
 fn inventory_workspace_root(source_path: &Path, profile: &InventoryProfile) -> Option<PathBuf> {
     if profile.root_markers.is_empty() {
         return cargo_workspace_root(source_path);
@@ -356,7 +629,6 @@ fn requested_test_inventory_path(
     Ok(())
 }
 
-#[cfg(unix)]
 fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version=1"])
@@ -371,7 +643,6 @@ fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
     PathBuf::from(workspace_root).canonicalize().ok()
 }
 
-#[cfg(unix)]
 fn runner_fingerprint(
     workspace_root: &Path,
     runner: &str,
@@ -390,12 +661,10 @@ fn runner_fingerprint(
     })?
 }
 
-#[cfg(unix)]
 fn runner_fingerprint_from_version(runner: &str, version: &str) -> String {
     homeboy_engine_primitives::content_hash::sha256_hex(format!("{runner}\0{version}").as_bytes())
 }
 
-#[cfg(unix)]
 fn workspace_fingerprint(root: &Path, profile: &InventoryProfile) -> Option<String> {
     fn collect(
         root: &Path,
@@ -743,7 +1012,6 @@ fn valid_test_inventory_payload(
 /// The Rust inventory producer fingerprints `json.dumps(..., sort_keys=True,
 /// separators=(",", ":"))`. Its default `ensure_ascii=True` is part of the v1
 /// identity, including for non-ASCII test names.
-#[cfg(unix)]
 fn canonical_inventory_json(inventory: &TestInventoryEvidence) -> Vec<u8> {
     let mut json = String::from("{\"runner\":");
     append_python_json_string(&mut json, &inventory.runner);
@@ -780,7 +1048,6 @@ fn canonical_inventory_json(inventory: &TestInventoryEvidence) -> Vec<u8> {
     json.into_bytes()
 }
 
-#[cfg(unix)]
 fn append_python_json_string(json: &mut String, value: &str) {
     json.push('"');
     for character in value.chars() {
@@ -1062,6 +1329,10 @@ fn run_main_test_workflow_inner(
                     test_counts: None,
                     test_inventory: None,
                     test_inventory_rejection: None,
+                    test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                        reason: "test execution stopped before an exact runtime plan was available"
+                            .to_string(),
+                    }),
                     test_durations: None,
                     findings,
                     failure_analysis_input: None,
@@ -1102,6 +1373,9 @@ fn run_main_test_workflow_inner(
                 test_counts: None,
                 test_inventory: None,
                 test_inventory_rejection: None,
+                test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                    reason: "no Test phase executed for the selected change scope".to_string(),
+                }),
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
@@ -1177,6 +1451,10 @@ fn run_main_test_workflow_inner(
                     test_counts: None,
                     test_inventory: None,
                     test_inventory_rejection: None,
+                    test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                        reason: "test execution stopped before an exact runtime plan was available"
+                            .to_string(),
+                    }),
                     test_durations: None,
                     findings,
                     failure_analysis_input: None,
@@ -1214,25 +1492,102 @@ fn run_main_test_workflow_inner(
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
+    let inventory_profile = test_context.as_ref().and_then(|_| {
+        InventoryProfile::resolve(
+            test_config
+                .as_ref()
+                .and_then(|test| test.inventory.as_ref()),
+        )
+    });
 
     #[cfg(unix)]
     let inventory_binding = if inventory_mode {
-        let profile = test_context.as_ref().and_then(|_| {
-            InventoryProfile::resolve(
-                test_config
-                    .as_ref()
-                    .and_then(|test| test.inventory.as_ref()),
-            )
-        });
-        match profile {
-            Some(profile) => test_inventory_binding(&args.ci_env, source_path, run_dir, &profile)
-                .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
-                .map(Some),
+        match inventory_profile.as_ref() {
+            Some(profile) => {
+                test_inventory_binding(&args.ci_env, source_path, run_dir, profile, true)
+                    .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
+                    .map(Some)
+            }
             None => Err(TestInventoryRejection::BindingUnavailable),
         }
     } else {
         Ok(None)
     };
+
+    #[cfg(unix)]
+    let internal_runtime_plan = if !inventory_mode
+        && runtime_evidence_path(&args.ci_env, TEST_SHARD_MANIFEST_ENV).is_none()
+        && runtime_evidence_path(&args.ci_env, TEST_INVENTORY_FILE_ENV).is_none()
+    {
+        Some(match inventory_profile.as_ref() {
+            None => Err("test adapter inventory cannot be bound to this extension"),
+            Some(profile) => {
+                match test_inventory_binding(&args.ci_env, source_path, run_dir, profile, false)
+                    .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
+                {
+                    Err(_) => Err("internal runtime inventory binding could not be established"),
+                    Ok(binding) => {
+                        let producer = build_test_runner(
+                            component,
+                            args.path_override.clone(),
+                            &args.settings,
+                            &args.settings_json,
+                            args.skip_lint,
+                            false,
+                            None,
+                            None,
+                            run_dir,
+                        )?;
+                        let producer = args
+                            .ci_env
+                            .iter()
+                            .fold(producer, |producer, (key, value)| producer.env(key, value));
+                        let output = producer
+                            .env(TEST_INVENTORY_ONLY_ENV, "1")
+                            .env(
+                                TEST_INVENTORY_FILE_ENV,
+                                binding.child_path.to_string_lossy().as_ref(),
+                            )
+                            .env_remove_if(true, "SCOPE_MODE")
+                            .env_remove_if(true, "HOMEBOY_CHANGED_SINCE")
+                            .env_remove_if(true, "HOMEBOY_CHANGED_TEST_FILES")
+                            .passthrough(false)
+                            .timeout(Some(test_timeout()))
+                            .run()?;
+                        if !output.success {
+                            let _ = unlink_test_inventory(&binding);
+                            Err("internal runtime inventory producer failed")
+                        } else {
+                            match valid_test_inventory(&binding) {
+                                Err(_) => Err(
+                                    "internal runtime inventory producer emitted invalid evidence",
+                                ),
+                                Ok((inventory, bytes)) => {
+                                    if !revalidate_test_inventory_binding(
+                                        &binding,
+                                        source_path,
+                                        &inventory.runner,
+                                    ) {
+                                        Err("internal runtime inventory provenance changed before execution")
+                                    } else {
+                                        runtime_plan_from_inventory_bytes(
+                                            &bytes,
+                                            source_path,
+                                            profile,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let internal_runtime_plan: Option<Result<RuntimeTestPlan, &'static str>> = None;
 
     let runner = build_test_runner(
         component,
@@ -1434,6 +1789,17 @@ fn run_main_test_workflow_inner(
     let findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
+    let test_runtime_evidence = (!inventory_mode).then(|| {
+        runtime_test_evidence(
+            &args.ci_env,
+            source_path,
+            inventory_profile.as_ref(),
+            output.success,
+            test_counts.as_ref(),
+            failure_analysis_input.as_ref(),
+            internal_runtime_plan,
+        )
+    });
 
     let analysis = if args.analyze {
         let analysis_input = failure_analysis_input
@@ -1647,6 +2013,7 @@ fn run_main_test_workflow_inner(
         test_counts,
         test_inventory,
         test_inventory_rejection,
+        test_runtime_evidence,
         test_durations,
         findings,
         failure_analysis_input,
@@ -1861,6 +2228,9 @@ fn failed_test_workflow(
         test_counts: None,
         test_inventory: None,
         test_inventory_rejection: None,
+        test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+            reason: "test execution failed before runtime evidence could be produced".to_string(),
+        }),
         test_durations: None,
         findings: None,
         failure_analysis_input: None,
@@ -2206,6 +2576,9 @@ pub fn run_self_check_test_workflow_with_progress(
         test_counts: None,
         test_inventory: None,
         test_inventory_rejection: None,
+        test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+            reason: "self-check execution does not expose stable test identities".to_string(),
+        }),
         test_durations: None,
         findings: None,
         failure_analysis_input: None,
@@ -2295,6 +2668,237 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("conditional secret env lock")
+    }
+
+    fn failed_identity(id: &str) -> TestFailure {
+        TestFailure {
+            test_name: id.to_string(),
+            test_file: String::new(),
+            error_type: "assertion".to_string(),
+            message: "failed".to_string(),
+            source_file: String::new(),
+            source_line: 0,
+        }
+    }
+
+    fn runtime_fixture_profile(root: &Path) -> InventoryProfile {
+        std::fs::write(root.join("fixture.root"), "root\n").unwrap();
+        std::fs::write(root.join("suite.fixture"), "suite\n").unwrap();
+        InventoryProfile {
+            root_markers: vec!["fixture.root".to_string()],
+            fingerprint_names: vec!["fixture.root".to_string()],
+            fingerprint_extensions: vec!["fixture".to_string()],
+            fingerprint_skip_dirs: Vec::new(),
+            runner_commands: BTreeMap::from([(
+                "rustc".to_string(),
+                vec!["rustc".to_string(), "--version".to_string()],
+            )]),
+        }
+    }
+
+    #[test]
+    fn shard_runtime_evidence_normalizes_observed_failures_against_exact_plan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let runner_fingerprint = runner_fingerprint(temp.path(), "rustc", &profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(temp.path(), &profile).unwrap();
+        let manifest = temp.path().join("shard.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "homeboy/test-shard-manifest/v1",
+                "id": "shard-2",
+                "runner": "rustc",
+                "runner_fingerprint": runner_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
+                "inventory_fingerprint": "c".repeat(64),
+                "tests": ["suite::passes", "suite::fails"],
+                "estimated_duration_ms": 120000,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let failures = TestAnalysisInput {
+            failures: vec![failed_identity(" suite::fails ")],
+            total: 2,
+            passed: 1,
+        };
+
+        let evidence = runtime_test_evidence(
+            &[(
+                TEST_SHARD_MANIFEST_ENV.to_string(),
+                manifest.to_string_lossy().to_string(),
+            )],
+            temp.path(),
+            Some(&profile),
+            false,
+            Some(&TestCounts::new(2, 1, 1, 0)),
+            Some(&failures),
+            None,
+        );
+
+        let TestRuntimeEvidence::Complete {
+            tests,
+            failed_test_ids,
+            execution_fingerprint,
+            ..
+        } = evidence
+        else {
+            panic!("expected complete shard evidence");
+        };
+        assert_eq!(
+            tests.into_iter().map(|test| test.id).collect::<Vec<_>>(),
+            vec!["suite::fails", "suite::passes"]
+        );
+        assert_eq!(failed_test_ids, vec!["suite::fails"]);
+        assert!(canonical_sha256(&execution_fingerprint));
+    }
+
+    #[test]
+    fn unknown_duplicate_or_missing_red_runtime_details_are_invalid_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let runner_fingerprint = runner_fingerprint(temp.path(), "rustc", &profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(temp.path(), &profile).unwrap();
+        let manifest = temp.path().join("shard.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "homeboy/test-shard-manifest/v1",
+                "id": "shard-1",
+                "runner": "rustc",
+                "runner_fingerprint": runner_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
+                "inventory_fingerprint": "c".repeat(64),
+                "tests": ["suite::planned"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ci_env = [(
+            TEST_SHARD_MANIFEST_ENV.to_string(),
+            manifest.to_string_lossy().to_string(),
+        )];
+        let cases = [
+            (None, "did not expose an observed failed test ID"),
+            (
+                Some(TestAnalysisInput {
+                    failures: vec![failed_identity("unknown test")],
+                    total: 1,
+                    passed: 0,
+                }),
+                "did not expose stable test IDs",
+            ),
+            (
+                Some(TestAnalysisInput {
+                    failures: vec![
+                        failed_identity("suite::planned"),
+                        failed_identity("suite::planned"),
+                    ],
+                    total: 1,
+                    passed: 0,
+                }),
+                "duplicate test IDs",
+            ),
+        ];
+
+        for (details, expected_reason) in cases {
+            let evidence = runtime_test_evidence(
+                &ci_env,
+                temp.path(),
+                Some(&profile),
+                false,
+                Some(&TestCounts::new(1, 0, 1, 0)),
+                details.as_ref(),
+                None,
+            );
+            assert!(matches!(
+                evidence,
+                TestRuntimeEvidence::InvalidEvidence { ref reason }
+                    if reason.contains(expected_reason)
+            ));
+        }
+
+        let countless = runtime_test_evidence(
+            &ci_env,
+            temp.path(),
+            Some(&profile),
+            false,
+            None,
+            Some(&TestAnalysisInput {
+                failures: vec![failed_identity("suite::planned")],
+                total: 1,
+                passed: 0,
+            }),
+            None,
+        );
+        assert!(matches!(
+            countless,
+            TestRuntimeEvidence::InvalidEvidence { ref reason }
+                if reason.contains("structured TestCounts")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adapter_inventory_is_canonically_validated_and_selects_only_executed_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("fixture.root"), "root\n").unwrap();
+        std::fs::write(temp.path().join("suite.fixture"), "suite\n").unwrap();
+        let profile = InventoryProfile {
+            root_markers: vec!["fixture.root".to_string()],
+            fingerprint_names: vec!["fixture.root".to_string()],
+            fingerprint_extensions: vec!["fixture".to_string()],
+            fingerprint_skip_dirs: Vec::new(),
+            runner_commands: BTreeMap::from([(
+                "fixture".to_string(),
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf fixture-version".to_string(),
+                ],
+            )]),
+        };
+        let runner_fingerprint = runner_fingerprint(temp.path(), "fixture", &profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(temp.path(), &profile).unwrap();
+        let mut inventory = TestInventoryEvidence {
+            schema: TEST_INVENTORY_SCHEMA.to_string(),
+            runner: "fixture".to_string(),
+            runner_fingerprint,
+            workspace_fingerprint,
+            tests: vec![
+                TestInventoryTest {
+                    id: "suite::runs".to_string(),
+                    package: "fixture".to_string(),
+                    target: "suite".to_string(),
+                    target_kind: "test".to_string(),
+                    name: "runs".to_string(),
+                    expected_outcome: Some("executed".to_string()),
+                },
+                TestInventoryTest {
+                    id: "suite::ignored".to_string(),
+                    package: "fixture".to_string(),
+                    target: "suite".to_string(),
+                    target_kind: "test".to_string(),
+                    name: "ignored".to_string(),
+                    expected_outcome: Some("skipped".to_string()),
+                },
+            ],
+            inventory_fingerprint: String::new(),
+            fallback_reason: None,
+        };
+        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+            &canonical_inventory_json(&inventory),
+        );
+        let path = temp.path().join("inventory.json");
+        std::fs::write(&path, serde_json::to_vec(&inventory).unwrap()).unwrap();
+
+        let plan = runtime_plan_from_inventory(path.to_str().unwrap(), temp.path(), &profile)
+            .expect("validated adapter inventory");
+
+        assert_eq!(plan.tests, vec!["suite::runs"]);
+        assert!(canonical_sha256(&plan.execution_fingerprint));
     }
 
     fn assert_artifact_tree_excludes(root: &Path, needle: &str) {
@@ -2795,6 +3399,7 @@ mod tests {
                 test_counts: Some(TestCounts::new(1, 0, 1, 0)),
                 test_inventory: None,
                 test_inventory_rejection: None,
+                test_runtime_evidence: None,
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
@@ -2894,6 +3499,9 @@ mod tests {
             test_counts: None,
             test_inventory: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                reason: "compiler failure did not map to an executed test identity".to_string(),
+            }),
             test_durations: None,
             findings: Some(findings),
             failure_analysis_input: Some(input),
@@ -3381,7 +3989,7 @@ mod tests {
             let run_dir = RunDir::create().expect("run directory");
 
             assert!(matches!(
-                test_inventory_binding(&[], source.path(), &run_dir, &profile),
+                test_inventory_binding(&[], source.path(), &run_dir, &profile, true),
                 Err(TestInventoryRejection::BindingUnavailable)
             ));
 
@@ -3394,6 +4002,7 @@ mod tests {
                     source.path(),
                     &run_dir,
                     &profile,
+                    true,
                 ),
                 Err(TestInventoryRejection::RequestedPathRejected)
             ));

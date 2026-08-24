@@ -59,17 +59,60 @@ pub fn write_output_file_atomically(
         }
     }
 
+    write_output_file_atomically_with(
+        target,
+        contents.as_ref(),
+        options,
+        |path| std::fs::File::create(path),
+        |file, bytes| file.write_all(bytes),
+        std::fs::File::sync_all,
+        |from, to| std::fs::rename(from, to),
+    )
+}
+
+fn write_output_file_atomically_with<C, W, S, R>(
+    target: &Path,
+    contents: &[u8],
+    options: OutputWriteOptions,
+    create: C,
+    mut write: W,
+    sync: S,
+    rename: R,
+) -> std::io::Result<()>
+where
+    C: FnOnce(&Path) -> std::io::Result<std::fs::File>,
+    W: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    S: FnOnce(&std::fs::File) -> std::io::Result<()>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     let temp = atomic_output_temp_path(target);
-    let mut file = std::fs::File::create(&temp)?;
-    let contents = contents.as_ref();
-    file.write_all(contents)?;
-    if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
-        file.write_all(b"\n")?;
+    let cleanup = || {
+        let _ = std::fs::remove_file(&temp);
+    };
+    let mut file = match create(&temp) {
+        Ok(file) => file,
+        Err(error) => {
+            cleanup();
+            return Err(error);
+        }
+    };
+    if let Err(error) = write(&mut file, contents) {
+        cleanup();
+        return Err(error);
     }
-    file.sync_all()?;
+    if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
+        if let Err(error) = write(&mut file, b"\n") {
+            cleanup();
+            return Err(error);
+        }
+    }
+    if let Err(error) = sync(&file) {
+        cleanup();
+        return Err(error);
+    }
     drop(file);
 
-    match std::fs::rename(&temp, target) {
+    match rename(&temp, target) {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = std::fs::remove_file(&temp);
@@ -131,5 +174,49 @@ mod tests {
         .expect("write output");
 
         assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "{}\n");
+    }
+
+    fn assert_injected_staging_failure_removes_temp(fail_write: bool, fail_sync: bool) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output_path = dir.path().join("output.json");
+        let error = write_output_file_atomically_with(
+            &output_path,
+            b"{}",
+            OutputWriteOptions::artifact(),
+            |path| std::fs::File::create(path),
+            move |file, bytes| {
+                if fail_write {
+                    Err(std::io::Error::other("injected write failure"))
+                } else {
+                    file.write_all(bytes)
+                }
+            },
+            move |file| {
+                if fail_sync {
+                    Err(std::io::Error::other("injected sync failure"))
+                } else {
+                    file.sync_all()
+                }
+            },
+            |from, to| std::fs::rename(from, to),
+        )
+        .expect_err("injected failure");
+
+        assert!(error.to_string().contains("injected"));
+        assert!(!output_path.exists());
+        assert!(std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn atomic_writer_removes_temp_after_write_failure() {
+        assert_injected_staging_failure_removes_temp(true, false);
+    }
+
+    #[test]
+    fn atomic_writer_removes_temp_after_sync_failure() {
+        assert_injected_staging_failure_removes_temp(false, true);
     }
 }

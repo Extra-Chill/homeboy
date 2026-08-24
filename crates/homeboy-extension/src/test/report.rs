@@ -90,6 +90,7 @@ pub fn from_main_workflow_with_ci_context(
             test_counts: result.test_counts,
             test_inventory: result.test_inventory,
             test_inventory_rejection: result.test_inventory_rejection,
+            test_runtime_evidence: result.test_runtime_evidence,
             // Carried through untouched. `test_phase_report` and
             // `test_phase_failure` below never read it: a slow suite must not
             // be able to change the phase verdict in either direction. (#10655)
@@ -129,6 +130,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             test_counts: None,
             test_inventory: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -177,6 +179,7 @@ pub fn from_auto_fix_drift_workflow(
             test_counts: None,
             test_inventory: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -326,6 +329,7 @@ mod tests {
             test_counts: Some(TestCounts::new(3, 1, 2, 0)),
             test_inventory: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: None,
             test_durations: None,
             findings,
             failure_analysis_input: None,
@@ -352,6 +356,7 @@ mod tests {
             test_inventory: None,
             test_durations: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: None,
             findings: None,
             failure_analysis_input: None,
             coverage: None,
@@ -377,6 +382,7 @@ mod tests {
             test_inventory: None,
             test_durations: None,
             test_inventory_rejection: None,
+            test_runtime_evidence: None,
             findings: None,
             failure_analysis_input: None,
             coverage: None,
