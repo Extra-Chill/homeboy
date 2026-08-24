@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.7] - 2026-08-24
+
+### Changed
+- one trace run record, because trace_runs assigns no column
+- key both digest caches on one file identity
+- drop trailing blank line left by probe removal in route.rs
+- seal the crate boundary the facade only looked like it had
+- light up agent_task_lifecycle for the dead-code lint
+- declare the replay/minimize argument set once instead of three times
+- seal the crate boundary so rustc can see inside it
+- delete RawComponent and its two 44-field conversions
+- light up agent_task_scheduler for the dead-code lint
+- collapse the two projection twins onto their source types
+
+### Fixed
+- preserve legacy full-scope baselines
+- route runner artifact promotion locally
+
 ## [0.359.6] - 2026-08-24
 
 ### Changed
