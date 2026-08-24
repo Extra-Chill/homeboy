@@ -3,41 +3,22 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::apply::{
-    preflight_configured_workspace_provider_with_config, run_provider_command,
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionWorkspaceProvider,
 };
 
-use super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider,
-    promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
-};
+use super::promote::promote_with_provider;
 use super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport,
 };
-use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
-};
+use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
-use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::{
-    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
-    WorktreeProviderListResultMapping,
-};
-use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use homeboy_core::{Error, Result};
 
 pub(super) const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";

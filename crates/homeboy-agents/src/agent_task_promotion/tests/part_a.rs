@@ -3,42 +3,29 @@
 
 use super::super::apply::{
     preflight_configured_workspace_provider_with_config, run_provider_command,
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
+    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider,
     promote_with_provider_and_checkpoint,
     promote_with_provider_and_checkpoint_in_observation_store, resume_promoted_patch,
-    retain_committed_changes_artifact, select_patch_artifact, validate_artifact_content,
+    retain_committed_changes_artifact,
 };
-use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
-use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
-};
-use crate::agent_task_gate::{
-    AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
-};
-use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
+use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::defaults::{
     HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
     WorktreeProviderListResultMapping,
 };
-use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use homeboy_core::worktree::{self, WorktreeAdoptOptions};
-use homeboy_core::{Error, Result};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[test]

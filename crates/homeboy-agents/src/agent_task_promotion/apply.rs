@@ -454,6 +454,8 @@ impl ExternalPromotionWorkspaceProvider {
         self.provenance.as_ref()
     }
 
+    #[cfg(test)]
+    // Read only by the promotion test shards' provider assertions.
     pub(super) fn invocation(&self) -> Option<&CommandInvocation> {
         self.invocation.as_ref()
     }
