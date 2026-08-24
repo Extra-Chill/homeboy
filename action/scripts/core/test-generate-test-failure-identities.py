@@ -45,6 +45,28 @@ def main() -> None:
         assert len(payload["identities"]) == 256
         assert payload["truncated"] is True
 
+        result.write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "findings": [
+                            {
+                                "fingerprint": "test::::provider test results::test_failure::118 test failure(s) reported",
+                                "metadata": {"test_name": "provider test results"},
+                                "source": {"label": "test-failures"},
+                            }
+                        ],
+                        "test_counts": {"failed": 118, "errors": 0},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        subprocess.run(["python3", str(GENERATOR), "review test", str(result), str(evidence)], check=True)
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        assert payload["identities"] == []
+        assert payload["truncated"] is False
+
     print("PASS: test failure identity sidecars are redacted and bounded")
 
 

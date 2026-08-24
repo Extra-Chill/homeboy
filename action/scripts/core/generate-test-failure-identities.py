@@ -27,11 +27,16 @@ def text(value: Any) -> str:
 def fingerprint(item: Any) -> str | None:
     if not isinstance(item, dict):
         return None
+    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    # Homeboy emits this aggregate when its per-test sidecar is malformed. Its
+    # fingerprint includes a variable count, so it is not a test identity.
+    if source.get("label") == "test-failures" and text(metadata.get("test_name")) == "provider test results":
+        return None
     for key in ("fingerprint", "id"):
         value = text(item.get(key))
         if value:
             return f"{key}:{value}"
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     name = text(metadata.get("test_name")) or text(item.get("test_name")) or text(item.get("name"))
     suite = text(metadata.get("suite")) or text(item.get("suite"))
     if name:
