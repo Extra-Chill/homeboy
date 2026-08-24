@@ -271,11 +271,12 @@ fn normalize_legacy_allow_local_fallback(args: Vec<String>) -> Vec<String> {
 }
 
 fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
-    if matches!(args.get(1).map(String::as_str), Some("review"))
-        && matches!(args.get(2).map(String::as_str), Some("audit"))
-        && matches!(args.get(3).map(String::as_str), Some("baseline"))
-    {
-        args.splice(2..4, ["audit-baseline".to_string()]);
+    if let Some(position) = args.windows(3).position(|window| {
+        matches!(window[0].as_str(), "review")
+            && matches!(window[1].as_str(), "audit")
+            && matches!(window[2].as_str(), "baseline")
+    }) {
+        args.splice(position + 1..position + 3, ["audit-baseline".to_string()]);
     }
     args
 }
@@ -459,6 +460,36 @@ mod normalize_tests {
                 "review",
                 "audit-baseline",
                 "refresh",
+                "--path",
+                ".",
+            ])
+        );
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
+
+    #[test]
+    fn review_audit_baseline_normalizes_after_global_options() {
+        let args = normalize(argv(&[
+            "homeboy",
+            "--placement",
+            "local",
+            "review",
+            "audit",
+            "baseline",
+            "validate",
+            "--path",
+            ".",
+        ]));
+
+        assert_eq!(
+            args,
+            argv(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "review",
+                "audit-baseline",
+                "validate",
                 "--path",
                 ".",
             ])

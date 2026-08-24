@@ -111,6 +111,10 @@ pub struct UpgradeResult {
     /// Machine-readable outcome for controller and runner ordering semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Read-only admission findings that prevented controller mutation. Kept
+    /// bounded to one entry and recovery command per extension blocker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight: Option<UpgradePreflight>,
     /// Independent controller mutation outcome. Additive so persisted and
     /// older callers can continue using `upgraded` and `partial` unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +175,21 @@ pub struct UpgradeResult {
 pub struct UpgradeComponentStatus {
     pub status: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpgradePreflight {
+    pub candidate_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_blockers: Vec<ExtensionPreflightBlocker>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionPreflightBlocker {
+    pub extension_id: String,
+    pub classification: String,
+    pub detail: String,
+    pub recovery_command: String,
 }
 
 /// Outcome of attempting to restart one declared binary-resident service after
@@ -332,6 +351,7 @@ mod tests {
             source_revision: None,
             upgraded: true,
             outcome: Some("controller_updated".to_string()),
+            preflight: None,
             controller: Some(UpgradeComponentStatus {
                 status: "updated".to_string(),
                 summary: "controller installation completed".to_string(),

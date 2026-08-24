@@ -32,10 +32,10 @@ const DIAGNOSTIC_TRUNCATION_MARKER: &str = "...[truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-    pub timed_out: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) timed_out: bool,
 }
 
 /// Safe, bounded evidence from a failed `gh` invocation for persisted release
@@ -43,21 +43,21 @@ pub(crate) struct GhCommandOutput {
 /// notes and upload paths can contain credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct GitHubCommandFailureDiagnostic {
-    pub operation: String,
-    pub endpoint: String,
-    pub exit_code: Option<i32>,
-    pub timed_out: bool,
-    pub stdout: String,
-    pub stderr: String,
-    pub http_status: Option<u16>,
-    pub github_request_id: Option<String>,
-    pub summary: String,
+    pub(crate) operation: String,
+    pub(crate) endpoint: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) timed_out: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) github_request_id: Option<String>,
+    pub(crate) summary: String,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseMetadataError {
-    pub message: String,
-    pub diagnostics: Vec<GitHubCommandFailureDiagnostic>,
+    pub(crate) message: String,
+    pub(crate) diagnostics: Vec<GitHubCommandFailureDiagnostic>,
 }
 
 impl GitHubReleaseMetadataError {
@@ -187,23 +187,23 @@ impl std::error::Error for GitHubReleaseMetadataError {}
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct GitHubReleaseMetadata {
     #[serde(default)]
-    pub tag_name: String,
+    pub(crate) tag_name: String,
     #[serde(rename = "draft", alias = "isDraft")]
-    pub is_draft: bool,
+    pub(crate) is_draft: bool,
     #[serde(default)]
-    pub assets: Vec<GitHubReleaseAsset>,
+    pub(crate) assets: Vec<GitHubReleaseAsset>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct GitHubReleaseAsset {
     #[serde(default)]
-    pub id: Option<u64>,
-    pub name: String,
-    pub size: u64,
+    pub(crate) id: Option<u64>,
+    pub(crate) name: String,
+    pub(crate) size: u64,
     #[serde(default)]
-    pub state: String,
+    pub(crate) state: String,
     #[serde(default)]
-    pub digest: Option<String>,
+    pub(crate) digest: Option<String>,
 }
 
 /// A content-addressed intent to publish bytes under one canonical remote name.
@@ -211,10 +211,10 @@ pub(crate) struct GitHubReleaseAsset {
 /// coordinate through this target-name plus digest identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReleaseAssetPublication {
-    pub target_name: String,
-    pub sha256: String,
-    pub size: u64,
-    pub source_path: String,
+    pub(crate) target_name: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
+    pub(crate) source_path: String,
 }
 
 impl ReleaseAssetPublication {
@@ -864,6 +864,10 @@ pub(crate) fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleas
         .and_then(|line| serde_json::from_str(line).ok())
 }
 
+#[allow(
+    dead_code,
+    reason = "No production caller: release upload verification is asserted by this module's tests but is not wired into the publish path."
+)]
 pub(crate) fn verify_release_assets(
     artifact_paths: &[String],
     assets: &[GitHubReleaseAsset],

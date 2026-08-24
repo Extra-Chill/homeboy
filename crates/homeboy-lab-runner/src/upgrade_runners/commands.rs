@@ -68,15 +68,26 @@ pub fn is_managed_immutable_homeboy_path(runner: &Runner, homeboy_path: &str) ->
 }
 
 pub fn managed_immutable_runner_recovery_commands(runner_id: &str) -> Vec<String> {
-    let refresh = format!(
+    managed_immutable_runner_recovery_commands_with_commit(
+        runner_id,
+        homeboy_product_identity::build_identity()
+            .git_commit
+            .as_deref(),
+    )
+}
+
+pub(crate) fn managed_immutable_runner_recovery_commands_with_commit(
+    runner_id: &str,
+    commit: Option<&str>,
+) -> Vec<String> {
+    let Some(commit) = commit else {
+        return Vec::new();
+    };
+    vec![format!(
         "homeboy runner refresh-homeboy {} --ref {} --reconnect",
         shell_arg(runner_id),
-        shell_arg(&crate::homeboy_refresh::controller_refresh_ref())
-    );
-    vec![
-        refresh,
-        format!("homeboy runner reconcile {}", shell_arg(runner_id)),
-    ]
+        shell_arg(commit)
+    )]
 }
 
 pub fn reconnect_runner_daemon(runner_id: &str) -> Result<(String, Option<String>)> {

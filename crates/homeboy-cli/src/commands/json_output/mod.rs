@@ -46,10 +46,11 @@ pub(crate) fn run_command_output(
     crate::commands::utils::tty::status("homeboy is working...");
     let summarize_changed_since_audit = changed_since_audit_uses_bounded_output(&command);
     let run = match command {
-        Commands::AgentTask(args) => {
+        Commands::AgentTask(mut args) => {
             let run_from_spec_output_ref =
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
+            let bounded_operation = agent_task_bounded_operation(&args);
             if matches!(
                 &args.command,
                 crate::commands::agent_task::AgentTaskCommand::Cook(_)
@@ -65,12 +66,57 @@ pub(crate) fn run_command_output(
                                 .with_output_file_already_written();
                         }
                     };
-                    let progress = |phase: &str,
-                                    cook_id: Option<&str>,
-                                    run_id: Option<&str>,
-                                    activity: Option<&str>| {
-                        lease.progress(phase, cook_id, run_id, activity)
+                    // The output lease is deliberately silent until this parent
+                    // exists. A killed client can therefore always resolve or
+                    // cancel the identity in its first published envelope.
+                    let cook_args = match &mut args.command {
+                        crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) => cook_args,
+                        _ => unreachable!("Cook output branch has a Cook command"),
                     };
+                    let cook_id = cook_args
+                        .dispatch
+                        .run_id
+                        .clone()
+                        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+                    cook_args.dispatch.run_id = Some(cook_id.clone());
+                    let bootstrap = (|| {
+                        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                        homeboy::agents::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                            &store, &cook_id,
+                        )
+                    })();
+                    if let Err(error) = bootstrap {
+                        let result = Err(error);
+                        let _ = lease.finish(
+                            &result,
+                            2,
+                            &crate::commands::utils::response::CommandIdentity::with_operation(
+                                "agent-task",
+                                "cook",
+                            ),
+                            None,
+                        );
+                        return CommandRun::from_stdout_result(result, 2)
+                            .with_command(spec.name)
+                            .with_output_file_already_written();
+                    }
+                    if let Err(error) = lease.progress(
+                        "submission_bootstrap",
+                        Some(&cook_id),
+                        Some(&cook_id),
+                        Some("durable Cook submission is preparing"),
+                    ) {
+                        return CommandRun::from_stdout_result(Err(error), 2)
+                            .with_command(spec.name);
+                    }
+                    let progress =
+                        |phase: &str,
+                         cook_id: Option<&str>,
+                         run_id: Option<&str>,
+                         activity: Option<&str>,
+                         _terminal_retry_command: Option<&str>| {
+                            lease.progress(phase, cook_id, run_id, activity)
+                        };
                     let (result, exit_code) = map(
                         crate::commands::agent_task::run_with_cook_progress_and_provenance(
                             args,
@@ -78,6 +124,42 @@ pub(crate) fn run_command_output(
                             Some(provenance),
                         ),
                     );
+                    if let Err(error) = &result {
+                        // A bootstrap parent is a real lifecycle record, not an
+                        // output-only marker. If normal preparation never
+                        // materialized its first attempt, terminalize that parent
+                        // before replacing the in-flight envelope.
+                        let terminalize = (|| {
+                            let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                            if store.cook_index_exists(&cook_id) {
+                                return Ok(());
+                            }
+                            let plan = store.read_controller_plan(&cook_id)?;
+                            homeboy::agents::agent_task_lifecycle::record_pre_execution_failure_in_store(
+                                &store,
+                                &cook_id,
+                                &plan,
+                                "output_bootstrap",
+                                error,
+                            )?;
+                            Ok(())
+                        })();
+                        if let Err(terminal_error) = terminalize {
+                            let result = Err(terminal_error);
+                            let _ = lease.finish(
+                                &result,
+                                2,
+                                &crate::commands::utils::response::CommandIdentity::with_operation(
+                                    "agent-task",
+                                    "cook",
+                                ),
+                                None,
+                            );
+                            return CommandRun::from_stdout_result(result, 2)
+                                .with_command(spec.name)
+                                .with_output_file_already_written();
+                        }
+                    }
                     if let Err(error) = lease.finish(
                         &result,
                         exit_code,
@@ -90,9 +172,15 @@ pub(crate) fn run_command_output(
                         return CommandRun::from_stdout_result(Err(error), 2)
                             .with_command(spec.name);
                     }
-                    return agent_task_command_run(result, exit_code, summary_kind, full)
-                        .with_command(spec.name)
-                        .with_output_file_already_written();
+                    return agent_task_command_run(
+                        result,
+                        exit_code,
+                        summary_kind,
+                        full,
+                        bounded_operation,
+                    )
+                    .with_command(spec.name)
+                    .with_output_file_already_written();
                 }
             }
             let full = agent_task_requests_full_output(&args);
@@ -102,11 +190,28 @@ pub(crate) fn run_command_output(
                     render_controller_run_from_spec_output_ref(payload, exit_code, output_file)
                 })
             } else {
-                agent_task_command_run(result.0, result.1, summary_kind, full)
+                agent_task_command_run(result.0, result.1, summary_kind, full, bounded_operation)
             }
         }
         Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
             refresh_homeboy_command_run(args, output_file)
+        }
+        Commands::Ssh(args)
+            if matches!(
+                args.subcommand,
+                Some(super::ssh::SshSubcommand::List { full: false })
+            ) =>
+        {
+            command_run_with_summary(
+                dispatch(Commands::Ssh(args), spec, placement),
+                |payload, _| super::ssh::render_list_summary(payload),
+            )
+        }
+        Commands::Runner(args) if runner::is_compact_doctor_stdout(&args) => {
+            command_run_with_summary(
+                dispatch(Commands::Runner(args), spec, placement),
+                |payload, _| super::runner::doctor::render_summary(payload),
+            )
         }
         Commands::Runner(args) => runner::run_command_output(args),
         Commands::Activity(args) => command_run_with_summary(
@@ -720,9 +825,14 @@ fn agent_task_command_run(
     exit_code: i32,
     summary_kind: Option<super::agent_task_summary::AgentTaskSummaryKind>,
     full: bool,
+    bounded_operation: Option<&'static str>,
 ) -> CommandRun {
     let stdout_result = output_file_result.clone().map(|mut value| {
-        if !full {
+        if let Some(operation) = bounded_operation {
+            value = crate::commands::agent_task::status::bounded_full_operation_report(
+                value, operation,
+            );
+        } else if !full {
             crate::commands::agent_task::status::project_operator_output(&mut value);
         }
         value
@@ -737,6 +847,21 @@ fn agent_task_command_run(
             stdout: summary_stdout,
             stderr: None,
         })
+}
+
+/// Only terminal-facing reports need the bounded operation projection. Handler
+/// results remain lossless for internal callers and `--output` artifacts.
+fn agent_task_bounded_operation(
+    args: &crate::commands::agent_task::AgentTaskArgs,
+) -> Option<&'static str> {
+    use crate::commands::agent_task::AgentTaskCommand;
+
+    match &args.command {
+        AgentTaskCommand::FinalizePr(_) => Some("finalize-pr"),
+        AgentTaskCommand::Cook(args) if args.full => Some("cook"),
+        AgentTaskCommand::CookContinue(args) if args.full => Some("cook-continue"),
+        _ => None,
+    }
 }
 
 fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTaskArgs) -> bool {
@@ -962,16 +1087,9 @@ mod tests {
         let args = AgentTaskArgs {
             command: AgentTaskCommand::Status(StatusArgs {
                 run_id: "run-1".to_string(),
-                exact: false,
-                bridge: false,
-                since_cursor: None,
-                full: false,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
                 interval: "5s".to_string(),
                 timeout: "30m".to_string(),
+                ..Default::default()
             }),
         };
 
@@ -1007,7 +1125,7 @@ mod tests {
     #[test]
     fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
         let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
-        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false);
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None);
 
         assert!(
             run.stdout_result.as_ref().expect("stdout")["stdout"]

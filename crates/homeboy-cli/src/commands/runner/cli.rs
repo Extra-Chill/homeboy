@@ -26,6 +26,10 @@ impl RunnerArgs {
             }
         )
     }
+
+    pub(crate) fn compact_doctor_stdout(&self) -> bool {
+        matches!(&self.command, RunnerCommand::Doctor { full: false, .. })
+    }
 }
 
 #[derive(Subcommand)]
@@ -214,6 +218,10 @@ pub(super) enum RunnerCommand {
         /// Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon. Without --scope, repairs use lab-offload.
         #[arg(long)]
         repair: bool,
+
+        /// Return complete, redacted probe evidence and resource maps.
+        #[arg(long)]
+        full: bool,
     },
     /// Evaluate workload placement without creating a run, rig lease, runner job, or connection
     Preflight {

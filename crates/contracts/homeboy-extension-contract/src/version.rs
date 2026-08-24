@@ -38,6 +38,8 @@ pub enum VersionConstraint {
     LessEqual(Version),
     /// `<version`
     Less(Version),
+    /// Every comma-separated constraint must match.
+    All(Vec<VersionConstraint>),
 }
 
 impl VersionConstraint {
@@ -49,6 +51,15 @@ impl VersionConstraint {
 
         if input == "*" {
             return Ok(VersionConstraint::Any);
+        }
+
+        if input.contains(',') {
+            return input
+                .split(',')
+                .map(str::trim)
+                .map(VersionConstraint::parse)
+                .collect::<Result<Vec<_>>>()
+                .map(VersionConstraint::All);
         }
 
         if let Some(rest) = input.strip_prefix(">=") {
@@ -97,6 +108,9 @@ impl VersionConstraint {
             VersionConstraint::Less(v) => version < v,
             VersionConstraint::Caret(v) => caret_matches(v, version),
             VersionConstraint::Tilde(v) => tilde_matches(v, version),
+            VersionConstraint::All(constraints) => constraints
+                .iter()
+                .all(|constraint| constraint.matches(version)),
         }
     }
 }
@@ -112,6 +126,16 @@ impl std::fmt::Display for VersionConstraint {
             VersionConstraint::Less(v) => write!(f, "<{}", v),
             VersionConstraint::Caret(v) => write!(f, "^{}", v),
             VersionConstraint::Tilde(v) => write!(f, "~{}", v),
+            VersionConstraint::All(constraints) => {
+                let mut constraints = constraints.iter();
+                if let Some(first) = constraints.next() {
+                    write!(f, "{first}")?;
+                }
+                for constraint in constraints {
+                    write!(f, ", {constraint}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -260,6 +284,14 @@ mod tests {
     fn parse_with_spaces() {
         let c = VersionConstraint::parse(">= 1.0.0 ").unwrap();
         assert_eq!(c, VersionConstraint::GreaterEqual(v("1.0.0")));
+    }
+
+    #[test]
+    fn comma_separated_constraints_require_every_bound() {
+        let c = VersionConstraint::parse(">=2.0.0, <3.0.0").unwrap();
+        assert!(c.matches(&v("2.1.0")));
+        assert!(!c.matches(&v("3.0.0")));
+        assert_eq!(c.to_string(), ">=2.0.0, <3.0.0");
     }
 
     #[test]

@@ -1,17 +1,6 @@
-use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use homeboy_core::finding::{FindingSource, HomeboyFinding};
-
-pub(crate) fn deserialize_budget_findings<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Vec<HomeboyFinding>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let values = Vec::<HomeboyFinding>::deserialize(deserializer)?;
-    Ok(values)
-}
 
 pub(crate) fn failure(
     code: impl Into<String>,

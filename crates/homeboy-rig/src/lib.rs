@@ -418,22 +418,9 @@ pub(crate) fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
 }
 
 fn local_package_root_for_rig_json(path: &Path) -> PathBuf {
-    let Some(rig_dir) = path.parent() else {
-        return PathBuf::from(".");
-    };
-    if rig_dir
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        == Some("rigs")
-    {
-        return rig_dir
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or(rig_dir)
-            .to_path_buf();
-    }
-    rig_dir.to_path_buf()
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn absolute_path(path: &str) -> Result<PathBuf> {
@@ -854,5 +841,36 @@ mod schema_error_tests {
             .is_some_and(|details| details.iter().any(|detail| detail
                 .as_str()
                 .is_some_and(|value| value.contains("env instead")))));
+    }
+
+    #[test]
+    fn local_rig_file_materializes_with_its_own_package_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rig_dir = tmp.path().join("rigs/isolated");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("base.json"),
+            r#"{ "description": "materialized from this package" }"#,
+        )
+        .expect("base spec");
+        let rig_path = rig_dir.join("rig.json");
+        fs::write(
+            &rig_path,
+            r#"{
+                "extends": "./base.json",
+                "id": "isolated",
+                "components": { "app": { "path": "${package.root}/app" } }
+            }"#,
+        )
+        .expect("rig spec");
+
+        let spec = load_local_source(rig_path.to_str().expect("UTF-8 path"), None)
+            .expect("materialize local rig");
+
+        assert_eq!(spec.description, "materialized from this package");
+        assert_eq!(
+            local_package_root("isolated").as_deref(),
+            Some(rig_dir.as_path())
+        );
     }
 }

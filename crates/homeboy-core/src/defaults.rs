@@ -244,6 +244,12 @@ pub struct RetentionConfig {
     /// artifact retention may bypass its age floor before managed work starts.
     #[serde(default = "default_reconstructable_artifact_reserve_bytes")]
     pub reconstructable_artifact_reserve_bytes: u64,
+    #[serde(default = "default_external_storage_retention_days")]
+    pub external_storage_days: u64,
+    #[serde(default = "default_external_storage_max_bytes")]
+    pub external_storage_max_bytes: u64,
+    #[serde(default = "default_external_storage_reserve_bytes")]
+    pub external_storage_reserve_bytes: u64,
     /// Cooperative wall-clock budget for one automatic pass. Category owners
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
@@ -268,6 +274,9 @@ impl Default for RetentionConfig {
             reconstructable_artifact_days: default_reconstructable_artifact_retention_days(),
             reconstructable_artifact_reserve_bytes: default_reconstructable_artifact_reserve_bytes(
             ),
+            external_storage_days: default_external_storage_retention_days(),
+            external_storage_max_bytes: default_external_storage_max_bytes(),
+            external_storage_reserve_bytes: default_external_storage_reserve_bytes(),
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
         }
     }
@@ -326,6 +335,16 @@ fn default_reconstructable_artifact_retention_days() -> u64 {
 }
 
 fn default_reconstructable_artifact_reserve_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
+}
+
+fn default_external_storage_retention_days() -> u64 {
+    7
+}
+fn default_external_storage_max_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
+}
+fn default_external_storage_reserve_bytes() -> u64 {
     20 * 1024 * 1024 * 1024
 }
 
@@ -654,6 +673,16 @@ pub struct WorktreeProviderCommands {
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<Vec<String>>,
+    /// Targeted tracker lookup. Each `{task_url}` argument is replaced with the
+    /// canonical task URL and returns every candidate owned by that task. The
+    /// provider owns pagination so Homeboy never mistakes a partial page for an
+    /// absent destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_task: Option<Vec<String>>,
+    /// Targeted tracker lookup exit statuses that mean the requested task is
+    /// absent. This is independent from exact handle/path resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve_task_not_found_exit_codes: Vec<i32>,
     /// Targeted canonical-path lookup. Each `{path}` argument is replaced with
     /// the requested canonical path. The result uses `list_result_mapping` and
     /// may contain one item.
@@ -712,6 +741,8 @@ impl Default for WorktreeProviderCommands {
             resolve_identity: None,
             attest_safety: None,
             resolve: None,
+            resolve_task: None,
+            resolve_task_not_found_exit_codes: Vec::new(),
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
             list: None,
@@ -1180,6 +1211,8 @@ mod tests {
             resolve_identity: None,
             attest_safety: None,
             resolve: None,
+            resolve_task: None,
+            resolve_task_not_found_exit_codes: Vec::new(),
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
             list: Some(vec!["provider".to_string(), "list".to_string()]),
@@ -1195,6 +1228,21 @@ mod tests {
         };
 
         assert!(commands.ensure.is_some());
+    }
+
+    #[test]
+    fn legacy_worktree_provider_commands_config_defaults_task_not_found_exit_codes() {
+        let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
+            "worktree_providers": {"fixture": {"commands": {
+                "resolve_task": ["provider", "resolve-task", "{task_url}"],
+                "resolve_not_found_exit_codes": [41]
+            }}}
+        }))
+        .expect("legacy config deserializes");
+        let commands = &config.worktree_providers["fixture"].commands;
+
+        assert_eq!(commands.resolve_not_found_exit_codes, vec![41]);
+        assert!(commands.resolve_task_not_found_exit_codes.is_empty());
     }
 
     #[test]

@@ -66,6 +66,23 @@ pub fn extensions() -> Result<PathBuf> {
     Ok(extensions_in_root(&homeboy()?))
 }
 
+/// Durable, controller-owned sources for linked local extensions. These are
+/// intentionally separate from installed extension links so a source snapshot
+/// can survive replacement of the installed entry.
+pub fn extension_sources_in_root(config_root: &Path) -> PathBuf {
+    config_root.join("extension-sources")
+}
+
+/// Durable source root registered for one linked extension.
+pub fn extension_source_root_in_root(config_root: &Path, id: &str) -> PathBuf {
+    extension_sources_in_root(config_root).join(id)
+}
+
+/// Durable source root registered for one linked extension.
+pub fn extension_source_root(id: &str) -> Result<PathBuf> {
+    Ok(extension_source_root_in_root(&homeboy()?, id))
+}
+
 /// Agent runtime package directory below an already-resolved config root.
 ///
 /// This is the documented and process-stable runtime boundary. Generation

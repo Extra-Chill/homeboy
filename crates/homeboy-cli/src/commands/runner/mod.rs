@@ -35,6 +35,10 @@ pub(crate) fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
     args.compact_exec_stdout()
 }
 
+pub(crate) fn is_compact_doctor_stdout(args: &RunnerArgs) -> bool {
+    args.compact_doctor_stdout()
+}
+
 pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
     matches!(
         &args.command,

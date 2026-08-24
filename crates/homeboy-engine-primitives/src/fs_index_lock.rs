@@ -64,7 +64,6 @@ impl FsIndexLockConfig {
 #[derive(Debug)]
 pub struct FsIndexLock {
     path: PathBuf,
-    config: FsIndexLockConfig,
 }
 
 impl FsIndexLock {
@@ -79,11 +78,11 @@ impl FsIndexLock {
         })?;
         let path = dir.join(config.name);
         match fs::create_dir(&path) {
-            Ok(()) => Ok(Some(Self { path, config })),
+            Ok(()) => Ok(Some(Self { path })),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 remove_if_stale(&path, config)?;
                 match fs::create_dir(&path) {
-                    Ok(()) => Ok(Some(Self { path, config })),
+                    Ok(()) => Ok(Some(Self { path })),
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
                     Err(e) => Err(Error::internal_unexpected(format!(
                         "Failed to acquire {} lock {}: {}",
@@ -114,7 +113,7 @@ impl FsIndexLock {
         let path = dir.join(config.name);
         for _ in 0..config.attempts {
             match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path, config }),
+                Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     remove_if_stale(&path, config)?;
                     thread::sleep(config.sleep);

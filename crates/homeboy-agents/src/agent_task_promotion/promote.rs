@@ -618,6 +618,8 @@ fn verify_patch_is_present(
     Ok(report)
 }
 
+#[cfg(test)]
+// Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
@@ -625,6 +627,8 @@ pub(crate) fn promote_with_provider(
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
+// Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
@@ -1200,6 +1204,8 @@ fn gate_feedback_baseline_for_artifact(
 /// Replace a runner-local baseline path with the controller artifact-store
 /// identity before a follow-up can reuse a dirty destination. Older baselines
 /// without source identity retain their existing strict path/hash contract.
+#[cfg(test)]
+// Superseded by `bind_gate_feedback_baseline_internal` in cb7c0317e; retained as the tests' entry point.
 pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
     // One call is one unit of work, so the store resolves once here rather
     // than at each projection lookup inside (#7505).
@@ -1483,7 +1489,7 @@ mod declared_base_tests {
         let git = fixture_dir.path().join("git");
         std::fs::write(
             &git,
-            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access remote: Failed to connect to proxy' >&2\nexit 1\n",
+            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access https://git-user:git-secret@proxy.example.test/repository: Failed to connect to proxy' >&2\nexit 1\n",
         )
         .expect("write Git fixture");
         let mut permissions = std::fs::metadata(&git)
@@ -1514,6 +1520,8 @@ mod declared_base_tests {
             error.details["git_base_preflight"]["required_environment"],
             json!(["HTTPS_PROXY"])
         );
+        assert!(!error.message.contains("git-secret"));
+        assert!(!error.message.contains("git-user"));
         assert!(!error.details.to_string().contains("proxy.example.test"));
     }
 
@@ -2505,7 +2513,7 @@ fn declared_base_git_failure(
     environment: &[(String, String)],
     timeout: Duration,
 ) -> Error {
-    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(stderr));
     if is_git_transport_failure(&stderr) {
         return declared_base_transport_error(
             base_ref,
@@ -2521,6 +2529,11 @@ fn declared_base_git_failure(
         None,
         None,
     )
+}
+
+fn redact_declared_base_git_diagnostic(value: &str) -> String {
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    policy.redact_embedded_urls(value).trim().to_string()
 }
 
 fn declared_base_transport_error(

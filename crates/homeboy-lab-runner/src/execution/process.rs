@@ -1044,6 +1044,42 @@ mod tests {
         assert!(unknown.exists());
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_temp_owner_exports_a_socket_safe_alias_for_long_run_identity() {
+        use std::os::unix::net::UnixListener;
+
+        let _guard = homeboy_core::test_support::home_env_guard();
+        let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+        let durable_root = tempfile::tempdir().expect("durable runtime temp root");
+        std::env::set_var(
+            homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            runtime_root.path(),
+        );
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", durable_root.path());
+        let run_id = format!("runner-workload-{}", "long-identity-segment-".repeat(12));
+        let owner = runner_temp_owner(&HashMap::from([("HOMEBOY_RUN_ID".to_string(), run_id)]))
+            .expect("runner temp owner");
+        let env = owner
+            .child_env_vars()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let exported = PathBuf::from(env.get("TMPDIR").expect("exported TMPDIR"));
+        let socket_dir = exported.join("tsx-1000");
+        fs::create_dir(&socket_dir).expect("socket parent");
+        let socket = socket_dir.join("123456.pipe");
+
+        let listener = UnixListener::bind(&socket).expect("bind socket below exported TMPDIR");
+        assert_ne!(exported, owner.path());
+        assert!(socket.as_os_str().len() < 108);
+        drop(listener);
+        drop(owner);
+        assert!(!exported.exists());
+
+        std::env::remove_var(homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+    }
 }
 
 pub(super) fn apply_runner_process_env(
@@ -1371,7 +1407,16 @@ fn validated_runner_inherited_env(
 }
 
 pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
-    &["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP"]
+    &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+    ]
 }
 
 pub(super) fn command_output(

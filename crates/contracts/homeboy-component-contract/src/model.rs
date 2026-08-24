@@ -80,22 +80,51 @@ fn is_active_lifecycle(lifecycle: &ComponentLifecycle) -> bool {
     lifecycle.is_active()
 }
 
+/// The component configuration contract, and the one type that defines its
+/// serialized shape.
+///
+/// This used to be `#[serde(from = "RawComponent", into = "RawComponent")]`
+/// over a private `RawComponent` that repeated all 44 fields solely to carry
+/// the serde attributes, plus two 44-line `From` impls that were pure field
+/// moves in each direction.
+///
+/// That duplication was not cosmetic -- it shipped a bug. `harvest_excludes`
+/// was added to `Component` and to `From<Component> for RawComponent` but not
+/// to `From<RawComponent> for Component`, so a declared exclude set
+/// round-tripped back to disk while `harvest` could never see it (#10220, fixed
+/// in `0ac903bcc`). `component::mutations` still carries a second workaround
+/// for the same pattern (#1140). Two hand-maintained conversions between
+/// identical field lists is a standing invitation to that class of bug, so the
+/// attributes now live on the fields they describe and adding a field can no
+/// longer half-land.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(from = "RawComponent", into = "RawComponent")]
 pub struct Component {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    #[serde(default)]
     pub local_path: String,
+    #[serde(default)]
     pub remote_path: String,
     /// Lifecycle state. `Active` (default) means independently deployable;
     /// `Bundled`/`Retired` suppress the component from deploy/outdated/version
     /// surfaces. See [`ComponentLifecycle`].
+    #[serde(default, skip_serializing_if = "is_active_lifecycle")]
     pub lifecycle: ComponentLifecycle,
     /// When `lifecycle` is `Bundled`, the component this one was absorbed into.
     /// Informational/reporting only — its version tracks the host component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundled_into: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "deserialize_empty_as_none"
+    )]
     pub build_artifact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub build_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
     /// Explicit extension ownership by capability label.
     ///
@@ -103,7 +132,9 @@ pub struct Component {
     /// requires the component to choose the owner here instead of guessing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub capability_extensions: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version_targets: Option<Vec<VersionTarget>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_target: Option<String>,
 
     /// Paths never compared when harvesting remote content into this component.
@@ -116,19 +147,27 @@ pub struct Component {
     /// means (#10220).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harvest_excludes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_aliases: Option<Vec<String>>,
     /// Lifecycle hooks: event name -> list of shell commands.
     /// Events: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hooks: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub git_deploy: Option<GitDeployConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_provider: Option<DeploymentProviderAttachment>,
     /// Git remote URL for the component's source repository (e.g., GitHub URL).
     /// Used by deploy to download release artifacts or initialize server-side git repos.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     /// Host-scoped GitHub CLI/API environment used by release automation.
     #[serde(default, skip_serializing_if = "is_default_github_config")]
@@ -138,13 +177,18 @@ pub struct Component {
     pub release: ComponentReleaseConfig,
     /// Reporting-only GitHub remote override for `homeboy triage`.
     /// Does not affect git, deploy, or release operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub triage_remote_url: Option<String>,
     /// Labels treated as priority issues by `homeboy triage` for this component.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority_labels: Option<Vec<String>>,
+    #[serde(default)]
     pub auto_cleanup: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub docs_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub docs_dirs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<ScopeConfig>,
     /// Component-owned shell scripts that satisfy Homeboy command capabilities
     /// without requiring an extension. Resolution order is `scripts.*` first,
@@ -175,6 +219,7 @@ pub struct Component {
     pub package_artifacts: Vec<PackageArtifact>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, local wrappers may need "lando wp" instead of the default "wp".
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
     /// Component-level additions to the merge-aftermath drift list.
     ///
@@ -204,204 +249,6 @@ pub struct Component {
     /// deserializes it into its `AgentTaskReviewProfile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_profile: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct RawComponent {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    aliases: Vec<String>,
-    #[serde(default)]
-    local_path: String,
-    #[serde(default)]
-    remote_path: String,
-    #[serde(default, skip_serializing_if = "is_active_lifecycle")]
-    lifecycle: ComponentLifecycle,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    bundled_into: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        deserialize_with = "deserialize_empty_as_none"
-    )]
-    build_artifact: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    build_command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extensions: Option<HashMap<String, ScopedExtensionConfig>>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    capability_extensions: HashMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version_targets: Option<Vec<VersionTarget>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    harvest_excludes: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_next_section_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_next_section_aliases: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    hooks: HashMap<String, Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extract_command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_owner: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deploy_strategy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_deploy: Option<GitDeployConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    deployment_provider: Option<DeploymentProviderAttachment>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_url: Option<String>,
-    #[serde(default, skip_serializing_if = "is_default_github_config")]
-    github: GithubConfig,
-    #[serde(default, skip_serializing_if = "ComponentReleaseConfig::is_default")]
-    release: ComponentReleaseConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    triage_remote_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    priority_labels: Option<Vec<String>>,
-    #[serde(default)]
-    auto_cleanup: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    docs_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    docs_dirs: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scopes: Option<ScopeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scripts: Option<ComponentScriptsConfig>,
-    #[serde(default, skip_serializing_if = "ComponentManagedExecution::is_default")]
-    managed_execution: ComponentManagedExecution,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    audit: Option<AuditConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    dependency_stack: Vec<DependencyStackEdge>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    deploy_together: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_inputs: Vec<ArtifactInput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    package_artifacts: Vec<PackageArtifact>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    extra_drift_files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    cleanup_artifacts: Vec<CleanupArtifactDeclaration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    baselines: Option<HashMap<String, serde_json::Value>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    audit_rules: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    review_profile: Option<serde_json::Value>,
-}
-
-impl From<RawComponent> for Component {
-    fn from(raw: RawComponent) -> Self {
-        Component {
-            id: raw.id,
-            aliases: raw.aliases,
-            local_path: raw.local_path,
-            remote_path: raw.remote_path,
-            lifecycle: raw.lifecycle,
-            bundled_into: raw.bundled_into,
-            build_artifact: raw.build_artifact,
-            build_command: raw.build_command,
-            extensions: raw.extensions,
-            capability_extensions: raw.capability_extensions,
-            version_targets: raw.version_targets,
-            changelog_target: raw.changelog_target,
-            harvest_excludes: raw.harvest_excludes,
-            changelog_next_section_label: raw.changelog_next_section_label,
-            changelog_next_section_aliases: raw.changelog_next_section_aliases,
-            hooks: raw.hooks,
-            extract_command: raw.extract_command,
-            remote_owner: raw.remote_owner,
-            deploy_strategy: raw.deploy_strategy,
-            git_deploy: raw.git_deploy,
-            deployment_provider: raw.deployment_provider,
-            remote_url: raw.remote_url,
-            github: raw.github,
-            release: raw.release,
-            triage_remote_url: raw.triage_remote_url,
-            priority_labels: raw.priority_labels,
-            auto_cleanup: raw.auto_cleanup,
-            docs_dir: raw.docs_dir,
-            docs_dirs: raw.docs_dirs,
-            scopes: raw.scopes,
-            scripts: raw.scripts,
-            managed_execution: raw.managed_execution,
-            env: raw.env,
-            audit: raw.audit,
-            dependency_stack: raw.dependency_stack,
-            deploy_together: raw.deploy_together,
-            artifact_inputs: raw.artifact_inputs,
-            package_artifacts: raw.package_artifacts,
-            cli_path: raw.cli_path,
-            extra_drift_files: raw.extra_drift_files,
-            cleanup_artifacts: raw.cleanup_artifacts,
-            baselines: raw.baselines,
-            audit_rules: raw.audit_rules,
-            review_profile: raw.review_profile,
-        }
-    }
-}
-
-impl From<Component> for RawComponent {
-    fn from(c: Component) -> Self {
-        RawComponent {
-            id: c.id,
-            aliases: c.aliases,
-            local_path: c.local_path,
-            remote_path: c.remote_path,
-            lifecycle: c.lifecycle,
-            bundled_into: c.bundled_into,
-            build_artifact: c.build_artifact,
-            build_command: c.build_command,
-            extensions: c.extensions,
-            capability_extensions: c.capability_extensions,
-            version_targets: c.version_targets,
-            changelog_target: c.changelog_target,
-            harvest_excludes: c.harvest_excludes,
-            changelog_next_section_label: c.changelog_next_section_label,
-            changelog_next_section_aliases: c.changelog_next_section_aliases,
-            hooks: c.hooks,
-            extract_command: c.extract_command,
-            remote_owner: c.remote_owner,
-            deploy_strategy: c.deploy_strategy,
-            git_deploy: c.git_deploy,
-            deployment_provider: c.deployment_provider,
-            remote_url: c.remote_url,
-            github: c.github,
-            release: c.release,
-            triage_remote_url: c.triage_remote_url,
-            priority_labels: c.priority_labels,
-            auto_cleanup: c.auto_cleanup,
-            docs_dir: c.docs_dir,
-            docs_dirs: c.docs_dirs,
-            scopes: c.scopes,
-            scripts: c.scripts,
-            managed_execution: c.managed_execution,
-            env: c.env,
-            audit: c.audit,
-            dependency_stack: c.dependency_stack,
-            deploy_together: c.deploy_together,
-            artifact_inputs: c.artifact_inputs,
-            package_artifacts: c.package_artifacts,
-            cli_path: c.cli_path,
-            extra_drift_files: c.extra_drift_files,
-            cleanup_artifacts: c.cleanup_artifacts,
-            baselines: c.baselines,
-            audit_rules: c.audit_rules,
-            review_profile: c.review_profile,
-        }
-    }
 }
 
 impl Component {
@@ -709,6 +556,81 @@ mod tests {
             serialized["harvest_excludes"],
             serde_json::json!(["composer.lock", "vendor/"]),
             "declared harvest_excludes must survive serialization"
+        );
+    }
+
+    /// The emitted shape of a defaulted component. 42 of the 45 fields are
+    /// guarded by a `skip_serializing_if`, so an unconfigured component writes
+    /// nothing it was not asked to write. The three that are not -- `local_path`,
+    /// `remote_path` and `auto_cleanup` -- are bare `#[serde(default)]` and have
+    /// always been materialized unconditionally.
+    ///
+    /// Those guards used to live on the private `RawComponent` that `Component`
+    /// converted through. They now live on `Component` itself, and this pins the
+    /// result: dropping any one of them re-materializes a field into every
+    /// written `homeboy.json`.
+    #[test]
+    fn a_defaulted_component_serializes_to_only_its_three_unguarded_fields() {
+        let serialized =
+            serde_json::to_value(Component::default()).expect("serialize defaulted component");
+
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "local_path": "",
+                "remote_path": "",
+                "auto_cleanup": false
+            })
+        );
+    }
+
+    /// Every declared value must survive load. This is the #10220 class: a field
+    /// present on the way out but dropped on the way in round-tripped back to
+    /// disk while the subsystem that read it could never see a value. With the
+    /// conversion layer gone there is no longer a place for a field to be
+    /// half-wired, and this asserts it for the config's scalar surface.
+    #[test]
+    fn every_declared_field_survives_a_deserialize_serialize_round_trip() {
+        let declared = serde_json::json!({
+            "id": "agents-api",
+            "aliases": ["api", "agents"],
+            "local_path": "/source/agents-api",
+            "remote_path": "wp-content/plugins/agents-api",
+            "lifecycle": "bundled",
+            "bundled_into": "agents-host",
+            "build_artifact": "dist/plugin.zip",
+            "build_command": "npm run build",
+            "capability_extensions": { "deploy": "wordpress" },
+            "changelog_target": "CHANGELOG.md",
+            "harvest_excludes": ["composer.lock", "vendor/"],
+            "changelog_next_section_label": "Unreleased",
+            "changelog_next_section_aliases": ["Next"],
+            "hooks": { "post:release": ["./scripts/notify.sh"] },
+            "extract_command": "unzip",
+            "remote_owner": "www-data",
+            "deploy_strategy": "artifact",
+            "remote_url": "https://github.test/agents-api",
+            "triage_remote_url": "https://github.test/agents-api-issues",
+            "priority_labels": ["p0"],
+            "auto_cleanup": true,
+            "docs_dir": "docs",
+            "docs_dirs": ["docs", "guides"],
+            "env": { "WP_ENV": "production" },
+            "deploy_together": ["agents-theme"],
+            "cli_path": "lando wp",
+            "extra_drift_files": ["sdk/generated.ts"],
+            "baselines": { "audit": { "findings": 0 } },
+            "audit_rules": { "deny": ["core_boundary_leak"] },
+            "review_profile": { "reviewers": ["chubes"] }
+        });
+
+        let component: Component =
+            serde_json::from_value(declared.clone()).expect("component with every field declared");
+        let serialized = serde_json::to_value(&component).expect("serialize component");
+
+        assert_eq!(
+            serialized, declared,
+            "a declared value must be visible after load and identical on the way back out"
         );
     }
 

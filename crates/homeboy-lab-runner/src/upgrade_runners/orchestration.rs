@@ -12,15 +12,13 @@ use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 use std::path::Path;
 
 pub fn preflight_configured_runners_for_upgrade(
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    explicit_source_path: bool,
+    _method_override: Option<InstallMethod>,
+    _source_path: Option<&Path>,
+    _explicit_source_path: bool,
     runner_targets: &[String],
+    candidate_version: &str,
+    extension_ids: &[String],
 ) -> Result<Vec<RunnerUpgradeEntry>> {
-    if method_override != Some(InstallMethod::Source) || source_path.is_none() {
-        return Ok(Vec::new());
-    }
-
     let runners = runner_upgrade_targets(runner_targets)?;
     let mut failures = Vec::new();
     for runner in &runners {
@@ -33,44 +31,194 @@ pub fn preflight_configured_runners_for_upgrade(
             .homeboy_path
             .clone()
             .unwrap_or_else(|| "homeboy".to_string());
-        let materialized = if explicit_source_path {
-            materialize_explicit_runner_source_path(
-                runner,
-                source_path.expect("source path checked"),
-            )
-        } else {
-            materialize_runner_source_path(runner, source_path.expect("source path checked"))
-        };
-        let source_path = match materialized {
-            Ok(path) => path,
-            Err(error) => {
-                failures.push(runner_upgrade_failure_entry(
-                    &runner.id,
-                    homeboy_path,
-                    None,
-                    1,
-                    format!("runner preflight materialization failed: {}", error.message),
-                ));
-                continue;
-            }
-        };
-        if let Some(detail) = prepare_runner_source_checkout_for_upgrade(
-            runner,
-            method_override,
-            Some(&source_path),
-            &mut runner::exec,
-        ) {
+        if let Some(detail) =
+            runner_manifest_preflight(runner, &homeboy_path, candidate_version, extension_ids)
+        {
             failures.push(runner_upgrade_failure_entry(
                 &runner.id,
                 homeboy_path,
                 None,
                 1,
-                format!("runner preflight source checkout failed: {detail}"),
+                detail,
             ));
         }
     }
 
     Ok(failures)
+}
+
+/// Query only the runner's manifest summary. This admission does not install,
+/// refresh, or materialize extensions; those operations remain after promotion.
+fn runner_manifest_preflight(
+    runner: &Runner,
+    homeboy_path: &str,
+    candidate_version: &str,
+    extension_ids: &[String],
+) -> Option<String> {
+    runner_manifest_preflight_with_executor(
+        runner,
+        homeboy_path,
+        candidate_version,
+        extension_ids,
+        &mut runner::exec,
+    )
+}
+
+fn runner_manifest_preflight_with_executor(
+    runner: &Runner,
+    homeboy_path: &str,
+    candidate_version: &str,
+    extension_ids: &[String],
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> Option<String> {
+    for extension_id in extension_ids {
+        if !runner_supports_extension_sync(runner, extension_id) {
+            continue;
+        }
+        let mut options = runner_exec_options(
+            runner,
+            vec![
+                homeboy_path.to_string(),
+                "extension".to_string(),
+                "show".to_string(),
+                extension_id.clone(),
+            ],
+        );
+        options.print_handoff = false;
+        options.mirror_evidence = false;
+        options.read_only_artifact_access = true;
+        let Ok((output, exit_code)) = exec(&runner.id, options) else {
+            return Some(format!(
+                "runner manifest preflight could not query extension `{extension_id}`"
+            ));
+        };
+        if exit_code != 0 {
+            return Some(format!("runner manifest preflight failed for extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
+        }
+        let Some(requires_homeboy) = runner_extension_requires_homeboy(&output.stdout) else {
+            continue;
+        };
+        match homeboy_extension::evaluate_core_compatibility_for_version(
+            Some(&requires_homeboy),
+            None,
+            candidate_version,
+        ) {
+            Ok(report) if report.status != "incompatible" => {}
+            Ok(_) => return Some(format!("runner extension `{extension_id}` requires homeboy {requires_homeboy}, incompatible with selected controller {candidate_version}; recover with: {homeboy_path} extension update {extension_id}")),
+            Err(error) => return Some(format!("runner extension `{extension_id}` has invalid homeboy compatibility declaration: {}; recover with: {homeboy_path} extension show {extension_id}", error.message)),
+        }
+    }
+    None
+}
+
+fn runner_extension_requires_homeboy(stdout: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    value
+        .pointer("/data/extension/core_compatibility/requires_homeboy")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod manifest_preflight_tests {
+    use super::*;
+    use crate::{RunnerExecMode, RunnerExecOutput};
+    use homeboy_core::server::RunnerSettings;
+    use std::collections::HashMap;
+
+    #[test]
+    fn reads_runner_manifest_compatibility_from_extension_show_json() {
+        let stdout = r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}}}}"#;
+        assert_eq!(
+            runner_extension_requires_homeboy(stdout).as_deref(),
+            Some(">=2.0.0, <3.0.0")
+        );
+    }
+
+    #[test]
+    fn ignores_extension_show_without_a_compatibility_declaration() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"example"}}}"#;
+        assert!(runner_extension_requires_homeboy(stdout).is_none());
+    }
+
+    #[test]
+    fn changed_runner_manifest_is_rejected_by_revalidation_without_source_sync() {
+        let runner = Runner {
+            id: "lab-a".to_string(),
+            kind: RunnerKind::Ssh,
+            server_id: Some("lab-a-server".to_string()),
+            workspace_root: Some("/home/user/workspace".to_string()),
+            settings: RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: Default::default(),
+        };
+        let extension_ids = vec!["rust".to_string()];
+        let manifests = [
+            r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#,
+            r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#,
+        ];
+        let mut call_count = 0;
+        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
+            assert_eq!(runner_id, "lab-a");
+            assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
+            assert!(options.read_only_artifact_access);
+            let stdout = manifests[call_count].to_string();
+            call_count += 1;
+            Ok((
+                RunnerExecOutput {
+                    variant: "exec",
+                    command: "runner.exec",
+                    runner_id: runner_id.to_string(),
+                    dry_run: false,
+                    mode: RunnerExecMode::DiagnosticSsh,
+                    argv: options.command,
+                    remote_cwd: "/home/user/workspace".to_string(),
+                    exit_code: 0,
+                    stdout,
+                    stderr: String::new(),
+                    source_snapshot: None,
+                    job: None,
+                    runner_job: None,
+                    job_id: None,
+                    job_events: None,
+                    mirror_run_id: None,
+                    patch: None,
+                    mutation_artifacts: None,
+                    artifacts: Vec::new(),
+                    promoted_outputs: Vec::new(),
+                    structured_summaries: Vec::new(),
+                    metrics: None,
+                    capture: None,
+                    execution_record: None,
+                    runner_result: None,
+                    handoff: None,
+                    diagnostics: None,
+                },
+                0,
+            ))
+        };
+
+        assert!(runner_manifest_preflight_with_executor(
+            &runner,
+            "homeboy",
+            "2.1.0",
+            &extension_ids,
+            &mut exec,
+        )
+        .is_none());
+        let rejection = runner_manifest_preflight_with_executor(
+            &runner,
+            "homeboy",
+            "2.1.0",
+            &extension_ids,
+            &mut exec,
+        )
+        .expect("changed manifest is rejected during revalidation");
+        assert!(rejection.contains("incompatible with selected controller 2.1.0"));
+        assert_eq!(call_count, 2);
+    }
 }
 
 pub(crate) fn upgrade_configured_runners(
@@ -801,11 +949,20 @@ fn refresh_managed_immutable_runner(
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
     let recovery_commands = managed_immutable_runner_recovery_commands(&runner.id);
+    let Some(controller_commit) = homeboy_product_identity::build_identity().git_commit else {
+        return managed_immutable_runner_failure_entry(
+            &runner.id,
+            previous_homeboy_path,
+            previous_version,
+            1,
+            "managed immutable runner refresh requires the controller's immutable commit identity; no mutable version-tag recovery action was emitted".to_string(),
+        );
+    };
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
         mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(crate::homeboy_refresh::controller_refresh_ref()),
+        git_ref: Some(controller_commit),
         target_dir: None,
         reconnect: true,
         force: false,

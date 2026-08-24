@@ -97,6 +97,7 @@ pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;
 pub mod external_check_detail_resolver;
+pub mod external_storage_retention;
 pub mod fuzz_config;
 pub mod manifest;
 pub mod manifest_action_config;
@@ -122,6 +123,14 @@ pub use external_check_detail_resolver::{
     EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };
+pub use external_storage_retention::{
+    ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
+    ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
+    ExternalStorageResourceClass, ExternalStorageRetentionConfig,
+    ExternalStorageRetentionProviderConfig, ExternalStorageRoot,
+    DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS, EXTERNAL_STORAGE_RETENTION_SCHEMA,
+    MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS, MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
+};
 pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
     ArtifactCleanupCategory, ArtifactCleanupConfig, ArtifactCleanupDeclaration,
@@ -143,9 +152,9 @@ pub use trace_spec::{
 };
 
 pub use core_compat::{
-    core_incompatible_error, evaluate_core_compatibility, installed_homeboy_version,
-    validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
-    CORE_INCOMPATIBLE_DIAGNOSTIC,
+    core_incompatible_error, evaluate_core_compatibility, evaluate_core_compatibility_for_version,
+    installed_homeboy_version, validate_core_compatibility, CoreCompatibilityReport,
+    CORE_COMPAT_REMEDIATION_COMMAND, CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use manifest_test_config::{TestPassthroughFilter, TestPassthroughFilterStrategy};

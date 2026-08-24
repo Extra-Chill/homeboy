@@ -162,6 +162,43 @@ exit 1
 }
 
 #[test]
+fn full_scope_legacy_baseline_is_compared_with_legacy_provenance() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let finding = homeboy_core::finding::HomeboyFinding::builder("eslint", "known finding")
+            .fingerprint("known")
+            .build();
+        crate::lint::baseline::save_baseline(source.path(), "legacy", &[finding])
+            .expect("save legacy baseline");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"eslint","message":"known finding","fingerprint":"known","file":"src/lib.rs"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+        );
+
+        let workflow = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("run dir"),
+        )
+        .expect("workflow result");
+
+        assert_eq!(workflow.status, "passed");
+        assert_eq!(workflow.exit_code, 0);
+        let provenance = workflow
+            .baseline_provenance
+            .as_ref()
+            .expect("baseline provenance");
+        assert!(provenance.compared);
+        assert_eq!(provenance.baseline_key, "lint");
+    });
+}
+
+#[test]
 fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
@@ -196,21 +233,19 @@ fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
             home.path(),
             source.path(),
             r#"#!/bin/sh
-if [ -n "$HOMEBOY_LINT_GLOB" ]; then
+if grep -q candidate "$HOMEBOY_LINT_GLOB"; then
+  if grep -q 'candidate new' "$HOMEBOY_LINT_GLOB"; then
+    printf '[{"tool":"phpcs","message":"introduced","fingerprint":"introduced","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+    exit 1
+  fi
   printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
   printf '[{"tool":"phpcs","status":"passed","finding_count":0},{"tool":"phpstan","status":"passed","finding_count":0}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
   exit 0
-else
-  printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"untouched.php"},{"tool":"phpstan","message":"relocated","fingerprint":"relocated","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-  exit 1
 fi
+printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
 "#,
         );
-        let known = homeboy_core::finding::HomeboyFinding::builder("phpcs", "known")
-            .fingerprint("known")
-            .build();
-        crate::lint::baseline::save_baseline(source.path(), "fixture", &[known])
-            .expect("save baseline");
 
         let mut pr_args = lint_args();
         pr_args.changed_since = Some("baseline".to_string());
@@ -226,47 +261,94 @@ fi
         assert_eq!(pr_result.status, "passed");
         assert_eq!(pr_result.exit_code, 0);
         assert!(pr_result.findings.as_ref().is_some_and(Vec::is_empty));
-        assert!(pr_result.baseline_comparison.is_none());
+        assert!(pr_result
+            .baseline_comparison
+            .is_some_and(|comparison| comparison.new_items.is_empty()));
         let provenance = pr_result
             .baseline_provenance
             .as_ref()
             .expect("scoped baseline provenance");
-        assert!(!provenance.compared);
+        assert!(provenance.compared);
+        assert!(provenance.base_ref.is_some());
         assert_eq!(provenance.files, vec!["legacy.php"]);
         assert_eq!(provenance.tools, vec!["phpcs", "phpstan"]);
         assert_eq!(provenance.scope, "changed");
         assert!(provenance.baseline_key.starts_with("lint:"));
         assert_ne!(provenance.baseline_key, "lint");
 
-        let mut save_args = lint_args();
-        save_args.changed_since = Some("baseline".to_string());
-        save_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
-        save_args.baseline_flags.baseline = true;
-        run_main_lint_workflow(
+        std::fs::write(source.path().join("legacy.php"), "<?php // candidate new\n")
+            .expect("introduced candidate source");
+        let mut introduced_args = lint_args();
+        introduced_args.changed_since = Some("baseline".to_string());
+        introduced_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let introduced = run_main_lint_workflow(
             &component,
             source.path(),
-            save_args,
-            &RunDir::create().expect("scoped baseline run dir"),
+            introduced_args,
+            &RunDir::create().expect("introduced finding run dir"),
         )
-        .expect("save scoped baseline");
+        .expect("introduced finding workflow result");
+        assert_eq!(introduced.status, "failed");
+        assert_eq!(introduced.exit_code, 1);
+        assert!(introduced
+            .baseline_comparison
+            .is_some_and(|comparison| comparison.new_items.len() == 1));
+    });
+}
 
-        let mut compare_args = lint_args();
-        compare_args.changed_since = Some("baseline".to_string());
-        compare_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
-        let scoped_baseline_result = run_main_lint_workflow(
+#[test]
+fn unavailable_changed_since_baseline_does_not_suppress_matching_stored_findings() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+        );
+        let mut seed_args = lint_args();
+        seed_args.changed_since = Some("unreachable-base".to_string());
+        seed_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        seed_args.baseline_flags.ignore_baseline = true;
+        let seed = run_main_lint_workflow(
             &component,
             source.path(),
-            compare_args,
-            &RunDir::create().expect("scoped comparison run dir"),
+            seed_args,
+            &RunDir::create().expect("seed run dir"),
         )
-        .expect("compare scoped baseline");
-        assert!(scoped_baseline_result
+        .expect("seed workflow result");
+        let provenance = seed
             .baseline_provenance
             .as_ref()
-            .is_some_and(|provenance| provenance.compared));
-        assert!(scoped_baseline_result
-            .baseline_comparison
-            .is_some_and(|comparison| comparison.new_items.is_empty()));
+            .expect("stored baseline provenance");
+        crate::lint::baseline::save_baseline_for_scope(
+            source.path(),
+            "fixture",
+            seed.findings.as_deref().expect("seed findings"),
+            Some(provenance),
+        )
+        .expect("save matching baseline");
+
+        let mut args = lint_args();
+        args.changed_since = Some("unreachable-base".to_string());
+        args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            args,
+            &RunDir::create().expect("candidate run dir"),
+        )
+        .expect("candidate workflow result");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.baseline_comparison.is_none());
+        assert!(result
+            .baseline_provenance
+            .is_some_and(|provenance| !provenance.compared));
+        assert_eq!(result.findings.as_ref().map(Vec::len), Some(1));
     });
 }
 

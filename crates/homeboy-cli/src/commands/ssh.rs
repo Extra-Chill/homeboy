@@ -3,6 +3,7 @@ use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server};
 use homeboy::core::server::{resolve_context, CommandObservation, SshClient, SshResolveArgs};
 use serde::Serialize;
+use serde_json::Value;
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -66,14 +67,18 @@ pub(super) fn is_raw_command(args: &SshArgs) -> bool {
 #[derive(Subcommand)]
 pub enum SshSubcommand {
     /// List configured SSH server targets
-    List,
+    List {
+        /// Return complete, redacted server configuration records.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "action")]
 pub enum SshOutput {
     Connect(SshConnectOutput),
-    List(SshListOutput),
+    List(Value),
 }
 
 #[derive(Debug, Serialize)]
@@ -146,17 +151,11 @@ fn bounded_tail(value: &str) -> String {
     value[start..].to_string()
 }
 
-#[derive(Debug, Serialize)]
-
-pub struct SshListOutput {
-    pub servers: Vec<Server>,
-}
-
 pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
     match args.subcommand {
-        Some(SshSubcommand::List) => {
+        Some(SshSubcommand::List { full }) => {
             let servers = server::list()?;
-            Ok((SshOutput::List(SshListOutput { servers }), 0))
+            Ok((SshOutput::List(list_output(servers, full)), 0))
         }
         None => {
             ssh_phase("target-resolution-start");
@@ -174,7 +173,30 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                     server: None,
                 }
             };
-            let result = resolve_context(&resolve_args)?;
+            let result = resolve_context(&resolve_args).map_err(|error| {
+                let declared = std::env::var("HOMEBOY_DECLARED_SSH_TARGETS").ok();
+                let requested = args.target.as_deref().unwrap_or_default();
+                match declared.as_deref().filter(|value| !value.is_empty()) {
+                    Some(declared) if declared.split(',').any(|target| target == requested) => {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "target",
+                            format!("declared SSH target `{requested}` is unavailable in this Lab job"),
+                            Some(requested.to_string()),
+                            Some(vec!["Verify the controller target configuration and rerun the Lab workload.".to_string()]),
+                        )
+                    }
+                    Some(declared) => homeboy::core::Error::validation_invalid_argument(
+                        "target",
+                        format!("SSH target `{requested}` is not declared by this Lab workload"),
+                        Some(requested.to_string()),
+                        Some(vec![
+                            format!("Declare `{requested}` in the rig requirements.broker_targets before offloading."),
+                            format!("Declared targets: {declared}"),
+                        ]),
+                    ),
+                    None => error,
+                }
+            })?;
             ssh_phase("target-resolved");
 
             let command_string: Option<String> = if args.command.is_empty() {
@@ -255,6 +277,71 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
             }
         }
     }
+}
+
+const SSH_LIST_LIMIT: usize = 20;
+
+fn list_output(servers: Vec<Server>, full: bool) -> Value {
+    if full {
+        return homeboy::core::redaction::redact_json(
+            &serde_json::to_value(servers).unwrap_or(Value::Null),
+        );
+    }
+
+    let total = servers.len();
+    let shown = servers
+        .iter()
+        .take(SSH_LIST_LIMIT)
+        .map(|server| {
+            serde_json::json!({
+                "id": server.id,
+                "host": bounded_text(&server.host, 160),
+                "user": bounded_text(&server.user, 160),
+                "port": server.port,
+                "kind": server.kind,
+                "runner_configured": server.runner.is_some(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "homeboy/ssh-list/v1",
+        "operator_summary": {
+            "identity": "ssh list",
+            "state": if total == 0 { "empty" } else { "configured" },
+            "risk": Vec::<String>::new(),
+            "next_action": "homeboy ssh <server-id> -- <command>",
+        },
+        "servers": shown,
+        "truncation": {
+            "servers": {
+                "shown": shown.len(),
+                "omitted": total.saturating_sub(shown.len()),
+                "evidence_ref": "ssh:server-config",
+                "full_command": "homeboy ssh list --full",
+            }
+        }
+    })
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let end = value
+        .char_indices()
+        .find_map(|(index, _)| (index >= limit).then_some(index))
+        .unwrap_or(value.len());
+    format!("{}...", &value[..end])
+}
+
+pub(crate) fn render_list_summary(payload: &Value) -> Option<String> {
+    let summary = payload.get("operator_summary")?;
+    let count = payload.get("servers")?.as_array()?.len();
+    Some(format!(
+        "SSH targets\nStatus: {}\nTargets shown: {count}\nNext: {}",
+        summary.get("state")?.as_str()?,
+        summary.get("next_action")?.as_str()?,
+    ))
 }
 
 fn connect_output_from_execution(
@@ -538,6 +625,41 @@ mod tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+    use std::collections::HashMap;
+
+    #[test]
+    fn list_projection_bounds_items_bytes_and_redacts_full_records() {
+        let servers = (0..(SSH_LIST_LIMIT + 5))
+            .map(|index| Server {
+                id: format!("server-{index}"),
+                aliases: Vec::new(),
+                host: "h".repeat(4_000),
+                user: "user".to_string(),
+                port: 22,
+                identity_file: None,
+                kind: None,
+                auth: None,
+                env: HashMap::from([("API_TOKEN".to_string(), "secret-value".to_string())]),
+                runner: None,
+            })
+            .collect::<Vec<_>>();
+        let compact = list_output(servers.clone(), false);
+        let rendered = serde_json::to_string(&compact).expect("compact JSON");
+
+        assert_eq!(
+            compact["servers"].as_array().expect("servers").len(),
+            SSH_LIST_LIMIT
+        );
+        assert_eq!(compact["truncation"]["servers"]["omitted"], 5);
+        assert!(rendered.len() < 8 * 1024, "{rendered}");
+        assert_eq!(
+            render_list_summary(&compact).as_deref(),
+            Some("SSH targets\nStatus: configured\nTargets shown: 20\nNext: homeboy ssh <server-id> -- <command>")
+        );
+
+        let full = list_output(servers, true).to_string();
+        assert!(!full.contains("secret-value"), "{full}");
+    }
 
     /// A cwd-rooted interactive session must hand back a shell, not run `cd` and quit.
     #[test]

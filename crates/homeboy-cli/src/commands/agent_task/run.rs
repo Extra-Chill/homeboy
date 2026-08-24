@@ -302,7 +302,8 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     record_preview_phase(&mut progress, "destination_resolution");
-    let (args, provision) = resolve_cook_preview_destination(args)?;
+    let (args, mut provision) = resolve_cook_preview_destination(args)?;
+    project_preview_dirty_admission(&mut provision);
     let replay = cook_preview_replay_argv(&args);
     record_preview_phase(&mut progress, "placement_projection");
     let placement = preview_placement_policy_with_admission(&replay.argv);
@@ -2394,6 +2395,29 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
+    // A terminal legacy candidate with no model can never finalize. Reject it
+    // before reconciliation can enqueue a continuation or reserve promotion.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if lifecycle_store
+        .read_record(&run_id)
+        .is_ok_and(|record| record.state.is_terminal())
+    {
+        if let Err(error) =
+            agent_task_service_direct::validate_cook_attempt_model_provenance(&run_id)
+        {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "model_provenance",
+                    &error,
+                ),
+                1,
+            ));
+        }
+    }
     let record = match agent_task_service::reconcile_recipe_attempt_for_continuation(
         &recipe, &run_id,
     ) {
@@ -3070,13 +3094,23 @@ pub(crate) fn resolve_cook_destination(
             "--task-url <url> is required when --to-worktree is omitted".to_string(),
         ])
     })?;
+    let task_url = homeboy::core::worktree_providers::normalize_task_url(task_url);
+    args.dispatch.task_url = Some(task_url.clone());
     let config = defaults::load_config();
-    // DMC's provider mapping currently exposes safety and handle metadata but
-    // not task ownership. In that mode the canonical handle is still resolved
-    // first; its ensure operation must reject a different task-owned worktree.
-    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_from_config(task_url, &config) {
-        Ok(Some(resolution)) => resolution.worktree.handle,
-        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&derived_cook_branch(task_url)?)),
+    // Resolve the requested branch before task discovery. An explicit --head is
+    // authoritative through candidate reuse, provisioning, and finalization.
+    let head = match args.head.clone() {
+        Some(head) => head,
+        None => derived_cook_branch(&task_url)?,
+    };
+    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(&task_url, args.head.as_deref(), &config) {
+        Ok(Some(resolution)) => {
+            if args.head.is_none() {
+                args.head = Some(resolution.worktree.branch.clone());
+            }
+            resolution.worktree.handle
+        }
+        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&head)),
         Err(mut error) => {
             if let Some(handles) = error.message.strip_prefix(&format!("multiple active apply-enabled worktrees are owned by `{task_url}`: ")) {
                 error.details["recovery"] = serde_json::json!(handles.split(", ").map(|handle| format!("homeboy agent-task cook --to-worktree {handle}")).collect::<Vec<_>>());
@@ -3085,7 +3119,7 @@ pub(crate) fn resolve_cook_destination(
         }
     });
     if args.head.is_none() {
-        args.head = Some(derived_cook_branch(task_url)?);
+        args.head = Some(head);
     }
     resolve_cook_base(&mut args)?;
     Ok(args)
@@ -3356,6 +3390,45 @@ fn resolve_cook_preview_destination(
             "path": path,
         }),
     ))
+}
+
+/// Preview must report the same fail-closed first-provider admission when the
+/// resolved local checkout can be inspected without mutating it.
+fn project_preview_dirty_admission(provision: &mut Value) {
+    let Some(path) = provision.get("path").and_then(Value::as_str) else {
+        return;
+    };
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(path)
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let mut tracked = 0;
+    let mut staged = 0;
+    let mut untracked = 0;
+    for entry in output.stdout.split(|byte| *byte == b'\0') {
+        if entry.len() < 2 {
+            continue;
+        }
+        if entry.starts_with(b"??") {
+            untracked += 1;
+        } else {
+            staged += usize::from(entry[0] != b' ');
+            tracked += usize::from(entry[1] != b' ');
+        }
+    }
+    if tracked + staged + untracked > 0 {
+        provision["admission"] = serde_json::json!({
+            "status": "would_refuse_dirty_candidate",
+            "reason": "Cook requires a clean destination before its first provider execution",
+            "changes": { "tracked": tracked, "staged": staged, "untracked": untracked },
+        });
+    }
 }
 
 fn unresolved_provider_preview(handle: &str, error: homeboy::core::Error) -> Value {
@@ -3803,12 +3876,8 @@ fn repository_identity_error(
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
-    let issue = task_url
-        .trim()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('/');
+    let issue = homeboy::core::worktree_providers::normalize_task_url(task_url);
+    let issue = issue.as_str();
     let Some((repository, number)) = issue.rsplit_once("/issues/") else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
@@ -4138,7 +4207,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None, None)?;
+            progress(
+                "preparing",
+                Some(&cook_id),
+                Some(&run_id),
+                Some("preparing durable Cook inputs"),
+                None,
+            )?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -4216,11 +4291,16 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
-    let selected_model = initial_plan
-        .tasks
-        .first()
-        .and_then(|task| task.executor.model())
-        .map(str::to_string);
+    let selected_identity = initial_plan.tasks.first().map(|task| {
+        (
+            task.executor.backend.clone(),
+            task.executor.selector.clone(),
+            task.executor.model().map(str::to_string),
+        )
+    });
+    let selected_model = selected_identity
+        .as_ref()
+        .and_then(|(_, _, model)| model.clone());
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
@@ -4240,6 +4320,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
                     Some(event.cook_id),
                     Some(event.run_id),
                     terminal_outcome.or(activity.as_deref()),
+                    event.terminal_retry_command,
                 )
             })
             .unwrap_or(Ok(()))
@@ -4271,9 +4352,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             protected_branches: args.protected_branches,
             ai_tool: super::fanout::resolve_ai_tool_disclosure(
                 &args.ai_tool,
-                args.dispatch.backend.as_deref(),
-                args.dispatch.selector.as_deref(),
-                args.dispatch.model.as_deref(),
+                selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
+                selected_identity
+                    .as_ref()
+                    .and_then(|(_, selector, _)| selector.as_deref()),
+                selected_model.as_deref(),
             ),
             // Model identity comes only from explicit/config/rotation selection
             // (`--model`, provider profile). Disclosure text like
@@ -4851,7 +4934,7 @@ pub(crate) fn compile_cook_plan(
         }
     }
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
-        .validate_explicit_models(&plan)?;
+        .validate_selected_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
         for task in &mut plan.tasks {
@@ -6942,9 +7025,46 @@ mod tests {
         cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
         cook_resolved_policy_disclosure, detached_cook_route_less_warning,
-        durable_cook_identity_lines, preflight_continue_cook,
+        durable_cook_identity_lines, preflight_continue_cook, project_preview_dirty_admission,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
+
+    #[test]
+    fn preview_projects_each_dirty_admission_state() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(workspace.path().join("tracked.txt"), "base\n").expect("write base");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+
+        std::fs::write(workspace.path().join("tracked.txt"), "modified\n")
+            .expect("modify tracked file");
+        std::fs::write(workspace.path().join("staged.txt"), "staged\n").expect("write staged file");
+        git(&["add", "staged.txt"]);
+        std::fs::write(workspace.path().join("untracked.txt"), "untracked\n")
+            .expect("write untracked file");
+
+        let mut provision = serde_json::json!({ "path": workspace.path() });
+        project_preview_dirty_admission(&mut provision);
+
+        assert_eq!(
+            provision["admission"]["status"],
+            "would_refuse_dirty_candidate"
+        );
+        assert_eq!(provision["admission"]["changes"]["tracked"], 1);
+        assert_eq!(provision["admission"]["changes"]["staged"], 1);
+        assert_eq!(provision["admission"]["changes"]["untracked"], 1);
+    }
 
     #[test]
     fn durable_cook_identity_block_leads_with_the_run_id_and_follow_up_commands() {

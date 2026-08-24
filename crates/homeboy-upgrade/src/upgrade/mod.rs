@@ -28,9 +28,9 @@ pub(crate) use runner_upgrade_provider::with_runner_upgrade;
 pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
 pub use services::restart_extension_services;
 pub use types::{
-    ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod, RunnerDaemonDriftEntry,
-    RunnerExtensionSyncEntry, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus,
-    UpgradeResult, VersionCheck,
+    ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod,
+    RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry, ServiceRestartEntry,
+    UpgradeComponentStatus, UpgradePreflight, UpgradeResult, VersionCheck,
 };
 pub use validation::check_for_updates;
 

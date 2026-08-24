@@ -15,16 +15,16 @@ use super::types::{ReleaseArtifact, ReleaseOptions, ReleaseState, ReleaseStepRes
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleasePackageResult {
-    pub schema: &'static str,
-    pub schema_version: u32,
-    pub component_id: String,
-    pub tag: String,
-    pub version: String,
-    pub commit: String,
-    pub artifact_dir: String,
-    pub manifest_path: String,
-    pub artifacts: Vec<ReleaseArtifact>,
-    pub package_step: ReleaseStepResult,
+    pub(crate) schema: &'static str,
+    pub(crate) schema_version: u32,
+    pub(crate) component_id: String,
+    pub(crate) tag: String,
+    pub(crate) version: String,
+    pub(crate) commit: String,
+    pub(crate) artifact_dir: String,
+    pub(crate) manifest_path: String,
+    pub(crate) artifacts: Vec<ReleaseArtifact>,
+    pub(crate) package_step: ReleaseStepResult,
 }
 
 /// Regenerate the release package for an already-published tag.

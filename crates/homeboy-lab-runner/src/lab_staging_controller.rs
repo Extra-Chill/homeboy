@@ -2377,11 +2377,6 @@ const LAB_STAGING_POLL_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 /// produced.
 const LAB_STAGING_POLL_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Longest uninterrupted sleep slice. Backoff grows the *total* wait between
-/// polls, but cancellation is still observed at this granularity, so growing
-/// backoff cannot regress cancellation responsiveness.
-const LAB_STAGING_POLL_CANCELLATION_SLICE: Duration = Duration::from_millis(200);
-
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2425,23 +2420,17 @@ fn staging_poll_budget(request: &LabStagingExecutionRequest) -> Duration {
 
 /// Sleep up to `interval`, waking early if cancellation is observed.
 ///
-/// Returns `true` when cancellation was seen. Sleeping in
-/// `LAB_STAGING_POLL_CANCELLATION_SLICE` slices keeps worst-case cancellation
-/// latency fixed regardless of how far backoff has grown.
+/// Returns `true` when cancellation was seen. The slicing lives in
+/// [`crate::cancellable_sleep`]; backoff grows the *total* wait between polls,
+/// but cancellation is still observed at a fixed slice granularity, so growing
+/// backoff cannot regress cancellation responsiveness.
 fn sleep_unless_cancelled(
     interval: Duration,
     cancellation: Option<&LabStagingCancellationToken>,
 ) -> bool {
-    let mut remaining = interval;
-    while !remaining.is_zero() {
-        if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
-            return true;
-        }
-        let slice = remaining.min(LAB_STAGING_POLL_CANCELLATION_SLICE);
-        std::thread::sleep(slice);
-        remaining = remaining.saturating_sub(slice);
-    }
-    cancellation.is_some_and(LabStagingCancellationToken::is_cancelled)
+    crate::cancellable_sleep::sleep_unless_cancelled(interval, || {
+        cancellation.is_some_and(LabStagingCancellationToken::is_cancelled)
+    })
 }
 
 fn next_staging_poll_backoff(current: Duration) -> Duration {

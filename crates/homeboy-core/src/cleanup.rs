@@ -40,6 +40,11 @@ pub use degraded::{
     STORE_INDEPENDENT_CLEANUP_CATEGORIES,
 };
 mod extension_declarations;
+mod external_storage;
+pub use external_storage::{
+    cleanup_external_storage_from_extensions, cleanup_external_storage_with_providers,
+    ExternalStorageCleanupOptions, ExternalStorageCleanupOutput,
+};
 pub mod leaked_test_homes;
 pub use leaked_test_homes::{
     cleanup_leaked_test_homes, effective_temp_roots, owned_test_tempdir_prefix,

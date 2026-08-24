@@ -57,10 +57,6 @@ impl PathRoots {
 
 mod locations;
 mod rigs;
-#[allow(
-    dead_code,
-    reason = "Runtime path helpers support platform-specific and integration-test flows."
-)]
 mod runtime;
 
 pub use locations::*;

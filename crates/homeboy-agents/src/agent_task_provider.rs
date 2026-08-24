@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +40,7 @@ pub(crate) mod command_runner;
 mod config_preflight;
 mod credential_readiness;
 pub mod discovery;
+mod dispatchability;
 mod executor;
 mod fixture_gate;
 // The `fixture` backend is a test double, not an agent runtime. Its
@@ -79,6 +80,13 @@ pub use credential_readiness::{
     AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
     AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
+pub use dispatchability::{
+    evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
+    preflight_plan_provider_dispatchability_with_providers, preflight_provider_dispatchability,
+    preflight_provider_dispatchability_with_config,
+    preflight_provider_dispatchability_without_runtime_with_config,
+    AgentTaskProviderDispatchability,
+};
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
@@ -90,6 +98,7 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
+pub(crate) use runtime_readiness::{effective_provider_config, readiness_verdict};
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };
@@ -128,9 +137,6 @@ use outcome_normalization::{
     surface_provider_run_result_diagnostics,
 };
 #[cfg(test)]
-use resolution::{
-    discover_agent_task_executor_providers, provider_requires_cwd_git_checkout_with_providers,
-    select_provider_by_backend,
-};
+use resolution::{provider_requires_cwd_git_checkout_with_providers, select_provider_by_backend};
 #[cfg(test)]
 use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};

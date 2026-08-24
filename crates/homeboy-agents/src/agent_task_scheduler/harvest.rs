@@ -644,7 +644,7 @@ mod committed_harvest_tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use homeboy_core::source_snapshot::SourceSnapshot;
+
     use sha2::{Digest, Sha256};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;

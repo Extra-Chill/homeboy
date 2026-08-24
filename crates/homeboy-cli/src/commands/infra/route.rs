@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agents::agent_task_service::DerivedCookBaselineCapability;
+use crate::command_contract::{LabCommandPortability, LabCommandRoute};
 use crate::commands::utils::resource_policy;
 use crate::core::io::output_file::write_output_file;
 
@@ -592,6 +593,267 @@ pub(crate) fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// Global route inputs available to descriptor-composed commands. Keeping this
+/// separate from `Cli` lets a capability use the shared Lab dispatcher without
+/// pretending its parsed arguments are a static `Commands` variant.
+pub(crate) struct ComposedLabRouteOptions<'a> {
+    pub placement: homeboy::cli_surface::Placement,
+    pub runner: Option<&'a str>,
+    pub allow_dirty_lab_workspace: bool,
+    pub skip_deps_hydration: bool,
+    pub preserve_workspace_on_failure: bool,
+    pub detach_after_handoff: bool,
+    pub runner_env: &'a [String],
+    pub runner_secret_env: &'a [String],
+    pub lab_env_json: Option<&'a str>,
+    pub runner_workspace_root: Option<&'a str>,
+}
+
+/// Route a descriptor-composed command through the same core Lab contract and
+/// placement dispatcher used by built-ins. Static-command controller adapters
+/// (Cook/Fanout materialization and trace observers) intentionally remain on
+/// their typed path; composed commands use the generic no-op observer.
+pub(crate) fn route_composed_lab_command(
+    route: &LabCommandRoute,
+    options: ComposedLabRouteOptions<'_>,
+    normalized_args: &[String],
+    output_file: Option<&str>,
+) -> homeboy::core::Result<Option<i32>> {
+    let Some(route_contract) = route.lab_route_contract() else {
+        if options.placement == homeboy::cli_surface::Placement::Lab || options.runner.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "placement",
+                "this composed command has no Lab route contract",
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    };
+    if matches!(
+        route_contract.command.portability,
+        LabCommandPortability::LocalOnly(_)
+    ) {
+        if options.placement == homeboy::cli_surface::Placement::Lab || options.runner.is_some() {
+            let LabCommandPortability::LocalOnly(reason) = route_contract.command.portability
+            else {
+                unreachable!("local-only route was matched above");
+            };
+            return Err(Error::validation_invalid_argument(
+                "placement",
+                format!("Lab placement is unavailable for this composed command: {reason}"),
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    }
+    if options.placement == homeboy::cli_surface::Placement::Local {
+        return Ok(None);
+    }
+
+    let read_only_polling = route_contract.command.routing_policy.read_only_polling;
+    let command = lab_routing::lab_offload_command_from_route_contract(route_contract);
+    let task = command.command.hot_label;
+    let inferred_runner = options.runner.map(ToOwned::to_owned).or_else(|| {
+        (command.command.routing_policy.default_lab_offload
+            || options.placement == homeboy::cli_surface::Placement::Lab)
+            .then(|| runners::lab_runner_readiness().ok())
+            .flatten()
+            .and_then(|readiness| readiness.selected_runner_id)
+    });
+    let runner_id = inferred_runner.as_deref().filter(|_| {
+        options.runner.is_some()
+            || lab_routing::authorizes_policy_lab_runner(
+                &command.command,
+                options.placement,
+                lab_routing::captured_pressure_severity().as_deref(),
+            )
+    });
+    if runner_id.is_none() && options.placement != homeboy::cli_surface::Placement::Lab {
+        return Ok(None);
+    }
+
+    let source_path = std::env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve composed Lab source path".to_string()),
+        )
+    })?;
+    let decision = composed_placement_decision(
+        options.placement,
+        options.runner.is_some(),
+        runner_id,
+        task,
+        &source_path,
+    )?;
+    let outcome = lab_routing::dispatch_lab_offload(
+        LabRoutingRequest {
+            placement_decision: decision,
+            command: Some(command),
+            normalized_args,
+            explicit_runner: options.runner,
+            placement: options.placement,
+            allow_local_fallback: options.placement.allows_local_fallback(),
+            allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
+            skip_deps_hydration: options.skip_deps_hydration,
+            preserve_workspace_on_failure: options.preserve_workspace_on_failure,
+            capture_patch: route.lab_offload_captures_mutation_patch(),
+            mutation_flag: route.lab_offload_mutation_flag(),
+            timeout: None,
+            placement_outcome_target: None,
+            detach_after_handoff: options.detach_after_handoff,
+            output_file_requested: output_file.is_some(),
+            read_only_polling,
+            local_output_file: output_file,
+            durable_agent_task_plan: None,
+            durable_run_id: None,
+            source_path: Some(&source_path),
+            verified_cook_baseline: None,
+            require_controller_git_bundle: false,
+            reuse_compatible_snapshot: false,
+            job_overrides: composed_lab_job_overrides(&options)?,
+        },
+        runner_id,
+        Box::new(NoopLabDispatchObserver),
+    )?;
+    match outcome {
+        LabRouteOutcome::RunLocal => Ok(None),
+        LabRouteOutcome::InFlight(output) | LabRouteOutcome::Offloaded(output) => {
+            if !output.stderr.is_empty() {
+                eprint!("{}", output.stderr);
+            }
+            if let Some(path) = output_file {
+                write_offloaded_stdout(path, &output.stdout)?;
+            }
+            print!("{}", output.stdout);
+            Ok(Some(output.exit_code))
+        }
+    }
+}
+
+fn composed_placement_decision(
+    placement: homeboy::cli_surface::Placement,
+    explicit_runner: bool,
+    runner_id: Option<&str>,
+    task: &str,
+    source_path: &Path,
+) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+    };
+    if placement == homeboy::cli_surface::Placement::Lab && runner_id.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "required Lab placement has no selected ready runner",
+            Some("lab".to_string()),
+            None,
+        ));
+    }
+    let required = (placement == homeboy::cli_surface::Placement::Lab || explicit_runner)
+        .then_some(ExecutionPlacementRequirement::Lab)
+        .unwrap_or(ExecutionPlacementRequirement::Either);
+    Ok(
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "lab-route-contract",
+            "v1",
+            ExecutionPlacementIdentity {
+                repository: source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "controller-cwd".to_string()),
+                workspace: source_path.display().to_string(),
+                task: task.to_string(),
+                candidate: homeboy::core::git::head_sha(source_path),
+                base: homeboy::core::git::rev_parse(source_path, "origin/HEAD"),
+            },
+            placement,
+            required,
+            runner_id
+                .map(|_| EffectiveExecutionPlacement::Lab)
+                .unwrap_or(EffectiveExecutionPlacement::Local),
+            runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
+                runner_id: runner_id.to_string(),
+                source: if explicit_runner {
+                    RunnerSelectionSource::Explicit
+                } else {
+                    RunnerSelectionSource::Policy
+                },
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: required != ExecutionPlacementRequirement::Lab
+                    && placement.allows_local_fallback(),
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: placement == homeboy::cli_surface::Placement::Local,
+                authority: (placement == homeboy::cli_surface::Placement::Local)
+                    .then(|| "operator --placement local".to_string()),
+            },
+        ),
+    )
+}
+
+fn composed_lab_job_overrides(
+    options: &ComposedLabRouteOptions<'_>,
+) -> homeboy::core::Result<runners::LabJobOverrides> {
+    let mut overrides = runners::LabJobOverrides::default();
+    let policy = RedactionPolicy::default();
+    for raw in options.runner_env {
+        let (name, value) = parse_lab_env_pair("runner-env", raw)?;
+        validate_explicit_runner_env(&policy, &name, &value)?;
+        insert_lab_env_override(&mut overrides, &policy, name, value)?;
+    }
+    for name in options.runner_secret_env {
+        overrides
+            .secret_env_names
+            .push(validate_lab_env_name("runner-secret-env", name)?);
+    }
+    if let Some(raw_json) = options.lab_env_json {
+        let value: serde_json::Value = serde_json::from_str(raw_json).map_err(|error| {
+            Error::validation_invalid_argument("lab-env-json", error.to_string(), None, None)
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lab-env-json",
+                "--lab-env-json must be a JSON object of string or null values",
+                Some(raw_json.to_string()),
+                None,
+            )
+        })?;
+        for (name, value) in object {
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Null => String::new(),
+                _ => {
+                    return Err(Error::validation_invalid_argument(
+                        "lab-env-json",
+                        "values must be strings or null",
+                        None,
+                        None,
+                    ))
+                }
+            };
+            insert_lab_env_override(
+                &mut overrides,
+                &policy,
+                validate_lab_env_name("lab-env-json", name)?,
+                value,
+            )?;
+        }
+    }
+    overrides.secret_env_names.sort();
+    overrides.secret_env_names.dedup();
+    overrides.workspace_root = options
+        .runner_workspace_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(overrides)
 }
 
 fn needs_provider_resolved_cook_interception(cli: &Cli, inferred_runner_id: Option<&str>) -> bool {
@@ -2329,13 +2591,14 @@ fn run_split_placement_cook_with_runtime(
     let progress = |phase: &str,
                     cook_id: Option<&str>,
                     run_id: Option<&str>,
-                    activity: Option<&str>| {
+                    activity: Option<&str>,
+                    terminal_retry_command: Option<&str>| {
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
             }
         } else {
-            progress_reporter.report(phase, cook_id, run_id, activity);
+            progress_reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);
         }
         Ok(())
     };
@@ -2589,6 +2852,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                         "heartbeat",
                         None,
                         Some(&heartbeat_run_id),
+                        None,
                         None,
                     );
                 }

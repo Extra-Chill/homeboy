@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{Barrier, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +23,10 @@ use homeboy_core::{paths, Error, Result};
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
-
+// Base capture reaches the network while holding this lock. It must always
+// surface a wedged peer rather than inherit an operator-configured unbounded
+// config-lock wait.
+const WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
     LazyLock::new(|| Mutex::new((None, 0)));
@@ -91,6 +95,62 @@ impl CookRecipeStore {
         self.recipe_root()
             .join(paths::sanitize_path_segment(cook_id))
             .join("recipe.json")
+    }
+
+    /// Serialize the bounded base capture transaction for one durable recipe.
+    /// Advisory lock ownership is tied to this open file, so the operating
+    /// system releases it if the controller process exits before completing
+    /// either persistence step.
+    pub(crate) fn with_workspace_base_capture_lock<T>(
+        &self,
+        cook_id: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_workspace_base_capture_lock_for(
+            cook_id,
+            WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT,
+            operation,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_workspace_base_capture_lock_for_test<T>(
+        &self,
+        cook_id: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_workspace_base_capture_lock_for(cook_id, timeout, operation)
+    }
+
+    fn with_workspace_base_capture_lock_for<T>(
+        &self,
+        cook_id: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let lock_path = self
+            .recipe_path(cook_id)
+            .with_file_name("workspace-base-capture.lock");
+        let parent = lock_path.parent().expect("recipe lock has parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+        })?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("open Cook workspace base capture lock".to_string()),
+                )
+            })?;
+        lock_workspace_base_capture(&lock, &lock_path, timeout)?;
+        let _lock = lock;
+        operation()
     }
 
     fn supersession_path(&self, cook_id: &str) -> PathBuf {
@@ -238,6 +298,49 @@ impl CookRecipeStore {
             ));
         }
         consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+    }
+}
+
+fn lock_workspace_base_capture(lock: &File, lock_path: &Path, timeout: Duration) -> Result<()> {
+    use fs4::fs_std::FileExt;
+
+    let started = Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock Cook workspace base capture".to_string()),
+                ));
+            }
+        }
+
+        let waited = started.elapsed();
+        if waited >= timeout {
+            let mut error = Error::internal_io(
+                format!(
+                    "timed out after {}ms waiting for Cook workspace base capture lock at {}",
+                    waited.as_millis(),
+                    lock_path.display()
+                ),
+                Some("lock Cook workspace base capture".to_string()),
+            );
+            error.details = serde_json::json!({
+                "kind": "workspace_base_capture_lock_timeout",
+                "path": lock_path,
+                "timeout_ms": timeout.as_millis(),
+                "waited_ms": waited.as_millis(),
+            });
+            error.retryable = Some(true);
+            return Err(error);
+        }
+
+        std::thread::sleep(backoff.min(timeout - waited));
+        backoff = (backoff * 2).min(Duration::from_millis(50));
     }
 }
 

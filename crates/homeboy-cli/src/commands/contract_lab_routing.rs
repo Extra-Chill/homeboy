@@ -22,31 +22,110 @@ use crate::command_contract::{
     LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES,
 };
 
+/// Fully resolved Lab policy for one parsed command invocation.
+///
+/// This sits below the static `Commands` transport enum: built-ins construct it
+/// from their typed arguments, while descriptor-composed commands construct the
+/// same value from their parsed Clap matches. Routing consumers therefore never
+/// need a second capability-specific policy path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabCommandRoute {
+    portability: CommandPortabilityContract,
+    command: Option<LabCommandContract>,
+    required_extensions: Vec<String>,
+    workload: Option<crate::command_contract::LabRigWorkloadArguments>,
+    capture_mutation_patch: bool,
+}
+
+impl LabCommandRoute {
+    pub fn new(
+        portability: CommandPortabilityContract,
+        required_extensions: Vec<String>,
+        workload: Option<crate::command_contract::LabRigWorkloadArguments>,
+    ) -> Self {
+        let capture_mutation_patch = portability
+            .lab_command()
+            .is_some_and(|contract| contract.capture_mutation_patch);
+        Self {
+            command: portability.lab_command(),
+            portability,
+            required_extensions,
+            workload,
+            capture_mutation_patch,
+        }
+    }
+
+    pub fn portability_contract(&self) -> &CommandPortabilityContract {
+        &self.portability
+    }
+
+    pub fn lab_contract(&self) -> Option<LabCommandContract> {
+        self.command.clone()
+    }
+
+    pub fn lab_route_contract(&self) -> Option<crate::command_contract::LabCommandRouteContract> {
+        self.lab_contract().map(|contract| {
+            let mut route = contract.into_route_contract(self.required_extensions.clone());
+            route.workload = self.workload.clone();
+            route
+        })
+    }
+
+    pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
+        self.lab_contract()
+            .and_then(|contract| contract.mutation_flag)
+    }
+
+    pub fn lab_offload_captures_mutation_patch(&self) -> bool {
+        self.capture_mutation_patch
+    }
+}
+
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Only its provider attempt is portable, and that attempt is dispatched to the selected Lab runner: `--placement lab` selects the runner for the attempt (never offloading the coordinator), and `--runner <runner-id>` pins a specific one.";
 pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
-    "agent-task promote with a durable run id or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
+    "agent-task promote with a durable run reference or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task fanout coordination is controller-owned so durable batch state, worktree ownership, and recovery remain available; `--placement lab` (or `--runner <runner-id>`) selects the Lab runner each child provider attempt is dispatched to, and never offloads the coordinator itself";
 
 impl Commands {
-    pub fn lab_contract(&self) -> Option<LabCommandContract> {
-        let mut contract = self.portability_contract().lab_command()?;
-
-        if let Commands::AgentTask(args) = self {
-            if matches!(args.command, agent_task::AgentTaskCommand::Promote(_))
-                || agent_task_controller_materializes_worktree(&args.command)
-                || agent_task_provider_requires_cwd_git_checkout(&args.command)
-            {
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+    /// Resolve this built-in command through the generic Lab route contract.
+    pub(crate) fn lab_route(&self) -> crate::core::Result<LabCommandRoute> {
+        let portability = self.portability_contract();
+        let workload = match self {
+            Commands::Bench(args) => args.lab_rig_workload_arguments(),
+            Commands::Fuzz(args) => args.lab_rig_workload_arguments(),
+            _ => None,
+        };
+        let mut route = LabCommandRoute::new(portability, Vec::new(), workload);
+        if let Some(mut contract) = route.lab_contract() {
+            if let Commands::AgentTask(args) = self {
+                if matches!(args.command, agent_task::AgentTaskCommand::Promote(_))
+                    || agent_task_controller_materializes_worktree(&args.command)
+                    || agent_task_provider_requires_cwd_git_checkout(&args.command)
+                {
+                    contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+                }
             }
+            route.command = Some(contract);
         }
+        if matches!(
+            self,
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Promote(args),
+            }) if args.dry_run
+        ) {
+            route.capture_mutation_patch = false;
+        }
+        Ok(route)
+    }
 
-        Some(contract)
+    pub fn lab_contract(&self) -> Option<LabCommandContract> {
+        self.lab_route().ok()?.lab_contract()
     }
 
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
@@ -252,39 +331,26 @@ impl Commands {
     pub(crate) fn lab_route_contract(
         &self,
     ) -> crate::core::Result<Option<crate::command_contract::LabCommandRouteContract>> {
-        let Some(contract) = self.lab_contract() else {
-            return Ok(None);
-        };
-        let required_extensions = self.lab_required_extensions()?;
-        let mut route = contract.into_route_contract(required_extensions);
-        route.workload = match self {
-            Commands::Bench(args) => args.lab_rig_workload_arguments(),
-            Commands::Fuzz(args) => args.lab_rig_workload_arguments(),
-            _ => None,
-        };
-        Ok(Some(route))
+        let mut route = self.lab_route()?;
+        route.required_extensions =
+            self.lab_required_extensions_for(route.portability_contract())?;
+        Ok(route.lab_route_contract())
     }
 
     pub(crate) fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
-        self.lab_contract()
-            .and_then(|contract| contract.mutation_flag)
+        self.lab_route().ok()?.lab_offload_mutation_flag()
     }
 
     pub(crate) fn lab_offload_captures_mutation_patch(&self) -> bool {
-        if matches!(
-            self,
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Promote(args),
-            }) if args.dry_run
-        ) {
-            return false;
-        }
-        self.lab_contract()
-            .is_some_and(|contract| contract.capture_mutation_patch)
+        self.lab_route()
+            .is_ok_and(|route| route.lab_offload_captures_mutation_patch())
     }
 
-    pub(crate) fn lab_required_extensions(&self) -> crate::core::Result<Vec<String>> {
-        let Some(contract) = self.lab_contract() else {
+    fn lab_required_extensions_for(
+        &self,
+        portability: &CommandPortabilityContract,
+    ) -> crate::core::Result<Vec<String>> {
+        let Some(contract) = portability.lab_command() else {
             return Ok(Vec::new());
         };
         if !contract.routing_policy.requires_extension_parity {
@@ -317,7 +383,13 @@ fn agent_task_fanout_local_only_contract(
 /// aggregate and finalized artifact projections are not portable path inputs.
 /// Other promotion source forms retain their existing runner-local behavior.
 fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
-    agent_task_lifecycle::status(source).is_ok() || std::path::Path::new(source).is_file()
+    // A run artifact URI is an immutable selector over controller-owned durable
+    // state, even when its bytes must be fetched from the producing runner.
+    // Keep its resolution, integrity verification, and target application on
+    // the controller rather than splitting those phases across placements.
+    source.starts_with("homeboy://agent-task/run/")
+        || agent_task_lifecycle::status(source).is_ok()
+        || std::path::Path::new(source).is_file()
 }
 
 pub(crate) fn agent_task_controller_materializes_worktree(

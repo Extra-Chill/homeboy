@@ -27,10 +27,12 @@ pub use baseline::{
     TestBaseline, TestBaselineComparison, TestCounts,
 };
 pub use differential::{
-    classify as classify_differential, classify_against_cache, measurement_from_test_output,
-    render_report, resolve_baseline_revision, BaselineCache, BaselineCacheKey, BaselineEvidence,
-    ComparisonBasis, DifferentialInput, DifferentialReport, DifferentialVerdict, MetricKind,
-    RunOutcome, TestMeasurement,
+    classify as classify_differential, classify_against_cache,
+    measurement_from_terminal_test_evidence, measurement_from_test_output,
+    normalize_terminal_test_evidence, render_report, resolve_baseline_revision, BaselineCache,
+    BaselineCacheKey, BaselineEvidence, ComparisonBasis, DifferentialInput, DifferentialReport,
+    DifferentialVerdict, MetricKind, RunOutcome, TerminalTestEvidence, TerminalTestInventoryItem,
+    TerminalTestOutcome, TerminalTestOutcomeKind, TestMeasurement,
 };
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
 pub use durations::{

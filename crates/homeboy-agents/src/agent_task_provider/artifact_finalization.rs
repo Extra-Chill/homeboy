@@ -29,6 +29,9 @@ pub(crate) struct ExecutorArtifactRootIdentity {
 }
 
 impl ExecutorArtifactRootIdentity {
+    #[cfg(test)]
+    // Convenience entry point used only by the provider test fixtures; production
+    // resolves the finalized root explicitly through capture_with_finalized_root.
     pub(crate) fn capture(path: &Path) -> Result<Self> {
         let finalized_root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
         Self::capture_with_finalized_root(path, finalized_root)

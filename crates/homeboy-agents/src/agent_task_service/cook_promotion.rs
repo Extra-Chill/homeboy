@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_engine_primitives::content_hash;
-use homeboy_engine_primitives::shell::quote_args;
+use homeboy_engine_primitives::shell::{quote_arg, quote_args};
 
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, finalize_pr_with_backend_in_store, preflight_pr_with_backend,
@@ -4358,6 +4358,18 @@ fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> R
     })
 }
 
+/// Shared continuation/finalization admission. Legacy attempts without durable
+/// model evidence are rejected before a continuation can claim or promote them.
+pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    required_execution_model(
+        &cook_attempt_execution_in_store(&lifecycle_store, run_id)?,
+        run_id,
+    )
+    .map(|_| ())
+}
+
 fn cook_ai_lineage_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -4869,18 +4881,26 @@ pub fn cook_failure_context(
             None,
         )
     };
-    let recovery_actions = cook_recovery_actions(
-        status,
+    let recovery_actions = dirty_candidate_adoption_recovery_actions(
+        &recipe,
+        record.as_ref(),
+        cook_id,
         &chronological_latest_run_id,
-        recovery_legal,
-        blocking_claim.is_some(),
-        record
-            .as_ref()
-            .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
-        exact_checkpoint_candidate_mismatch(&diagnostic),
-        ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
-        record.as_ref().and_then(lab_handoff_runtime_recovery),
-    );
+    )
+    .unwrap_or_else(|| {
+        cook_recovery_actions(
+            status,
+            &chronological_latest_run_id,
+            recovery_legal,
+            blocking_claim.is_some(),
+            record
+                .as_ref()
+                .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
+            exact_checkpoint_candidate_mismatch(&diagnostic),
+            ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
+            record.as_ref().and_then(lab_handoff_runtime_recovery),
+        )
+    });
     let promotion_provenance = promotion.cloned();
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
@@ -4906,6 +4926,62 @@ pub fn cook_failure_context(
         recovery_reason: recovery_actions.reason,
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
+    })
+}
+
+/// A dirty initial checkout is never provider input. Its durable failed attempt
+/// can instead adopt a human-committed immutable candidate without replaying a
+/// provider patch. This is available only for the recorded first-provider
+/// admission failure and a recipe that already names the candidate's model.
+fn dirty_candidate_adoption_recovery_actions(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    cook_id: &str,
+    run_id: &str,
+) -> Option<CookRecoveryActions> {
+    let record = record?;
+    if record.metadata["provider_executions_consumed"]
+        .as_u64()
+        .unwrap_or_default()
+        != 0
+        || record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]["reason"]
+            != "first_provider_admission"
+    {
+        return None;
+    }
+    let workspace = record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]
+        ["workspace"]
+        .as_str()?;
+    let options = super::cook_recipe::reconstruct_adoption_options(recipe).ok()?;
+    let model = options.ai_model?;
+    let prefix = super::cook_recovery_command_prefix(run_id);
+    let actions = vec![
+        super::AgentTaskCookRecoveryAction {
+            action: "commit_candidate".to_string(),
+            command: format!(
+                "git -C {} add -A && git -C {} commit -m {}",
+                quote_arg(workspace),
+                quote_arg(workspace),
+                quote_arg(&options.commit_message),
+            ),
+        },
+        super::AgentTaskCookRecoveryAction {
+            action: "review_candidate".to_string(),
+            command: format!("{prefix} agent-task review {}", quote_arg(run_id)),
+        },
+        super::AgentTaskCookRecoveryAction {
+            action: "adopt_candidate".to_string(),
+            command: format!(
+                "{prefix} agent-task adopt {} --candidate-ref HEAD --model {}",
+                quote_arg(cook_id),
+                quote_arg(&model),
+            ),
+        },
+    ];
+    Some(CookRecoveryActions {
+        reason: "The first provider admission refused a dirty checkout. Commit the immutable candidate, record its tracked review, then adopt HEAD through the durable Cook gates without provider patch replay.".to_string(),
+        legal_actions: actions.clone(),
+        next_actions: actions,
     })
 }
 

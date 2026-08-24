@@ -149,9 +149,8 @@ static TEST_ADMISSION_HEAD_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sy
 #[cfg(test)]
 static TEST_ADMISSION_OWNER_CAS_REPLACEMENT: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
 #[cfg(all(unix, any(test, feature = "test-support")))]
-static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<
-    Mutex<BTreeMap<TestExecutableFileIdentity, String>>,
-> = OnceLock::new();
+static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileIdentity, String>>> =
+    OnceLock::new();
 /// Digests this process has already computed, keyed by observed file identity.
 ///
 /// Sealing a cook into an immutable runtime hashes the same bytes repeatedly:
@@ -181,24 +180,16 @@ static TEST_CONTROLLER_FIXTURE_DIGEST_CALLS: std::sync::atomic::AtomicUsize =
 /// One executable file as this process observed it. Inode and change time are
 /// part of the identity so replacing or modifying a path cannot reuse its prior
 /// digest.
+///
+/// This is the single definition of "same file" for both the process-local
+/// digest memo and the test fixture digest cache. It used to be duplicated as a
+/// verbatim `TestExecutableFileIdentity` clone -- same eight fields, same order,
+/// same derives -- which meant strengthening the production identity left the
+/// fixture cache keyed on the older, weaker one and the tests silently stopped
+/// exercising what production does.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ExecutableFileIdentity {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
-}
-
-/// A source fixture is immutable for a hermetic test context. Include inode and
-/// change time so replacing or modifying a path cannot reuse its prior digest.
-#[cfg(all(unix, any(test, feature = "test-support")))]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct TestExecutableFileIdentity {
     path: PathBuf,
     device: u64,
     inode: u64,
@@ -2582,7 +2573,7 @@ fn test_controller_identity(path: &Path, verified_digest: Option<&str>) -> Optio
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
 fn test_controller_fixture_digest(path: &Path) -> Result<String> {
-    let file_identity = test_executable_file_identity(path)?;
+    let file_identity = executable_file_identity(path)?;
     let cache = TEST_CONTROLLER_FIXTURE_DIGESTS.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Some(digest) = cache
         .lock()
@@ -2610,35 +2601,13 @@ fn test_controller_fixture_digest(path: &Path) -> Result<String> {
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
 fn test_registered_fixture_digest(path: &Path) -> Option<String> {
-    let file_identity = test_executable_file_identity(path).ok()?;
+    let file_identity = executable_file_identity(path).ok()?;
     TEST_CONTROLLER_FIXTURE_DIGESTS
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .expect("test controller fixture digest cache is not poisoned")
         .get(&file_identity)
         .cloned()
-}
-
-#[cfg(all(unix, any(test, feature = "test-support")))]
-fn test_executable_file_identity(path: &Path) -> Result<TestExecutableFileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("inspect test controller executable".to_string()),
-        )
-    })?;
-    Ok(TestExecutableFileIdentity {
-        path: path.to_path_buf(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.size(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
-    })
 }
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
@@ -2703,12 +2672,19 @@ fn executable_digest(path: &Path) -> Result<String> {
     Ok(digest)
 }
 
+/// Stat `path` into its observed identity. The one place the eight identity
+/// fields are read, for both the digest memo and the fixture cache.
 #[cfg(unix)]
-fn observed_executable_identity(path: &Path) -> Option<ExecutableFileIdentity> {
+fn executable_file_identity(path: &Path) -> Result<ExecutableFileIdentity> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = fs::metadata(path).ok()?;
-    Some(ExecutableFileIdentity {
+    let metadata = fs::metadata(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect controller executable".to_string()),
+        )
+    })?;
+    Ok(ExecutableFileIdentity {
         path: path.to_path_buf(),
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -2718,6 +2694,12 @@ fn observed_executable_identity(path: &Path) -> Option<ExecutableFileIdentity> {
         changed_seconds: metadata.ctime(),
         changed_nanoseconds: metadata.ctime_nsec(),
     })
+}
+
+/// The memo's view: an unreadable path is simply not memoizable, never an error.
+#[cfg(unix)]
+fn observed_executable_identity(path: &Path) -> Option<ExecutableFileIdentity> {
+    executable_file_identity(path).ok()
 }
 
 #[cfg(not(unix))]
@@ -2920,7 +2902,7 @@ fn register_test_fixture_candidate(source: &Path, candidate: &Path, expected_dig
     {
         return;
     }
-    let Ok(candidate_identity) = test_executable_file_identity(candidate) else {
+    let Ok(candidate_identity) = executable_file_identity(candidate) else {
         return;
     };
     TEST_CONTROLLER_FIXTURE_DIGESTS
