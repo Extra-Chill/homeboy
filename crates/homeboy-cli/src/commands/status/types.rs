@@ -9,6 +9,7 @@ use clap::Args;
 
 use crate::commands::utils::args::ScopeArgs;
 
+#[cfg_attr(test, derive(Default))]
 #[derive(Args)]
 pub struct StatusArgs {
     /// Project ID — show version dashboard for a project's components

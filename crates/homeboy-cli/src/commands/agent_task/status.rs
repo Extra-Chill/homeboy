@@ -2829,12 +2829,18 @@ const DIAGNOSE_ACTION_BASIS_CANDIDATE: &str = "canonical_candidate";
 struct DiagnosedFailure {
     task_id: String,
     classification: AgentTaskFailureClassification,
+    phase: Option<String>,
+    provider_boundary_exists: bool,
+    controller_runtime_recovery_available: bool,
 }
 
 /// Collect the distinct failure classifications a run actually recorded, first
 /// implicated task wins. Successful and no-op outcomes are never a failure
 /// signal even if a stale classification survived on them.
-fn diagnosed_failures(aggregate: &AgentTaskAggregate) -> Vec<DiagnosedFailure> {
+fn diagnosed_failures(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Vec<DiagnosedFailure> {
     let mut failures: Vec<DiagnosedFailure> = Vec::new();
     for outcome in &aggregate.outcomes {
         if matches!(
@@ -2855,6 +2861,16 @@ fn diagnosed_failures(aggregate: &AgentTaskAggregate) -> Vec<DiagnosedFailure> {
         failures.push(DiagnosedFailure {
             task_id: outcome.task_id.clone(),
             classification,
+            phase: outcome
+                .metadata
+                .get("phase")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            provider_boundary_exists: outcome
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "executor-input"),
+            controller_runtime_recovery_available: controller_runtime_recovery_available(record),
         });
     }
     failures
@@ -2879,7 +2895,9 @@ fn attach_diagnose_actionable(
     let candidate_recoverable = classify_candidates(&candidate_payload)
         .state()
         .is_available();
-    let failures = aggregate.map(diagnosed_failures).unwrap_or_default();
+    let failures = aggregate
+        .map(|aggregate| diagnosed_failures(record, aggregate))
+        .unwrap_or_default();
     let (next_actions, basis) = if current_lifecycle_denial {
         (
             current_lifecycle_next_actions(record),
@@ -3016,6 +3034,29 @@ fn classification_next_actions(
     )
     .with_kind(CommandNextActionKind::Show);
 
+    if failure.phase.as_deref() == Some("controller_admission") {
+        let mut actions = vec![failure_evidence];
+        if failure.controller_runtime_recovery_available {
+            actions.push(
+                CommandNextAction::new(
+                    "recover the pinned controller runtime from a trusted source checkout",
+                    format!(
+                        "homeboy agent-task runtime-recover {run} --source <trusted-source-checkout>"
+                    ),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
+        actions.push(
+            CommandNextAction::new(
+                "show the controller admission record and runtime pin",
+                format!("homeboy agent-task status {run} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+        return actions;
+    }
+
     match failure.classification {
         // The provider itself errored or was not resolvable: prove which
         // provider was asked for, and whether it is registered and ready.
@@ -3089,14 +3130,19 @@ fn classification_next_actions(
         }
         // The request the provider received was malformed. Replaying the
         // boundary shows the exact rejected input; a retry would resend it.
-        AgentTaskFailureClassification::InvalidInput => vec![
-            failure_evidence,
-            CommandNextAction::new(
-                format!("replay the provider boundary for {}", failure.task_id),
-                format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
-            )
-            .with_kind(CommandNextActionKind::Show),
-        ],
+        AgentTaskFailureClassification::InvalidInput => {
+            let mut actions = vec![failure_evidence];
+            if failure.provider_boundary_exists {
+                actions.push(
+                    CommandNextAction::new(
+                        format!("replay the provider boundary for {}", failure.task_id),
+                        format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
+                    )
+                    .with_kind(CommandNextActionKind::Show),
+                );
+            }
+            actions
+        }
         // The work ran and failed (gate/verify failure, harvest failure,
         // required typed artifacts missing): show what the failing step
         // recorded and what it produced before deciding to retry.
@@ -3310,16 +3356,10 @@ mod watch_tests {
     fn args() -> StatusArgs {
         StatusArgs {
             run_id: "run-1".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            strict_subject_exit: false,
-            no_runner_probe: false,
             watch: true,
             interval: "250ms".to_string(),
             timeout: "2m".to_string(),
+            ..Default::default()
         }
     }
 
@@ -3835,6 +3875,9 @@ mod diagnose_actionable_tests {
         DiagnosedFailure {
             task_id: "task-a".to_string(),
             classification,
+            phase: None,
+            provider_boundary_exists: true,
+            controller_runtime_recovery_available: false,
         }
     }
 
@@ -3999,7 +4042,7 @@ mod diagnose_actionable_tests {
     }
 
     #[test]
-    fn invalid_input_replays_the_rejected_boundary_instead_of_resending_it() {
+    fn provider_malformed_input_with_a_boundary_replays_the_rejected_input() {
         let actions = actions_for(AgentTaskFailureClassification::InvalidInput, None);
 
         assert_eq!(
@@ -4010,6 +4053,50 @@ mod diagnose_actionable_tests {
             ]
         );
         assert!(repair_commands(&actions).is_empty());
+    }
+
+    #[test]
+    fn invalid_input_without_a_provider_boundary_never_offers_replay() {
+        let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
+        let failure = DiagnosedFailure {
+            task_id: "task-a".to_string(),
+            classification: AgentTaskFailureClassification::InvalidInput,
+            phase: None,
+            provider_boundary_exists: false,
+            controller_runtime_recovery_available: false,
+        };
+
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false);
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        assert_eq!(
+            commands(&actions),
+            vec!["homeboy agent-task evidence run-1 --task task-a --failure-only"]
+        );
+    }
+
+    #[test]
+    fn controller_admission_uses_runtime_recovery_only_when_a_pin_is_recoverable() {
+        let failure = DiagnosedFailure {
+            task_id: "task-a".to_string(),
+            classification: AgentTaskFailureClassification::InvalidInput,
+            phase: Some("controller_admission".to_string()),
+            provider_boundary_exists: false,
+            controller_runtime_recovery_available: true,
+        };
+
+        let (actions, basis) = diagnose_next_actions("run-1", &[failure], &[], None, None, false);
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task runtime-recover run-1 --source <trusted-source-checkout>",
+                "homeboy agent-task status run-1 --full",
+            ]
+        );
     }
 
     #[test]
@@ -4116,6 +4203,9 @@ mod diagnose_actionable_tests {
             &[DiagnosedFailure {
                 task_id: "task with spaces".to_string(),
                 classification: AgentTaskFailureClassification::InvalidInput,
+                phase: None,
+                provider_boundary_exists: true,
+                controller_runtime_recovery_available: false,
             }],
             &[],
             None,
@@ -6183,7 +6273,7 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
         let details = failure.get("details")?;
         let provider_failure =
-            homeboy::core::worktree_providers::compact_provider_failure_details(details)?;
+            homeboy::core::worktree_providers::compact_provider_failure_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -6197,7 +6287,13 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 .unwrap_or("Cook pre-execution failure")
                 .to_string(),
             source: "pre_execution_failure".to_string(),
-            data: json!({ "worktree_provider_failure": provider_failure }),
+            data: json!({
+                "phase": failure.get("phase"),
+                "error_code": failure.get("error_code"),
+                "provider_executions_consumed": failure.get("provider_executions_consumed"),
+                "details": details,
+                "worktree_provider_failure": provider_failure,
+            }),
         });
     }
     let diagnostic = record.metadata.get("cook_controller_failure")?;
@@ -7211,7 +7307,7 @@ fn collected_diagnostic_value_with_details(
     item: CollectedDiagnostic,
     include_details: bool,
 ) -> Value {
-    let owner = diagnostic_owner(&item.class, &item.source);
+    let owner = diagnostic_owner(&item.class, &item.source, &item.data);
     let mut value = json!({
         "task_id": item.task_id,
         "class": item.class,
@@ -7225,6 +7321,8 @@ fn collected_diagnostic_value_with_details(
         }
     } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
+    } else if item.source == "pre_execution_failure" {
+        value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();
     }
@@ -7308,9 +7406,13 @@ fn bounded_diagnostic_value(value: &Value) -> Option<Value> {
     }
 }
 
-fn diagnostic_owner(class: &str, source: &str) -> &'static str {
+fn diagnostic_owner(class: &str, source: &str, data: &Value) -> &'static str {
     let class = class.to_ascii_lowercase();
-    if source == "hydrated_process_stream" {
+    if source == "pre_execution_failure"
+        && data.get("phase").and_then(Value::as_str) == Some("controller_admission")
+    {
+        "controller_runtime"
+    } else if source == "hydrated_process_stream" {
         "provider_runtime"
     } else if class.contains("malformed") || class.contains("normalization") {
         "executor_wrapper"
@@ -7319,6 +7421,20 @@ fn diagnostic_owner(class: &str, source: &str) -> &'static str {
     } else {
         "agent_task"
     }
+}
+
+fn controller_runtime_recovery_available(record: &AgentTaskRunRecord) -> bool {
+    let runtime = record
+        .metadata
+        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+    runtime
+        .and_then(|runtime| runtime.pointer("/originating/pinned_executable"))
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty())
+        && runtime
+            .and_then(|runtime| runtime.pointer("/originating/sha256"))
+            .and_then(Value::as_str)
+            .is_some_and(|digest| !digest.trim().is_empty())
 }
 
 fn missing_artifact_summaries(aggregate: &AgentTaskAggregate) -> Vec<Value> {

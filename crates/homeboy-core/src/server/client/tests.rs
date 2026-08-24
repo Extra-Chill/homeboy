@@ -151,6 +151,8 @@ fn ssh_envelope_owns_remote_descendant_cleanup() {
     let envelope = wrap_owned_remote_command("sleep 30 & printf terminal-result");
 
     assert!(envelope.contains("setsid sh -c"));
+    assert!(envelope.contains("command -v perl"));
+    assert!(envelope.contains("POSIX::setsid"));
     assert!(envelope.contains("exec 3<&0"));
     assert!(envelope.contains("<&3"));
     assert!(envelope.contains("kill -TERM -\"$__homeboy_remote_pid\""));
@@ -870,38 +872,39 @@ fn managed_session_connect_builds_master_command() {
 }
 
 #[cfg(unix)]
-#[test]
-fn successful_owned_remote_shell_with_delayed_eof_reaps_descendant_before_drain() {
-    let marker =
-        std::env::temp_dir().join(format!("homeboy-ssh-stream-drain-{}", std::process::id()));
-    let _ = std::fs::remove_file(&marker);
-    let fixture = tempfile::tempdir().expect("setsid fixture");
-    let setsid = fixture.path().join("setsid");
+fn ssh_equivalent_command(fixture: &tempfile::TempDir, remote_command: &str) -> Command {
+    let transport = fixture.path().join("ssh");
     std::fs::write(
-        &setsid,
-        "#!/usr/bin/env python3\nimport os, signal, sys\npid = os.fork()\nif pid:\n    _, status = os.waitpid(pid, 0)\n    os.killpg(pid, signal.SIGTERM)\n    sys.exit(os.waitstatus_to_exitcode(status))\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
+        &transport,
+        "#!/bin/sh\nfor argument do remote_command=$argument; done\nexec /bin/sh -c \"$remote_command\"\n",
     )
-    .expect("write setsid fixture");
+    .expect("write SSH-equivalent transport");
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
-        .expect("make setsid fixture executable");
-    let mut paths = vec![fixture.path().to_path_buf()];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").expect("PATH"),
-    ));
-    let mut command = Command::new("sh");
+    std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755))
+        .expect("make SSH-equivalent transport executable");
+    let mut command = Command::new(transport);
     command
-        .args([
-            "-c",
-            &wrap_owned_remote_command(&format!(
-                "sleep 5 & printf '%s' \"$!\" > {}; printf snapshot-output",
-                crate::engine::shell::quote_path(&marker.to_string_lossy())
-            )),
-        ])
-        .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+        .args(["fixture@remote", remote_command])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    command
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_equivalent_untimed_execution_reaps_remote_pipe_holder() {
+    let marker =
+        std::env::temp_dir().join(format!("homeboy-ssh-stream-drain-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let fixture = tempfile::tempdir().expect("SSH-equivalent fixture");
+    let command = ssh_equivalent_command(
+        &fixture,
+        &wrap_owned_remote_command(&format!(
+            "sleep 5 & printf '%s' \"$!\" > {}; printf snapshot-output",
+            crate::engine::shell::quote_path(&marker.to_string_lossy())
+        )),
+    );
     let started = Instant::now();
 
     let output = run_ssh_with_child(command);
@@ -920,6 +923,46 @@ fn successful_owned_remote_shell_with_delayed_eof_reaps_descendant_before_drain(
     assert!(
         !crate::process::pid_is_running(pid),
         "successful SSH child leaked its descendant"
+    );
+    let _ = std::fs::remove_file(marker);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_equivalent_untimed_piped_execution_reaps_remote_pipe_holder() {
+    let marker = std::env::temp_dir().join(format!(
+        "homeboy-ssh-piped-stream-drain-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let fixture = tempfile::tempdir().expect("SSH-equivalent fixture");
+    let command = ssh_equivalent_command(
+        &fixture,
+        &wrap_owned_remote_command(&format!(
+            "cat >/dev/null; sleep 5 & printf '%s' \"$!\" > {}; printf piped-output",
+            crate::engine::shell::quote_path(&marker.to_string_lossy())
+        )),
+    );
+    let started = Instant::now();
+
+    let output = run_command_with_stdin_source(
+        command,
+        StdinSource::Reader(Box::new(Cursor::new(b"piped input".to_vec()))),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "piped-output");
+    assert!(
+        started.elapsed() < Duration::from_millis(750),
+        "piped SSH output collection must not wait for a pipe-holding descendant"
+    );
+    let pid = std::fs::read_to_string(&marker)
+        .expect("pipe-holding descendant pid")
+        .parse()
+        .expect("numeric descendant pid");
+    assert!(
+        !crate::process::pid_is_running(pid),
+        "piped SSH child leaked its descendant"
     );
     let _ = std::fs::remove_file(marker);
 }

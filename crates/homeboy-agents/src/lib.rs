@@ -9,10 +9,6 @@
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_artifacts;
-#[allow(
-    dead_code,
-    reason = "Batch test fixtures cover alternative artifact execution paths."
-)]
 pub mod agent_task_batch;
 pub mod agent_task_candidate_baseline;
 pub mod agent_task_config_materialization;
@@ -26,10 +22,6 @@ pub mod agent_task_dispatch_service;
 pub mod agent_task_executor_evidence;
 pub mod agent_task_fanout;
 pub mod agent_task_fanout_supervisor;
-#[allow(
-    dead_code,
-    reason = "Finalization validation supports recovery-driven finalization."
-)]
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
 pub mod agent_task_gate_executor;
@@ -47,11 +39,6 @@ pub mod agent_task_model;
 // and controller lifecycle notifications. Cook's own emitters stay internal.
 pub mod agent_task_notify;
 mod agent_task_process_containment;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Promotion test shards share fixtures and provider helpers."
-)]
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
 #[allow(
