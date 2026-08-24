@@ -563,15 +563,17 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn status_in_store<S, P>(
+fn status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
     mut projection_readiness: P,
+    mut child_record_exists: E,
 ) -> Result<AgentTaskBatchStatusReport>
 where
     S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
     P: FnMut(&str) -> Result<Option<String>>,
+    E: FnMut(&str) -> Result<bool>,
 {
     let mut batch = store.read_batch(batch_id)?;
     if batch.metadata["terminal_failure"].is_object() {
@@ -582,9 +584,7 @@ where
         let admitted = batch
             .child_runs
             .iter()
-            .filter(|child| {
-                agent_task_lifecycle::run_record_exists_readonly(&child.run_id).unwrap_or(false)
-            })
+            .filter(|child| child_record_exists(&child.run_id).unwrap_or(false))
             .count();
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
@@ -1017,6 +1017,7 @@ fn artifacts_in_store(
                 run_id,
             )
         },
+        |run_id| agent_task_lifecycle::run_record_exists_readonly_in_store(lifecycle_store, run_id),
     )?;
     let mut unavailable_child_runs = report.unavailable_child_runs.clone();
     let child_runs = report
@@ -1369,7 +1370,13 @@ impl AgentTaskBatchStore {
         S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
         P: FnMut(&str) -> Result<Option<String>>,
     {
-        status_in_store(self, batch_id, child_status, projection_readiness)
+        status_in_store(
+            self,
+            batch_id,
+            child_status,
+            projection_readiness,
+            agent_task_lifecycle::run_record_exists_readonly,
+        )
     }
 
     pub fn record_child_finalization(
