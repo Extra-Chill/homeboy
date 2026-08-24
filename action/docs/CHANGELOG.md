@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.4] - 2026-08-24
+
+### Fixed
+- ignore aggregate test fallback identities
+
 ## [2.15.3] - 2026-08-24
 
 ### Fixed
