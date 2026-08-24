@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.5] - 2026-08-24
+
+### Fixed
+- resolve installed runtime selection shim
+
 ## [3.38.4] - 2026-08-24
 
 ### Changed
