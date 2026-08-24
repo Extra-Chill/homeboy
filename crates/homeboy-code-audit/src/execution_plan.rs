@@ -138,6 +138,7 @@ pub(crate) enum FingerprintDetectorRunner {
     CommandWrapperBypass,
     SharedScaffolding,
     AggregateConstruction,
+    TwinTypes,
     PolicyFlow,
 }
 
@@ -514,6 +515,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         timing_id: "detector.aggregate_construction",
         log_label: "Aggregate construction",
         log_summary: "direct literals bypass construction seams",
+    },
+    DetectorDescriptor {
+        id: "twin_types",
+        findings: &[AuditFinding::TwinTypeDeclaration],
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::TwinTypes),
+        timing_id: "detector.twin_types",
+        log_label: "Twin types",
+        log_summary: "one type declared twice",
     },
     DetectorDescriptor {
         id: "policy_flow",

@@ -5,7 +5,8 @@ use super::detectors::{
     global_env_guard, mutating_resource_access, parallel_runner_setup, policy_flow,
     public_registry_exposure, redirect_validation, remote_execution_preflight,
     repeated_literal_shape, requested_detectors, shared_scaffolding, source_policy, test_coverage,
-    test_topology, test_wiring, thin_command_adapter, unbounded_output_capture, wrapper_inference,
+    test_topology, test_wiring, thin_command_adapter, twin_types, unbounded_output_capture,
+    wrapper_inference,
 };
 use super::doc_drift::detect_doc_drift;
 use super::reference::DeadCodeReferenceAnalysis;
@@ -78,6 +79,7 @@ fn run_fingerprint_descriptor(
         FingerprintDetectorRunner::AggregateConstruction => {
             aggregate_construction::run(context.all_fingerprints)
         }
+        FingerprintDetectorRunner::TwinTypes => twin_types::run(context.all_fingerprints),
         FingerprintDetectorRunner::PolicyFlow => {
             policy_flow::run(context.all_fingerprints, &context.audit_config.policy_flow)
         }
