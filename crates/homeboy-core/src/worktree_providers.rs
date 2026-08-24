@@ -956,6 +956,7 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
     head: Option<&str>,
     config: &HomeboyConfig,
 ) -> Result<Option<WorktreeProviderResolution>> {
+    let task_url = normalize_task_url(task_url);
     let mut matches = Vec::new();
     for (provider_id, provider) in &config.worktree_providers {
         if !provider.enabled
@@ -969,14 +970,17 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
             continue;
         }
         let worktrees = if let Some(command) = provider.commands.resolve_task.as_ref() {
-            run_provider_resolve_task_command(provider_id, provider, command, task_url)?
+            run_provider_resolve_task_command(provider_id, provider, command, &task_url)?
         } else if let Some(command) = provider.commands.list.as_ref() {
             run_provider_list_command(provider_id, provider, command)?
         } else {
             continue;
         };
         for worktree in worktrees {
-            if worktree.task_url.as_deref() == Some(task_url)
+            if worktree
+                .task_url
+                .as_deref()
+                .is_some_and(|candidate| normalize_task_url(candidate) == task_url)
                 && head.is_none_or(|head| worktree.branch == head)
             {
                 validate_provider_handle(provider_id, &worktree, None, None)?;
@@ -1001,7 +1005,7 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Some(task_url.to_string()),
+            Some(task_url),
             None,
         )),
     }
@@ -1898,7 +1902,51 @@ fn run_provider_resolve_task_command(
         provider,
         &command,
         "resolve_task",
-        &provider.commands.resolve_not_found_exit_codes,
+        &provider.commands.resolve_task_not_found_exit_codes,
+    )
+}
+
+/// Normalize tracker URLs without changing their path identity.
+pub fn normalize_task_url(task_url: &str) -> String {
+    let url = task_url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let Some((scheme, remainder)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let (authority, path) = remainder.split_at(authority_end);
+    let (userinfo, host_port) = authority
+        .rsplit_once('@')
+        .map_or(("", authority), |(userinfo, host_port)| {
+            (userinfo, host_port)
+        });
+    let (host, port) = if host_port.starts_with('[') {
+        host_port
+            .find(']')
+            .map_or((host_port, ""), |end| host_port.split_at(end + 1))
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map_or((host_port, ""), |(host, _)| {
+                (host, &host_port[host.len()..])
+            })
+    };
+    let userinfo = if userinfo.is_empty() {
+        String::new()
+    } else {
+        format!("{userinfo}@")
+    };
+    format!(
+        "{}://{}{}{}{}",
+        scheme.to_ascii_lowercase(),
+        userinfo,
+        host.to_ascii_lowercase(),
+        port,
+        path
     )
 }
 
@@ -3784,6 +3832,8 @@ mod tests {
                     "kind": "command",
                     "apply_enabled": true,
                     "commands": {
+                        "resolve_task": ["fixture-bin", "resolve-task", "{task_url}"],
+                        "resolve_task_not_found_exit_codes": [42],
                         "cleanup_preview": ["fixture-bin", "preview"],
                         "cleanup_apply": ["fixture-bin", "apply"],
                         "artifacts_preview": ["fixture-bin", "artifacts-preview"]
@@ -3806,6 +3856,10 @@ mod tests {
         assert!(provider.enabled);
         assert_eq!(provider.kind, WorktreeProviderKind::Command);
         assert!(provider.apply_enabled);
+        assert_eq!(
+            provider.commands.resolve_task_not_found_exit_codes,
+            vec![42]
+        );
         assert_eq!(
             provider.commands.cleanup_preview.as_ref().expect("command"),
             &vec!["fixture-bin".to_string(), "preview".to_string()]
@@ -6311,6 +6365,111 @@ mod tests {
         )
         .expect_err("duplicate ownership must be explicit");
         assert!(error.message.contains("project@first, project@second"));
+    }
+
+    #[test]
+    fn normalizes_task_urls_without_changing_path_case() {
+        assert_eq!(
+            normalize_task_url(
+                " HTTPS://Example.TEST:8443/Owner/Project/issues/42/?source=cook#details "
+            ),
+            "https://example.test:8443/Owner/Project/issues/42"
+        );
+    }
+
+    #[test]
+    fn task_lookup_normalizes_provider_urls_but_requires_exact_path_case() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "issue-42");
+        let requested = " HTTPS://example.test/Owner/Project/issues/42/?source=cook#details ";
+        let mapping = WorktreeProviderListResultMapping {
+            items: "$.worktrees".to_string(),
+            handle: "$.handle".to_string(),
+            path: "$.path".to_string(),
+            branch: "$.branch".to_string(),
+            dirty: "$.safety.dirty".to_string(),
+            unpushed: "$.safety.unpushed".to_string(),
+            primary: "$.safety.primary".to_string(),
+            task_url: Some("$.task_url".to_string()),
+        };
+        let script = fake_list_provider_script(json!({ "worktrees": [
+            {
+                "handle": "project@exact-path", "path": workspace.path(), "branch": "issue-42",
+                "task_url": "HTTPS://EXAMPLE.TEST/Owner/Project/issues/42/?provider=1#result",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            },
+            {
+                "handle": "project@different-path-case", "path": workspace.path(), "branch": "issue-42",
+                "task_url": "https://example.test/owner/project/issues/42",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }
+        ] }));
+        let mut provider = list_provider(script.clone(), mapping);
+        provider.apply_enabled = true;
+        provider.commands.list = None;
+        provider.commands.resolve_task = Some(vec![script, "{task_url}".to_string()]);
+
+        let found = find_apply_enabled_worktree_provider_by_task_url_from_config(
+            requested,
+            &config_with_provider(provider),
+        )
+        .expect("task lookup")
+        .expect("exact path-case candidate");
+        assert_eq!(found.worktree.handle, "project@exact-path");
+    }
+
+    #[test]
+    fn resolve_task_uses_its_own_not_found_exit_codes() {
+        let mut provider = list_provider(
+            fake_list_provider_script(json!({ "worktrees": [] })),
+            worktrees_mapping(),
+        );
+        provider.apply_enabled = true;
+        provider.commands.list = None;
+        provider.commands.resolve_task = Some(vec![
+            fake_provider_script_body("exit 42\n"),
+            "{task_url}".to_string(),
+        ]);
+        provider.commands.resolve_not_found_exit_codes = vec![41];
+        provider.commands.resolve_task_not_found_exit_codes = vec![42];
+
+        assert!(
+            find_apply_enabled_worktree_provider_by_task_url_from_config(
+                "https://example.test/issues/42",
+                &config_with_provider(provider),
+            )
+            .expect("task-specific not-found exit is accepted")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_handle_resolution_keeps_shared_not_found_exit_codes() {
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![
+                    fake_provider_script_body("exit 41\n"),
+                    "{handle}".to_string(),
+                ]),
+                resolve_not_found_exit_codes: vec![41],
+                resolve_task_not_found_exit_codes: vec![42],
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let error = resolve_worktree_provider_handle_from_config(
+            "project@issue-42",
+            &config_with_provider(provider),
+        )
+        .expect_err("exact resolution remains not found after its accepted exit");
+        assert_eq!(error.details["worktree_provider_lookup"], "not_found");
     }
 
     #[test]
