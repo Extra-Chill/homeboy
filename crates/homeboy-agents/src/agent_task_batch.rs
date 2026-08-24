@@ -1706,13 +1706,12 @@ pub fn record_dependency_action_receipt_in_store(
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskOutcome,
-        AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskArtifact, AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Barrier};
@@ -3434,50 +3433,6 @@ mod tests {
             output_declarations: Vec::new(),
             runtime_tools: Vec::new(),
             metadata: Value::Null,
-        }
-    }
-
-    struct ArtifactExecutor;
-
-    impl AgentTaskExecutorAdapter for ArtifactExecutor {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: request.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: vec![AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: format!("artifact-{}", request.task_id),
-                    kind: "report".to_string(),
-                    name: Some("report.json".to_string()),
-                    label: Some("Report".to_string()),
-                    role: Some("report".to_string()),
-                    semantic_key: Some("agent_task.report".to_string()),
-                    path: Some(format!("artifacts/{}/report.json", request.task_id)),
-                    url: None,
-                    mime: Some("application/json".to_string()),
-                    size_bytes: Some(12),
-                    sha256: None,
-                    metadata: Value::Null,
-                }],
-                typed_artifacts: Vec::new(),
-                evidence_refs: vec![AgentTaskEvidenceRef {
-                    kind: "executor-log".to_string(),
-                    uri: format!("homeboy://agent-task/evidence/{}", request.task_id),
-                    label: Some("Executor log".to_string()),
-                }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
-            }
         }
     }
 }

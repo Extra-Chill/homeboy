@@ -135,6 +135,8 @@ impl AgentTaskScheduler {
         )
     }
 
+    #[cfg(test)]
+    // Cancellation harness entry point; production drives run() directly.
     pub(crate) fn run_with_cancellation(
         &self,
         plan: AgentTaskPlan,
