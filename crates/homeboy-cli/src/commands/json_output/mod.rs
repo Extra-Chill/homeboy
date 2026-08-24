@@ -50,6 +50,7 @@ pub(crate) fn run_command_output(
             let run_from_spec_output_ref =
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
+            let bounded_operation = agent_task_bounded_operation(&args);
             if matches!(
                 &args.command,
                 crate::commands::agent_task::AgentTaskCommand::Cook(_)
@@ -92,9 +93,15 @@ pub(crate) fn run_command_output(
                         return CommandRun::from_stdout_result(Err(error), 2)
                             .with_command(spec.name);
                     }
-                    return agent_task_command_run(result, exit_code, summary_kind, full)
-                        .with_command(spec.name)
-                        .with_output_file_already_written();
+                    return agent_task_command_run(
+                        result,
+                        exit_code,
+                        summary_kind,
+                        full,
+                        bounded_operation,
+                    )
+                    .with_command(spec.name)
+                    .with_output_file_already_written();
                 }
             }
             let full = agent_task_requests_full_output(&args);
@@ -104,7 +111,7 @@ pub(crate) fn run_command_output(
                     render_controller_run_from_spec_output_ref(payload, exit_code, output_file)
                 })
             } else {
-                agent_task_command_run(result.0, result.1, summary_kind, full)
+                agent_task_command_run(result.0, result.1, summary_kind, full, bounded_operation)
             }
         }
         Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
@@ -722,9 +729,14 @@ fn agent_task_command_run(
     exit_code: i32,
     summary_kind: Option<super::agent_task_summary::AgentTaskSummaryKind>,
     full: bool,
+    bounded_operation: Option<&'static str>,
 ) -> CommandRun {
     let stdout_result = output_file_result.clone().map(|mut value| {
-        if !full {
+        if let Some(operation) = bounded_operation {
+            value = crate::commands::agent_task::status::bounded_full_operation_report(
+                value, operation,
+            );
+        } else if !full {
             crate::commands::agent_task::status::project_operator_output(&mut value);
         }
         value
@@ -739,6 +751,21 @@ fn agent_task_command_run(
             stdout: summary_stdout,
             stderr: None,
         })
+}
+
+/// Only terminal-facing reports need the bounded operation projection. Handler
+/// results remain lossless for internal callers and `--output` artifacts.
+fn agent_task_bounded_operation(
+    args: &crate::commands::agent_task::AgentTaskArgs,
+) -> Option<&'static str> {
+    use crate::commands::agent_task::AgentTaskCommand;
+
+    match &args.command {
+        AgentTaskCommand::FinalizePr(_) => Some("finalize-pr"),
+        AgentTaskCommand::Cook(args) if args.full => Some("cook"),
+        AgentTaskCommand::CookContinue(args) if args.full => Some("cook-continue"),
+        _ => None,
+    }
 }
 
 fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTaskArgs) -> bool {
@@ -1009,7 +1036,7 @@ mod tests {
     #[test]
     fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
         let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
-        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false);
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None);
 
         assert!(
             run.stdout_result.as_ref().expect("stdout")["stdout"]

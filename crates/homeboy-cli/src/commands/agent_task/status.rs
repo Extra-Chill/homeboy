@@ -57,6 +57,139 @@ const STATUS_WATCH_EVENT_BYTE_LIMIT: usize = 4 * 1024;
 const STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT: usize = 2 * 1024;
 const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 
+/// `--output` retains the lossless report. Terminal stdout instead carries a
+/// bounded, deduplicated view with the decision and recovery command first.
+pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Value {
+    let run_id = value
+        .get("run_id")
+        .or_else(|| value.get("latest_run_id"))
+        .or_else(|| value.pointer("/source/run_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("<run-id>");
+    // An invalid oversized identifier must not defeat the terminal budget.
+    // The complete identifier remains available in the lossless output artifact.
+    let run_id = (run_id.len() <= COMPACT_TEXT_LIMIT)
+        .then_some(run_id)
+        .unwrap_or("<oversized-run-id>");
+    let status = value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .or_else(|| value.pointer("/handoff/boundary"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let pr_url = value
+        .get("pr_url")
+        .or_else(|| value.pointer("/finalization/pr_url"))
+        .or_else(|| value.pointer("/handoff/pr_url"))
+        .or_else(|| value.pointer("/cook_completion/pr_url"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let next_command = value
+        .pointer("/handoff/finalize_command")
+        .or_else(|| value.get("continuation_command"))
+        .or_else(|| value.pointer("/failure_context/next_action/command"))
+        .or_else(|| value.pointer("/failure_context/next_actions/0/command"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("homeboy agent-task status {} --full", quote_arg(run_id)));
+    let blocker = value
+        .pointer("/failure_context/diagnostic/message")
+        .or_else(|| value.pointer("/blocking_claim/message"))
+        .or_else(|| value.get("error"))
+        .map(bounded_value)
+        .unwrap_or(Value::Null);
+    let source_schema = value
+        .get("schema")
+        .filter(|schema| {
+            schema
+                .as_str()
+                .is_some_and(|schema| schema.len() <= COMPACT_TEXT_LIMIT)
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    let evidence_command = format!("homeboy agent-task evidence {} --full", quote_arg(run_id));
+    let mut evidence_refs = stable_evidence_refs(&value);
+    if evidence_refs.is_empty() {
+        evidence_refs.push(json!({
+            "ref": format!("homeboy://agent-task/run/{}/evidence", homeboy::core::execution_contract::encode_uri_component(run_id)),
+            "command": evidence_command,
+            "export_command": format!("{evidence_command} --output <path>"),
+        }));
+    }
+    let output = json!({
+        "actionable": {
+            "operation": operation,
+            "terminal_state": bounded_value(&status),
+            "pr_url": bounded_value(&pr_url),
+            "blocker": blocker,
+            "next_action": { "command": bounded_value(&Value::String(next_command)) },
+        },
+        "schema": source_schema,
+        "presentation": "bounded_operator_projection",
+        "run_id": bounded_value(&Value::String(run_id.to_string())),
+        "evidence_refs": evidence_refs,
+        "output_budget": {
+            "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
+            "lossless_output": "--output <path>",
+            "deduplicated": true,
+            "truncated": true,
+        },
+    });
+    if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
+        output
+    } else {
+        json!({
+            "actionable": {
+                "operation": operation,
+                "terminal_state": bounded_value(&status),
+                "next_action": { "command": format!("homeboy agent-task status {} --full", quote_arg(run_id)) },
+            },
+            "schema": source_schema,
+            "output_budget": { "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT, "truncated": true },
+        })
+    }
+}
+
+/// Preserve a bounded set of stable evidence identities without repeating their
+/// gate/environment/proof payloads. The traversal accepts legacy nesting.
+fn stable_evidence_refs(value: &Value) -> Vec<Value> {
+    fn visit(value: &Value, refs: &mut Vec<Value>, seen: &mut HashSet<String>) {
+        if refs.len() >= COMPACT_REF_LIMIT {
+            return;
+        }
+        match value {
+            Value::Array(values) => values.iter().for_each(|value| visit(value, refs, seen)),
+            Value::Object(values) => {
+                if let Some(evidence) = values.get("evidence_refs").and_then(Value::as_array) {
+                    for item in evidence {
+                        let reference = match item {
+                            Value::String(reference) => Some(reference.clone()),
+                            Value::Object(item) => ["ref", "uri", "id", "path"]
+                                .iter()
+                                .find_map(|key| item.get(*key).and_then(Value::as_str))
+                                .map(str::to_string),
+                            _ => None,
+                        };
+                        if let Some(reference) =
+                            reference.filter(|reference| reference.len() <= COMPACT_TEXT_LIMIT)
+                        {
+                            if seen.insert(reference.clone()) {
+                                refs.push(json!({ "ref": reference }));
+                            }
+                        }
+                    }
+                }
+                values.values().for_each(|value| visit(value, refs, seen));
+            }
+            _ => {}
+        }
+    }
+
+    let mut refs = Vec::new();
+    visit(value, &mut refs, &mut HashSet::new());
+    refs
+}
+
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
 /// attempt readers, even when a newer Cook attempt produced no patch.
 pub(super) struct CookReaderTarget {
@@ -1166,6 +1299,8 @@ fn normalized_full_status(
             "stop_reason": bounded_value(value.pointer("/metadata/stop_reason").unwrap_or(&Value::Null)),
             "candidate_state": bounded_value(value.pointer("/canonical_candidate/state").unwrap_or(&Value::Null)),
             "notification_state": bounded_value(value.pointer("/notification_delivery/status").unwrap_or(&Value::Null)),
+            "pr_url": bounded_value(value.get("pr_url").unwrap_or(&Value::Null)),
+            "blocker": bounded_value(value.get("diagnostic_summary").unwrap_or(&Value::Null)),
             "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")).map(|action| json!({
                 "kind": bounded_value(action.get("kind").unwrap_or(&Value::Null)),
                 "command": bounded_value(action.get("command").unwrap_or(&Value::Null)),
@@ -2430,7 +2565,7 @@ fn normalized_full_diagnosis(
                 .sum()
         })
         .unwrap_or_default();
-    let mut output = json!({
+    let output = json!({
         "schema": "homeboy/agent-task-diagnose-full/v2",
         "presentation": "normalized_evidence_graph",
         "run_id": value.get("run_id"),
@@ -2440,6 +2575,7 @@ fn normalized_full_diagnosis(
         "continuation_admission": value.get("continuation_admission"),
         "retry_replay": value.get("retry_replay"),
         "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")),
+        "actionable": value.get(ACTIONABLE_METADATA_KEY),
         "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
         "output_budget": {
             "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
@@ -2447,11 +2583,13 @@ fn normalized_full_diagnosis(
             "lossless_command": format!("homeboy agent-task evidence {} --full --output <path>", quote_arg(run_id)),
         },
     });
-    if serialized_len(&output) > BOUNDED_FULL_STATUS_BYTE_LIMIT {
-        output["root_cause"] = bounded_value(value.get("root_cause").unwrap_or(&Value::Null));
-        output["retry_replay"] = bounded_value(value.get("retry_replay").unwrap_or(&Value::Null));
+    if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
+        return output;
     }
-    output
+
+    let mut bounded = bounded_full_operation_report(value, "diagnose");
+    bounded["schema"] = json!("homeboy/agent-task-diagnose-full/v2");
+    bounded
 }
 
 /// These fields are deliberately separate from secondary compact tables. They
@@ -9281,6 +9419,66 @@ mod tests {
             "a report without failure_context must not grow one"
         );
         assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    #[test]
+    fn adopted_three_gate_finalization_projection_is_bounded_and_actionable_before_evidence() {
+        let gate = json!({
+            "name": "cargo test",
+            "status": "passed",
+            "evidence_refs": [{ "uri": "homeboy://evidence/three-gate-proof" }],
+            "environment": { "PATH": "x".repeat(8 * 1024) },
+            "proof": { "stdout": "x".repeat(8 * 1024) },
+        });
+        let report = json!({
+            "schema": "homeboy/agent-task-finalization-report/v1",
+            "run_id": "adopted-three-gate",
+            "status": "review_ready",
+            "pr_url": "https://github.com/Extra-Chill/homeboy/pull/422",
+            "handoff": { "finalize_command": "homeboy agent-task finalize-pr --recover adopted-three-gate" },
+            "gates": [gate.clone(), gate.clone(), gate],
+            "promotion": { "gates": (0..100).map(|_| json!({ "proof": "x".repeat(1024) })).collect::<Vec<_>>() },
+        });
+
+        let projected = bounded_full_operation_report(report, "finalize-pr");
+        let serialized = serde_json::to_vec(&projected).expect("projection serializes");
+        let early =
+            std::str::from_utf8(&serialized[..serialized.len().min(1024)]).expect("json is utf8");
+
+        assert!(serialized.len() <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(
+            projected["schema"],
+            "homeboy/agent-task-finalization-report/v1"
+        );
+        assert_eq!(projected["actionable"]["terminal_state"], "review_ready");
+        assert_eq!(
+            projected["actionable"]["pr_url"],
+            "https://github.com/Extra-Chill/homeboy/pull/422"
+        );
+        assert_eq!(
+            projected["actionable"]["next_action"]["command"],
+            "homeboy agent-task finalize-pr --recover adopted-three-gate"
+        );
+        assert_eq!(projected["evidence_refs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projected["evidence_refs"][0]["ref"],
+            "homeboy://evidence/three-gate-proof"
+        );
+        assert!(early.contains("https://github.com/Extra-Chill/homeboy/pull/422"));
+        assert!(early.contains("finalize-pr --recover adopted-three-gate"));
+
+        let oversized = bounded_full_operation_report(
+            json!({
+                "schema": "x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2),
+                "run_id": "r".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2),
+                "status": "failed",
+                "handoff": { "finalize_command": "x".repeat(BOUNDED_FULL_STATUS_BYTE_LIMIT * 2) },
+            }),
+            "finalize-pr",
+        );
+        assert!(serialized_len(&oversized) <= BOUNDED_FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(oversized["actionable"]["terminal_state"], "failed");
+        assert_eq!(oversized["schema"], Value::Null);
     }
 
     /// #11113: `cook_failure_context` already computes the runnable recovery
