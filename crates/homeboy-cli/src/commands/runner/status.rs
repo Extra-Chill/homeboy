@@ -803,7 +803,8 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
     let mut materialization =
         RuntimeMaterializationStatus::for_homeboy_runner(runner_id, configured_executable, status);
     let recovery_blocked = terminal_daemon_ownership_blocks_mutation(status);
-    let refresh_command = (!recovery_blocked)
+    let refresh_safe = authoritative_idle_active_job_projection(status);
+    let refresh_command = (!recovery_blocked && refresh_safe)
         .then(|| recovery_refresh_command(&shell_arg(runner_id), guidance))
         .flatten();
     materialization.stale_daemon_refresh_command = refresh_command.clone();
@@ -844,7 +845,7 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
             status,
             has_drift,
         ),
-        refresh_commands: (!recovery_blocked)
+        refresh_commands: (!recovery_blocked && refresh_safe)
             .then(|| lab_runner_homeboy_refresh_commands(runner_id, status))
             .unwrap_or_default(),
         // An exact refresh owns stale-daemon recovery end-to-end: it selects the
@@ -852,6 +853,7 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
         // proves admission. Do not present the known-weaker fleet upgrade beside it.
         upgrade_command: (!recovery_blocked
             && !(status.stale_daemon.is_some()
+                && refresh_safe
                 && recovery_refresh_command(
                     &shell_arg(runner_id),
                     recovery_refresh_guidance(status),
@@ -1381,6 +1383,9 @@ fn lab_runner_homeboy_refresh_commands(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Vec<String> {
+    if !authoritative_idle_active_job_projection(status) {
+        return Vec::new();
+    }
     let runner_arg = shell_arg(runner_id);
     if let Some(command) = recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status))
     {
@@ -1401,23 +1406,26 @@ pub(super) fn runner_followups(
         return followups;
     };
     let runner_arg = shell_arg(runner_id);
-    if let Some(command) = recovery_refresh_command(
-        &runner_arg,
-        status.map(recovery_refresh_guidance).unwrap_or_else(|| {
-            RecoveryRefreshGuidance::IdentityDrift {
-                controller: homeboy_product_identity::build_identity().git_commit,
-                runner: "unavailable".to_string(),
-            }
-        }),
-    ) {
-        followups.push(LabFollowup {
-            label: "refresh_homeboy".to_string(),
-            command,
-            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
-        });
+    if status.is_some_and(authoritative_idle_active_job_projection) {
+        if let Some(command) = recovery_refresh_command(
+            &runner_arg,
+            status.map(recovery_refresh_guidance).unwrap_or_else(|| {
+                RecoveryRefreshGuidance::IdentityDrift {
+                    controller: homeboy_product_identity::build_identity().git_commit,
+                    runner: "unavailable".to_string(),
+                }
+            }),
+        ) {
+            followups.push(LabFollowup {
+                label: "refresh_homeboy".to_string(),
+                command,
+                purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
+            });
+        }
     }
     let has_exact_stale_daemon_refresh = status.is_some_and(|status| {
-        status.stale_daemon.is_some()
+        authoritative_idle_active_job_projection(status)
+            && status.stale_daemon.is_some()
             && recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status)).is_some()
     });
     followups.extend([
@@ -1574,6 +1582,10 @@ fn recovery_refresh_command(runner_arg: &str, guidance: RecoveryRefreshGuidance)
         )),
         RecoveryRefreshGuidance::IdentityDrift { .. } => None,
     }
+}
+
+fn authoritative_idle_active_job_projection(status: &RunnerStatusReport) -> bool {
+    status.active_job_state == RunnerActiveJobState::Available && status.active_job_count == 0
 }
 
 fn sanitized_status_for_output(mut report: RunnerStatusReport) -> RunnerStatusReport {
@@ -1796,14 +1808,15 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
         let mut materialization =
             RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report);
         materialization.stale_daemon_refresh_command =
-            (!terminal_daemon_ownership_blocks_mutation(report))
-                .then(|| {
-                    recovery_refresh_command(
-                        &shell_arg(&report.runner_id),
-                        recovery_refresh_guidance(report),
-                    )
-                })
-                .flatten();
+            (!terminal_daemon_ownership_blocks_mutation(report)
+                && authoritative_idle_active_job_projection(report))
+            .then(|| {
+                recovery_refresh_command(
+                    &shell_arg(&report.runner_id),
+                    recovery_refresh_guidance(report),
+                )
+            })
+            .flatten();
         hints.extend(materialization.stale_daemon_hint());
     }
     if !terminal_daemon_ownership_blocks_mutation(report) {
@@ -1886,7 +1899,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
         return Vec::new();
     };
 
-    if report.active_job_count == 0 && report.stale_daemon.is_some() {
+    if authoritative_idle_active_job_projection(report) && report.stale_daemon.is_some() {
         if let Some(command) =
             recovery_refresh_command(&shell_arg(&report.runner_id), guidance.clone())
         {
@@ -1895,7 +1908,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
                 runner_id: report.runner_id.clone(),
                 job_id: None,
                 command,
-                description: "Refresh the configured Homeboy binary, rotate the idle daemon, and verify identity plus admission convergence.".to_string(),
+                description: "Refresh the configured job command binary, rotate the idle daemon, and verify identity plus admission convergence.".to_string(),
             }];
         }
     }
@@ -2029,7 +2042,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
         });
     }
 
-    if report.stale_daemon.is_some() {
+    if authoritative_idle_active_job_projection(report) && report.stale_daemon.is_some() {
         if let Some(refresh_command) =
             recovery_refresh_command(&shell_arg(&report.runner_id), guidance)
         {
@@ -2180,6 +2193,34 @@ mod tests {
         assert_eq!(operator_commands.len(), 1);
         assert_eq!(operator_commands[0].scope, "daemon_refresh");
         assert_eq!(operator_commands[0].command, commands[0]);
+    }
+
+    #[test]
+    fn unknown_active_job_states_never_emit_or_suppress_refresh_recovery() {
+        for state in [
+            RunnerActiveJobState::Unavailable,
+            RunnerActiveJobState::NotQueried,
+        ] {
+            let mut report = stale_daemon_report();
+            report.active_job_state = state;
+
+            let commands = runner_status_operator_commands(&report);
+            let followups = runner_followups(Some("homeboy-lab"), Some(&report));
+            let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy", &report);
+
+            assert!(commands
+                .iter()
+                .all(|command| command.scope != "daemon_refresh"));
+            assert!(output.stale_daemon_refresh_command.is_none());
+            assert!(output.refresh_commands.is_empty());
+            assert!(output.upgrade_command.is_some());
+            assert!(followups.iter().any(|followup| {
+                matches!(
+                    followup.label.as_str(),
+                    "exec" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+                )
+            }));
+        }
     }
 
     #[test]
