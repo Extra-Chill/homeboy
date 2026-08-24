@@ -3,7 +3,7 @@ use homeboy_core::error::Result;
 
 use super::types::ReleaseArtifact;
 
-pub fn extract_latest_notes(content: &str) -> Option<String> {
+pub(crate) fn extract_latest_notes(content: &str) -> Option<String> {
     let mut in_section = false;
     let mut buffer = Vec::new();
 
@@ -40,7 +40,7 @@ fn extract_version_from_heading(label: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseArtifact>> {
+pub(crate) fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseArtifact>> {
     let mut artifacts = Vec::new();
     let items = match value {
         serde_json::Value::Array(arr) => arr.clone(),

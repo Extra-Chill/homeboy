@@ -23,13 +23,13 @@ fn github_command_error_details(
 
 /// Evidence and recovery context for a failed GitHub Release asset upload.
 pub(crate) struct UploadFailedResultRequest<'a> {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-    pub timed_out: bool,
-    pub artifact_count: usize,
-    pub repair: GitHubReleaseRepairCommands,
-    pub diagnostics: &'a [GitHubCommandFailureDiagnostic],
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) timed_out: bool,
+    pub(crate) artifact_count: usize,
+    pub(crate) repair: GitHubReleaseRepairCommands,
+    pub(crate) diagnostics: &'a [GitHubCommandFailureDiagnostic],
 }
 
 pub(crate) fn published_release_url(

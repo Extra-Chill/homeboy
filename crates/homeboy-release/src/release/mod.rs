@@ -1,5 +1,5 @@
 mod advanced_remote;
-pub mod cascade;
+mod cascade;
 mod checkout_guard;
 // "Is my fix released yet?" — commit→release containment and the inverse
 // installed-versus-latest gap (#11754). Public because the CLI surfaces it
@@ -12,7 +12,8 @@ mod execution_plan;
 mod execution_projection;
 mod executor;
 // Durable operation/finalization records. Lived in homeboy-core until #11143;
-// the release workspace finalizer is their only consumer.
+// the release workspace finalizer is their only consumer. Public because
+// `homeboy release readiness show` reads records back out of the store.
 pub mod operation_record;
 mod orchestrator;
 mod package_recovery;
@@ -28,6 +29,8 @@ mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
 mod preflight_identity;
+// `homeboy-core` reaches release/deploy behavior only through the
+// `release_provider` hook; the CLI registers this implementation at startup.
 pub use homeboy_deploy::provider_impl;
 mod types;
 mod utils;
@@ -40,8 +43,10 @@ mod workspace;
 // `homeboy-version` so `homeboy-deploy` can use them without depending on this
 // crate (#11144). Re-exported under their original names so every release-side
 // `super::scope::`, `crate::release::changelog::`, and `version::` path keeps
-// resolving unchanged.
-pub use homeboy_version::{changelog, scope};
+// resolving unchanged. `changelog` is public because `homeboy release
+// changelog` and `homeboy review` surface it directly; `scope` is internal.
+pub use homeboy_version::changelog;
+pub(crate) use homeboy_version::scope;
 
 /// The shared version primitives, plus the release-only version mutation guard.
 ///
@@ -54,11 +59,10 @@ pub mod version {
     pub use homeboy_version::version::*;
 }
 
-pub use cascade::{run_cascade, CascadeResult, CascadeStepResult, ReleasedCoordinates};
-pub use containment::{
-    ContainmentAssessment, ContainmentStatus, ContainsQuery, GapStatus, ReleaseContainsReport,
-    ReleaseGapAssessment, ReleaseGapReport,
-};
+// Public API — every item below is reached from `homeboy-cli`. Anything the CLI
+// does not name stays `pub(crate)` so `dead_code` can see it.
+pub use cascade::{run_cascade, CascadeResult, ReleasedCoordinates};
+pub use containment::{ContainsQuery, ReleaseContainsReport, ReleaseGapReport};
 pub use context::readiness_provenance;
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
@@ -66,28 +70,28 @@ pub use executor::artifacts::{
 pub use executor::release_notes_path;
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
-pub use planner::plan;
 pub use types::readiness_is_valid;
 pub use types::{
-    BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
-    ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-    ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
-    ReleasePreflightPlacement, ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity,
-    ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
-    ReleaseReadinessLocalOnly, ReleaseReadinessProvenance, ReleaseRollbackEvidence, ReleaseRun,
-    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
-    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
+    BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
+    ReleasePhase, ReleasePipelineOptions, ReleasePreflightPlacement,
+    ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
+    ReleaseReadinessGateResult, ReleaseReadinessLocalOnly, ReleaseReadinessProvenance,
+    ReleaseWorkspaceOutput,
 };
-pub use utils::{extract_latest_notes, parse_release_artifacts};
-pub use workflow::{
-    run_batch, run_command, run_command_with_recovery_owner, run_command_with_workspace,
-    SKIPPED_RELEASE_EXIT_CODE,
-};
+pub use workflow::{run_batch, run_command_with_workspace, SKIPPED_RELEASE_EXIT_CODE};
+
+// Crate-internal re-exports: submodules reach these through `super::`/
+// `crate::release::` paths, so the alias has to exist, but nothing outside the
+// crate names them.
+pub(crate) use homeboy_version::component_tag_name;
+pub(crate) use planner::plan;
+pub(crate) use workflow::run_command;
 
 // The component tag-naming contract moved to `homeboy-version` alongside
 // `scope`. Deploy resolves release tags too (tag-gap detection, ref checkout),
 // so the contract has to sit below both subsystems rather than inside release.
-pub use homeboy_version::{component_tag_name, component_tag_prefix, latest_component_tag};
+// `homeboy status` derives its tag prefix through this re-export.
+pub use homeboy_version::component_tag_prefix;
 
 /// Whether this component would normally get a reviewer-facing GitHub Release
 /// created as part of a release (i.e. it resolves to a GitHub remote).

@@ -31,12 +31,12 @@ use super::gh_cli::{
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseBody {
     /// The exact markdown body passed to `gh release create --notes`.
-    pub body: String,
+    pub(crate) body: String,
     /// Whether GitHub-generated notes succeeded. `false` means the changelog
     /// fallback body was used.
-    pub generated_notes_ok: bool,
+    pub(crate) generated_notes_ok: bool,
     /// The changelog URL embedded in the footer, when one was resolved.
-    pub changelog_url: Option<String>,
+    pub(crate) changelog_url: Option<String>,
     pub(crate) source: String,
 }
 
