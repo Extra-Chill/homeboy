@@ -9,10 +9,6 @@
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_artifacts;
-#[allow(
-    dead_code,
-    reason = "Batch test fixtures cover alternative artifact execution paths."
-)]
 pub mod agent_task_batch;
 pub mod agent_task_candidate_baseline;
 pub mod agent_task_config_materialization;
