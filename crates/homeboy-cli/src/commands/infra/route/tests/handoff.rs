@@ -5,6 +5,22 @@ use clap::Parser;
 use std::fs;
 use tempfile::tempdir;
 
+fn capture_fixture_preflight(cli: &Cli, normalized: &[String]) {
+    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+    homeboy::core::parsed_command_preflight::capture_result(
+        homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+            normalized.to_vec(),
+            resource_policy::parsed_command_preflight_input(cli, normalized),
+            None,
+            None,
+            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+            homeboy::core::parsed_command_preflight::FallbackDirective::None,
+            crate::cli_runtime::placement_directive(cli, cli.runner.as_deref(), false),
+            cli.runner.clone(),
+        ),
+    );
+}
+
 #[test]
 fn rig_install_offload_translates_source_path_instead_of_forwarding_it() {
     let source_dir = tempdir().expect("source dir");
@@ -53,6 +69,7 @@ fn linked_local_rig_check_stays_local_without_runner() {
         "linked-local".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("linked local rig check should skip automatic Lab offload");
@@ -97,6 +114,7 @@ fn extension_update_routes_locally_without_explicit_lab_runner() {
         "wordpress".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("extension update without --runner should not offload");
@@ -123,6 +141,7 @@ fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
         "wordpress".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("dev-run should execute its own runner lifecycle");
@@ -142,6 +161,7 @@ fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
         "nodejs".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("fuzz doctor without --runner should remain a local diagnostic");
@@ -427,40 +447,38 @@ fn default_placement_provider_discovery_stays_local_despite_connected_default_ru
 #[test]
 fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
     homeboy::core::resource_policy_context::reset_captured_context_for_test();
-    homeboy::core::resource_policy_context::capture_context(
-        homeboy::core::resource_policy_context::ResourcePolicyContext {
-            command: "agent-task cook".to_string(),
-            severity: "hot".to_string(),
-            local_override: false,
-            warned: true,
-            message: None,
-            runner_selection:
-                homeboy::core::resource_policy_context::ResourcePolicyRunnerSelection {
-                    runner_id: Some("admitted-lab".to_string()),
-                    available_runner_ids: vec!["admitted-lab".to_string()],
-                    readiness_state: "connected_ready".to_string(),
-                    readiness_reasons: Vec::new(),
-                    remediation_commands: Vec::new(),
-                    reason: "default_lab_runner".to_string(),
-                },
-            host: homeboy::core::resource_policy_context::ResourcePolicyHostSnapshot {
-                load_severity: "hot".to_string(),
-                load_one: None,
-                load_five: None,
-                load_fifteen: None,
-                cpu_count: 1,
-                memory_severity: None,
-                memory_used_percent: None,
-                memory_available_mb: None,
-                memory_total_mb: None,
-                relevant_process_count: 0,
-                process_severity: "ok".to_string(),
-                active_rig_lease_count: 0,
-                rig_lease_severity: "ok".to_string(),
-                rig_lease_concurrency_limit: None,
-            },
+    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+    let context = homeboy::core::resource_policy_context::ResourcePolicyContext {
+        command: "agent-task cook".to_string(),
+        severity: "hot".to_string(),
+        local_override: false,
+        warned: true,
+        message: None,
+        runner_selection: homeboy::core::resource_policy_context::ResourcePolicyRunnerSelection {
+            runner_id: Some("admitted-lab".to_string()),
+            available_runner_ids: vec!["admitted-lab".to_string()],
+            readiness_state: "connected_ready".to_string(),
+            readiness_reasons: Vec::new(),
+            remediation_commands: Vec::new(),
+            reason: "default_lab_runner".to_string(),
         },
-    );
+        host: homeboy::core::resource_policy_context::ResourcePolicyHostSnapshot {
+            load_severity: "hot".to_string(),
+            load_one: None,
+            load_five: None,
+            load_fifteen: None,
+            cpu_count: 1,
+            memory_severity: None,
+            memory_used_percent: None,
+            memory_available_mb: None,
+            memory_total_mb: None,
+            relevant_process_count: 0,
+            process_severity: "ok".to_string(),
+            active_rig_lease_count: 0,
+            rig_lease_severity: "ok".to_string(),
+            rig_lease_concurrency_limit: None,
+        },
+    };
     let cli = Cli::parse_from([
         "homeboy",
         "agent-task",
@@ -470,15 +488,49 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
         "--to-worktree",
         "repo@hot-cook",
     ]);
-    let command = lab_offload_command(&cli.command)
-        .expect("Lab route contract resolves")
-        .expect("Cook has a Lab route contract");
-
-    let selected = admitted_lab_runner_id(&cli, Some(&command))
-        .flatten()
-        .expect("hot controller admission retains the ready runner");
-    let decision = placement_decision(&cli, Some(&selected), "cook", None)
-        .expect("explicit Lab placement is admissible with a ready runner");
+    homeboy::core::parsed_command_preflight::capture_result(
+        homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            resource_policy::parsed_command_preflight_input(
+                &cli,
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+            ),
+            Some(context),
+            Some(
+                homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+                    state: "connected_ready".to_string(),
+                    selected_runner_id: Some("admitted-lab".to_string()),
+                    available_runner_ids: vec!["admitted-lab".to_string()],
+                    reasons: Vec::new(),
+                    remediation_commands: Vec::new(),
+                },
+            ),
+            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+            homeboy::core::parsed_command_preflight::FallbackDirective::None,
+            crate::cli_runtime::placement_directive(&cli, Some("admitted-lab"), false),
+            Some("admitted-lab".to_string()),
+        ),
+    );
+    let preflight =
+        homeboy::core::parsed_command_preflight::captured_result().expect("fixture preflight");
+    assert_eq!(
+        preflight
+            .placement
+            .runner
+            .as_ref()
+            .expect("hot controller admission retains the ready runner")
+            .runner_id,
+        "admitted-lab"
+    );
+    let decision = finalize_placement(&preflight.placement, "cook", None);
     assert_eq!(decision.requested, crate::cli_surface::Placement::Lab);
     assert_eq!(
         decision.selected,
@@ -489,6 +541,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
         "admitted-lab"
     );
     homeboy::core::resource_policy_context::reset_captured_context_for_test();
+    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
 }
 
 #[test]
@@ -590,6 +643,7 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
         "fanout.json".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    capture_fixture_preflight(&cli, &normalized);
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
     assert_eq!(command.hot_label, "agent-task fanout submit-batch");
@@ -1038,7 +1092,15 @@ fn route_runner_for(args: &[&str], inferred: &Option<String>) -> Option<String> 
     let lab_command = lab_offload_command(&cli.command)
         .expect("lab route contract resolves")
         .expect("agent-task commands carry a Lab contract");
-    generic_route_runner_id(&cli, Some(&lab_command), inferred).map(str::to_string)
+    inferred.as_deref().and_then(|runner| {
+        (cli.runner.is_some()
+            || lab_routing::authorizes_policy_lab_runner(
+                &lab_command.command,
+                cli.placement,
+                lab_routing::captured_pressure_severity().as_deref(),
+            ))
+        .then(|| runner.to_string())
+    })
 }
 
 #[test]

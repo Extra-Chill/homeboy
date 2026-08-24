@@ -190,70 +190,50 @@ pub(crate) fn route_after_parse_with_provenance(
     let lab_command = lab_offload_command(&cli.command)?;
     let normalized_args = inline_portable_settings_profiles(cli, normalized_args)?;
 
-    // Reuse the admission snapshot when preflight captured one. A second
-    // readiness lookup could otherwise turn an admitted Lab attempt into a
-    // local fallback before routing constructs its immutable decision.
-    let admitted_lab_runner = admitted_lab_runner_id(cli, lab_command.as_ref());
-    let lab_readiness =
-        if lab_command.is_some() && cli.runner.is_none() && admitted_lab_runner.is_none() {
-            runners::lab_runner_readiness().ok()
-        } else {
-            None
-        };
-    let mut inferred_runner_id = if lab_command.is_some() {
-        cli.runner
-            .clone()
-            .or_else(|| admitted_lab_runner.clone().flatten())
-            .or_else(|| {
-                lab_readiness
-                    .as_ref()
-                    .and_then(|readiness| readiness.selected_runner_id.clone())
-            })
-    } else {
-        None
-    };
+    // Admission owns runner inventory. Routing consumes its immutable result;
+    // reopening readiness here can otherwise turn an admitted Lab attempt into
+    // a local fallback.
+    let preflight = authoritative_preflight()?;
+    let lab_readiness = preflight.lab_readiness.as_ref();
+    let inferred_runner_id = lab_command
+        .is_some()
+        .then(|| {
+            preflight
+                .placement
+                .runner
+                .as_ref()
+                .map(|runner| runner.runner_id.clone())
+        })
+        .flatten();
     if detached_cook_can_queue(cli) && !is_unmaterialized_replay_worker() {
         // Persist before any bounded refresh. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
             cli,
             &normalized_args,
-            lab_readiness.as_ref(),
+            &preflight,
             output_file,
             provenance,
         )
         .map(Some);
     }
-    let deferred_requirements = review_test_deferred_requirements(cli);
-    let deferred_runner_incompatible = inferred_runner_id
-        .as_deref()
-        .zip(deferred_requirements.as_ref())
-        .is_some_and(|(runner_id, requirements)| {
-            matches!(
-                runners::runner_capability_inventory(runner_id),
-                Ok(inventory)
-                    if !requirements
-                        .is_satisfied_by(&inventory.runtime_ids, &inventory.capabilities)
-            )
-        });
-    if deferred_runner_incompatible {
-        inferred_runner_id = None;
-    }
-    if deferred_runner_incompatible
+    if preflight.deferred_workload
+        == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::RunnerIncompatible
         && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_some()
     {
         return Ok(Some(75));
     }
 
-    if inferred_runner_id.is_none()
-        && review_test_can_defer(cli)
-        && deferred_resource_admission_refused()
+    if preflight.deferred_workload
+        == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer
         && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_none()
     {
         let deferred = homeboy::deferred_workload::defer(deferred_workload_input(
             cli,
             &portable_deferred_args(&normalized_args),
-            deferred_requirements.expect("review tests always resolve deferred requirements"),
+            &preflight,
+            review_test_deferred_requirements(cli)
+                .expect("preflight only defers portable review tests"),
         )?)?;
         crate::commands::deferred_workload::ensure_worker(&homeboy::core::paths::homeboy()?)?;
         println!(
@@ -283,7 +263,7 @@ pub(crate) fn route_after_parse_with_provenance(
         &cli.command,
         cli.placement,
         inferred_runner_id.as_deref(),
-        lab_readiness.as_ref(),
+        lab_readiness,
     ) {
         return Err(error);
     }
@@ -316,14 +296,18 @@ pub(crate) fn route_after_parse_with_provenance(
         &normalized_args,
         output_file,
         inferred_runner_id.as_deref(),
+        &preflight.placement,
         provenance,
     )? {
         return Ok(Some(exit_code));
     }
 
-    if let Some(exit_code) =
-        run_split_placement_fanout(cli, output_file, inferred_runner_id.as_deref())?
-    {
+    if let Some(exit_code) = run_split_placement_fanout(
+        cli,
+        output_file,
+        inferred_runner_id.as_deref(),
+        &preflight.placement,
+    )? {
         return Ok(Some(exit_code));
     }
 
@@ -339,7 +323,7 @@ pub(crate) fn route_after_parse_with_provenance(
     // lifecycle commands ended up querying a machine that does not own their
     // durable record (#11597, #11599) and how an explicitly local run acquired
     // a Lab handoff it could not later recover (#11600).
-    let route_runner_id = generic_route_runner_id(cli, lab_command.as_ref(), &inferred_runner_id);
+    let route_runner_id = preflight.generic_route_runner_id.as_deref();
     if lab_command.is_none()
         || (route_runner_id.is_none() && cli.placement != homeboy::cli_surface::Placement::Lab)
     {
@@ -368,14 +352,18 @@ pub(crate) fn route_after_parse_with_provenance(
     let normalized_args = normalized_args.to_vec();
     let deferred_claim = inferred_runner_id
         .as_deref()
-        .filter(|_| review_test_can_defer(cli))
+        .filter(|_| {
+            preflight.deferred_workload
+                == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Dispatch
+        })
         .map(|runner_id| {
             homeboy::deferred_workload::claim(
                 &deferred_workload_input(
                     cli,
                     &portable_deferred_args(&normalized_args),
+                    &preflight,
                     review_test_deferred_requirements(cli)
-                        .expect("review tests always resolve deferred requirements"),
+                        .expect("preflight only dispatches portable review tests"),
                 )?,
                 runner_id,
                 &format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()),
@@ -454,12 +442,24 @@ pub(crate) fn route_after_parse_with_provenance(
         .and_then(|plan| plan.tasks.first())
         .map(|task| task.task_id.as_str())
         .unwrap_or("command");
-    let placement_decision = placement_decision(
-        cli,
-        route_runner_id,
-        placement_task,
-        Some(&routing_source_path),
-    )?;
+    if preflight.placement.required
+        == homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab
+        && preflight.placement.selected
+            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+    {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "required Lab placement has no selected ready runner",
+            Some("lab".to_string()),
+            None,
+        ));
+    }
+    let placement_decision = preflight
+        .placement
+        .finalize(materialized_placement_identity(
+            placement_task,
+            Some(&routing_source_path),
+        ));
     let generic_detached_handoff = needs_generic_detached_handoff
         .then(|| {
             materialize_generic_detached_lab_handoff(
@@ -569,9 +569,7 @@ pub(crate) fn route_after_parse_with_provenance(
             if destructive_fuzz_requires_lab(&cli.command) {
                 return Err(destructive_fuzz_local_execution_error());
             }
-            if let Some(warning) =
-                agent_task_local_fanout_warning(&cli.command, lab_readiness.as_ref())
-            {
+            if let Some(warning) = agent_task_local_fanout_warning(&cli.command, lab_readiness) {
                 eprintln!("{warning}");
             }
             Ok(None)
@@ -860,6 +858,24 @@ fn composed_lab_job_overrides(
     Ok(overrides)
 }
 
+fn materialized_placement_identity(
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+    homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        repository: source_path
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+        workspace: source_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+        task: task.to_string(),
+        candidate: source_path.and_then(homeboy::core::git::head_sha),
+        base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
+    }
+}
+
 fn needs_provider_resolved_cook_interception(cli: &Cli, inferred_runner_id: Option<&str>) -> bool {
     // Explicit local placement was already intercepted before provider
     // resolution. Running it through this pass again consumes the supervised
@@ -870,17 +886,11 @@ fn needs_provider_resolved_cook_interception(cli: &Cli, inferred_runner_id: Opti
             || cli.placement == homeboy::cli_surface::Placement::Auto)
 }
 
-/// Return the Lab choice made by resource admission. `Some(None)` is an
-/// intentional no-runner decision and must retain normal local fallback.
-fn admitted_lab_runner_id(
-    cli: &Cli,
-    lab_command: Option<&runners::LabOffloadCommand>,
-) -> Option<Option<String>> {
-    (lab_command.is_some() && cli.runner.is_none())
-        .then(resource_policy::captured_context)
-        .flatten()
-        .filter(|context| !context.local_override)
-        .map(|context| context.runner_selection.runner_id)
+fn authoritative_preflight(
+) -> homeboy::core::Result<homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult> {
+    homeboy::core::parsed_command_preflight::captured_result().ok_or_else(|| {
+        Error::internal_unexpected("route requires a completed parsed-command preflight result")
+    })
 }
 
 /// The runner the *generic* Lab route may use, given what the command's
@@ -893,106 +903,44 @@ fn admitted_lab_runner_id(
 /// the offload executor applies — so the canonical placement decision this
 /// controller writes and the dispatch the executor performs can never disagree
 /// about whether a command was entitled to leave this machine.
-fn generic_route_runner_id<'a>(
-    cli: &Cli,
-    lab_command: Option<&runners::LabOffloadCommand>,
-    inferred_runner_id: &'a Option<String>,
-) -> Option<&'a str> {
-    let runner_id = inferred_runner_id.as_deref()?;
-    if cli.runner.is_some() {
-        return Some(runner_id);
-    }
-    let command = lab_command?;
-    lab_routing::authorizes_policy_lab_runner(
-        &command.command,
-        cli.placement,
-        lab_routing::captured_pressure_severity().as_deref(),
-    )
-    .then_some(runner_id)
+
+fn finalize_placement(
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    directive.finalize(materialized_placement_identity(task, source_path))
 }
 
+#[cfg(test)]
+fn fixture_preflight_decision(
+    cli: &Cli,
+    runner_id: Option<&str>,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    let normalized = vec!["homeboy".to_string()];
+    let result = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+        normalized.clone(),
+        resource_policy::parsed_command_preflight_input(cli, &normalized),
+        None,
+        None,
+        homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+        homeboy::core::parsed_command_preflight::FallbackDirective::None,
+        crate::cli_runtime::placement_directive(cli, runner_id, false),
+        runner_id.map(str::to_string),
+    );
+    Ok(finalize_placement(&result.placement, task, source_path))
+}
+
+#[cfg(test)]
 fn placement_decision(
     cli: &Cli,
     runner_id: Option<&str>,
     task: &str,
     source_path: Option<&Path>,
 ) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
-    use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
-        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
-        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
-    };
-    // Selecting a default runner is a policy preference, not an operator
-    // requirement. Only pinned Lab placement or an explicit runner forbids a
-    // verified local fallback.
-    let required = if cli.placement == homeboy::cli_surface::Placement::Lab || cli.runner.is_some()
-    {
-        ExecutionPlacementRequirement::Lab
-    } else {
-        ExecutionPlacementRequirement::Either
-    };
-    // `auto` is a policy-selected Lab attempt. The provider may append a
-    // verified local fallback only when the decision's fallback policy allows.
-    let selected = if cli.placement == homeboy::cli_surface::Placement::Local || runner_id.is_none()
-    {
-        EffectiveExecutionPlacement::Local
-    } else {
-        EffectiveExecutionPlacement::Lab
-    };
-    if cli.placement == homeboy::cli_surface::Placement::Lab && runner_id.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "placement",
-            "required Lab placement has no selected ready runner",
-            Some("lab".to_string()),
-            None,
-        ));
-    }
-    Ok(
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-            "lab-route-contract",
-            "v1",
-            ExecutionPlacementIdentity {
-                repository: source_path
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
-                workspace: source_path
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
-                task: task.to_string(),
-                candidate: source_path.and_then(homeboy::core::git::head_sha),
-                base: source_path
-                    .and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
-            },
-            cli.placement,
-            required,
-            selected,
-            runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
-                runner_id: runner_id.to_string(),
-                source: if cli.runner.is_some() {
-                    RunnerSelectionSource::Explicit
-                } else {
-                    RunnerSelectionSource::Policy
-                },
-            }),
-            ExecutionPlacementFallback {
-                // Automatic routing historically falls back to local when no ready
-                // Lab runner exists; record that authorization explicitly.
-                local_allowed: required != ExecutionPlacementRequirement::Lab
-                    && matches!(
-                        cli.placement,
-                        homeboy::cli_surface::Placement::Auto
-                            | homeboy::cli_surface::Placement::LabOrLocal
-                    ),
-                reason: None,
-            },
-            ExecutionPlacementOverrideAuthorization {
-                authorized: cli.placement == homeboy::cli_surface::Placement::Local,
-                authority: (cli.placement == homeboy::cli_surface::Placement::Local)
-                    .then(|| "operator --placement local".to_string()),
-            },
-        ),
-    )
+    fixture_preflight_decision(cli, runner_id, task, source_path)
 }
 
 fn authoritative_lab_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
@@ -1108,7 +1056,7 @@ fn admission_digest(value: impl AsRef<[u8]>) -> String {
 fn admit_unmaterialized_cook(
     cli: &Cli,
     normalized_args: &[String],
-    readiness: Option<&runners::LabRunnerReadiness>,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
     output_file: Option<&str>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<i32> {
@@ -1127,11 +1075,15 @@ fn admit_unmaterialized_cook(
         .run_id
         .clone()
         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
-    let readiness_state = readiness
+    let readiness_state = preflight
+        .lab_readiness
+        .as_ref()
         .map(|value| value.state.as_str())
         .unwrap_or("absent");
-    let state = unmaterialized_admission_state(readiness);
-    let reason = readiness
+    let state = unmaterialized_admission_state(preflight.lab_readiness.as_ref());
+    let reason = preflight
+        .lab_readiness
+        .as_ref()
         .and_then(|value| value.reasons.first())
         .map(String::as_str)
         .unwrap_or("no eligible Lab runner is currently available");
@@ -1164,10 +1116,10 @@ fn admit_unmaterialized_cook(
         "request_ref": request_ref,
         "candidate_policy": resolved.candidate_completion,
         "placement": {
-            "requested": cli.placement,
-            "local_fallback": false,
-            "runner_ref": cli.runner,
-            "resource_policy": homeboy::core::resource_policy_context::captured_context(),
+            "requested": preflight.placement.requested,
+            "local_fallback": preflight.placement.fallback.local_allowed,
+            "runner_ref": preflight.placement.runner.as_ref().map(|runner| &runner.runner_id),
+            "resource_policy": preflight.resource_policy,
         },
         "source": {
             "repository": resolved.dispatch.repo,
@@ -1936,78 +1888,7 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         &self,
         request: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
-        let placement = &request["binding"]["placement"];
-        let required_capabilities = request["binding"]["provider_runtime_refs"]
-            ["required_capabilities"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<BTreeSet<_>>();
-        if let Some(runner_id) = placement["runner_ref"].as_str() {
-            let mut snapshot = runners::runner_admission_snapshot(runner_id)?;
-            if snapshot.summary.accepting_jobs
-                || crate::runner::refresh_explicit_detached_queue_runner(runner_id)?
-            {
-                if !runner_satisfies_admission_capabilities(runner_id, &required_capabilities)? {
-                    return Ok(serde_json::json!({
-                        "state": "blocked_runner_unavailable",
-                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
-                        "selection": "explicit",
-                    }));
-                }
-                return Ok(serde_json::json!({
-                    "state": "eligible",
-                    "runner_id": runner_id,
-                    "selection": "explicit",
-                }));
-            }
-            snapshot = runners::runner_admission_snapshot(runner_id)?;
-            return Ok(serde_json::json!({
-                "state": if snapshot.summary.daemon_fresh { "blocked_runner_unavailable" } else { "blocked_runner_stale" },
-                "reason": snapshot.summary.next_action.unwrap_or_else(|| format!("runner `{runner_id}` is not accepting jobs")),
-                "selection": "explicit",
-            }));
-        }
-
-        let readiness = runners::refresh_lab_runner_readiness_for_admission()?;
-        if readiness.state == runners::LabRunnerReadinessState::ConnectedReady {
-            if let Some(runner_id) = readiness.selected_runner_id {
-                if !runner_satisfies_admission_capabilities(&runner_id, &required_capabilities)? {
-                    return Ok(serde_json::json!({
-                        "state": "blocked_runner_unavailable",
-                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
-                        "selection": "configured_policy",
-                    }));
-                }
-                return Ok(serde_json::json!({
-                    "state": "eligible",
-                    "runner_id": runner_id,
-                    "selection": "configured_policy",
-                }));
-            }
-        }
-        if readiness.state == runners::LabRunnerReadinessState::CapacityBlocked {
-            if let Some(runner_id) = runners::refresh_detached_queue_runner()? {
-                if !runner_satisfies_admission_capabilities(&runner_id, &required_capabilities)? {
-                    return Ok(serde_json::json!({
-                        "state": "blocked_runner_unavailable",
-                        "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
-                        "selection": "reverse_capacity_queue",
-                    }));
-                }
-                return Ok(serde_json::json!({
-                    "state": "eligible",
-                    "runner_id": runner_id,
-                    "selection": "reverse_capacity_queue",
-                }));
-            }
-        }
-        Ok(serde_json::json!({
-            "state": unmaterialized_admission_state(Some(&readiness)),
-            "reason": readiness.reasons.first().cloned().unwrap_or_else(|| "no configured Lab runner currently satisfies admission policy".to_string()),
-            "selection": "configured_policy",
-        }))
+        crate::cli_runtime::select_unmaterialized_cook_runner(request)
     }
 
     fn replay(&self, request: &serde_json::Value) -> homeboy::core::Result<serde_json::Value> {
@@ -2120,28 +2001,6 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     }
 }
 
-fn runner_satisfies_admission_capabilities(
-    runner_id: &str,
-    required: &BTreeSet<&str>,
-) -> homeboy::core::Result<bool> {
-    if required.is_empty() {
-        return Ok(true);
-    }
-    let inventory = runners::runner_capability_inventory(runner_id)?;
-    Ok(runner_inventory_satisfies_admission_capabilities(
-        &inventory, required,
-    ))
-}
-
-fn runner_inventory_satisfies_admission_capabilities(
-    inventory: &runners::RunnerCapabilityInventory,
-    required: &BTreeSet<&str>,
-) -> bool {
-    required.iter().all(|required| {
-        inventory.capabilities.contains(*required) || inventory.runtime_ids.contains(*required)
-    })
-}
-
 fn supervise_replay_worker(
     cook_id: String,
     fence: u64,
@@ -2229,13 +2088,14 @@ pub(crate) fn register_unmaterialized_cook_replay_driver() {
     ));
 }
 
-fn unmaterialized_admission_state(readiness: Option<&runners::LabRunnerReadiness>) -> &'static str {
-    use runners::LabRunnerReadinessState;
-    match readiness.map(|value| value.state) {
-        Some(LabRunnerReadinessState::Stale) => "blocked_runner_stale",
+fn unmaterialized_admission_state(
+    readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
+) -> &'static str {
+    match readiness.map(|value| value.state.as_str()) {
+        Some("stale") => "blocked_runner_stale",
         // A healthy reverse runner at capacity owns a durable broker queue. It
         // is waiting for a slot, not unavailable.
-        Some(LabRunnerReadinessState::CapacityBlocked) => "queued",
+        Some("capacity_blocked") => "queued",
         _ => "blocked_runner_unavailable",
     }
 }
@@ -2257,7 +2117,7 @@ fn split_placement_lab_runner_unavailable_error(
     command: &Commands,
     placement: homeboy::cli_surface::Placement,
     inferred_runner_id: Option<&str>,
-    readiness: Option<&runners::LabRunnerReadiness>,
+    readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
 ) -> Option<Error> {
     if placement != homeboy::cli_surface::Placement::Lab || inferred_runner_id.is_some() {
         return None;
@@ -2304,6 +2164,7 @@ fn run_split_placement_fanout(
     cli: &Cli,
     output_file: Option<&str>,
     runner_id: Option<&str>,
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
 ) -> homeboy::core::Result<Option<i32>> {
     if cli.placement == homeboy::cli_surface::Placement::Local {
         return Ok(None);
@@ -2314,7 +2175,7 @@ fn run_split_placement_fanout(
     let runner_id = runner_id.to_string();
     let job_overrides = lab_job_overrides(cli)?;
     let placement = cli.placement;
-    let runner_is_explicit = cli.runner.is_some();
+    let directive = directive.clone();
     let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
     let skip_deps_hydration = cli.skip_deps_hydration;
     let detach_after_handoff = cli.detach_after_handoff;
@@ -2337,13 +2198,7 @@ fn run_split_placement_fanout(
                 .unwrap_or("fanout-provider-attempt");
             Arc::new(LabCookAttemptDispatcher {
                 runner_id: runner_id.clone(),
-                placement_decision: fanout_child_placement_decision(
-                    placement,
-                    runner_is_explicit,
-                    &runner_id,
-                    task,
-                    source_path.as_deref(),
-                ),
+                placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace,
                 skip_deps_hydration,
@@ -2437,56 +2292,6 @@ fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
     Ok(())
 }
 
-fn fanout_child_placement_decision(
-    placement: homeboy::cli_surface::Placement,
-    runner_is_explicit: bool,
-    runner_id: &str,
-    task: &str,
-    source_path: Option<&Path>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
-        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
-        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
-    };
-
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-        "lab-route-contract",
-        "v1",
-        ExecutionPlacementIdentity {
-            repository: source_path
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unmaterialized-fanout-child".to_string()),
-            workspace: source_path
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "unmaterialized-fanout-child".to_string()),
-            task: task.to_string(),
-            candidate: source_path.and_then(homeboy::core::git::head_sha),
-            base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
-        },
-        placement,
-        ExecutionPlacementRequirement::Lab,
-        EffectiveExecutionPlacement::Lab,
-        Some(ExecutionPlacementRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: if runner_is_explicit {
-                RunnerSelectionSource::Explicit
-            } else {
-                RunnerSelectionSource::Policy
-            },
-        }),
-        ExecutionPlacementFallback {
-            local_allowed: false,
-            reason: None,
-        },
-        ExecutionPlacementOverrideAuthorization {
-            authorized: false,
-            authority: None,
-        },
-    )
-}
-
 /// Cook owns controller-local target resolution, promotion, gates, retries, and
 /// finalization. Its provider attempt is the only portable unit: a materialized
 /// typed run-plan that mirrors its aggregate and artifacts back into the same
@@ -2496,15 +2301,25 @@ fn run_split_placement_cook(
     _normalized_args: &[String],
     output_file: Option<&str>,
     runner_id: Option<&str>,
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<Option<i32>> {
-    run_split_placement_cook_with_runtime(cli, output_file, runner_id, provenance, None, None)
+    run_split_placement_cook_with_runtime(
+        cli,
+        output_file,
+        runner_id,
+        directive,
+        provenance,
+        None,
+        None,
+    )
 }
 
 fn run_split_placement_cook_with_runtime(
     cli: &Cli,
     output_file: Option<&str>,
     runner_id: Option<&str>,
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
     dispatcher_override: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
@@ -2577,12 +2392,11 @@ fn run_split_placement_cook_with_runtime(
     } else {
         Arc::new(LabCookAttemptDispatcher {
             runner_id: runner_id.to_string(),
-            placement_decision: placement_decision(
-                cli,
-                Some(runner_id),
+            placement_decision: finalize_placement(
+                directive,
                 placement_task,
                 source_path.as_deref(),
-            )?,
+            ),
             allow_local_fallback: cli.runner.is_none() && cli.placement.allows_local_fallback(),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             skip_deps_hydration: cli.skip_deps_hydration,
@@ -2958,49 +2772,45 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
     }
 }
 
-fn placement_decision_for_attempt(
+fn finalize_replacement_attempt(
     prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
     runner_id: &str,
     task: &str,
     source_path: Option<&Path>,
 ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    use homeboy_lab_runner_contract::{
-        ExecutionPlacementIdentity, ExecutionPlacementRunnerSelection,
+    let directive = homeboy::core::parsed_command_preflight::PlacementDirective {
+        requested: prior.requested,
+        required: prior.required,
+        selected: prior.selected,
+        runner: Some(
+            homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                runner_id: runner_id.to_string(),
+                source: prior
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.source)
+                    .unwrap_or(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit),
+            },
+        ),
+        fallback: prior.fallback.clone(),
+        override_authorization: prior.override_authorization.clone(),
     };
-
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-        prior.policy_id.clone(),
-        prior.policy_revision.clone(),
-        ExecutionPlacementIdentity {
-            repository: source_path
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| prior.identity.repository.clone()),
-            workspace: source_path
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| prior.identity.workspace.clone()),
-            task: task.to_string(),
-            candidate: source_path
-                .and_then(homeboy::core::git::head_sha)
-                .or_else(|| prior.identity.candidate.clone()),
-            base: source_path
-                .and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD"))
-                .or_else(|| prior.identity.base.clone()),
-        },
-        prior.requested,
-        prior.required,
-        prior.selected,
-        Some(ExecutionPlacementRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: prior
-                .runner
-                .as_ref()
-                .map(|runner| runner.source)
-                .unwrap_or(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit),
-        }),
-        prior.fallback.clone(),
-        prior.override_authorization.clone(),
-    )
+    directive.finalize(homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        repository: source_path
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| prior.identity.repository.clone()),
+        workspace: source_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| prior.identity.workspace.clone()),
+        task: task.to_string(),
+        candidate: source_path
+            .and_then(homeboy::core::git::head_sha)
+            .or_else(|| prior.identity.candidate.clone()),
+        base: source_path
+            .and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD"))
+            .or_else(|| prior.identity.base.clone()),
+    })
 }
 
 fn resolve_cook_attempt_placement_decision(
@@ -3011,7 +2821,7 @@ fn resolve_cook_attempt_placement_decision(
     task: &str,
     source_path: Option<&Path>,
 ) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
-    let replacement = placement_decision_for_attempt(initial, runner_id, task, source_path);
+    let replacement = finalize_replacement_attempt(initial, runner_id, task, source_path);
     let persisted = plan
         .metadata
         .get("execution_placement_decision")
@@ -3165,9 +2975,14 @@ pub(crate) fn dispatch_controller_plan_to_lab(
                 None,
             )
         })?
-        .unwrap_or_else(|| {
-            controller_dispatch_placement_decision(&plan, runner_id, source_path.as_deref())
-        });
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "execution_placement_decision",
+                "controller plan requires its authoritative preflight placement decision",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
     if !plan.metadata.is_object() {
         plan.metadata = serde_json::json!({ "legacy_metadata": plan.metadata });
     }
@@ -3201,54 +3016,6 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         "identity": record.metadata.get("runner_handoff").and_then(|handoff| handoff.get("identity")).cloned(),
         "run": record,
     }))
-}
-
-fn controller_dispatch_placement_decision(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
-    runner_id: &str,
-    source_path: Option<&Path>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
-        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
-        ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
-    };
-
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-        "controller-dispatch-lab",
-        "v1",
-        ExecutionPlacementIdentity {
-            repository: source_path
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "controller-dispatch".to_string()),
-            workspace: source_path
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "controller-dispatch".to_string()),
-            task: plan
-                .tasks
-                .first()
-                .map(|task| task.task_id.clone())
-                .unwrap_or_else(|| plan.plan_id.clone()),
-            candidate: source_path.and_then(homeboy::core::git::head_sha),
-            base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
-        },
-        Placement::Lab,
-        ExecutionPlacementRequirement::Lab,
-        EffectiveExecutionPlacement::Lab,
-        Some(ExecutionPlacementRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: RunnerSelectionSource::Explicit,
-        }),
-        ExecutionPlacementFallback {
-            local_allowed: false,
-            reason: None,
-        },
-        ExecutionPlacementOverrideAuthorization {
-            authorized: false,
-            authority: None,
-        },
-    )
 }
 
 /// Transfer the exact controller-compiled cook plan rather than asking the
@@ -3421,22 +3188,10 @@ fn credential_shaped_key(key: &str) -> bool {
     .any(|needle| key.contains(needle))
 }
 
-fn review_test_can_defer(cli: &Cli) -> bool {
-    matches!(
-        cli.placement,
-        homeboy::cli_surface::Placement::Auto | homeboy::cli_surface::Placement::LabOrLocal
-    ) && cli.runner.is_none()
-        && matches!(
-            &cli.command,
-            Commands::Review(review)
-                if matches!(review.command, Some(crate::commands::review::ReviewCommand::Test(_)))
-                    && review.lab_contract().is_some_and(|contract| contract.is_portable())
-        )
-}
-
 fn deferred_workload_input(
     cli: &Cli,
     args: &[String],
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
     test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements,
 ) -> homeboy::core::Result<homeboy::deferred_workload::DeferredWorkloadInput> {
     Ok(homeboy::deferred_workload::DeferredWorkloadInput {
@@ -3460,7 +3215,9 @@ fn deferred_workload_input(
             "required_runtimes": test_requirements.required_runtimes,
             "required_capabilities": test_requirements.required_capabilities,
         }),
-        resolved_resources: resource_policy::captured_context()
+        resolved_resources: preflight
+            .resource_policy
+            .as_ref()
             .and_then(|context| serde_json::to_value(context).ok())
             .unwrap_or_else(|| serde_json::json!({ "severity": "unknown" })),
         test_requirements,
@@ -3493,12 +3250,6 @@ fn review_test_deferred_requirements(
                 .collect(),
         },
     )
-}
-
-fn deferred_resource_admission_refused() -> bool {
-    resource_policy::captured_context().is_some_and(|context| {
-        context.warned && matches!(context.severity.as_str(), "warm" | "hot")
-    })
 }
 
 /// Preserve a command which can be replayed with an explicit runner. Placement
@@ -4411,7 +4162,7 @@ fn validate_lab_env_name(source: &str, name: &str) -> homeboy::core::Result<Stri
 /// remediation commands are the operator's shortest path back to the Lab.
 fn agent_task_local_fanout_warning(
     command: &Commands,
-    readiness: Option<&runners::LabRunnerReadiness>,
+    readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
 ) -> Option<String> {
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
@@ -4706,7 +4457,7 @@ fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()>
     write_output_file(path, stdout)
 }
 
-fn lab_offload_command(
+pub(crate) fn lab_offload_command(
     command: &Commands,
 ) -> homeboy::core::Result<Option<runners::LabOffloadCommand>> {
     let Some(route_contract) = command.lab_route_contract()? else {

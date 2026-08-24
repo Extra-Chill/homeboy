@@ -4,7 +4,7 @@ use std::sync::{OnceLock, RwLock};
 
 use serde_json::{json, Value};
 
-use crate::cli_surface::{Cli, Placement};
+use crate::cli_surface::Placement;
 
 const SCHEMA: &str = "homeboy/execution-provenance/v1";
 
@@ -16,12 +16,12 @@ fn captured_storage() -> &'static RwLock<Option<Value>> {
 /// Capture normalized, redacted intent before placement routing consumes its
 /// transport markers. The same original argv reaches a Lab child, where its
 /// resolved execution identity is recorded independently.
-pub fn capture(cli: &Cli, normalized_args: &[String]) {
+pub fn capture(result: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult) {
     let mut slot = captured_storage()
         .write()
         .unwrap_or_else(|error| error.into_inner());
     if slot.is_none() {
-        *slot = Some(build(cli, normalized_args));
+        *slot = Some(build(result));
     }
 }
 
@@ -75,23 +75,63 @@ pub fn captured() -> Option<Value> {
     captured_storage().read().ok().and_then(|slot| slot.clone())
 }
 
-fn build(cli: &Cli, normalized_args: &[String]) -> Value {
-    let execution = homeboy::core::resource_policy_context::lab_execution_runner_id()
-        .map(|runner_id| ("lab", Some(runner_id)))
-        .unwrap_or(("controller", None));
-    build_with_execution(cli, normalized_args, execution.0, execution.1)
-}
-
-fn build_with_execution(
-    cli: &Cli,
-    normalized_args: &[String],
-    location: &str,
-    runner_id: Option<String>,
-) -> Value {
-    let argv = redact_execution_argv(normalized_args);
+fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult) -> Value {
+    let argv = redact_execution_argv(&result.normalized_args);
     let rerun_command = homeboy::core::redaction::redact_argv_shell_display(&argv);
-    let placement = placement_name(cli.placement);
-    let decision_origin = decision_origin(cli.placement, cli.runner.is_some(), location);
+    let placement = match result.placement.requested {
+        homeboy_lab_runner_contract::Placement::Auto => "auto",
+        homeboy_lab_runner_contract::Placement::Local => "local",
+        homeboy_lab_runner_contract::Placement::Lab => "lab",
+        homeboy_lab_runner_contract::Placement::LabOrLocal => "lab-or-local",
+    };
+    let directive_location = match result.placement.selected {
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "controller",
+    };
+    // Split-placement coordinators dispatch children later; this invocation is
+    // still controller-owned even when its child placement directive is Lab.
+    let location = if result.input.controller_execution
+        == homeboy::core::parsed_command_preflight::ControllerExecution::Ordinary
+    {
+        directive_location
+    } else {
+        "controller"
+    };
+    let policy_runner_id = result
+        .placement
+        .runner
+        .as_ref()
+        .filter(|runner| {
+            runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Policy
+        })
+        .map(|runner| runner.runner_id.clone());
+    let explicit_runner_id = match &result.input.runner {
+        homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(runner_id) => {
+            Some(runner_id.clone())
+        }
+        _ => None,
+    };
+    let runner_id = (location == "lab")
+        .then(|| {
+            explicit_runner_id
+                .clone()
+                .or_else(|| policy_runner_id.clone())
+        })
+        .flatten();
+    let decision_origin =
+        if result.placement.requested == homeboy_lab_runner_contract::Placement::Lab {
+            "explicit"
+        } else {
+            match result.placement.runner.as_ref().map(|runner| runner.source) {
+                Some(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit) => "explicit",
+                Some(homeboy_lab_runner_contract::RunnerSelectionSource::Policy) => "automatic",
+                None if result.placement.override_authorization.authorized => "explicit",
+                None if result.placement.fallback.local_allowed => "fallback",
+                _ => "automatic",
+            }
+        };
+    let runner_env = flag_values(&argv, "--runner-env");
+    let lab_env_json = flag_values(&argv, "--lab-env-json").into_iter().last();
 
     json!({
         "schema": SCHEMA,
@@ -99,13 +139,13 @@ fn build_with_execution(
             "argv": argv,
             "rerun_command": rerun_command,
             "placement": placement,
-            "runner_id": cli.runner,
+            "runner_id": explicit_runner_id,
             "global_flags": {
-                "detach_after_handoff": cli.detach_after_handoff,
-                "allow_dirty_lab_workspace": cli.allow_dirty_lab_workspace,
-                "skip_deps_hydration": cli.skip_deps_hydration,
-                "runner_env": cli.runner_env.iter().map(|value| redact_env_assignment(value, &homeboy::core::redaction::RedactionPolicy::default())).collect::<Vec<_>>(),
-                "lab_env_json": cli.lab_env_json.as_ref().map(|value| redact_json_env(value, &homeboy::core::redaction::RedactionPolicy::default())),
+                "detach_after_handoff": argv.iter().any(|arg| arg == "--detach-after-handoff"),
+                "allow_dirty_lab_workspace": argv.iter().any(|arg| arg == "--allow-dirty-lab-workspace"),
+                "skip_deps_hydration": argv.iter().any(|arg| arg == "--skip-deps-hydration"),
+                "runner_env": runner_env,
+                "lab_env_json": lab_env_json,
             },
         },
         "resolved_execution": {
@@ -114,11 +154,26 @@ fn build_with_execution(
         },
         "resource_policy": {
             "decision_origin": decision_origin,
-            "preflight": crate::commands::utils::resource_policy::captured_context()
-                .as_ref()
+            "preflight": result.resource_policy.as_ref()
                 .map(crate::commands::utils::resource_policy::resource_policy_context_to_json),
         },
     })
+}
+
+fn flag_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut next = false;
+    for arg in args {
+        if next {
+            values.push(arg.clone());
+            next = false;
+        } else if arg == flag {
+            next = true;
+        } else if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+            values.push(value.to_string());
+        }
+    }
+    values
 }
 
 fn redact_execution_argv(args: &[String]) -> Vec<String> {
@@ -225,7 +280,21 @@ mod tests {
             .map(|arg| (*arg).to_string())
             .collect::<Vec<_>>();
         let cli = Cli::try_parse_from(&argv).expect("parse CLI");
-        build(&cli, &argv)
+        let runner_id = cli.runner.as_deref();
+        build(
+            &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                argv.clone(),
+                crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                    &cli, &argv,
+                ),
+                None,
+                None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, runner_id, false),
+                runner_id.map(str::to_string),
+            ),
+        )
     }
 
     #[test]
@@ -301,12 +370,40 @@ mod tests {
             .map(|arg| (*arg).to_string())
             .collect::<Vec<_>>();
         let cli = Cli::try_parse_from(&argv).expect("parse CLI");
-        let value = build_with_execution(&cli, &argv, "lab", Some("runner-a".to_string()));
+        let value = build(
+            &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                argv.clone(),
+                crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                    &cli, &argv,
+                ),
+                None,
+                None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, Some("runner-a"), false),
+                Some("runner-a".to_string()),
+            ),
+        );
 
         assert_eq!(value["operator_intent"]["placement"], "lab");
+        assert_eq!(value["operator_intent"]["runner_id"], Value::Null);
         assert_eq!(value["resolved_execution"]["location"], "lab");
         assert_eq!(value["resolved_execution"]["runner_id"], "runner-a");
+        assert!(value["resource_policy"].get("policy_runner_id").is_none());
         assert_eq!(value["resource_policy"]["decision_origin"], "explicit");
+    }
+
+    #[test]
+    fn v1_resource_policy_shape_has_no_policy_runner_field() {
+        let value = provenance(&["homeboy", "review"]);
+        let policy = value["resource_policy"].as_object().expect("policy object");
+        assert_eq!(
+            policy.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["decision_origin", "preflight"]
+        );
+        assert!(!serde_json::to_string(&value)
+            .expect("serialize provenance")
+            .contains("policy_runner_id"));
     }
 
     #[test]
@@ -325,6 +422,27 @@ mod tests {
 
         assert!(command.contains("--placement local"));
         assert!(!command.contains("secret-value"));
+    }
+
+    #[test]
+    fn preserves_redacted_runner_and_lab_environment_flag_shapes() {
+        let value = provenance(&[
+            "homeboy",
+            "--runner-env",
+            "MODE=test",
+            "--runner-env=API_TOKEN=secret-value",
+            "--lab-env-json",
+            "{\"token\":\"secret-value\",\"mode\":\"test\"}",
+            "review",
+        ]);
+        assert_eq!(
+            value["operator_intent"]["global_flags"]["runner_env"],
+            json!(["MODE=test", "API_TOKEN=[redacted]"])
+        );
+        assert_eq!(
+            value["operator_intent"]["global_flags"]["lab_env_json"],
+            json!("{\"mode\":\"test\",\"token\":\"[REDACTED]\"}")
+        );
     }
 
     #[test]
