@@ -29,20 +29,14 @@ pub use homeboy_extension_contract::test_results::{
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
-use serde::Deserialize;
-#[cfg(unix)]
-use serde::Serialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::collections::BTreeMap;
-#[cfg(unix)]
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct TestRunWorkflowArgs {
@@ -114,11 +108,12 @@ fn runtime_test_evidence(
     runner_succeeded: bool,
     counts: Option<&TestCounts>,
     failures: Option<&TestAnalysisInput>,
+    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
 ) -> TestRuntimeEvidence {
     let invalid = |reason: &str| TestRuntimeEvidence::InvalidEvidence {
         reason: reason.to_string(),
     };
-    let plan = match runtime_test_plan(ci_env, source_path, inventory_profile) {
+    let plan = match runtime_test_plan(ci_env, source_path, inventory_profile, internal_plan) {
         Ok(plan) => plan,
         Err(reason) => return invalid(reason),
     };
@@ -149,10 +144,13 @@ fn runtime_test_evidence(
         return invalid("observed failed test ID is absent from the runtime plan");
     }
     if !runner_succeeded {
+        let Some(counts) = counts else {
+            return invalid("failed test command did not expose structured TestCounts");
+        };
         if failed_test_ids.is_empty() {
             return invalid("failed test command did not expose an observed failed test ID");
         }
-        if counts.is_some_and(|counts| counts.failed as usize != failed_test_ids.len()) {
+        if counts.failed as usize != failed_test_ids.len() {
             return invalid("failed-test detail IDs do not account for every reported failure");
         }
     } else if !failed_test_ids.is_empty() {
@@ -177,12 +175,18 @@ fn runtime_test_plan(
     ci_env: &[(String, String)],
     source_path: &Path,
     inventory_profile: Option<&InventoryProfile>,
+    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
 ) -> Result<RuntimeTestPlan, &'static str> {
     if let Some(path) = runtime_evidence_path(ci_env, TEST_SHARD_MANIFEST_ENV) {
-        return runtime_plan_from_shard(path);
+        let Some(profile) = inventory_profile else {
+            return Err("runtime shard manifest cannot be bound to this extension");
+        };
+        return runtime_plan_from_shard(path, source_path, profile);
     }
     let Some(path) = runtime_evidence_path(ci_env, TEST_INVENTORY_FILE_ENV) else {
-        return Err("test adapter did not provide an exact runtime test plan");
+        return internal_plan.unwrap_or(Err(
+            "test adapter did not provide an exact runtime test plan",
+        ));
     };
     let Some(profile) = inventory_profile else {
         return Err("test adapter inventory cannot be bound to this extension");
@@ -197,7 +201,11 @@ fn runtime_evidence_path<'a>(ci_env: &'a [(String, String)], key: &str) -> Optio
         .filter(|path| !path.is_empty())
 }
 
-fn runtime_plan_from_shard(path: &str) -> Result<RuntimeTestPlan, &'static str> {
+fn runtime_plan_from_shard(
+    path: &str,
+    source_path: &Path,
+    profile: &InventoryProfile,
+) -> Result<RuntimeTestPlan, &'static str> {
     let raw = std::fs::read(path).map_err(|_| "runtime shard manifest is missing or unreadable")?;
     let mut manifest = serde_json::from_slice::<TestShardManifest>(&raw)
         .map_err(|_| "runtime shard manifest is malformed")?;
@@ -219,6 +227,15 @@ fn runtime_plan_from_shard(path: &str) -> Result<RuntimeTestPlan, &'static str> 
     manifest.tests.sort();
     if manifest.tests.windows(2).any(|ids| ids[0] == ids[1]) {
         return Err("runtime shard manifest contains duplicate test IDs");
+    }
+    let workspace_root = inventory_workspace_root(source_path, profile)
+        .ok_or("runtime shard manifest workspace cannot be resolved")?;
+    if workspace_fingerprint(&workspace_root, profile).as_deref()
+        != Some(manifest.workspace_fingerprint.as_str())
+        || runner_fingerprint(&workspace_root, &manifest.runner, profile).as_deref()
+            != Some(manifest.runner_fingerprint.as_str())
+    {
+        return Err("runtime shard manifest provenance does not match the current execution");
     }
     let execution_fingerprint = execution_fingerprint(
         "shard_manifest",
@@ -245,6 +262,14 @@ fn runtime_plan_from_inventory(
 ) -> Result<RuntimeTestPlan, &'static str> {
     let raw =
         std::fs::read(path).map_err(|_| "runtime adapter inventory is missing or unreadable")?;
+    runtime_plan_from_inventory_bytes(&raw, source_path, profile)
+}
+
+fn runtime_plan_from_inventory_bytes(
+    raw: &[u8],
+    source_path: &Path,
+    profile: &InventoryProfile,
+) -> Result<RuntimeTestPlan, &'static str> {
     let inventory = serde_json::from_slice::<TestInventoryEvidence>(&raw)
         .map_err(|_| "runtime adapter inventory is malformed")?;
     if inventory.schema != TEST_INVENTORY_SCHEMA
@@ -508,13 +533,16 @@ fn test_inventory_binding(
     source_path: &Path,
     run_dir: &RunDir,
     profile: &InventoryProfile,
+    require_public_path: bool,
 ) -> Result<TestInventoryBinding, TestInventoryRejection> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let child_path = run_dir.path().join(TEST_INVENTORY_FILE);
     let workspace_root = inventory_workspace_root(source_path, profile)
         .ok_or(TestInventoryRejection::BindingUnavailable)?;
-    requested_test_inventory_path(ci_env, &workspace_root)?;
+    if require_public_path {
+        requested_test_inventory_path(ci_env, &workspace_root)?;
+    }
     let project_root = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -1464,25 +1492,102 @@ fn run_main_test_workflow_inner(
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
+    let inventory_profile = test_context.as_ref().and_then(|_| {
+        InventoryProfile::resolve(
+            test_config
+                .as_ref()
+                .and_then(|test| test.inventory.as_ref()),
+        )
+    });
 
     #[cfg(unix)]
     let inventory_binding = if inventory_mode {
-        let profile = test_context.as_ref().and_then(|_| {
-            InventoryProfile::resolve(
-                test_config
-                    .as_ref()
-                    .and_then(|test| test.inventory.as_ref()),
-            )
-        });
-        match profile {
-            Some(profile) => test_inventory_binding(&args.ci_env, source_path, run_dir, &profile)
-                .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
-                .map(Some),
+        match inventory_profile.as_ref() {
+            Some(profile) => {
+                test_inventory_binding(&args.ci_env, source_path, run_dir, profile, true)
+                    .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
+                    .map(Some)
+            }
             None => Err(TestInventoryRejection::BindingUnavailable),
         }
     } else {
         Ok(None)
     };
+
+    #[cfg(unix)]
+    let internal_runtime_plan = if !inventory_mode
+        && runtime_evidence_path(&args.ci_env, TEST_SHARD_MANIFEST_ENV).is_none()
+        && runtime_evidence_path(&args.ci_env, TEST_INVENTORY_FILE_ENV).is_none()
+    {
+        Some(match inventory_profile.as_ref() {
+            None => Err("test adapter inventory cannot be bound to this extension"),
+            Some(profile) => {
+                match test_inventory_binding(&args.ci_env, source_path, run_dir, profile, false)
+                    .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
+                {
+                    Err(_) => Err("internal runtime inventory binding could not be established"),
+                    Ok(binding) => {
+                        let producer = build_test_runner(
+                            component,
+                            args.path_override.clone(),
+                            &args.settings,
+                            &args.settings_json,
+                            args.skip_lint,
+                            false,
+                            None,
+                            None,
+                            run_dir,
+                        )?;
+                        let producer = args
+                            .ci_env
+                            .iter()
+                            .fold(producer, |producer, (key, value)| producer.env(key, value));
+                        let output = producer
+                            .env(TEST_INVENTORY_ONLY_ENV, "1")
+                            .env(
+                                TEST_INVENTORY_FILE_ENV,
+                                binding.child_path.to_string_lossy().as_ref(),
+                            )
+                            .env_remove_if(true, "SCOPE_MODE")
+                            .env_remove_if(true, "HOMEBOY_CHANGED_SINCE")
+                            .env_remove_if(true, "HOMEBOY_CHANGED_TEST_FILES")
+                            .passthrough(false)
+                            .timeout(Some(test_timeout()))
+                            .run()?;
+                        if !output.success {
+                            let _ = unlink_test_inventory(&binding);
+                            Err("internal runtime inventory producer failed")
+                        } else {
+                            match valid_test_inventory(&binding) {
+                                Err(_) => Err(
+                                    "internal runtime inventory producer emitted invalid evidence",
+                                ),
+                                Ok((inventory, bytes)) => {
+                                    if !revalidate_test_inventory_binding(
+                                        &binding,
+                                        source_path,
+                                        &inventory.runner,
+                                    ) {
+                                        Err("internal runtime inventory provenance changed before execution")
+                                    } else {
+                                        runtime_plan_from_inventory_bytes(
+                                            &bytes,
+                                            source_path,
+                                            profile,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let internal_runtime_plan: Option<Result<RuntimeTestPlan, &'static str>> = None;
 
     let runner = build_test_runner(
         component,
@@ -1685,11 +1790,6 @@ fn run_main_test_workflow_inner(
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
     let test_runtime_evidence = (!inventory_mode).then(|| {
-        let inventory_profile = InventoryProfile::resolve(
-            test_config
-                .as_ref()
-                .and_then(|test| test.inventory.as_ref()),
-        );
         runtime_test_evidence(
             &args.ci_env,
             source_path,
@@ -1697,6 +1797,7 @@ fn run_main_test_workflow_inner(
             output.success,
             test_counts.as_ref(),
             failure_analysis_input.as_ref(),
+            internal_runtime_plan,
         )
     });
 
@@ -2580,18 +2681,36 @@ mod tests {
         }
     }
 
+    fn runtime_fixture_profile(root: &Path) -> InventoryProfile {
+        std::fs::write(root.join("fixture.root"), "root\n").unwrap();
+        std::fs::write(root.join("suite.fixture"), "suite\n").unwrap();
+        InventoryProfile {
+            root_markers: vec!["fixture.root".to_string()],
+            fingerprint_names: vec!["fixture.root".to_string()],
+            fingerprint_extensions: vec!["fixture".to_string()],
+            fingerprint_skip_dirs: Vec::new(),
+            runner_commands: BTreeMap::from([(
+                "rustc".to_string(),
+                vec!["rustc".to_string(), "--version".to_string()],
+            )]),
+        }
+    }
+
     #[test]
     fn shard_runtime_evidence_normalizes_observed_failures_against_exact_plan() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let runner_fingerprint = runner_fingerprint(temp.path(), "rustc", &profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(temp.path(), &profile).unwrap();
         let manifest = temp.path().join("shard.json");
         std::fs::write(
             &manifest,
             serde_json::to_vec(&serde_json::json!({
                 "schema": "homeboy/test-shard-manifest/v1",
                 "id": "shard-2",
-                "runner": "nextest",
-                "runner_fingerprint": "a".repeat(64),
-                "workspace_fingerprint": "b".repeat(64),
+                "runner": "rustc",
+                "runner_fingerprint": runner_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
                 "inventory_fingerprint": "c".repeat(64),
                 "tests": ["suite::passes", "suite::fails"],
                 "estimated_duration_ms": 120000,
@@ -2611,10 +2730,11 @@ mod tests {
                 manifest.to_string_lossy().to_string(),
             )],
             temp.path(),
-            None,
+            Some(&profile),
             false,
             Some(&TestCounts::new(2, 1, 1, 0)),
             Some(&failures),
+            None,
         );
 
         let TestRuntimeEvidence::Complete {
@@ -2637,15 +2757,18 @@ mod tests {
     #[test]
     fn unknown_duplicate_or_missing_red_runtime_details_are_invalid_evidence() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let runner_fingerprint = runner_fingerprint(temp.path(), "rustc", &profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(temp.path(), &profile).unwrap();
         let manifest = temp.path().join("shard.json");
         std::fs::write(
             &manifest,
             serde_json::to_vec(&serde_json::json!({
                 "schema": "homeboy/test-shard-manifest/v1",
                 "id": "shard-1",
-                "runner": "nextest",
-                "runner_fingerprint": "a".repeat(64),
-                "workspace_fingerprint": "b".repeat(64),
+                "runner": "rustc",
+                "runner_fingerprint": runner_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
                 "inventory_fingerprint": "c".repeat(64),
                 "tests": ["suite::planned"],
             }))
@@ -2684,10 +2807,11 @@ mod tests {
             let evidence = runtime_test_evidence(
                 &ci_env,
                 temp.path(),
-                None,
+                Some(&profile),
                 false,
                 Some(&TestCounts::new(1, 0, 1, 0)),
                 details.as_ref(),
+                None,
             );
             assert!(matches!(
                 evidence,
@@ -2695,6 +2819,25 @@ mod tests {
                     if reason.contains(expected_reason)
             ));
         }
+
+        let countless = runtime_test_evidence(
+            &ci_env,
+            temp.path(),
+            Some(&profile),
+            false,
+            None,
+            Some(&TestAnalysisInput {
+                failures: vec![failed_identity("suite::planned")],
+                total: 1,
+                passed: 0,
+            }),
+            None,
+        );
+        assert!(matches!(
+            countless,
+            TestRuntimeEvidence::InvalidEvidence { ref reason }
+                if reason.contains("structured TestCounts")
+        ));
     }
 
     #[cfg(unix)]
@@ -3846,7 +3989,7 @@ mod tests {
             let run_dir = RunDir::create().expect("run directory");
 
             assert!(matches!(
-                test_inventory_binding(&[], source.path(), &run_dir, &profile),
+                test_inventory_binding(&[], source.path(), &run_dir, &profile, true),
                 Err(TestInventoryRejection::BindingUnavailable)
             ));
 
@@ -3859,6 +4002,7 @@ mod tests {
                     source.path(),
                     &run_dir,
                     &profile,
+                    true,
                 ),
                 Err(TestInventoryRejection::RequestedPathRejected)
             ));
