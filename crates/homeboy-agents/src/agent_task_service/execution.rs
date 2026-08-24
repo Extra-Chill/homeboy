@@ -1459,6 +1459,7 @@ fn retryable_cook_attempt(
             )]),
         ));
     };
+    agent_task_lifecycle::admit_lab_pre_execution_replay(source, &source_recipe_attempt.plan)?;
     let retryable_pre_execution_failure =
         source.metadata["pre_execution_failure"]["retryable"] == serde_json::Value::Bool(true);
     if source.metadata["pre_execution_failure"].is_object() && !retryable_pre_execution_failure {
