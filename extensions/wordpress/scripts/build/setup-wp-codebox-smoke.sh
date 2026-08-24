@@ -32,6 +32,11 @@ if [ "${1:-}" = "--version" ]; then
     printf '%s\n' "${FAKE_WP_CODEBOX_VERSION-0.21.0}"
     exit 0
 fi
+if [ "${1:-}" = "doctor" ] && [ "${2:-}" = "--json" ]; then
+    version="${FAKE_WP_CODEBOX_VERSION-0.21.0}"
+    printf '{"schema":"wp-codebox/doctor/v1","status":"ok","checks":[{"id":"wp-codebox.source","status":"ok","message":"packaged provenance verified","details":{"provenance":{"schema":"wp-codebox/cli-build-provenance/v1","package":{"name":"@automattic/wp-codebox-cli","version":"%s"},"dist":{"sha256":"release-dist"},"git":{}}}}]}\n' "${version}"
+    exit 0
+fi
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
@@ -136,6 +141,12 @@ while [ "$#" -gt 0 ]; do
 cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
+if (process.argv.includes('doctor') && process.argv.includes('--json')) {
+  const ref = process.env.WP_CODEBOX_SOURCE_REF ?? 'main';
+  const commit = process.env.WP_CODEBOX_SOURCE_SHA ?? '0123456789abcdef0123456789abcdef01234567';
+  process.stdout.write(JSON.stringify({ schema: 'wp-codebox/doctor/v1', status: 'ok', checks: [{ id: 'wp-codebox.source', status: 'ok', message: 'source provenance verified; no configured upstream is available and remote fetch was not attempted', details: { provenance: { schema: 'wp-codebox/cli-build-provenance/v1', package: { name: '@automattic/wp-codebox-cli', version: process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0' }, dist: { sha256: 'source-dist' }, git: { ref, commit } }, git: { evidence: 'unavailable', reason: 'no configured upstream', remoteFetch: 'not-attempted' } } }] }) + '\n');
+  process.exit(0);
+}
 console.log('wp-codebox source stub');
 NODE
             chmod +x "${prefix}/packages/cli/dist/index.js"
@@ -177,6 +188,43 @@ fi
 
 if [ "$("${wp_codebox_bin}")" != "wp-codebox release stub" ]; then
     echo "Expected wp-codebox wrapper to execute release artifact CLI" >&2
+    exit 1
+fi
+
+# A runnable global workspace package must not shadow an already-current
+# managed release, and the no-op path must not contact the release authority.
+GLOBAL_BIN="${TMPDIR}/global-bin"
+CURRENT_GITHUB_ENV_FILE="${TMPDIR}/current-github-env"
+mkdir -p "${GLOBAL_BIN}"
+cat > "${GLOBAL_BIN}/wp-codebox" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then printf '%s\n' '0.21.0'; exit 0; fi
+if [ "${1:-}" = "doctor" ]; then
+    printf '%s\n' '{"schema":"wp-codebox/doctor/v1","status":"ok","checks":[{"id":"wp-codebox.source","status":"ok","message":"stale packaged provenance","details":{"provenance":{"schema":"wp-codebox/cli-build-provenance/v1","package":{"name":"@automattic/wp-codebox-cli","version":"0.21.0"},"dist":{"sha256":"stale-global-dist"},"git":{}}}}]}'
+    exit 0
+fi
+printf '%s\n' 'stale global wp-codebox'
+SH
+chmod +x "${GLOBAL_BIN}/wp-codebox"
+
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${HOME_DIR}" \
+    PATH="${GLOBAL_BIN}:${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${CURRENT_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/current-setup.out"
+)
+
+current_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${CURRENT_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+if [ "${current_wp_codebox_bin}" != "${HOME_DIR}/.cache/homeboy/wp-codebox/release/wp-codebox-cli/bin/wp-codebox" ]; then
+    echo "Expected current managed release to win over stale global CLI, got: ${current_wp_codebox_bin}" >&2
+    cat "${TMPDIR}/current-setup.out" >&2
+    exit 1
+fi
+if ! grep -q 'WP Codebox managed release is already current' "${TMPDIR}/current-setup.out" || grep -q 'Installing WP Codebox CLI' "${TMPDIR}/current-setup.out"; then
+    echo "Expected an already-current managed release to be a no-op" >&2
+    cat "${TMPDIR}/current-setup.out" >&2
     exit 1
 fi
 
@@ -381,8 +429,8 @@ if [ "${missing_version_wp_codebox_bin}" != "${TMPDIR}/missing-version-install/s
     exit 1
 fi
 
-if ! grep -q 'wp_codebox_version_probe_failed' "${TMPDIR}/missing-version-setup.out"; then
-    echo "Expected release without a version to report the adapter version preflight" >&2
+if ! grep -q 'provenance_identity_incomplete' "${TMPDIR}/missing-version-setup.out"; then
+    echo "Expected release without an immutable version identity to report the provenance rejection" >&2
     cat "${TMPDIR}/missing-version-setup.out" >&2
     exit 1
 fi
@@ -514,7 +562,7 @@ if (
     exit 1
 fi
 
-if ! grep -q 'WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: https://example.test/custom-wp-codebox.git' "${NO_LOCKFILE_ERROR}"; then
+if ! grep -q 'WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci from the configured source authority' "${NO_LOCKFILE_ERROR}"; then
     echo "Expected a deterministic lockfile diagnostic for custom WP Codebox sources" >&2
     cat "${NO_LOCKFILE_ERROR}" >&2
     exit 1
@@ -539,6 +587,10 @@ printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: 
 cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (process.argv.includes('doctor') && process.argv.includes('--json')) {
+  process.stdout.write(JSON.stringify({ schema: 'wp-codebox/doctor/v1', status: 'ok', checks: [{ id: 'wp-codebox.source', status: 'ok', message: 'packaged provenance verified', details: { provenance: { schema: 'wp-codebox/cli-build-provenance/v1', package: { name: '@automattic/wp-codebox-cli', version: '0.21.0' }, dist: { sha256: 'override-dist' }, git: {} } } }] }) + '\n');
+  process.exit(0);
+}
 console.log('current wp-codebox');
 NODE
 chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"
@@ -546,11 +598,18 @@ printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: 
 printf '%s\n' 'module.exports = require("./native.js");' > "${CURRENT_ROOT}/node_modules/sharp/index.js"
 printf '%s\n' 'module.exports = { native: true };' > "${CURRENT_ROOT}/node_modules/sharp/native.js"
 
+OVERRIDE_INSTALL_DIR="${TMPDIR}/override-install"
+OVERRIDE_DOWNLOAD_URL="https://example.test/override-wp-codebox-cli-linux-x64.tar.gz"
+mkdir -p "${OVERRIDE_INSTALL_DIR}"
+node -e 'const { createHash } = require("node:crypto"); const fs = require("node:fs"); fs.writeFileSync(process.argv[2], JSON.stringify({ schema: "homeboy-wordpress/wp-codebox-managed-release/v1", authority_sha256: createHash("sha256").update(process.argv[1]).digest("hex"), version: "0.21.0", dist_sha256: "override-dist" }));' "${OVERRIDE_DOWNLOAD_URL}" "${OVERRIDE_INSTALL_DIR}/managed-release-identity.json"
+
 (
     cd "${EXTENSION_DIR}"
     HOME="${HOME_DIR}" \
     PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${OVERRIDE_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${OVERRIDE_INSTALL_DIR}" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="${OVERRIDE_DOWNLOAD_URL}" \
     HOMEBOY_WP_CODEBOX_BIN="${STALE_ROOT}/packages/cli/dist/index.js" \
     HOMEBOY_WP_CODEBOX_CORE_MODULE="${STALE_ROOT}/packages/runtime-core/dist/index.js" \
     WP_CODEBOX_CLI="${CURRENT_ROOT}/packages/cli/dist/index.js" \
@@ -670,7 +729,7 @@ if [ "${missing_release_wp_codebox_core_module}" != "${MISSING_RELEASE_INSTALL_D
     exit 1
 fi
 
-if ! grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
+if ! grep -q 'WP Codebox release artifact is unavailable from the configured authority' "${TMPDIR}/missing-release-setup.err"; then
     echo "Missing release artifact must use the source fallback" >&2
     cat "${TMPDIR}/missing-release-setup.err" >&2
     exit 1

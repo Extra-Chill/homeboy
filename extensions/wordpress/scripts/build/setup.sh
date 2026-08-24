@@ -101,6 +101,99 @@ NODE
         esac
     }
 
+    wp_codebox_identity_file() {
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        printf '%s\n' "${install_root}/managed-release-identity.json"
+    }
+
+    wp_codebox_freshness_inspector() {
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        printf '%s\n' "${script_dir}/inspect-wp-codebox-freshness.mjs"
+    }
+
+    wp_codebox_authority_digest() {
+        node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$1"
+    }
+
+    report_wp_codebox_freshness() {
+        local result_file="$1"
+        local authority="$2"
+        local remediation="$3"
+
+        echo "WP Codebox candidate: $(jq -r '.bin' "${result_file}")"
+        echo "WP Codebox source authority: ${authority}"
+        echo "WP Codebox expected identity: $(jq -c '.expected' "${result_file}")"
+        echo "WP Codebox observed version/provenance: $(jq -c '.observed' "${result_file}")"
+        if [ "$(jq -r '.fresh' "${result_file}")" != "true" ]; then
+            echo "WP Codebox candidate rejected: $(jq -r '.reason + (if .detail == "" then "" else ": " + .detail end)' "${result_file}")" >&2
+            echo "WP Codebox remediation: ${remediation}" >&2
+        fi
+    }
+
+    wp_codebox_candidate_is_fresh() {
+        local bin_path="$1"
+        local candidate_kind="$2"
+        local mode="$3"
+        local authority="$4"
+        local expected_version="$5"
+        local expected_dist="$6"
+        local expected_ref="$7"
+        local expected_commit="$8"
+        local remediation="$9"
+        local result_file
+        local args=(--bin "${bin_path}" --candidate "${candidate_kind}" --mode "${mode}")
+
+        [ -n "${expected_version}" ] && args+=(--expected-version "${expected_version}")
+        [ -n "${expected_dist}" ] && args+=(--expected-dist "${expected_dist}")
+        [ -n "${expected_ref}" ] && args+=(--expected-ref "${expected_ref}")
+        [ -n "${expected_commit}" ] && args+=(--expected-commit "${expected_commit}")
+
+        result_file="$(mktemp)"
+        if node "$(wp_codebox_freshness_inspector)" "${args[@]}" > "${result_file}"; then
+            report_wp_codebox_freshness "${result_file}" "${authority}" "${remediation}"
+            rm -f "${result_file}"
+            return 0
+        fi
+        report_wp_codebox_freshness "${result_file}" "${authority}" "${remediation}"
+        rm -f "${result_file}"
+        return 1
+    }
+
+    record_managed_release_identity() {
+        local bin_path="$1"
+        local authority_digest="$2"
+        local result_file
+        local identity_file
+        local identity_tmp
+
+        result_file="$(mktemp)"
+        identity_file="$(wp_codebox_identity_file)"
+        if ! node "$(wp_codebox_freshness_inspector)" --bin "${bin_path}" --candidate managed --mode release --record > "${result_file}"; then
+            report_wp_codebox_freshness "${result_file}" "managed release artifact" "reinstall the managed release or use the configured source fallback"
+            rm -f "${result_file}"
+            return 1
+        fi
+        identity_tmp="${identity_file}.tmp"
+        jq -n \
+            --arg schema "homeboy-wordpress/wp-codebox-managed-release/v1" \
+            --arg authority_sha256 "${authority_digest}" \
+            --arg version "$(jq -r '.observed.version' "${result_file}")" \
+            --arg dist_sha256 "$(jq -r '.observed.dist_sha256' "${result_file}")" \
+            '{schema:$schema,authority_sha256:$authority_sha256,version:$version,dist_sha256:$dist_sha256}' > "${identity_tmp}"
+        mv "${identity_tmp}" "${identity_file}"
+        rm -f "${result_file}"
+    }
+
+    persist_managed_wp_codebox_selection() {
+        local selected_bin="$1"
+
+        export HOMEBOY_WP_CODEBOX_BIN="${selected_bin}"
+        write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${selected_bin}"
+        HOMEBOY_WP_CODEBOX_CLI="" WP_CODEBOX_CLI="" WP_CODEBOX_BIN="" \
+            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" --machine "$(wp_codebox_override_file)" "${EXTENSION_PATH}/wordpress.json"
+    }
+
     # A wrapper written into ${HOME}/.local/bin by an earlier install keeps
     # resolving on PATH after its exec target is pruned or a build is
     # interrupted. Anything that trusts PATH then reaches a missing entrypoint
@@ -242,7 +335,7 @@ NODE
             fi
         fi
 
-        if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
+        if [ "${configured_bin}" -eq 1 ] && wp_codebox_candidate_is_fresh "${HOMEBOY_WP_CODEBOX_BIN}" override "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use a provenance-bearing override matching the requested identity, or let setup converge the managed install" && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
             # Persist machine-local overrides to the untracked cache override
             # file rather than the tracked wordpress.json manifest so setup does
             # not dirty a linked extension source checkout.
@@ -277,61 +370,89 @@ NODE
         return 1
     }
 
-    prune_stale_wp_codebox_wrapper "${HOME}/.local/bin/wp-codebox"
-
-    if configure_explicit_overrides; then
-        return 0
-    fi
-
     local source_install_requested=0
     if [ -n "${HOMEBOY_WP_CODEBOX_SOURCE:-}" ] || [ -n "${HOMEBOY_WP_CODEBOX_REF:-}" ] || [ "${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-}" = "source" ]; then
         source_install_requested=1
         export HOMEBOY_WP_CODEBOX_INSTALL_MODE="source"
     fi
 
+    local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir source ref repo_dir
+    local source_authority_label expected_release_version="" expected_release_dist="" expected_source_ref="" expected_source_commit=""
+    local release_authority_digest identity_file managed_candidate detected_bin
+    install_mode="${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-release}"
+    install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+    bin_dir="${HOME}/.local/bin"
+    bin_path="${bin_dir}/wp-codebox"
+    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/Automattic/wp-codebox.git}"
+    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
+    repo_dir="${install_root}/source"
+    download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}"
+    source_authority_label="managed source ref ${ref}"
+    expected_source_ref="${ref}"
+    expected_source_commit="${WP_CODEBOX_SOURCE_SHA:-}"
+
+    prune_stale_wp_codebox_wrapper "${HOME}/.local/bin/wp-codebox"
+
+    if [ "${install_mode}" != "source" ]; then
+        platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        arch="$(uname -m)"
+        case "${platform}" in darwin) platform="macos" ;; esac
+        case "${arch}" in x86_64|amd64) arch="x64" ;; aarch64) arch="arm64" ;; esac
+        artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
+        download_url="${download_url:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
+        release_authority_digest="$(wp_codebox_authority_digest "${download_url}")"
+        source_authority_label="managed release artifact ${artifact_name}"
+        identity_file="$(wp_codebox_identity_file)"
+        if [ -f "${identity_file}" ] && [ "$(jq -r '.schema // empty' "${identity_file}" 2>/dev/null)" = "homeboy-wordpress/wp-codebox-managed-release/v1" ] && [ "$(jq -r '.authority_sha256 // empty' "${identity_file}" 2>/dev/null)" = "${release_authority_digest}" ]; then
+            expected_release_version="$(jq -r '.version // empty' "${identity_file}")"
+            expected_release_dist="$(jq -r '.dist_sha256 // empty' "${identity_file}")"
+        fi
+    fi
+
+    if configure_explicit_overrides; then
+        return 0
+    fi
+
+    if [ "${install_mode}" = "source" ]; then
+        managed_candidate="${repo_dir}/packages/cli/dist/index.js"
+        if [ -x "${managed_candidate}" ] && [ -d "${repo_dir}/.git" ] && [ "$(git -C "${repo_dir}" remote get-url origin 2>/dev/null || true)" = "${source}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed source "${source_authority_label}" "" "" "${expected_source_ref}" "${expected_source_commit}" "refresh and rebuild the managed source checkout" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${repo_dir}"; then
+            persist_managed_wp_codebox_selection "${managed_candidate}"
+            echo "WP Codebox managed source is already current: ${managed_candidate}"
+            return 0
+        fi
+    else
+        managed_candidate="${install_root}/release/wp-codebox-cli/bin/wp-codebox"
+        if [ -x "${managed_candidate}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed release "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "" "" "reinstall the managed release artifact" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${install_root}/release/wp-codebox-cli"; then
+            persist_managed_wp_codebox_selection "${managed_candidate}"
+            echo "WP Codebox managed release is already current: ${managed_candidate}"
+            return 0
+        fi
+    fi
+
     if [ "${source_install_requested}" -eq 0 ] && [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
-        if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
+        if wp_codebox_candidate_is_fresh "${HOMEBOY_WP_CODEBOX_BIN}" ambient "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use the managed installation selected by setup" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
             return 0
         fi
         echo "WP Codebox CLI is configured without a ready runtime; (re)installing source module" >&2
     fi
 
     if [ "${source_install_requested}" -eq 0 ] && command -v wp-codebox >/dev/null 2>&1; then
-        local detected_bin
         detected_bin="$(command -v wp-codebox)"
         echo "WP Codebox already available: ${detected_bin}"
         write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${detected_bin}"
-        if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${detected_bin}" && preflight_wp_codebox_version "${detected_bin}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${detected_bin}")"; then
+        if wp_codebox_candidate_is_fresh "${detected_bin}" ambient "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use the managed installation selected by setup" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${detected_bin}" && preflight_wp_codebox_version "${detected_bin}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${detected_bin}")"; then
             return 0
         fi
         echo "WP Codebox CLI is available without a ready runtime; (re)installing source module" >&2
     fi
 
-    local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir
-    install_mode="${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-release}"
-    install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
-    bin_dir="${HOME}/.local/bin"
-    bin_path="${bin_dir}/wp-codebox"
-
     if [ "${install_mode}" != "source" ]; then
         local release_artifact_downloaded=0
-        platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
-        arch="$(uname -m)"
-        case "${platform}" in
-            darwin) platform="macos" ;;
-        esac
-        case "${arch}" in
-            x86_64|amd64) arch="x64" ;;
-            aarch64) arch="arm64" ;;
-        esac
-
-        artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
-        download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
         artifact_path="${install_root}/${artifact_name}"
         extract_dir="${install_root}/release"
 
-        echo "Installing WP Codebox CLI from release artifact (${download_url})..."
+        echo "Installing WP Codebox CLI from ${source_authority_label}..."
         mkdir -p "${install_root}" "${bin_dir}"
 
         if command -v curl >/dev/null 2>&1 && curl -fsIL "${download_url}" >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
@@ -355,7 +476,8 @@ EOF
             write_github_env "PATH" "${bin_dir}:${PATH}"
 
             echo "WP Codebox installed: ${bin_path}"
-            if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${bin_path}" && preflight_wp_codebox_version "${bin_path}" && probe_wp_codebox_native_runtime "${extract_dir}/wp-codebox-cli"; then
+            if record_managed_release_identity "${extract_dir}/wp-codebox-cli/bin/wp-codebox" "${release_authority_digest}" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${bin_path}" && preflight_wp_codebox_version "${bin_path}" && probe_wp_codebox_native_runtime "${extract_dir}/wp-codebox-cli"; then
+                persist_managed_wp_codebox_selection "${extract_dir}/wp-codebox-cli/bin/wp-codebox"
                 return 0
             fi
 
@@ -363,7 +485,7 @@ EOF
         fi
 
         if [ "${release_artifact_downloaded}" -eq 0 ]; then
-            echo "WP Codebox release artifact not published at ${download_url}; falling back to source install" >&2
+            echo "WP Codebox release artifact is unavailable from the configured authority; falling back to source install" >&2
         fi
     fi
 
@@ -372,12 +494,7 @@ EOF
     # this managed release before resolving the source CLI/core pair.
     clear_rejected_release_runtime "${install_root}/release" "${bin_path}"
 
-    local source ref repo_dir
-    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/Automattic/wp-codebox.git}"
-    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
-    repo_dir="${install_root}/source"
-
-    echo "Installing WP Codebox CLI (${source}@${ref})..."
+    echo "Installing WP Codebox CLI from ${source_authority_label}..."
     mkdir -p "${install_root}" "${bin_dir}"
 
     if [ ! -d "${repo_dir}/.git" ]; then
@@ -409,7 +526,7 @@ EOF
     }
 
     if [ ! -f "${repo_dir}/package-lock.json" ] && [ ! -f "${repo_dir}/npm-shrinkwrap.json" ]; then
-        echo "WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: ${source}" >&2
+        echo "WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci from the configured source authority" >&2
         exit 1
     fi
 
@@ -447,10 +564,14 @@ EOF
         echo "Built WP Codebox source native runtime is not ready" >&2
         exit 1
     }
+    wp_codebox_candidate_is_fresh "${source_bin_path}" managed source "managed source ref ${ref}" "" "" "${ref}" "${source_sha}" "rebuild the managed source checkout" || {
+        echo "Built WP Codebox source did not provide matching immutable provenance" >&2
+        exit 1
+    }
 
     bin_path="${source_bin_path}"
 
-    write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${bin_path}"
+    persist_managed_wp_codebox_selection "${bin_path}"
     write_github_env "PATH" "${bin_dir}:${PATH}"
 
     echo "WP Codebox installed: ${bin_path}"

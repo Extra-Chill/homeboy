@@ -59,20 +59,21 @@ homeboy_wp_codebox_resolve_bin() {
         candidates+=("$bin")
     fi
 
-    while IFS= read -r candidate; do
-        [ -n "$candidate" ] && candidates+=("$candidate")
-    done < <(homeboy_wp_codebox_managed_cli_candidates)
-
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
     fi
     if [ -n "$bin" ]; then
         candidates+=("$bin")
     fi
+
     bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
     if [ -n "$bin" ]; then
         candidates+=("$bin")
     fi
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && candidates+=("$candidate")
+    done < <(homeboy_wp_codebox_managed_cli_candidates)
     if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
         candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
     fi
