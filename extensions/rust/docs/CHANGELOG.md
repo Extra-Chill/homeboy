@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.1] - 2026-08-24
+
+### Fixed
+- resolve generic field types structurally
+
 ## [1.37.0] - 2026-08-23
 
 ### Added
