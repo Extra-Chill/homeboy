@@ -76,22 +76,6 @@ homeboy_wordpress_host_smoke_abs() {
     esac
 }
 
-homeboy_wordpress_resolve_wp_codebox_bin() {
-    local bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
-
-    if [ -z "$bin" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-        bin=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-    fi
-
-    bin="${bin:-wp-codebox}"
-    if [ "$bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-        echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
-        return 1
-    fi
-
-    printf '%s\n' "$bin"
-}
-
 homeboy_wordpress_smoke_wp_version() {
     local version=""
     if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
@@ -356,13 +340,9 @@ if [ "${#smoke_files[@]}" -eq 0 ]; then
     exit 0
 fi
 
-WP_CODEBOX_BIN="$(homeboy_wordpress_resolve_wp_codebox_bin)" || exit 1
-WP_CODEBOX_COMMAND=("$WP_CODEBOX_BIN")
-case "$WP_CODEBOX_BIN" in
-    *.js|*.cjs)
-        WP_CODEBOX_COMMAND=(node "$WP_CODEBOX_BIN")
-        ;;
-esac
+homeboy_wp_codebox_export_command "${HOMEBOY_SETTINGS_JSON:-}" || exit 1
+homeboy_wp_codebox_preflight_command || exit 1
+WP_CODEBOX_COMMAND=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 WP_VERSION="$(homeboy_wordpress_smoke_wp_version)"
 RECIPE_INPUTS="$(homeboy_wordpress_smoke_recipe_inputs)" || exit 1
 RECIPE_MOUNTS="$(jq -c '.mounts' <<< "$RECIPE_INPUTS")"

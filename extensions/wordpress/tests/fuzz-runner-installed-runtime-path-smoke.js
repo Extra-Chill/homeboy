@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const {
 	resolveWpCodeboxRuntimePath,
-	wpCodeboxCommand,
+	wpCodeboxRuntimeCommand,
 	wpCodeboxRuntimeEnv,
 } = require('../scripts/fuzz/fuzz-runner.cjs');
 
@@ -64,15 +64,7 @@ assert.equal(
 	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
 	'/existing/core.mjs'
 );
-assert.equal(wpCodeboxCommand({ HOMEBOY_EXTENSION_PATH: extensionPath }), manifestDefaultBin);
-assert.equal(wpCodeboxCommand({
-	HOMEBOY_EXTENSION_PATH: extensionPath,
-	HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
-}), '/explicit/wp-codebox');
-assert.equal(wpCodeboxCommand({
-	HOMEBOY_EXTENSION_PATH: extensionPath,
-	HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: '/settings-json/wp-codebox' }),
-}), '/settings-json/wp-codebox');
+assert.equal(typeof wpCodeboxRuntimeCommand, 'function');
 assert.equal(
 	wpCodeboxRuntimeEnv({
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(root, 'wp-codebox-cache'),

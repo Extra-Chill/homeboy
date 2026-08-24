@@ -5,6 +5,7 @@
  */
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
+const { canonicalWpCodeboxRuntime } = require('./wp-codebox-recipe-helper');
 
 const ARTIFACT_KEYS = {
   summary: 'browser_summary',
@@ -15,11 +16,10 @@ const ARTIFACT_KEYS = {
   screenshot: 'browser_screenshot',
 };
 
-function runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin = 'wp-codebox') {
+function runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin) {
   const wpCodeboxArgs = ['artifacts', 'browser-metrics', '--bundle', artifactsDirectory, '--json'];
-  const command = wpCodeboxBin.endsWith('.js') ? process.execPath : wpCodeboxBin;
-  const args = wpCodeboxBin.endsWith('.js') ? [wpCodeboxBin, ...wpCodeboxArgs] : wpCodeboxArgs;
-  const result = spawnSync(command, args, {
+  const invocation = canonicalWpCodeboxRuntime(wpCodeboxBin ? { wp_codebox_bin: wpCodeboxBin } : {}).invocation;
+  const result = spawnSync(invocation.command, [...invocation.args, ...wpCodeboxArgs], {
     encoding: 'utf8',
   });
   if (result.error) {
@@ -48,7 +48,7 @@ function scenarioReceivesBrowserMetrics(scenario) {
   return scenario && scenario.id !== '__bootstrap';
 }
 
-function enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory, wpCodeboxBin = 'wp-codebox') {
+function enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory, wpCodeboxBin) {
   const parsed = runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin);
   if (Object.keys(parsed.metrics).length === 0 && Object.keys(parsed.artifacts).length === 0) {
     return benchResults;

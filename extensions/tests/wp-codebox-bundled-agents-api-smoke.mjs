@@ -21,6 +21,19 @@ try {
 	writeFileSync(path.join(agentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
 	writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) {
+  process.stdout.write('0.21.0');
+  process.exit(0);
+}
+if (process.argv[2] === 'runtime' && process.argv[3] === 'descriptor' && process.argv.includes('--json')) {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+    commands: ['run-agent-task'],
+  }));
+  process.exit(0);
+}
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const inputPath = inputArg ? inputArg.slice('--input-file='.length) : '';
 const input = JSON.parse(readFileSync(inputPath, 'utf8'));
@@ -65,7 +78,8 @@ process.stdout.write(JSON.stringify({
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 
-	const captured = JSON.parse(readFileSync(capturePath, 'utf8'));
+	const capturedEnvelope = JSON.parse(readFileSync(capturePath, 'utf8'));
+	const captured = capturedEnvelope.task_input || capturedEnvelope;
 	const agentsApiContract = (captured.component_contracts || []).find((contract) => contract.slug === 'agents-api');
 	const agentsApiPlugin = (captured.extra_plugins || []).find((plugin) => plugin.slug === 'agents-api');
 
@@ -96,7 +110,8 @@ process.stdout.write(JSON.stringify({
 		},
 	});
 	assert.equal(runtimeRequirementsResult.status, 0, runtimeRequirementsResult.stderr || runtimeRequirementsResult.stdout);
-	const runtimeRequirementsCaptured = JSON.parse(readFileSync(runtimeRequirementsCapturePath, 'utf8'));
+	const runtimeRequirementsEnvelope = JSON.parse(readFileSync(runtimeRequirementsCapturePath, 'utf8'));
+	const runtimeRequirementsCaptured = runtimeRequirementsEnvelope.task_input || runtimeRequirementsEnvelope;
 	assert.ok(
 		runtimeRequirementsCaptured.component_contracts.some((contract) => contract.slug === 'agents-api'),
 		'agents-api component contract is preserved from runtime_requirements when top-level contracts are empty'

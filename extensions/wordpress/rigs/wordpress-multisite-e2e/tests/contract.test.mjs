@@ -2,7 +2,7 @@
  * External dependencies
  */
 import { strict as assert } from 'node:assert';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -163,13 +163,23 @@ try {
 
   const previousCodeboxBin = process.env.HOMEBOY_WP_CODEBOX_BIN;
   const previousMaxBuffer = process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES;
-  process.env.HOMEBOY_WP_CODEBOX_BIN = process.execPath;
+  const cli = path.join(temporary, 'wp-codebox');
+  await writeFile(cli, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes('--version')) process.stdout.write('0.21.0');
+else if (args.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }));
+else if (args[0] === 'emit') process.stdout.write('x'.repeat(Number(args[1])));
+else if (args[0] === 'overflow') { process.stderr.write('overflow diagnostic'); process.stdout.write('x'.repeat(Number(args[1]))); }
+else process.exitCode = 1;
+`);
+  await chmod(cli, 0o755);
+  process.env.HOMEBOY_WP_CODEBOX_BIN = cli;
   try {
-    const largeOutput = runCodebox(['-e', "process.stdout.write('x'.repeat(2 * 1024 * 1024))"], true);
+    const largeOutput = runCodebox(['emit', String(2 * 1024 * 1024)], true);
     assert.equal(largeOutput.stdout.length, 2 * 1024 * 1024);
     process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES = '1024';
     assert.throws(
-      () => runCodebox(['-e', "process.stderr.write('overflow diagnostic'); process.stdout.write('x'.repeat(2048))"], true),
+      () => runCodebox(['overflow', '2048'], true),
       (error) => error.code === 'ENOBUFS'
         && error.maxBuffer === 1024
         && error.stderr.includes('overflow diagnostic')

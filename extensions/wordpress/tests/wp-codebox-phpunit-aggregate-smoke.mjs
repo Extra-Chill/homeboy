@@ -57,6 +57,7 @@ import fs from 'node:fs';
 const args = process.argv.slice(2);
 const value = (name) => args[args.indexOf(name) + 1];
 if (args.includes('--version')) { process.stdout.write(process.env.WP_CODEBOX_FIXTURE_VERSION || '0.21.0'); process.exit(0); }
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (process.env.DISPATCHED) { fs.appendFileSync(process.env.DISPATCHED, JSON.stringify(args) + '\\n'); }
 if (args[0] === 'recipe') { fs.writeFileSync(value('--output'), JSON.stringify({ schema: 'wp-codebox/workspace-recipe/v1' })); process.exit(0); }
 const artifacts = value('--artifacts');
@@ -299,7 +300,7 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   await mkdir(crashedInvocation);
   await writeFile(path.join(crashedInvocation, 'homeboy-artifact-manifest.json'), JSON.stringify({ schema: 'homeboy/artifact-manifest/v1', artifacts: [{ id: 'unrelated', path: 'unrelated.json', kind: 'proof', provenance: { producer: 'fixture' } }] }));
   await writeFile(path.join(crashedInvocation, 'unrelated.json'), '{}\n');
-  const crashedOwner = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'crashed-owner-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'crashed-owner-results.json'), HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE: crashedReady, HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS: '5000', HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
+  const crashedOwner = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'crashed-owner-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'crashed-owner-results.json'), HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE: crashedReady, HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS: '30000', HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
   const ownerLease = JSON.parse(await waitForFile(crashedReady));
   assert.equal(typeof ownerLease.start_token, 'string');
   assert.notEqual(ownerLease.start_token, '');

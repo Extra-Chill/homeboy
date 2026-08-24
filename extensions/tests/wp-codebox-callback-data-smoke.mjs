@@ -33,6 +33,14 @@ if (process.argv.includes('--version')) {
   process.stdout.write('0.21.0');
   process.exit(0);
 }
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+  }));
+  process.exit(0);
+}
 const fs = require('node:fs');
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const input = JSON.parse(fs.readFileSync(inputArg.slice('--input-file='.length), 'utf8'));

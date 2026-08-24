@@ -32,6 +32,10 @@ if [ "${1:-}" = "--version" ]; then
     printf '%s\n' "${FAKE_WP_CODEBOX_VERSION-0.21.0}"
     exit 0
 fi
+if [ "${1:-}" = "runtime" ] && [ "${2:-}" = "descriptor" ] && [ "${3:-}" = "--json" ]; then
+    printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    exit 0
+fi
 if [ "${1:-}" = "doctor" ] && [ "${2:-}" = "--json" ]; then
     version="${FAKE_WP_CODEBOX_VERSION-0.21.0}"
     printf '{"schema":"wp-codebox/doctor/v1","status":"ok","checks":[{"id":"wp-codebox.source","status":"ok","message":"packaged provenance verified","details":{"provenance":{"schema":"wp-codebox/cli-build-provenance/v1","package":{"name":"@automattic/wp-codebox-cli","version":"%s"},"dist":{"sha256":"release-dist"},"git":{}}}}]}\n' "${version}"
@@ -141,6 +145,7 @@ while [ "$#" -gt 0 ]; do
 cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (process.argv.includes('doctor') && process.argv.includes('--json')) {
   const ref = process.env.WP_CODEBOX_SOURCE_REF ?? 'main';
   const commit = process.env.WP_CODEBOX_SOURCE_SHA ?? '0123456789abcdef0123456789abcdef01234567';
@@ -587,6 +592,7 @@ printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: 
 cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (process.argv.includes('doctor') && process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify({ schema: 'wp-codebox/doctor/v1', status: 'ok', checks: [{ id: 'wp-codebox.source', status: 'ok', message: 'packaged provenance verified', details: { provenance: { schema: 'wp-codebox/cli-build-provenance/v1', package: { name: '@automattic/wp-codebox-cli', version: '0.21.0' }, dist: { sha256: 'override-dist' }, git: {} } } }] }) + '\n');
   process.exit(0);

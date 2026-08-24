@@ -7,6 +7,24 @@ runtime through the WP Codebox executable and package contracts.
 
 ## Runtime Defaults
 
+### CLI Resolution
+
+CLI resolution uses exact configured pins in this order:
+`HOMEBOY_WP_CODEBOX_BIN`, `WP_CODEBOX_BIN`,
+`HOMEBOY_SETTINGS_WP_CODEBOX_BIN`, and configured runtime settings. A configured
+pin must name a usable executable; a dangling pin fails closed and never falls
+through to a managed cache or `PATH`. With no configured pin, a present managed
+cache is selected (and fails closed if incomplete), followed by `PATH`.
+
+Managed setup records the source Git revision and SHA-256 of the built CLI in
+`.homeboy-runtime-identity.json`. Readiness verifies both values, so rebuilding
+or modifying the executable requires setup to record a fresh identity.
+
+Managed cache promotion atomically replaces the stable `source` symlink with a
+verified immutable release. Releases are retained during updates because a
+reader may have resolved an older target before later promotions. Cleanup is a
+deferred operator concern until a reader-safe lease or reclamation design exists.
+
 `wp-codebox.json` is the declarative source for executor defaults that callers may
 override through the provider contract or task conversion options:
 

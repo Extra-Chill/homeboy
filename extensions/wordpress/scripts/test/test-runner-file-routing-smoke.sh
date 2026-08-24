@@ -123,6 +123,10 @@ if [ "${1:-}" = "--version" ]; then
     printf '0.21.0\n'
     exit 0
 fi
+if [ "${1:-}" = "runtime" ] && [ "${2:-}" = "descriptor" ] && [ "${3:-}" = "--json" ]; then
+    printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    exit 0
+fi
 echo "WP_CODEBOX_STUB"
 echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
 echo "CORE_MODULE=${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"

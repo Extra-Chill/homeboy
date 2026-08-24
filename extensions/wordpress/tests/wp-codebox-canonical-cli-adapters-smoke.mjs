@@ -23,6 +23,7 @@ await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 await appendFile(process.env.OBSERVED, JSON.stringify(args) + '\\n');
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = JSON.parse(await readFile(args[args.indexOf('--options') + 1], 'utf8'));

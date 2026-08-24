@@ -48,7 +48,7 @@ for target in \
     "wp-codebox/lib/wp-codebox-runtime-selection.js" \
     "opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs"; do
     resolved="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "${target}" 2>&1)"
-    expected="${HOMEBOY_ROOT}/agent-runtimes/${target}"
+    expected="$(cd "$(dirname "${HOMEBOY_ROOT}")" && pwd -P)/$(basename "${HOMEBOY_ROOT}")/agent-runtimes/${target}"
     [ "$resolved" = "$expected" ] || fail "Expected installed resolution of ${target} to ${expected}, got: ${resolved}"
 done
 

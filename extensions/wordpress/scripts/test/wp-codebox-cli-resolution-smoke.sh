@@ -134,6 +134,25 @@ exit 0
 SH
 chmod +x "${OVERRIDE_BIN}"
 
+# The highest-precedence configured pin is authoritative. A dangling one must
+# not be masked by a lower-precedence valid pin.
+set +e
+env -i \
+    PATH="/usr/bin:/bin" \
+    HOME="${TMP_ROOT}/home" \
+    HOMEBOY_WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/highest" \
+    WP_CODEBOX_BIN="${OVERRIDE_BIN}" \
+    bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin ""' \
+    wp-codebox-highest-pin "${PATHS_LIB}" \
+    > "${TMP_ROOT}/highest-pin.out" 2> "${TMP_ROOT}/highest-pin.err"
+highest_pin_status=$?
+set -e
+if [ "${highest_pin_status}" -ne 0 ] && grep -q "${TMP_ROOT}/does-not-exist/highest" "${TMP_ROOT}/highest-pin.err"; then
+    pass "a dangling highest-precedence pin does not fall through"
+else
+    fail "dangling highest-precedence pin fell through: $(cat "${TMP_ROOT}/highest-pin.err")"
+fi
+
 override_json="$(env -i \
     PATH="/usr/bin:/bin" \
     HOME="${TMP_ROOT}/home" \
@@ -150,18 +169,22 @@ fi
 
 # A pin at a path that is not there is a dangling pin, not an instruction to
 # hand it to the runtime.
-dangling_override_json="$(env -i \
+set +e
+env -i \
     PATH="/usr/bin:/bin" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     HOMEBOY_WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/wp-codebox" \
-    bash -c 'source "$1" && homeboy_wp_codebox_export_command "" && printf "%s" "$HOMEBOY_WP_CODEBOX_COMMAND_JSON"' \
-    wp-codebox-dangling-override "${PATHS_LIB}" 2>/dev/null || true)"
+    bash -c 'source "$1" && homeboy_wp_codebox_export_command ""' \
+    wp-codebox-dangling-override "${PATHS_LIB}" \
+    > "${TMP_ROOT}/dangling-override.out" 2> "${TMP_ROOT}/dangling-override.err"
+dangling_override_status=$?
+set -e
 
-if [ "${dangling_override_json}" = "${expected_json}" ]; then
-    pass "a dangling explicit override falls through to full resolution"
+if [ "${dangling_override_status}" -ne 0 ] && grep -q 'configured WP Codebox binary' "${TMP_ROOT}/dangling-override.err"; then
+    pass "a dangling explicit override fails closed"
 else
-    fail "dangling override produced ${dangling_override_json}, expected ${expected_json}"
+    fail "dangling override did not fail closed: $(cat "${TMP_ROOT}/dangling-override.err")"
 fi
 
 # An override is pinned by the caller, so it is not subjected to the ambient
@@ -185,6 +208,25 @@ if [ "${nonprobing_json}" = "[\"${NONPROBING_OVERRIDE}\"]" ]; then
     pass "an explicit override is not subjected to the ambient runtime probe"
 else
     fail "non-probing override produced ${nonprobing_json}, expected [\"${NONPROBING_OVERRIDE}\"]"
+fi
+
+# WP_CODEBOX_BIN is the supported legacy configured pin and has the same
+# fail-closed behavior as HOMEBOY_WP_CODEBOX_BIN.
+set +e
+env -i \
+    PATH="${STALE_BIN_DIR}:/usr/bin:/bin" \
+    HOME="${TMP_ROOT}/home" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
+    WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/wp-codebox" \
+    bash -c 'source "$1" && homeboy_wp_codebox_export_command ""' \
+    wp-codebox-legacy-dangling-override "${PATHS_LIB}" \
+    > "${TMP_ROOT}/legacy-dangling-override.out" 2> "${TMP_ROOT}/legacy-dangling-override.err"
+legacy_dangling_status=$?
+set -e
+if [ "${legacy_dangling_status}" -ne 0 ] && grep -q 'configured WP Codebox binary' "${TMP_ROOT}/legacy-dangling-override.err"; then
+    pass "a dangling WP_CODEBOX_BIN pin fails closed"
+else
+    fail "dangling WP_CODEBOX_BIN did not fail closed: $(cat "${TMP_ROOT}/legacy-dangling-override.err")"
 fi
 
 # --- 5. the adapter consumes the resolved argv, never a bare CLI string -----

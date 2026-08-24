@@ -25,8 +25,10 @@ if (args[0] === 'runtime' && args[1] === 'descriptor') {
   const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
   process.stdout.write(JSON.stringify({
     schema: 'wp-codebox/runtime-descriptor/v1',
+    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
     capabilities,
     contractManifest: {
+      schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } },
       capabilities: {
         runtimeServices: { schema: 'wp-codebox/runtime-service-capabilities/v1', capabilities },
       },

@@ -39,6 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
+if (args.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (args[0] === 'recipe' && args[1] === 'build') {
   fs.writeFileSync(args[args.indexOf('--output') + 1], '{"schema":"wp-codebox/workspace-recipe/v1"}');
   process.exit(0);

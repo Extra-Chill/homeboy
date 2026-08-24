@@ -6,11 +6,14 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const WP_CODEBOX_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+const requireFromHere = createRequire(import.meta.url);
+const { canonicalWpCodeboxRuntime } = requireFromHere('../../lib/wp-codebox-recipe-helper.js');
 const supportedPhpVersions = new Set(['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']);
 
 export async function buildRecipe(settings = {}, cwd = process.cwd()) {
@@ -390,9 +393,9 @@ async function main() {
 }
 
 export function runCodebox(args, capture = false) {
-  const executable = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox';
+  const runtime = canonicalWpCodeboxRuntime({ env: process.env });
   const maxBuffer = codeboxMaxBuffer();
-  const result = spawnSync(executable, args, {
+  const result = spawnSync(runtime.invocation.command, [...runtime.invocation.args, ...args], {
     encoding: 'utf8',
     stdio: capture ? 'pipe' : 'inherit',
     maxBuffer,

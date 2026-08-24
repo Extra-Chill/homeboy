@@ -102,15 +102,15 @@ try {
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/default/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/default/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wpCodeboxBin: '/path/request/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/request/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, runtime_bin: '/path/runtime/wp-codebox', executable: '', preferPackagedRuntime: true }),
-		runtimeCli
+		'/path/runtime/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/explicit/wp-codebox', executable: '' }),
@@ -129,16 +129,21 @@ try {
 		wpCodeboxBin({
 			env: {
 				HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed'),
-				HOMEBOY_WP_CODEBOX_BIN: '/stale/env/wp-codebox',
+				HOMEBOY_WP_CODEBOX_BIN: '/configured/env/wp-codebox',
+				WP_CODEBOX_BIN: '/configured/legacy/wp-codebox',
 			},
-			settings: { wp_codebox_bin: '/stale/settings/wp-codebox' },
+			settings: { wp_codebox_bin: '/configured/settings/wp-codebox' },
 			executable: '',
 		}),
-		managedCli
+		'/configured/env/wp-codebox'
 	);
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, runtime_bin: '/fresh/runtime/wp-codebox', executable: '' }),
 		'/fresh/runtime/wp-codebox'
+	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, settings: { runtime_bin: '/settings/runtime/wp-codebox' }, executable: '' }),
+		'/settings/runtime/wp-codebox'
 	);
 } finally {
 	rmSync(fixtureRoot, { recursive: true, force: true });

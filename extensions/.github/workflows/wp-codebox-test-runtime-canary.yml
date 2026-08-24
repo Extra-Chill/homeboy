@@ -57,6 +57,7 @@ jobs:
           set -euo pipefail
           npm install
           npm run build
+          npx playwright install --with-deps chromium
 
       - name: Run WP Codebox-backed test runner canary
         env:

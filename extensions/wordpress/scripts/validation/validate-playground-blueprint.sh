@@ -2,25 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-resolve_wp_codebox_bin() {
-    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
-        if [ ! -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
-            echo "Error: HOMEBOY_WP_CODEBOX_BIN is not executable: ${HOMEBOY_WP_CODEBOX_BIN}" >&2
-            exit 2
-        fi
-        printf '%s\n' "${HOMEBOY_WP_CODEBOX_BIN}"
-        return 0
-    fi
-
-    if command -v wp-codebox >/dev/null 2>&1; then
-        command -v wp-codebox
-        return 0
-    fi
-
-    echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or run scripts/build/setup.sh" >&2
-    exit 2
-}
+source "${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -92,7 +74,8 @@ if [ -z "$BLUEPRINT" ]; then
     echo "Error: blueprint path or URL is required" >&2
     exit 2
 fi
-WP_CODEBOX_BIN="$(resolve_wp_codebox_bin)"
+homeboy_wp_codebox_export_command "${HOMEBOY_SETTINGS_JSON:-}"
+homeboy_wp_codebox_preflight_command
 if [ -n "$ARTIFACT_DIR" ]; then
     mkdir -p "$ARTIFACT_DIR"
 fi
@@ -119,7 +102,7 @@ if [ -n "$ARTIFACT_DIR" ]; then
 fi
 
 set +e
-"$WP_CODEBOX_BIN" "${WP_CODEBOX_ARGS[@]}" >"$OUTPUT_FILE" 2>&1
+"${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "${WP_CODEBOX_ARGS[@]}" >"$OUTPUT_FILE" 2>&1
 status=$?
 set -e
 

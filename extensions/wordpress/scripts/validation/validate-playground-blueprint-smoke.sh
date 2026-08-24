@@ -16,6 +16,14 @@ JSON
 
 cat > "$FAKE_WP_CODEBOX" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = '--version' ]; then
+    printf '0.21.0\n'
+    exit 0
+fi
+if [ "${1:-}" = runtime ]; then
+    printf '%s\n' '{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    exit 0
+fi
 printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
 printf 'WP Codebox blueprint validation\n'
 SH

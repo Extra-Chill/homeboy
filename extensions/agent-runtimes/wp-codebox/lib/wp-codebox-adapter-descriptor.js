@@ -3,14 +3,19 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const {
   WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 } = require('./codebox-run-agent-task-contract');
 const {
-  WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
+	WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
 } = require('./wp-codebox-adapter-contract');
+const {
+	preflightWpCodeboxCommand,
+	preflightWpCodeboxRuntime,
+	probeWpCodeboxRuntimeDescriptor,
+	wpCodeboxCommand: runtimeWpCodeboxCommand,
+} = require('./wp-codebox-runtime-selection');
 
 const WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA = 'wp-codebox/cli-descriptor/v1';
 const WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS = ['source', 'path', 'bundle_path', 'bundlePath'];
@@ -19,7 +24,7 @@ const DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR = {
   schema: WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
   id: 'wp-codebox',
   env: ['HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN'],
-  settings: ['wp_codebox_bin', 'wpCodeboxBin'],
+  settings: ['runtime_bin', 'wp_codebox_bin', 'wpCodeboxBin'],
   executable: 'wp-codebox',
   commands: {
     run_agent_task: WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
@@ -44,24 +49,30 @@ function wpCodeboxBin(options = {}) {
   const descriptor = wpCodeboxCliDescriptor(options.descriptor || options.cliDescriptor || {});
   const env = options.env || process.env;
   const settings = options.settings || homeboySettings(env);
-  const packagedRuntimeCandidates = [
-    wpCodeboxBinFromRuntimeComponent(env),
-    managedWpCodeboxBin(env),
-  ];
   const explicitBinCandidates = [
+    options.bin,
     options.runtimeBin,
     options.runtime_bin,
     options.wpCodeboxBin,
     options.wp_codebox_bin,
   ];
-  return firstValue(
-    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : explicitBinCandidates),
-    options.bin,
-    ...(options.preferPackagedRuntime ? explicitBinCandidates : packagedRuntimeCandidates),
+  const configuredCandidates = [
+    ...explicitBinCandidates,
     ...descriptor.env.map((key) => env[key]),
-    ...descriptor.settings.map((key) => settings[key]),
     env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
-    options.executable === undefined ? descriptor.executable : options.executable,
+    ...descriptor.settings.map((key) => settings[key]),
+  ];
+  // A configured value is an exact pin. Managed and PATH-like defaults only
+  // participate when no caller configuration was supplied.
+  const packagedRuntimeCandidates = [
+    wpCodeboxBinFromRuntimeComponent(env),
+    managedWpCodeboxBin(env),
+  ];
+  const managedUpdating = managedWpCodeboxCacheIsUpdating(env);
+  return firstValue(
+    ...configuredCandidates,
+    ...packagedRuntimeCandidates,
+    managedUpdating ? '' : (options.executable === undefined ? descriptor.executable : options.executable),
   );
 }
 
@@ -82,6 +93,15 @@ function managedWpCodeboxBin(env = process.env) {
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const candidate = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
   return isExecutableFile(candidate) ? candidate : '';
+}
+
+function managedWpCodeboxCacheIsUpdating(env = process.env) {
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  try {
+    return fs.statSync(path.join(installDir, 'source.update-lock')).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function isExecutableFile(filePath) {
@@ -149,22 +169,12 @@ function wpCodeboxSupportsRunAgentTaskCommand(options = {}) {
 
 function wpCodeboxRuntimeDescriptor(options = {}) {
 	const env = options.env || process.env;
-	const bin = firstValue(options.bin, options.wpCodeboxBin, options.wp_codebox_bin, wpCodeboxBin({ ...options, env }));
-	if (!bin) {
-		return null;
-	}
-	const resolved = wpCodeboxResolveCommand(bin, ['runtime', 'descriptor', '--json']);
-	const spawn = options.spawnSync || spawnSync;
-	const result = spawn(resolved.command, resolved.args, {
-		encoding: 'utf8',
-		env,
-		maxBuffer: 1024 * 1024,
-		timeout: options.timeoutMs || options.timeout_ms || 5000,
-	});
-	if (result.error || result.status !== 0) {
-		return null;
-	}
-	return parseRuntimeDescriptorJson(result.stdout);
+	const runtime = preflightWpCodeboxRuntime({ ...options, env });
+	if (!runtime.ready) return null;
+	const invocation = runtimeWpCodeboxCommand(runtime.selected.path);
+	const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env });
+	if (!command.ready) return null;
+	return probeWpCodeboxRuntimeDescriptor(invocation.command, { ...options, env }, invocation.args);
 }
 
 function parseRuntimeDescriptorJson(stdout) {

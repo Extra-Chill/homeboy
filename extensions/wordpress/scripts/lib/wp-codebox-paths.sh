@@ -48,38 +48,50 @@ homeboy_wp_codebox_component_relative_path() {
 homeboy_wp_codebox_resolve_bin() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local config_label="${2:-settings}"
-    local bin=""
     local candidate=""
+
+    for candidate in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}" "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}"; do
+        [ -n "$candidate" ] && break
+    done
+    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
+        [ -n "$candidate" ] || candidate=$(printf '%s' "$settings_json" | jq -r '.wpCodeboxBin // empty' 2>/dev/null || true)
+    fi
+    [ -n "$candidate" ] || candidate="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
+
+    # Explicit configuration is an operator pin. Without one, a managed source
+    # checkout owns resolution; an incomplete checkout is repaired, never
+    # bypassed through PATH by a possibly incompatible global installation.
+    if [ -n "$candidate" ]; then
+        if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${candidate}." >&2
+        echo "       Re-run the WordPress extension setup or correct the explicit binary setting." >&2
+        return 1
+    fi
+
+    # Cache promotion takes this lock before a legacy directory is migrated to
+    # the stable source symlink. Never fall through to PATH in that interval.
+    if homeboy_wp_codebox_managed_cache_is_updating; then
+        echo "Error: the managed WP Codebox cache is updating; retry after the update completes." >&2
+        return 1
+    fi
+
+    if [ -d "$(homeboy_wp_codebox_managed_install_root)/source" ]; then
+        candidate="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
+        if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        echo "Error: the managed WP Codebox cache is incomplete; its built CLI entrypoint is missing at ${candidate}." >&2
+        echo "       Re-run the WordPress extension setup to rebuild it." >&2
+        return 1
+    fi
+
     local candidates=()
-
-    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
-        bin=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
-    fi
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
-    fi
-
-    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
-        bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-    fi
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
-    fi
-
-    bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
-    if [ -n "$bin" ]; then
-        candidates+=("$bin")
-    fi
-
-    while IFS= read -r candidate; do
-        [ -n "$candidate" ] && candidates+=("$candidate")
-    done < <(homeboy_wp_codebox_managed_cli_candidates)
-    if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
-    fi
-    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
-        candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
-    fi
 
     while IFS= read -r candidate; do
         [ -n "$candidate" ] && candidates+=("$candidate")
@@ -99,12 +111,7 @@ homeboy_wp_codebox_resolve_bin() {
         fi
     done
 
-    if homeboy_wp_codebox_managed_cache_is_incomplete; then
-        local managed_cli
-        managed_cli="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
-        echo "Error: the managed WP Codebox cache is incomplete; its built CLI entrypoint is missing at ${managed_cli}." >&2
-        echo "       Re-run the WordPress extension setup to rebuild it, or set HOMEBOY_WP_CODEBOX_BIN / settings wp_codebox_bin to a working CLI." >&2
-    elif ! command -v wp-codebox >/dev/null 2>&1; then
+    if ! command -v wp-codebox >/dev/null 2>&1; then
         if [ "$config_label" = "config" ]; then
             echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
         else
@@ -151,6 +158,12 @@ homeboy_wp_codebox_global_cli_candidates() {
 
 homeboy_wp_codebox_managed_install_root() {
     printf '%s\n' "${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+}
+
+homeboy_wp_codebox_managed_cache_is_updating() {
+    local install_dir
+    install_dir="$(homeboy_wp_codebox_managed_install_root)"
+    [ -d "${install_dir}/source.update-lock" ]
 }
 
 # Machine-scoped override file written by setup (scripts/build/setup.sh) into
@@ -280,20 +293,20 @@ homeboy_wp_codebox_publish_command() {
 
 # Resolve once and export the argv contract for child processes.
 #
-# An explicit override that is present wins outright. The general resolver
-# deliberately ranks the managed cache ahead of the environment so a stale
-# exported path cannot shadow a freshly built cache, but a caller that pins a
-# binary — a test fixture, or an operator pointing at a local build — means it.
-# An override pointing at something that is not there is skipped rather than
-# trusted, so a dangling pin still falls through to full resolution and its
-# diagnostics instead of reaching the runtime.
+# Explicit configuration is resolved by homeboy_wp_codebox_resolve_bin. Every
+# configured value is an exact pin: a dangling pin fails closed rather than
+# silently selecting a managed or PATH runtime.
 homeboy_wp_codebox_export_command() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local override
 
     for override in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}"; do
         [ -n "$override" ] || continue
-        homeboy_wp_codebox_bin_is_present "$override" || continue
+        if ! homeboy_wp_codebox_bin_is_present "$override"; then
+            echo "Error: the configured WP Codebox binary is unavailable or does not satisfy the CLI contract: ${override}." >&2
+            echo "       Re-run the WordPress extension setup or correct the explicit binary setting." >&2
+            return 1
+        fi
         homeboy_wp_codebox_set_command "$override"
         homeboy_wp_codebox_publish_command
         return 0
@@ -315,6 +328,32 @@ homeboy_wp_codebox_resolved_bin_path() {
     printf '%s\n' "$bin"
 }
 
+# Keep shell runners on the same version, capability, and managed-runtime
+# identity gate as Node readiness. This validates the exact argv below instead
+# of resolving a second candidate after a caller has selected one.
+homeboy_wp_codebox_preflight_command() {
+    local script_dir
+    local resolver
+    local selection_module
+    local result
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    resolver="${script_dir}/agent-runtime-paths.cjs"
+    selection_module="$(node "${resolver}" "wp-codebox/lib/wp-codebox-runtime-selection.js")" || return 1
+    result="$(node - "${selection_module}" "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" <<'NODE'
+const { preflightWpCodeboxCommand } = require(process.argv[2]);
+const result = preflightWpCodeboxCommand(process.argv.slice(3));
+if (!result.ready) {
+    process.stdout.write(`WP Codebox ${result.reason}: required >=${result.required_version}, observed ${result.selected.version || 'unavailable'} at ${result.selected.path || 'no executable'}. Run ${result.remediation}.\n`);
+    process.exit(1);
+}
+NODE
+)" || {
+        [ -n "${result}" ] && printf '%s\n' "${result}" >&2
+        return 1
+    }
+}
+
 homeboy_wp_codebox_run_recipe() {
     local recipe_file="$1"
     local artifacts_dir="$2"
@@ -328,6 +367,7 @@ homeboy_wp_codebox_run_recipe() {
         bin="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || return 1
     fi
     homeboy_wp_codebox_set_command "$bin"
+    homeboy_wp_codebox_preflight_command || return 1
 
     case $- in
         *e*) had_errexit=1 ;;

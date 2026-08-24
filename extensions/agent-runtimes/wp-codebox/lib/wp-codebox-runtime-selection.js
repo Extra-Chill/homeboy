@@ -3,9 +3,13 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require('../wp-codebox.json');
+
+const BROWSER_PREVIEW_SCHEMA = 'wp-codebox/browser-contained-site-open/v1';
+const MANAGED_IDENTITY_SCHEMA = 'homeboy/wp-codebox-managed-runtime-identity/v1';
 
 function selectWpCodeboxRuntime(options = {}) {
   const env = options.env || process.env;
@@ -25,19 +29,30 @@ function selectWpCodeboxRuntime(options = {}) {
     settings.wp_codebox_bin,
     settings.wpCodeboxBin,
   );
-  const managed = path.join(env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox'), 'source', 'packages', 'cli', 'dist', 'index.js');
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  const managedSource = path.join(installDir, 'source');
+  const managed = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+  const updating = managedCacheUpdateInProgress(installDir, options);
+  const packaged = packagedWpCodeboxBin(env, options);
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
-    configured: candidate(configured, 'configured', options),
+    configured: candidate(configured, configured && sameFile(expandHome(String(configured), env), managed, options) ? 'managed' : 'configured', options),
+    packaged: candidate(packaged, 'packaged', options),
     managed: candidate(managed, 'managed', options),
     path: candidate(pathCandidate, 'path', options),
   };
-  // The managed runtime is the reproducible default. Explicit configuration is
-  // used only when that managed build is unavailable.
-  const selected = options.strictBin && configured
+  // A configured runtime is an exact pin. An incomplete managed source cache
+  // is also a Homeboy-owned prerequisite, not permission to use PATH instead.
+  const selected = configured
     ? candidates.configured
-    : [candidates.configured, candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
-  return { candidates, selected };
+    : candidates.packaged.available
+      ? candidates.packaged
+      : updating
+        ? { ...candidates.managed, source: 'managed-updating', available: false }
+      : directoryExists(managedSource, options)
+      ? candidates.managed
+      : [candidates.managed, candidates.path].find((entry) => entry.available) || emptyCandidate('');
+  return { candidates, selected, updating };
 }
 
 function preflightWpCodeboxRuntime(options = {}) {
@@ -45,6 +60,12 @@ function preflightWpCodeboxRuntime(options = {}) {
   const requiredVersion = options.requiredVersion || REQUIRED_WP_CODEBOX_VERSION;
   if (!selection.selected.path) {
     return failure(selection, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
+  }
+  if (selection.updating && !configuredRuntime(options)) {
+    return failure(selection, requiredVersion, '', 'wp_codebox_managed_updating', 'retry after the managed WP Codebox cache update completes');
+  }
+  if (!selection.selected.available) {
+    return failure(selection, requiredVersion, '', `wp_codebox_${selection.selected.source}_binary_missing`, 'homeboy extension setup wordpress');
   }
   const invocation = wpCodeboxCommand(selection.selected.path);
   const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, '--version'], {
@@ -57,6 +78,13 @@ function preflightWpCodeboxRuntime(options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure(selection, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
+	const descriptor = probeWpCodeboxRuntimeDescriptor(selection.selected.path, options);
+  if (!browserPreviewReady(descriptor)) {
+    return failure(selection, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
+  }
+  if (selection.selected.source === 'managed' && !managedIdentityMatches(selection.selected.path, options)) {
+    return failure(selection, requiredVersion, version, 'wp_codebox_managed_source_identity_invalid', 'homeboy extension setup wordpress');
+  }
   return { ready: true, required_version: requiredVersion, selected: { ...selection.selected, version }, candidates: selection.candidates, remediation: '' };
 }
 
@@ -65,9 +93,13 @@ function preflightWpCodeboxRuntime(options = {}) {
 function preflightWpCodeboxCommand(command, options = {}) {
   const requiredVersion = options.requiredVersion || REQUIRED_WP_CODEBOX_VERSION;
   const [binary, ...args] = Array.isArray(command) ? command : [];
-  const selected = { path: binary || '', source: 'resolved-command', available: Boolean(binary) };
+  const managed = managedCommandBinary(binary, args, options);
+  const selected = { path: managed || binary || '', source: managed ? 'managed' : 'resolved-command', available: Boolean(binary) };
   if (!binary) {
     return failure({ selected, candidates: {} }, requiredVersion, '', 'wp_codebox_not_found', 'homeboy extension setup wordpress');
+  }
+  if (managed && managedCacheUpdateInProgress(managedInstallDir(options), options)) {
+    return failure({ selected, candidates: {} }, requiredVersion, '', 'wp_codebox_managed_updating', 'retry after the managed WP Codebox cache update completes');
   }
   const result = (options.spawnSync || spawnSync)(binary, [...args, '--version'], {
     encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
@@ -79,7 +111,104 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
+	if (!browserPreviewReady(probeWpCodeboxRuntimeDescriptor(binary, options, args))) {
+    return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
+  }
+  if (managed && !managedIdentityMatches(managed, options)) {
+    return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_managed_source_identity_invalid', 'homeboy extension setup wordpress');
+  }
   return { ready: true, required_version: requiredVersion, selected: { ...selected, version }, candidates: {}, remediation: '' };
+}
+
+function managedCommandBinary(binary, args, options = {}) {
+  const env = options.env || process.env;
+  const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+  const managed = path.join(installDir, 'source', 'packages', 'cli', 'dist', 'index.js');
+  return [binary, ...args].some((entry) => sameFile(entry, managed, options)) ? managed : '';
+}
+
+function managedInstallDir(options = {}) {
+  const env = options.env || process.env;
+  return env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+}
+
+function managedCacheUpdateInProgress(installDir, options = {}) {
+  try {
+    return (options.fs || fs).statSync(path.join(installDir, 'source.update-lock')).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function configuredRuntime(options = {}) {
+  const env = options.env || process.env;
+  const settings = { ...settingsFromEnv(env), ...(options.settings || {}) };
+  return Boolean(firstValue(options.bin, options.runtimeBin, options.runtime_bin, options.wpCodeboxBin, options.wp_codebox_bin, env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN, settings.runtime_bin, settings.wp_codebox_bin, settings.wpCodeboxBin));
+}
+
+function sameFile(left, right, options = {}) {
+  try {
+    const fileSystem = options.fs || fs;
+    const leftStat = fileSystem.statSync(left);
+    const rightStat = fileSystem.statSync(right);
+    if (leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) return true;
+    return fileSystem.realpathSync(left) === fileSystem.realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function packagedWpCodeboxBin(env, options = {}) {
+  const component = firstValue(env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT, env.WP_CODEBOX_RUNTIME_COMPONENT);
+  if (!component) return '';
+  const resolved = path.resolve(expandHome(component, env));
+  const candidates = [
+    path.resolve(resolved, '..', 'cli', 'dist', 'index.js'),
+    path.resolve(resolved, '..', '..', 'packages', 'cli', 'dist', 'index.js'),
+  ];
+  return candidates.find((entry) => executableFile(entry, options)) || '';
+}
+
+// This is deliberately a low-level probe. Higher-level descriptor consumers
+// must preflight their selected runtime and exact argv before calling it.
+function probeWpCodeboxRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
+  const invocation = wpCodeboxCommand(bin);
+  const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, ...prefixArgs, 'runtime', 'descriptor', '--json'], {
+    encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
+  });
+  if (result.error || result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function browserPreviewReady(descriptor) {
+  return descriptor?.schema === 'wp-codebox/runtime-descriptor/v1'
+    && descriptor?.readiness?.status === 'available'
+    && descriptor?.readiness?.browserRuntime?.status === 'ready'
+    && descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen === BROWSER_PREVIEW_SCHEMA;
+}
+
+function managedIdentityMatches(bin, options = {}) {
+  const source = path.resolve(bin, '../../../../');
+  const identityPath = path.join(source, '.homeboy-runtime-identity.json');
+  let identity;
+  try {
+    identity = JSON.parse((options.fs || fs).readFileSync(identityPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (identity?.schema !== MANAGED_IDENTITY_SCHEMA || !/^[0-9a-f]{40}$/i.test(identity?.source_sha || '') || !/^[0-9a-f]{64}$/i.test(identity?.cli_sha256 || '') || !Array.isArray(identity.required_capabilities) || !identity.required_capabilities.includes(BROWSER_PREVIEW_SCHEMA)) return false;
+  const result = (options.spawnSync || spawnSync)('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: options.timeoutMs || 5_000 });
+  if (result.status !== 0 || result.stdout.trim() !== identity.source_sha) return false;
+  try {
+    const executable = (options.fs || fs).readFileSync(bin);
+    return crypto.createHash('sha256').update(executable).digest('hex') === identity.cli_sha256;
+  } catch {
+    return false;
+  }
 }
 
 function failure(selection, requiredVersion, version, reason, remediation) {
@@ -125,6 +254,14 @@ function executableFile(filePath, options = {}) {
     if (/\.(?:js|cjs|mjs)$/.test(filePath)) return true;
     fileSystem.accessSync(filePath, fs.constants.X_OK);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function directoryExists(directoryPath, options = {}) {
+  try {
+    return (options.fs || fs).statSync(directoryPath).isDirectory();
   } catch {
     return false;
   }
@@ -197,10 +334,13 @@ function settingsFromEnv(env) {
 
 module.exports = {
   REQUIRED_WP_CODEBOX_VERSION,
+  BROWSER_PREVIEW_SCHEMA,
+  MANAGED_IDENTITY_SCHEMA,
   compareVersions,
   parseVersion,
-  preflightWpCodeboxCommand,
-  preflightWpCodeboxRuntime,
+	preflightWpCodeboxCommand,
+	preflightWpCodeboxRuntime,
+	probeWpCodeboxRuntimeDescriptor,
   selectWpCodeboxRuntime,
   wpCodeboxCommand,
 };
