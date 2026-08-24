@@ -8,13 +8,6 @@ use crate::agent_task_lifecycle::{
 use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
 use serde_json::json;
 
-/// The tests below drive the store-rooted entry points. Resolving the store
-/// once here keeps the ambient lookup in one place and lets the ambient
-/// wrappers be deleted (#7505).
-fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
-}
-
 fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentTaskRunRecord {
     let plan = test_plan();
     AgentTaskRunRecord {
