@@ -171,28 +171,14 @@ pub struct ArtifactCleanupCandidateRecord {
     pub run_status: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct NewTraceRunRecord {
-    pub run_id: String,
-    pub component_id: String,
-    pub rig_id: Option<String>,
-    pub scenario_id: String,
-    pub status: String,
-    pub baseline_status: Option<String>,
-    pub metadata_json: serde_json::Value,
-}
-
-impl NewTraceRunRecord {
-    pub fn builder(
-        run_id: impl Into<String>,
-        component_id: impl Into<String>,
-        scenario_id: impl Into<String>,
-        status: impl Into<String>,
-    ) -> NewTraceRunRecordBuilder {
-        NewTraceRunRecordBuilder::new(run_id, component_id, scenario_id, status)
-    }
-}
-
+/// One trace run, on both sides of the observation store.
+///
+/// The `New*Record` / `*Record` split here exists so a stored record can carry
+/// the columns its table assigns: [`RunRecord`] adds `id`/`started_at`/
+/// `finished_at`/`status`, [`TraceSpanRecord`] adds `trace_spans.id`.
+///
+/// `trace_runs` assigns nothing -- `run_id TEXT PRIMARY KEY` comes from the
+/// caller -- so the split had nothing to express here and was a verbatim copy.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TraceRunRecord {
     pub run_id: String,
@@ -202,6 +188,21 @@ pub struct TraceRunRecord {
     pub status: String,
     pub baseline_status: Option<String>,
     pub metadata_json: serde_json::Value,
+}
+
+/// The insert-side name for [`TraceRunRecord`], kept so `record_trace_run` and
+/// `NewTraceRunRecord::builder()` still read as the insert path.
+pub type NewTraceRunRecord = TraceRunRecord;
+
+impl TraceRunRecord {
+    pub fn builder(
+        run_id: impl Into<String>,
+        component_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        status: impl Into<String>,
+    ) -> NewTraceRunRecordBuilder {
+        NewTraceRunRecordBuilder::new(run_id, component_id, scenario_id, status)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
