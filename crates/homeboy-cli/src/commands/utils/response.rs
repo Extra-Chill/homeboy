@@ -394,7 +394,7 @@ impl CommandResultEnvelope<()> {
     }
 }
 
-fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
+pub(crate) fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
     let payload = response.to_json()?;

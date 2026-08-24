@@ -15,6 +15,7 @@ use homeboy::runner::runners::{
 };
 use serde::Serialize;
 
+use crate::commands::output_runtime::{CommandPresentation, CommandRun};
 use crate::commands::CmdResult;
 
 mod checks;
@@ -230,13 +231,23 @@ fn projection_envelope_bytes(payload: &serde_json::Value) -> serde_json::Result<
     let data = serde_json::to_value(super::types::RunnerCommandOutput::Doctor(Box::new(
         payload.clone(),
     )))?;
-    let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
-        &Ok(data),
-        0,
+    let run = compact_command_run(Ok(data), 0).with_identity(
         &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
-        None,
     );
-    serde_json::to_vec(&response).map(|rendered| rendered.len())
+    serde_json::to_vec(&run.stdout_envelope()).map(|rendered| rendered.len())
+}
+
+pub(crate) fn compact_command_run(
+    stdout_result: homeboy::core::Result<serde_json::Value>,
+    exit_code: i32,
+) -> CommandRun {
+    let summary = stdout_result.as_ref().ok().and_then(render_summary);
+    CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+        CommandPresentation {
+            stdout: summary,
+            stderr: None,
+        },
+    )
 }
 
 fn bounded_text(value: &str) -> String {

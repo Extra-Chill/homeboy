@@ -134,16 +134,23 @@ fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
         Box::new(compact),
     ))
     .expect("doctor output serializes");
-    let envelope = crate::commands::utils::response::cli_response_for_json_result_for_identity(
-        &Ok(data),
-        0,
+    let run = compact_command_run(Ok(data), 0).with_identity(
         &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
-        None,
     );
-    let wire = serde_json::to_vec(&envelope).expect("doctor wire serializes");
+    let wire = serde_json::to_vec(&run.stdout_envelope()).expect("doctor wire serializes");
     assert!(wire.len() <= COMPACT_PROJECTION_BYTES);
     let wire: serde_json::Value = serde_json::from_slice(&wire).expect("doctor wire round trips");
+    assert_eq!(wire["command"], "runner");
     assert_eq!(wire["operation"], "doctor");
+    assert_eq!(
+        format!(
+            "{} {}",
+            wire["command"].as_str().unwrap(),
+            wire["operation"].as_str().unwrap()
+        ),
+        "runner doctor"
+    );
+    assert!(wire["presentation"]["stdout"].is_string());
 }
 
 #[test]

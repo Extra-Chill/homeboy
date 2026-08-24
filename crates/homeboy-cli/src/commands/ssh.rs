@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::io::IsTerminal;
 use std::time::Duration;
 
+use super::output_runtime::{CommandPresentation, CommandRun};
 use super::CmdResult;
 
 #[derive(Args)]
@@ -347,15 +348,25 @@ fn bounded_list_envelope(projection: Value) -> Value {
     })
 }
 
+pub(crate) fn compact_list_command_run(
+    stdout_result: homeboy::core::Result<Value>,
+    exit_code: i32,
+) -> CommandRun {
+    let summary = stdout_result.as_ref().ok().and_then(render_list_summary);
+    CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+        CommandPresentation {
+            stdout: summary,
+            stderr: None,
+        },
+    )
+}
+
 fn list_envelope_bytes(output: &SshListOutput) -> serde_json::Result<usize> {
     let data = serde_json::to_value(SshOutput::List(output.clone()))?;
-    let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
-        &Ok(data),
-        0,
+    let run = compact_list_command_run(Ok(data), 0).with_identity(
         &crate::commands::utils::response::CommandIdentity::with_operation("ssh", "list"),
-        None,
     );
-    serde_json::to_vec(&response).map(|rendered| rendered.len())
+    serde_json::to_vec(&run.stdout_envelope()).map(|rendered| rendered.len())
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
@@ -765,18 +776,26 @@ mod tests {
             false,
         );
         let data = serde_json::to_value(SshOutput::List(output.clone())).expect("tagged data");
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_identity(
-            &Ok(data),
-            0,
+        let run = compact_list_command_run(Ok(data), 0).with_identity(
             &crate::commands::utils::response::CommandIdentity::with_operation("ssh", "list"),
-            None,
         );
-        let wire = serde_json::to_vec(&envelope).expect("wire serializes");
+        let wire = serde_json::to_vec(&run.stdout_envelope()).expect("wire serializes");
 
         assert!(wire.len() <= SSH_LIST_PROJECTION_BYTES);
         let wire: Value = serde_json::from_slice(&wire).expect("wire round trips");
+        assert_eq!(wire["command"], "ssh");
         assert_eq!(wire["operation"], "list");
+        assert_eq!(
+            format!(
+                "{} {}",
+                wire["command"].as_str().unwrap(),
+                wire["operation"].as_str().unwrap()
+            ),
+            "ssh list"
+        );
         assert_eq!(wire["data"]["action"], "List");
+        assert!(wire["presentation"]["stdout"].is_string());
+        assert_eq!(wire["data"]["servers"].as_array().unwrap().len(), 1);
     }
 
     #[test]
