@@ -281,6 +281,12 @@ fn list_output(servers: Vec<Server>, full: bool) -> SshListOutput {
         };
     }
 
+    SshListOutput {
+        payload: bounded_list_envelope(compact_list_projection(&servers)),
+    }
+}
+
+fn compact_list_projection(servers: &[Server]) -> Value {
     let total = servers.len();
     let shown = servers
         .iter()
@@ -296,7 +302,7 @@ fn list_output(servers: Vec<Server>, full: bool) -> SshListOutput {
             })
         })
         .collect::<Vec<_>>();
-    let projection = serde_json::json!({
+    serde_json::json!({
         "schema": "homeboy/ssh-list/v1",
         "operator_summary": {
             "identity": "ssh list",
@@ -313,10 +319,7 @@ fn list_output(servers: Vec<Server>, full: bool) -> SshListOutput {
                 "full_command": "homeboy ssh list --full",
             }
         }
-    });
-    SshListOutput {
-        payload: bounded_list_envelope(projection),
-    }
+    })
 }
 
 /// Validate the rendered command envelope rather than trusting per-field caps.
@@ -361,12 +364,12 @@ pub(crate) fn compact_list_command_run(
     )
 }
 
-fn list_envelope_bytes(output: &SshListOutput) -> serde_json::Result<usize> {
+fn list_envelope_bytes(output: &SshListOutput) -> homeboy::core::Result<usize> {
     let data = serde_json::to_value(SshOutput::List(output.clone()))?;
     let run = compact_list_command_run(Ok(data), 0).with_identity(
         &crate::commands::utils::response::CommandIdentity::with_operation("ssh", "list"),
     );
-    serde_json::to_vec(&run.stdout_envelope()).map(|rendered| rendered.len())
+    run.stdout_bytes()
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
@@ -823,6 +826,48 @@ mod tests {
             output.payload["truncation"]["servers"]["omitted"],
             "see_full_output"
         );
+    }
+
+    #[test]
+    fn list_projection_uses_pretty_stdout_bytes_at_the_boundary() {
+        let (servers, compact, pretty) = (1..=SSH_LIST_TEXT_LIMIT)
+            .find_map(|length| {
+                let servers = (0..SSH_LIST_LIMIT)
+                    .map(|index| Server {
+                        id: format!("server-{index}-{}", "x".repeat(length)),
+                        aliases: Vec::new(),
+                        host: "h".repeat(length),
+                        user: "u".repeat(length),
+                        port: 22,
+                        identity_file: None,
+                        kind: Some("k".repeat(length)),
+                        auth: None,
+                        env: HashMap::new(),
+                        runner: None,
+                    })
+                    .collect::<Vec<_>>();
+                let output = SshListOutput {
+                    payload: compact_list_projection(&servers),
+                };
+                let data = serde_json::to_value(SshOutput::List(output)).ok()?;
+                let run = compact_list_command_run(Ok(data), 0).with_identity(
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "ssh", "list",
+                    ),
+                );
+                let envelope = run.stdout_envelope();
+                let compact = serde_json::to_vec(&envelope).ok()?.len();
+                let pretty = envelope.stdout_json().ok()?.len();
+                (compact <= SSH_LIST_PROJECTION_BYTES && pretty > SSH_LIST_PROJECTION_BYTES)
+                    .then_some((servers, compact, pretty))
+            })
+            .expect("a compact-only boundary case");
+
+        assert!(compact <= SSH_LIST_PROJECTION_BYTES);
+        assert!(pretty > SSH_LIST_PROJECTION_BYTES);
+        let bounded = list_output(servers, false);
+        assert!(list_envelope_bytes(&bounded).unwrap() <= SSH_LIST_PROJECTION_BYTES);
+        assert!(bounded.payload["servers"].as_array().unwrap().is_empty());
     }
 
     /// A cwd-rooted interactive session must hand back a shell, not run `cd` and quit.

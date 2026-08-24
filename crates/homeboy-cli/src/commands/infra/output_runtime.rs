@@ -374,6 +374,11 @@ impl CommandRun {
         )
     }
 
+    /// Count the exact pretty-printed bytes `OutputService` emits on stdout.
+    pub(crate) fn stdout_bytes(&self) -> homeboy::core::Result<usize> {
+        self.stdout_envelope().stdout_json().map(|json| json.len())
+    }
+
     pub(crate) fn with_output_file_already_written(mut self) -> Self {
         self.output_file_already_written = true;
         self

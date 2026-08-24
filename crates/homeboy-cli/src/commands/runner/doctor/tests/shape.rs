@@ -177,6 +177,54 @@ fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budge
 }
 
 #[test]
+fn compact_doctor_uses_pretty_stdout_bytes_at_the_boundary() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    let length = (1..=COMPACT_TEXT_LIMIT)
+        .find(|length| {
+            report.checks = (0..COMPACT_CHECK_LIMIT)
+                .map(|index| types::RunnerCheck {
+                    id: format!("check-{index}-{}", "x".repeat(*length)),
+                    status: RunnerDoctorStatus::Error,
+                    message: "m".repeat(*length),
+                    remediation: Some("r".repeat(*length)),
+                    details: BTreeMap::new(),
+                })
+                .collect();
+            let payload = compact_projection(&report);
+            let data = serde_json::to_value(
+                crate::commands::runner::types::RunnerCommandOutput::Doctor(Box::new(payload)),
+            )
+            .expect("doctor output serializes");
+            let run = compact_command_run(Ok(data), 0).with_identity(
+                &crate::commands::utils::response::CommandIdentity::with_operation(
+                    "runner", "doctor",
+                ),
+            );
+            let envelope = run.stdout_envelope();
+            serde_json::to_vec(&envelope).is_ok_and(|compact| {
+                compact.len() <= COMPACT_PROJECTION_BYTES
+                    && envelope
+                        .stdout_json()
+                        .is_ok_and(|pretty| pretty.len() > COMPACT_PROJECTION_BYTES)
+            })
+        })
+        .expect("a compact-only boundary case");
+    report.checks = (0..COMPACT_CHECK_LIMIT)
+        .map(|index| types::RunnerCheck {
+            id: format!("check-{index}-{}", "x".repeat(length)),
+            status: RunnerDoctorStatus::Error,
+            message: "m".repeat(length),
+            remediation: Some("r".repeat(length)),
+            details: BTreeMap::new(),
+        })
+        .collect();
+
+    let bounded = output_projection(report, false);
+    assert!(projection_envelope_bytes(&bounded).unwrap() <= COMPACT_PROJECTION_BYTES);
+    assert!(bounded["checks"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn capabilities_are_runner_substrate_only() {
     let (report, _) = run("local").expect("local doctor report");
     let value = serde_json::to_value(report).expect("serialize report");

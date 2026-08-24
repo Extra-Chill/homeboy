@@ -118,6 +118,10 @@ pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde
         return homeboy::core::redaction::redact_json(&value);
     }
 
+    bounded_projection_envelope(compact_projection(&report))
+}
+
+fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
     let failed_checks = report
         .checks
         .iter()
@@ -190,7 +194,7 @@ pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde
             "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
     });
-    bounded_projection_envelope(projection)
+    projection
 }
 
 fn compact_runner_summary(runner: &types::RunnerTargetSummary) -> serde_json::Value {
@@ -227,14 +231,14 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
     })
 }
 
-fn projection_envelope_bytes(payload: &serde_json::Value) -> serde_json::Result<usize> {
+fn projection_envelope_bytes(payload: &serde_json::Value) -> homeboy::core::Result<usize> {
     let data = serde_json::to_value(super::types::RunnerCommandOutput::Doctor(Box::new(
         payload.clone(),
     )))?;
     let run = compact_command_run(Ok(data), 0).with_identity(
         &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
     );
-    serde_json::to_vec(&run.stdout_envelope()).map(|rendered| rendered.len())
+    run.stdout_bytes()
 }
 
 pub(crate) fn compact_command_run(
