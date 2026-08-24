@@ -2062,6 +2062,14 @@ fn provider_report_state(
         &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
     >,
 ) -> &'static str {
+    // These routes identify the next operator decision. An empty backend passed
+    // to dispatchability is not a concrete route and must not overwrite it.
+    if matches!(
+        route,
+        Some(ProviderRoute::SelectionRequired { .. } | ProviderRoute::Ambiguous { .. })
+    ) {
+        return route.expect("matched route").state();
+    }
     if let Some(verdict) = dispatchability {
         return verdict.state;
     }
@@ -2775,6 +2783,7 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
@@ -3056,6 +3065,12 @@ mod tests {
                 .0;
             assert_eq!(output["operator_summary"]["state"], "ready");
             assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: ready\nProviders shown: 2\nNext: homeboy agent-task providers --backend configured --selector configured.provider --validate-readiness".to_string()
+                )
+            );
+            assert_eq!(
                 output["readiness_validation"]["effective_provider_id"],
                 "configured.provider"
             );
@@ -3197,12 +3212,15 @@ mod tests {
             assert_eq!(output["operator_summary"]["state"], "selection_required");
             assert_eq!(validation["route_state"], "selection_required");
             assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: ready\nNext: homeboy agent-task providers --backend ready --validate-readiness".to_string()
+                ),
+                "the rendered report preserves the selection decision over the empty-route dispatchability verdict"
+            );
+            assert_eq!(
                 output["operator_summary"]["selection_choices"],
                 serde_json::json!([
-                    {
-                        "backend": "failing",
-                        "command": "homeboy agent-task providers --backend failing --validate-readiness",
-                    },
                     {
                         "backend": "ready",
                         "command": "homeboy agent-task providers --backend ready --validate-readiness",
@@ -3261,6 +3279,29 @@ mod tests {
     }
 
     #[test]
+    fn providers_report_resolved_route_credentials_missing() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let mut args = providers_args();
+            args.backend = Some("claude-code".to_string());
+            let output = providers_with_catalog(
+                args,
+                provider_catalog(vec![credential_declaring_provider()]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
+            assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: credentials_missing\nProviders shown: 1\nNext: homeboy agent-task providers --backend claude-code --selector claude-code.agent-task-executor --validate-readiness".to_string()
+                )
+            );
+        });
+    }
+
+    #[test]
     fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
         crate::test_support::with_isolated_home(|_| {
             save_provider_policy(Some("extension"), None);
@@ -3281,7 +3322,7 @@ mod tests {
             let output = providers_with_catalog(providers_args(), provider_catalog(Vec::new()))
                 .expect("missing-default output")
                 .0;
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(output["operator_summary"]["state"], "route_unavailable");
         });
     }
 
@@ -3296,7 +3337,7 @@ mod tests {
             .expect("provider report")
             .0;
 
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(output["operator_summary"]["state"], "route_unavailable");
             assert_eq!(
                 output["readiness_validation"]["route_state"],
                 "configuration_unavailable"
