@@ -210,7 +210,7 @@ fn dispatch_with_provider_catalog(
             catalog.provider_requires_cwd_git_checkout(backend, selector)
         })?;
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_explicit_models(&plan)?;
+    catalog.validate_selected_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
@@ -244,7 +244,7 @@ pub fn dispatch_with_provider_requirements(
         provider_requires_cwd_git_checkout,
     )?;
     apply_provider_runner_secret_env_contracts(&mut plan);
-    AgentTaskProviderCatalog::discover().validate_explicit_models(&plan)?;
+    AgentTaskProviderCatalog::discover().validate_selected_models(&plan)?;
     enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(
@@ -403,13 +403,23 @@ pub fn resolve_cook_initial_provider_route_with_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskInitialProviderRoute> {
     let request = resolve_dispatch_request(command)?;
-    Ok(initial_provider_route_from_policy(
-        controller_resolved_execution_policy_with_sources(
+    let mut route =
+        initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
             &request,
             catalog,
             configured_rotation_policy(),
-        ),
-    ))
+        ));
+    // Provider configuration is the configured-model source used by Cook when
+    // policy and CLI do not select one. Keep discovery on the same default.
+    if route.model.is_none() {
+        route.model = homeboy_core::defaults::load_config()
+            .settings
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(str::to_string);
+    }
+    Ok(route)
 }
 
 fn configured_rotation_policy() -> Option<AgentTaskProviderRotationPolicy> {

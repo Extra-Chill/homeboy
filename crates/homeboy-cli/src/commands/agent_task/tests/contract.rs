@@ -8,6 +8,7 @@ fn providers_output_includes_core_capability_contract() {
         let (value, status) = review::providers(ProvidersArgs {
             backend: None,
             selector: None,
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),
@@ -56,6 +57,7 @@ fn providers_output_declares_the_scope_it_observed() {
         let result = review::providers(ProvidersArgs {
             backend: None,
             selector: None,
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),

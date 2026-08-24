@@ -1935,6 +1935,7 @@ fn resolve_provider_route(
     resolve_provider_route_for(
         args.backend.clone(),
         args.selector.clone(),
+        args.model.clone(),
         catalog,
         args.validate_readiness,
     )
@@ -1946,6 +1947,7 @@ fn resolve_provider_route(
 fn resolve_provider_route_for(
     backend: Option<String>,
     selector: Option<String>,
+    model: Option<String>,
     catalog: &AgentTaskProviderCatalog,
     probe_runtime: bool,
 ) -> Option<ProviderRoute> {
@@ -1953,6 +1955,7 @@ fn resolve_provider_route_for(
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
         backend,
         selector,
+        model,
         ..Default::default()
     };
     let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
@@ -1978,12 +1981,33 @@ fn resolve_provider_route_for(
         &route.backend,
         route.selector.as_deref(),
     ) {
-        ProviderResolution::Resolved(provider) => Some(ProviderRoute::Resolved {
-            backend: route.backend,
-            provider_id: provider.id.clone(),
-            model: route.model,
-            dispatchable: provider_credential_readiness(provider).dispatchable,
-        }),
+        ProviderResolution::Resolved(provider) => {
+            if probe_runtime
+                && route.model.as_deref().is_none_or(str::is_empty)
+                && provider
+                    .cli
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.model.is_some())
+            {
+                return Some(ProviderRoute::Blocked {
+                    reason: format!(
+                        "Cook resolved backend `{}` but no concrete model; pass --model or configure provider model selection",
+                        route.backend
+                    ),
+                    next_command: format!(
+                        "homeboy agent-task providers --backend {} --model <model> --validate-readiness",
+                        shell_arg(&route.backend)
+                    ),
+                });
+            }
+            Some(ProviderRoute::Resolved {
+                backend: route.backend,
+                provider_id: provider.id.clone(),
+                model: route.model,
+                dispatchable: provider_credential_readiness(provider).dispatchable,
+            })
+        }
         ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
             candidate_ids.sort();
             Some(ProviderRoute::Ambiguous {
@@ -2105,6 +2129,43 @@ fn validate_effective_provider_route(
             Some(vec![route.next_command()]),
         ));
     };
+    let provider = catalog
+        .providers()
+        .iter()
+        .find(|provider| provider.id == *provider_id)
+        .expect("resolved provider route is catalog-backed");
+    let mut supported_models = provider
+        .cli
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.model.as_deref())
+        .collect::<Vec<_>>();
+    supported_models.sort_unstable();
+    supported_models.dedup();
+    if !supported_models.is_empty()
+        && !model
+            .as_deref()
+            .is_some_and(|model| supported_models.iter().any(|available| *available == model))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "model",
+            match model {
+                Some(model) => format!(
+                    "provider `{}` does not support selected model `{model}`",
+                    provider.id
+                ),
+                None => format!(
+                    "provider `{}` has no concrete selected model; pass --model or configure provider model selection",
+                    provider.id
+                ),
+            },
+            model.clone(),
+            Some(vec![format!(
+                "supported models: {}",
+                supported_models.join(", ")
+            )]),
+        ));
+    }
     preflight_provider_dispatchability(catalog, backend, Some(provider_id), model.as_deref())?;
     Ok(Some((backend.clone(), provider_id.clone())))
 }
@@ -2140,7 +2201,13 @@ fn declared_backend_readiness(
                         .any(|provider| provider.backend == backend && provider.id == *selector)
                 })
                 .map(str::to_string);
-            let route = resolve_provider_route_for(Some(backend.clone()), selector, catalog, true);
+            let route = resolve_provider_route_for(
+                Some(backend.clone()),
+                selector,
+                args.model.clone(),
+                catalog,
+                true,
+            );
             let (identity, failure) =
                 match validate_effective_provider_route(route.as_ref(), catalog) {
                     Ok(identity) => (identity, None),
@@ -2284,6 +2351,7 @@ fn provider_full_command(args: &ProvidersArgs) -> String {
     for (flag, value) in [
         ("backend", args.backend.as_deref()),
         ("selector", args.selector.as_deref()),
+        ("model", args.model.as_deref()),
         ("runtime", args.runtime.as_deref()),
         ("status", args.status.as_deref()),
     ] {
@@ -2969,6 +3037,7 @@ mod tests {
         let command = provider_full_command(&ProvidersArgs {
             backend: Some("backend; touch /tmp/unwanted".to_string()),
             selector: Some("provider id".to_string()),
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),
@@ -3006,6 +3075,7 @@ mod tests {
         ProvidersArgs {
             backend: None,
             selector: None,
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),

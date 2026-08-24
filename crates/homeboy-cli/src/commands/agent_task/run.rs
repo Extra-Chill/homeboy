@@ -4898,7 +4898,7 @@ pub(crate) fn compile_cook_plan(
         }
     }
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
-        .validate_explicit_models(&plan)?;
+        .validate_selected_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
         for task in &mut plan.tasks {
