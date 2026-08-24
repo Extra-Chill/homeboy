@@ -678,11 +678,12 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     let root = homeboy::core::paths::homeboy().unwrap();
     let extension = root.join("extensions").join("fixture-external-check");
     std::fs::create_dir_all(&extension).unwrap();
-    let executable = fixture_program(&extension, fixture_mode_env);
-    let command = if mode == "missing-executable" {
-        "not-installed-resolver".to_string()
+    let command = if mode == "timeout" {
+        timeout_fixture_command(&extension)
+    } else if mode == "missing-executable" {
+        vec!["not-installed-resolver".to_string()]
     } else {
-        executable
+        vec![fixture_program(&extension, fixture_mode_env)]
     };
     std::fs::write(
         extension.join("fixture-external-check.json"),
@@ -692,7 +693,7 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
             "external_check_detail_resolvers": [{
                 "schema": "homeboy/external-check-detail-resolver/v1",
                 "provider": "fixture-ci",
-                "command": [command],
+                "command": command,
                 "public_env": [fixture_mode_env]
             }]
         })
@@ -700,6 +701,26 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     )
     .unwrap();
     std::env::set_var(fixture_mode_env, mode);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn timeout_fixture_command(extension: &Path) -> Vec<String> {
+    let name = if cfg!(windows) {
+        "fixture-resolver.exe"
+    } else {
+        "fixture-resolver"
+    };
+    std::fs::copy(
+        std::env::current_exe().expect("current test executable"),
+        extension.join(name),
+    )
+    .expect("copy portable timeout fixture");
+    vec![
+        name.to_string(),
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        "resolver_fixture_hangs_until_killed".to_string(),
+    ]
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]

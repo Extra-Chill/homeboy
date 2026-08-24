@@ -90,7 +90,7 @@ test ! -s "${tmp}/gh.log" || ! grep -Fq -- '--method PUT' "${tmp}/gh.log"
 run --operation reconcile --evidence "${tmp}/reconcile.json"
 jq -e '.operation == "reconcile" and .changed == true and .matched == true' "${tmp}/reconcile.json" >/dev/null
 grep -Fq -- '--method PUT' "${tmp}/gh.log"
-jq -e '[.rules[] | select(.type == "required_status_checks")] | length == 0' "${tmp}/state.json" >/dev/null
+jq -e '([.rules[] | select(.type == "required_status_checks")] | length) == 1 and ([.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]] | length) == 8' "${tmp}/state.json" >/dev/null
 jq -e '.bypass_actors == []' "${tmp}/state.json" >/dev/null
 
 : > "${tmp}/gh.log"
@@ -110,15 +110,8 @@ grep -Fq -- '--method PUT' "${tmp}/gh.log"
 
 # Status-check policies still prove the configured canonical check before a
 # write. The PR UI prefix is not part of the main-push check-run name.
-jq '. + {"reconcile_preflight":{"required_context":"homeboy / Test"}}
-  | .rules += [{
-      "type":"required_status_checks",
-      "parameters":{
-        "strict_required_status_checks_policy":true,
-        "do_not_enforce_on_create":false,
-        "required_status_checks":[{"context":"homeboy / Test","integration_id":15368}]
-      }
-    }]' "${root}/.github/required-gates-ruleset.json" > "${tmp}/preflight-policy.json"
+jq '. + {"reconcile_preflight":{"required_context":"homeboy / Test"}}' \
+  "${root}/.github/required-gates-ruleset.json" > "${tmp}/preflight-policy.json"
 jq '.rules' "${tmp}/preflight-policy.json" > "${tmp}/effective-rules.json"
 cp "${root}/.github/required-gates-ruleset.json" "${tmp}/state.json"
 : > "${tmp}/gh.log"
