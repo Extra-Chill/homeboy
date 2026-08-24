@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.0] - 2026-08-24
+
+### Added
+- compose Lab command routes
+
+### Changed
+- light up five stable crates for the dead-code lint
+
+### Fixed
+- revalidate compatibility before promotion
+- canonicalize task lookup identity
+- resolve task worktrees before deriving handles
+- require authoritative refresh recovery
+- reject unsupported composed Lab intent
+- refresh composed Lab admission
+- admit composed Lab routes
+- route composed Lab commands
+
 ## [0.358.2] - 2026-08-24
 
 ### Fixed
