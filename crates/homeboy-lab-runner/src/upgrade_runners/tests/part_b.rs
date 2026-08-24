@@ -13,7 +13,7 @@ thread_local! {
 }
 
 #[test]
-fn managed_immutable_runner_slots_route_to_refresh_and_reconciliation() {
+fn managed_immutable_runner_slots_route_to_one_exact_refresh_action() {
     let runner = ssh_runner(
         "homeboy-lab",
         Some("/home/user/workspace/_homeboy_binaries/homeboy-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/homeboy"),
@@ -37,10 +37,9 @@ fn managed_immutable_runner_slots_route_to_refresh_and_reconciliation() {
     ));
 
     let commands = managed_immutable_runner_recovery_commands("homeboy-lab");
-    assert_eq!(commands.len(), 2);
+    assert_eq!(commands.len(), 1);
     assert!(commands[0].starts_with("homeboy runner refresh-homeboy homeboy-lab --ref "));
     assert!(commands[0].ends_with(" --reconnect"));
-    assert_eq!(commands[1], "homeboy runner reconcile homeboy-lab");
 }
 
 #[test]

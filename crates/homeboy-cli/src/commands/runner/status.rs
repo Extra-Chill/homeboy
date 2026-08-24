@@ -847,7 +847,17 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
         refresh_commands: (!recovery_blocked)
             .then(|| lab_runner_homeboy_refresh_commands(runner_id, status))
             .unwrap_or_default(),
-        upgrade_command: (!recovery_blocked).then(|| {
+        // An exact refresh owns stale-daemon recovery end-to-end: it selects the
+        // controller commit, rotates the daemon, verifies both identities, and
+        // proves admission. Do not present the known-weaker fleet upgrade beside it.
+        upgrade_command: (!recovery_blocked
+            && !(status.stale_daemon.is_some()
+                && recovery_refresh_command(
+                    &shell_arg(runner_id),
+                    recovery_refresh_guidance(status),
+                )
+                .is_some()))
+        .then(|| {
             format!(
                 "homeboy upgrade --force --upgrade-runner {}",
                 shell_arg(runner_id)
@@ -1372,16 +1382,14 @@ fn lab_runner_homeboy_refresh_commands(
     status: &RunnerStatusReport,
 ) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
-    let mut commands = Vec::new();
     if let Some(command) = recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status))
     {
-        commands.push(command);
+        return vec![command];
     }
-    commands.extend([
+    vec![
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
-    ]);
-    commands
+    ]
 }
 
 pub(super) fn runner_followups(
@@ -1408,6 +1416,10 @@ pub(super) fn runner_followups(
             purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         });
     }
+    let has_exact_stale_daemon_refresh = status.is_some_and(|status| {
+        status.stale_daemon.is_some()
+            && recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status)).is_some()
+    });
     followups.extend([
         LabFollowup {
             label: "doctor".to_string(),
@@ -1447,6 +1459,16 @@ pub(super) fn runner_followups(
             purpose: "Reclaim safe orphaned Lab workspaces in bounded passes when the runner workspace filesystem is under disk pressure.".to_string(),
         },
     ]);
+    if has_exact_stale_daemon_refresh {
+        // The refresh action includes reconnection, identity verification, and
+        // admission readiness. Suppress weaker local/upgrade alternatives.
+        followups.retain(|followup| {
+            !matches!(
+                followup.label.as_str(),
+                "exec" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+            )
+        });
+    }
     followups.extend(declared_followups(None, Some(runner_id)));
     if let Ok(path) = std::env::current_dir() {
         followups.push(LabFollowup {
@@ -1536,7 +1558,7 @@ fn build_identity_commit(identity: &str) -> Option<&str> {
         .then_some(commit)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RecoveryRefreshGuidance {
     Refresh(String),
     IdentityDrift {
@@ -1864,6 +1886,20 @@ fn runner_status_operator_commands_with_recovery_guidance(
         return Vec::new();
     };
 
+    if report.active_job_count == 0 && report.stale_daemon.is_some() {
+        if let Some(command) =
+            recovery_refresh_command(&shell_arg(&report.runner_id), guidance.clone())
+        {
+            return vec![RunnerOperatorCommand {
+                scope: "daemon_refresh",
+                runner_id: report.runner_id.clone(),
+                job_id: None,
+                command,
+                description: "Refresh the configured Homeboy binary, rotate the idle daemon, and verify identity plus admission convergence.".to_string(),
+            }];
+        }
+    }
+
     let mut commands = Vec::new();
     if report.active_job_count > 0 {
         commands.push(RunnerOperatorCommand {
@@ -2128,6 +2164,22 @@ mod tests {
                 .command,
             commands[0]
         );
+        assert_eq!(commands.len(), 1);
+        assert!(followups.iter().all(|followup| {
+            !matches!(
+                followup.label.as_str(),
+                "exec" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+            )
+        }));
+
+        let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy", &report);
+        assert_eq!(output.refresh_commands, commands);
+        assert_eq!(output.upgrade_command, None);
+
+        let operator_commands = runner_status_operator_commands(&report);
+        assert_eq!(operator_commands.len(), 1);
+        assert_eq!(operator_commands[0].scope, "daemon_refresh");
+        assert_eq!(operator_commands[0].command, commands[0]);
     }
 
     #[test]
