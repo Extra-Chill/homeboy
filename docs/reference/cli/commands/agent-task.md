@@ -1163,6 +1163,7 @@ List extension-declared executor providers and optional secret/backend readiness
 | --- | --- | --- |
 | `--backend` | `<BACKEND>` | _no help text_ |
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
+| `--model` | `<MODEL>` | Validate or report this exact model selection using Cook's provider route |
 | `--runtime` | `<RUNTIME>` | Restrict results to the runtime that owns the provider |
 | `--status` | `<STATUS>` | Restrict results to `default`, `available`, or `unavailable` providers |
 | `--secret-env` | `<ENV>` | _no help text_ |

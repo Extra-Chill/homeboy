@@ -6,6 +6,9 @@
 # Non-interactive discovery (JSON output):
 homeboy ssh list
 
+# Complete redacted records, including aliases and runner configuration:
+homeboy ssh list --full
+
 # Connect (interactive when no COMMAND is provided):
 homeboy ssh [OPTIONS] [ID] [-- <COMMAND...>]
 ```
@@ -40,21 +43,31 @@ homeboy ssh list
 
 ```json
 {
-  "action": "list",
+  "action": "List",
+  "schema": "homeboy/ssh-list/v1",
+  "operator_summary": {
+    "identity": "ssh list",
+    "state": "configured",
+    "next_action": "homeboy ssh <server-id> -- <command>"
+  },
   "servers": [
     {
       "id": "...",
-      "name": "...",
       "host": "...",
       "user": "...",
       "port": 22,
-      "identity_file": null
+      "kind": null,
+      "runner_configured": false
     }
-  ]
+  ],
+  "truncation": { "servers": { "shown": 1, "omitted": 0 } }
 }
 ```
 
-Note: `action` is produced by the tagged enum output (`SshOutput`).
+The default is a bounded operational projection. It limits target count and
+field sizes, validates the final JSON response envelope, redacts sensitive
+values, and includes `truncation` replay metadata. Use `homeboy ssh list --full`
+for complete redacted server records; `--full` is intentionally unbounded.
 
 ### Connect (`homeboy ssh [OPTIONS] [ID] [-- <COMMAND...>]`)
 

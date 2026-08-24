@@ -351,10 +351,16 @@ impl<T: Serialize> CommandResultEnvelope<T> {
         }
     }
 
-    fn to_json(&self) -> Result<String> {
+    pub(crate) fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).map_err(|e| {
             Error::internal_json(e.to_string(), Some("serialize response".to_string()))
         })
+    }
+
+    /// The exact JSON bytes written by [`print_response`], including its final
+    /// newline. Compact serializers must not be used for stdout byte budgets.
+    pub(crate) fn stdout_json(&self) -> Result<String> {
+        self.to_json().map(|json| format!("{json}\n"))
     }
 }
 
@@ -394,13 +400,13 @@ impl CommandResultEnvelope<()> {
     }
 }
 
-fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
+pub(crate) fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
-    let payload = response.to_json()?;
+    let payload = response.stdout_json()?;
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    if let Err(e) = writeln!(handle, "{}", payload) {
+    if let Err(e) = handle.write_all(payload.as_bytes()) {
         if e.kind() == io::ErrorKind::BrokenPipe {
             return Ok(()); // Exit gracefully on SIGPIPE
         }

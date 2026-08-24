@@ -364,6 +364,27 @@ impl CommandRun {
         self
     }
 
+    /// Render the same structured envelope that `OutputService` writes to stdout.
+    pub(crate) fn stdout_envelope(&self) -> output::CommandResultEnvelope<Value> {
+        output::cli_response_for_json_result_for_identity(
+            &self.stdout_result,
+            self.exit_code,
+            &CommandIdentity {
+                command: self.command.clone(),
+                operation: self.operation.clone(),
+            },
+            self.raw_stdout
+                .is_none()
+                .then(|| presentation_envelope(self.presentation.clone()))
+                .flatten(),
+        )
+    }
+
+    /// Count the exact pretty-printed bytes `OutputService` emits on stdout.
+    pub(crate) fn stdout_bytes(&self) -> homeboy::core::Result<usize> {
+        self.stdout_envelope().stdout_json().map(|json| json.len())
+    }
+
     pub(crate) fn with_output_file_already_written(mut self) -> Self {
         self.output_file_already_written = true;
         self
@@ -496,16 +517,7 @@ impl<'a> OutputService<'a> {
         if let Some(stderr) = &run.presentation.stderr {
             eprint!("{}", stderr);
         }
-        output::print_json_result_for_identity(
-            run.stdout_result,
-            run.exit_code,
-            &CommandIdentity {
-                command: run.command.clone(),
-                operation: run.operation.clone(),
-            },
-            presentation_envelope(run.presentation),
-        )
-        .ok();
+        output::print_response(&run.stdout_envelope()).ok();
 
         run.exit_code
     }

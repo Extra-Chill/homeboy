@@ -202,16 +202,12 @@ pub(crate) fn run_command_output(
                 Some(super::ssh::SshSubcommand::List { full: false })
             ) =>
         {
-            command_run_with_summary(
-                dispatch(Commands::Ssh(args), spec, placement),
-                |payload, _| super::ssh::render_list_summary(payload),
-            )
+            let result = dispatch(Commands::Ssh(args), spec, placement);
+            super::ssh::compact_list_command_run(result.0, result.1)
         }
         Commands::Runner(args) if runner::is_compact_doctor_stdout(&args) => {
-            command_run_with_summary(
-                dispatch(Commands::Runner(args), spec, placement),
-                |payload, _| super::runner::doctor::render_summary(payload),
-            )
+            let result = dispatch(Commands::Runner(args), spec, placement);
+            super::runner::doctor::compact_command_run(result.0, result.1)
         }
         Commands::Runner(args) => runner::run_command_output(args),
         Commands::Activity(args) => command_run_with_summary(
