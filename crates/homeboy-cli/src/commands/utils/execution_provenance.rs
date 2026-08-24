@@ -25,6 +25,50 @@ pub fn capture(cli: &Cli, normalized_args: &[String]) {
     }
 }
 
+/// Capture descriptor-composed command intent without requiring a synthetic
+/// static `Commands` value.
+pub fn capture_composed(
+    placement: Placement,
+    runner: Option<&str>,
+    detach_after_handoff: bool,
+    allow_dirty_lab_workspace: bool,
+    skip_deps_hydration: bool,
+    runner_env: &[String],
+    lab_env_json: Option<&str>,
+    normalized_args: &[String],
+) {
+    let mut slot = captured_storage()
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    if slot.is_none() {
+        let execution = homeboy::core::resource_policy_context::lab_execution_runner_id()
+            .map(|runner_id| ("lab", Some(runner_id)))
+            .unwrap_or(("controller", None));
+        let argv = redact_execution_argv(normalized_args);
+        *slot = Some(json!({
+            "schema": SCHEMA,
+            "operator_intent": {
+                "argv": argv,
+                "rerun_command": homeboy::core::redaction::redact_argv_shell_display(&redact_execution_argv(normalized_args)),
+                "placement": placement_name(placement),
+                "runner_id": runner,
+                "global_flags": {
+                    "detach_after_handoff": detach_after_handoff,
+                    "allow_dirty_lab_workspace": allow_dirty_lab_workspace,
+                    "skip_deps_hydration": skip_deps_hydration,
+                    "runner_env": runner_env.iter().map(|value| redact_env_assignment(value, &homeboy::core::redaction::RedactionPolicy::default())).collect::<Vec<_>>(),
+                    "lab_env_json": lab_env_json.map(|value| redact_json_env(value, &homeboy::core::redaction::RedactionPolicy::default())),
+                },
+            },
+            "resolved_execution": { "location": execution.0, "runner_id": execution.1 },
+            "resource_policy": {
+                "decision_origin": decision_origin(placement, runner.is_some(), execution.0),
+                "preflight": crate::commands::utils::resource_policy::captured_context().as_ref().map(crate::commands::utils::resource_policy::resource_policy_context_to_json),
+            },
+        }));
+    }
+}
+
 /// Return the command provenance captured for this process, if any. Older
 /// callers and imported observations remain valid without this optional field.
 pub fn captured() -> Option<Value> {
@@ -47,11 +91,7 @@ fn build_with_execution(
     let argv = redact_execution_argv(normalized_args);
     let rerun_command = homeboy::core::redaction::redact_argv_shell_display(&argv);
     let placement = placement_name(cli.placement);
-    let decision_origin = match (cli.runner.is_some(), cli.placement, location) {
-        (true, _, _) | (_, Placement::Local | Placement::Lab, _) => "explicit",
-        (_, Placement::LabOrLocal, "controller") => "fallback",
-        _ => "automatic",
-    };
+    let decision_origin = decision_origin(cli.placement, cli.runner.is_some(), location);
 
     json!({
         "schema": SCHEMA,
@@ -165,6 +205,14 @@ fn placement_name(placement: Placement) -> &'static str {
     }
 }
 
+fn decision_origin(placement: Placement, has_runner: bool, location: &str) -> &'static str {
+    match (has_runner, placement, location) {
+        (true, _, _) | (_, Placement::Local | Placement::Lab, _) => "explicit",
+        (_, Placement::LabOrLocal, "controller") => "fallback",
+        _ => "automatic",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +271,26 @@ mod tests {
             .as_str()
             .expect("rerun command")
             .contains("--placement=lab-or-local"));
+    }
+
+    #[test]
+    fn composed_decision_origin_matches_builtin_semantics() {
+        assert_eq!(
+            decision_origin(Placement::LabOrLocal, false, "controller"),
+            "fallback"
+        );
+        assert_eq!(
+            decision_origin(Placement::Lab, false, "controller"),
+            "explicit"
+        );
+        assert_eq!(
+            decision_origin(Placement::Auto, true, "controller"),
+            "explicit"
+        );
+        assert_eq!(
+            decision_origin(Placement::Auto, false, "controller"),
+            "automatic"
+        );
     }
 
     #[test]

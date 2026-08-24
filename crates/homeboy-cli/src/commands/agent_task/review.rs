@@ -446,8 +446,27 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let to_worktree = args.to_worktree.clone();
-    let (raw, source_path) = read_promotion_source(&args.source)?;
-    let source_run_id = match agent_task_lifecycle::status(&args.source) {
+    let source_reference = parse_promotion_run_artifact_reference(&args.source)?;
+    let source_spec = source_reference
+        .as_ref()
+        .map(|reference| reference.run_id.as_str())
+        .unwrap_or(&args.source);
+    let task_id = resolve_promotion_selector(
+        "task_id",
+        args.task_id,
+        source_reference
+            .as_ref()
+            .and_then(|reference| reference.task_id.clone()),
+    )?;
+    let requested_artifact_id = resolve_promotion_selector(
+        "artifact_id",
+        args.artifact_id,
+        source_reference
+            .as_ref()
+            .map(|reference| reference.artifact_id.clone()),
+    )?;
+    let (raw, source_path) = read_promotion_source(source_spec)?;
+    let source_run_id = match agent_task_lifecycle::status(source_spec) {
         Ok(record) => Some(record.run_id),
         Err(_) => match source_path.as_deref() {
             Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
@@ -455,23 +474,23 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         },
     };
     let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
-        args.artifact_id
+        requested_artifact_id
             .as_deref()
             .map(|artifact_id| {
                 agent_task_lifecycle::resolve_promotion_patch_artifact_id(
                     run_id,
-                    args.task_id.as_deref(),
+                    task_id.as_deref(),
                     artifact_id,
                 )
             })
             .transpose()?
     } else {
-        args.artifact_id.clone()
+        requested_artifact_id
     };
     if let Some(run_id) = source_run_id.as_deref() {
         agent_task_lifecycle::materialize_recovered_patch_artifact(
             run_id,
-            args.task_id.as_deref(),
+            task_id.as_deref(),
             artifact_id.as_deref(),
         )?;
     }
@@ -484,7 +503,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         task_base_sha: None,
         candidate_ref: None,
         to_worktree: args.to_worktree,
-        task_id: args.task_id,
+        task_id,
         artifact_id,
         dry_run: args.dry_run,
         gates: args.gates.into(),
@@ -522,6 +541,112 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     }
 
     Ok((value, exit_code))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromotionRunArtifactReference {
+    run_id: String,
+    task_id: Option<String>,
+    artifact_id: String,
+}
+
+/// Parse the immutable artifact selector emitted in durable agent-task output.
+/// It is a controller-owned source, not a runner-local path.
+fn parse_promotion_run_artifact_reference(
+    source: &str,
+) -> homeboy::core::Result<Option<PromotionRunArtifactReference>> {
+    let Some(rest) = source.strip_prefix("homeboy://agent-task/run/") else {
+        return Ok(None);
+    };
+    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let mut path = path.split('/');
+    let encoded_run_id = path.next().unwrap_or_default();
+    if encoded_run_id.is_empty() || path.next() != Some("artifacts") || path.next().is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "source",
+            "agent-task promotion URI must select exactly one run artifact",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    let run_id = homeboy::core::execution_contract::decode_uri_component_strict(encoded_run_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "source",
+                "agent-task promotion URI has malformed run id encoding",
+                Some(source.to_string()),
+                None,
+            )
+        })?;
+    let mut task_id = None;
+    let mut artifact_id = None;
+    for part in fragment.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = homeboy::core::execution_contract::decode_uri_component_strict(value)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "source",
+                    "agent-task promotion URI has malformed artifact selector encoding",
+                    Some(source.to_string()),
+                    None,
+                )
+            })?;
+        match key {
+            "task" => {
+                if task_id.replace(value).is_some() {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "source",
+                        "agent-task promotion URI repeats its task selector",
+                        Some(source.to_string()),
+                        None,
+                    ));
+                }
+            }
+            "artifact" => {
+                if artifact_id.replace(value).is_some() {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "source",
+                        "agent-task promotion URI repeats its artifact selector",
+                        Some(source.to_string()),
+                        None,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    let artifact_id = artifact_id.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "source",
+            "agent-task promotion URI must include an artifact selector",
+            Some(source.to_string()),
+            None,
+        )
+    })?;
+    Ok(Some(PromotionRunArtifactReference {
+        run_id,
+        task_id,
+        artifact_id,
+    }))
+}
+
+fn resolve_promotion_selector(
+    name: &str,
+    requested: Option<String>,
+    immutable: Option<String>,
+) -> homeboy::core::Result<Option<String>> {
+    if requested.is_some() && immutable.is_some() && requested != immutable {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            name,
+            format!("{name} conflicts with the immutable agent-task promotion URI selector"),
+            requested,
+            None,
+        ));
+    }
+    Ok(immutable.or(requested))
 }
 
 #[derive(Clone)]
@@ -1900,11 +2025,16 @@ impl ProviderRoute {
             Self::Resolved {
                 backend,
                 provider_id,
+                model,
                 ..
             } => format!(
-                "homeboy agent-task providers --backend {} --selector {} --validate-readiness",
+                "homeboy agent-task providers --backend {} --selector {}{} --validate-readiness",
                 shell_arg(backend),
                 shell_arg(provider_id),
+                model
+                    .as_deref()
+                    .map(|model| format!(" --model {}", shell_arg(model)))
+                    .unwrap_or_default(),
             ),
             Self::Blocked { next_command, .. } => next_command.clone(),
             Self::SelectionRequired { choices } => choices
@@ -1935,6 +2065,7 @@ fn resolve_provider_route(
     resolve_provider_route_for(
         args.backend.clone(),
         args.selector.clone(),
+        args.model.clone(),
         catalog,
         args.validate_readiness,
     )
@@ -1946,6 +2077,7 @@ fn resolve_provider_route(
 fn resolve_provider_route_for(
     backend: Option<String>,
     selector: Option<String>,
+    model: Option<String>,
     catalog: &AgentTaskProviderCatalog,
     probe_runtime: bool,
 ) -> Option<ProviderRoute> {
@@ -1953,6 +2085,7 @@ fn resolve_provider_route_for(
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
         backend,
         selector,
+        model,
         ..Default::default()
     };
     let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
@@ -1978,12 +2111,33 @@ fn resolve_provider_route_for(
         &route.backend,
         route.selector.as_deref(),
     ) {
-        ProviderResolution::Resolved(provider) => Some(ProviderRoute::Resolved {
-            backend: route.backend,
-            provider_id: provider.id.clone(),
-            model: route.model,
-            dispatchable: provider_credential_readiness(provider).dispatchable,
-        }),
+        ProviderResolution::Resolved(provider) => {
+            if probe_runtime
+                && route.model.as_deref().is_none_or(str::is_empty)
+                && provider
+                    .cli
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.model.is_some())
+            {
+                return Some(ProviderRoute::Blocked {
+                    reason: format!(
+                        "Cook resolved backend `{}` but no concrete model; pass --model or configure provider model selection",
+                        route.backend
+                    ),
+                    next_command: format!(
+                        "homeboy agent-task providers --backend {} --model <model> --validate-readiness",
+                        shell_arg(&route.backend)
+                    ),
+                });
+            }
+            Some(ProviderRoute::Resolved {
+                backend: route.backend,
+                provider_id: provider.id.clone(),
+                model: route.model,
+                dispatchable: provider_credential_readiness(provider).dispatchable,
+            })
+        }
         ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
             candidate_ids.sort();
             Some(ProviderRoute::Ambiguous {
@@ -2062,6 +2216,14 @@ fn provider_report_state(
         &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
     >,
 ) -> &'static str {
+    // These routes identify the next operator decision. An empty backend passed
+    // to dispatchability is not a concrete route and must not overwrite it.
+    if matches!(
+        route,
+        Some(ProviderRoute::SelectionRequired { .. } | ProviderRoute::Ambiguous { .. })
+    ) {
+        return route.expect("matched route").state();
+    }
     if let Some(verdict) = dispatchability {
         return verdict.state;
     }
@@ -2105,6 +2267,43 @@ fn validate_effective_provider_route(
             Some(vec![route.next_command()]),
         ));
     };
+    let provider = catalog
+        .providers()
+        .iter()
+        .find(|provider| provider.id == *provider_id)
+        .expect("resolved provider route is catalog-backed");
+    let mut supported_models = provider
+        .cli
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.model.as_deref())
+        .collect::<Vec<_>>();
+    supported_models.sort_unstable();
+    supported_models.dedup();
+    if !supported_models.is_empty()
+        && !model
+            .as_deref()
+            .is_some_and(|model| supported_models.iter().any(|available| *available == model))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "model",
+            match model {
+                Some(model) => format!(
+                    "provider `{}` does not support selected model `{model}`",
+                    provider.id
+                ),
+                None => format!(
+                    "provider `{}` has no concrete selected model; pass --model or configure provider model selection",
+                    provider.id
+                ),
+            },
+            model.clone(),
+            Some(vec![format!(
+                "supported models: {}",
+                supported_models.join(", ")
+            )]),
+        ));
+    }
     preflight_provider_dispatchability(catalog, backend, Some(provider_id), model.as_deref())?;
     Ok(Some((backend.clone(), provider_id.clone())))
 }
@@ -2140,7 +2339,13 @@ fn declared_backend_readiness(
                         .any(|provider| provider.backend == backend && provider.id == *selector)
                 })
                 .map(str::to_string);
-            let route = resolve_provider_route_for(Some(backend.clone()), selector, catalog, true);
+            let route = resolve_provider_route_for(
+                Some(backend.clone()),
+                selector,
+                args.model.clone(),
+                catalog,
+                true,
+            );
             let (identity, failure) =
                 match validate_effective_provider_route(route.as_ref(), catalog) {
                     Ok(identity) => (identity, None),
@@ -2284,6 +2489,7 @@ fn provider_full_command(args: &ProvidersArgs) -> String {
     for (flag, value) in [
         ("backend", args.backend.as_deref()),
         ("selector", args.selector.as_deref()),
+        ("model", args.model.as_deref()),
         ("runtime", args.runtime.as_deref()),
         ("status", args.status.as_deref()),
     ] {
@@ -2775,6 +2981,7 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
@@ -2786,6 +2993,34 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
     use std::process::Command;
+
+    #[test]
+    fn immutable_promotion_uri_selects_its_controller_run_and_artifact() {
+        assert_eq!(
+            parse_promotion_run_artifact_reference(
+                "homeboy://agent-task/run/runner%2Fowned/artifacts#task=cook%20task&artifact=patch%2F1"
+            )
+            .expect("parse"),
+            Some(PromotionRunArtifactReference {
+                run_id: "runner/owned".to_string(),
+                task_id: Some("cook task".to_string()),
+                artifact_id: "patch/1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn immutable_promotion_uri_rejects_conflicting_cli_selector_before_materialization() {
+        let error = resolve_promotion_selector(
+            "artifact_id",
+            Some("different-patch".to_string()),
+            Some("patch".to_string()),
+        )
+        .expect_err("conflicting immutable selector must fail");
+        assert!(error
+            .message
+            .contains("immutable agent-task promotion URI selector"));
+    }
 
     #[test]
     fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
@@ -2969,6 +3204,7 @@ mod tests {
         let command = provider_full_command(&ProvidersArgs {
             backend: Some("backend; touch /tmp/unwanted".to_string()),
             selector: Some("provider id".to_string()),
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),
@@ -2982,6 +3218,21 @@ mod tests {
         assert_eq!(
             command,
             "homeboy agent-task providers --full --backend 'backend; touch /tmp/unwanted' --selector 'provider id'"
+        );
+    }
+
+    #[test]
+    fn provider_route_replay_preserves_the_selected_model() {
+        let route = ProviderRoute::Resolved {
+            backend: "opencode".to_string(),
+            provider_id: "opencode.executor".to_string(),
+            model: Some("openai/gpt-5.6-sol".to_string()),
+            dispatchable: true,
+        };
+
+        assert_eq!(
+            route.next_command(),
+            "homeboy agent-task providers --backend opencode --selector opencode.executor --model openai/gpt-5.6-sol --validate-readiness"
         );
     }
 
@@ -3006,6 +3257,7 @@ mod tests {
         ProvidersArgs {
             backend: None,
             selector: None,
+            model: None,
             runtime: None,
             status: None,
             secret_env: Vec::new(),
@@ -3055,6 +3307,12 @@ mod tests {
                 .expect("output")
                 .0;
             assert_eq!(output["operator_summary"]["state"], "ready");
+            assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: ready\nProviders shown: 2\nNext: homeboy agent-task providers --backend configured --selector configured.provider --validate-readiness".to_string()
+                )
+            );
             assert_eq!(
                 output["readiness_validation"]["effective_provider_id"],
                 "configured.provider"
@@ -3197,12 +3455,15 @@ mod tests {
             assert_eq!(output["operator_summary"]["state"], "selection_required");
             assert_eq!(validation["route_state"], "selection_required");
             assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: ready\nNext: homeboy agent-task providers --backend ready --validate-readiness".to_string()
+                ),
+                "the rendered report preserves the selection decision over the empty-route dispatchability verdict"
+            );
+            assert_eq!(
                 output["operator_summary"]["selection_choices"],
                 serde_json::json!([
-                    {
-                        "backend": "failing",
-                        "command": "homeboy agent-task providers --backend failing --validate-readiness",
-                    },
                     {
                         "backend": "ready",
                         "command": "homeboy agent-task providers --backend ready --validate-readiness",
@@ -3261,6 +3522,29 @@ mod tests {
     }
 
     #[test]
+    fn providers_report_resolved_route_credentials_missing() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let mut args = providers_args();
+            args.backend = Some("claude-code".to_string());
+            let output = providers_with_catalog(
+                args,
+                provider_catalog(vec![credential_declaring_provider()]),
+            )
+            .expect("provider report")
+            .0;
+
+            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
+            assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: credentials_missing\nProviders shown: 1\nNext: homeboy agent-task providers --backend claude-code --selector claude-code.agent-task-executor --validate-readiness".to_string()
+                )
+            );
+        });
+    }
+
+    #[test]
     fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
         crate::test_support::with_isolated_home(|_| {
             save_provider_policy(Some("extension"), None);
@@ -3281,7 +3565,7 @@ mod tests {
             let output = providers_with_catalog(providers_args(), provider_catalog(Vec::new()))
                 .expect("missing-default output")
                 .0;
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(output["operator_summary"]["state"], "route_unavailable");
         });
     }
 
@@ -3296,7 +3580,7 @@ mod tests {
             .expect("provider report")
             .0;
 
-            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(output["operator_summary"]["state"], "route_unavailable");
             assert_eq!(
                 output["readiness_validation"]["route_state"],
                 "configuration_unavailable"

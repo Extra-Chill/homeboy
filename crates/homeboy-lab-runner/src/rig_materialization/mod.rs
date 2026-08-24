@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use homeboy_core::materialization_currency::{self, Currency};
@@ -703,6 +703,187 @@ pub(super) struct LabOffloadRigComponentSync {
     pub selected_component_path: Option<String>,
 }
 
+/// Safe, job-scoped projection of a rig-declared SSH target. Configuration
+/// values are intentionally absent from this evidence: runner credentials stay
+/// in the runner's SSH agent/keychain transport.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct LabBrokerTargetProjection {
+    pub id: String,
+    pub resolved_as: &'static str,
+    pub server_id: String,
+}
+
+pub(super) struct LabBrokerTargetSync {
+    pub home: Option<String>,
+    pub targets: Vec<LabBrokerTargetProjection>,
+}
+
+/// Materialize only the fields `homeboy ssh <target>` needs into a private
+/// child of the Lab workspace. The child is deleted with the workspace; neither
+/// controller credentials nor arbitrary project/server configuration cross the
+/// boundary.
+pub(super) fn sync_lab_offload_broker_targets(
+    runner_id: &str,
+    args: &[String],
+    remote_cwd: &str,
+) -> Result<LabBrokerTargetSync> {
+    let config_root = rig_registry_config_root()?;
+    let target_ids = lab_offload_rig_ids(args)
+        .into_iter()
+        .map(|rig_id| homeboy_rig::load(&config_root, &rig_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flat_map(|rig| rig.requirements.broker_targets)
+        .collect::<BTreeSet<_>>();
+    if target_ids.is_empty() {
+        return Ok(LabBrokerTargetSync {
+            home: None,
+            targets: Vec::new(),
+        });
+    }
+
+    let home = format!(
+        "{}/rig-broker-targets/home",
+        crate::lab::offload::remote_lab_artifact_dir(remote_cwd)
+    );
+    let mut targets = Vec::new();
+    for target_id in target_ids {
+        if target_id.trim().is_empty()
+            || !target_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(Error::validation_invalid_argument(
+                "requirements.broker_targets",
+                "broker target IDs must contain only ASCII letters, digits, hyphens, and underscores",
+                Some(target_id),
+                None,
+            ));
+        }
+
+        let (project, server, projection) = match homeboy_core::project::load_in_root(
+            &config_root,
+            &target_id,
+        ) {
+            Ok(project) => {
+                let server_id = project.server_id.clone().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "requirements.broker_targets",
+                        format!("declared broker target `{target_id}` is a project without server_id"),
+                        Some(target_id.clone()),
+                        Some(vec!["Declare a project target with server_id, or declare its server ID directly.".to_string()]),
+                    )
+                })?;
+                let server = homeboy_core::server::load_in_root(&config_root, &server_id)?;
+                let projection = LabBrokerTargetProjection {
+                    id: target_id.clone(),
+                    resolved_as: "project",
+                    server_id,
+                };
+                (Some(project), server, projection)
+            }
+            Err(_) => match homeboy_core::server::load_in_root(&config_root, &target_id) {
+                Ok(server) => {
+                    let projection = LabBrokerTargetProjection {
+                        id: target_id.clone(),
+                        resolved_as: "server",
+                        server_id: server.id.clone(),
+                    };
+                    (None, server, projection)
+                }
+                Err(_) => {
+                    return Err(Error::validation_invalid_argument(
+                        "requirements.broker_targets",
+                        format!("declared broker target `{target_id}` is not configured on the controller"),
+                        Some(target_id.clone()),
+                        Some(vec![
+                            format!("Configure project or server `{target_id}` on the controller before Lab offload."),
+                            "Remove the target from requirements.broker_targets when the workload does not use it.".to_string(),
+                        ]),
+                    ));
+                }
+            },
+        };
+        write_broker_target_projection(runner_id, &home, project.as_ref(), &server)?;
+        targets.push(projection);
+    }
+    Ok(LabBrokerTargetSync {
+        home: Some(home),
+        targets,
+    })
+}
+
+fn write_broker_target_projection(
+    runner_id: &str,
+    home: &str,
+    project: Option<&homeboy_core::project::Project>,
+    server: &homeboy_core::server::Server,
+) -> Result<()> {
+    for (path, value) in broker_target_projection_files(home, project, server) {
+        write_runner_json(runner_id, &path, &value)?;
+    }
+    Ok(())
+}
+
+fn broker_target_projection_files(
+    home: &str,
+    project: Option<&homeboy_core::project::Project>,
+    server: &homeboy_core::server::Server,
+) -> Vec<(String, serde_json::Value)> {
+    let config_root = format!("{home}/.config/homeboy");
+    let mut files = vec![(
+        format!("{config_root}/servers/{}.json", server.id),
+        serde_json::json!({
+            "aliases": server.aliases,
+            "host": server.host,
+            "user": server.user,
+            "port": server.port,
+        }),
+    )];
+    if let Some(project) = project {
+        files.push((
+            format!("{config_root}/projects/{0}/{0}.json", project.id),
+            serde_json::json!({
+                "aliases": project.aliases,
+                "server_id": project.server_id,
+                "base_path": project.base_path,
+            }),
+        ));
+    }
+    files
+}
+
+fn write_runner_json(runner_id: &str, path: &str, value: &serde_json::Value) -> Result<()> {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(value).expect("broker target projection serializes"));
+    let quoted_path = homeboy_core::engine::shell::quote_arg(path);
+    let quoted_parent = homeboy_core::engine::shell::quote_arg(
+        Path::new(path)
+            .parent()
+            .expect("broker target projection path has parent")
+            .to_string_lossy()
+            .as_ref(),
+    );
+    let command = format!(
+        "mkdir -p {quoted_parent} && printf %s {encoded} | base64 --decode > {quoted_path}"
+    );
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions::command(vec!["sh".to_string(), "-c".to_string(), command]),
+    )?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "requirements.broker_targets",
+            "Lab runner could not materialize declared broker target configuration",
+            None,
+            Some(vec![output.stderr.trim().to_string()]),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn sync_lab_offload_rig_component_dependencies(
     runner_id: &str,
     args: &[String],
@@ -1291,6 +1472,39 @@ mod tests {
     /// here is a boundary resolution (#7505).
     fn test_config_root() -> std::path::PathBuf {
         homeboy_core::paths::homeboy().expect("config root")
+    }
+
+    #[test]
+    fn broker_target_projection_keeps_credentials_out_of_runner_config() {
+        let server = homeboy_core::server::Server {
+            id: "fixture-server".to_string(),
+            host: "fixture.example.test".to_string(),
+            user: "fixture-user".to_string(),
+            identity_file: Some("/controller/private-key".to_string()),
+            env: std::collections::HashMap::from([(
+                "FIXTURE_TOKEN".to_string(),
+                "must-not-cross-the-lab-boundary".to_string(),
+            )]),
+            aliases: Vec::new(),
+            port: 22,
+            kind: None,
+            auth: None,
+            runner: None,
+        };
+        let project = homeboy_core::project::Project {
+            id: "fixture-project".to_string(),
+            server_id: Some(server.id.clone()),
+            base_path: Some("/srv/fixture".to_string()),
+            ..Default::default()
+        };
+
+        let files = broker_target_projection_files("/runner/job", Some(&project), &server);
+        let serialized = serde_json::to_string(&files).expect("serialize projection");
+        assert!(serialized.contains("fixture.example.test"));
+        assert!(serialized.contains("fixture-project"));
+        assert!(!serialized.contains("must-not-cross-the-lab-boundary"));
+        assert!(!serialized.contains("private-key"));
+        assert!(!serialized.contains("database"));
     }
 
     fn initialize_git_checkout(checkout_root: &Path) {

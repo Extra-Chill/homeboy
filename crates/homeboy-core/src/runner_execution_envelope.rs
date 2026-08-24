@@ -137,6 +137,12 @@ pub struct RunnerExecutionRecord {
     pub agent_task_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    /// Flattened runtime view of `path_materialization_plan`, populated only by
+    /// [`RunnerExecutionRecord::projection`]. Always empty on a stored record,
+    /// so `homeboy/runner-execution-record/v1` emits exactly the fields it
+    /// emitted before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materialized_paths: Vec<PathMaterializationProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,30 +153,16 @@ pub struct RunnerExecutionRecord {
     pub next_actions: Vec<RunnerExecutionNextAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerExecutionProjection {
-    pub schema: String,
-    pub execution_id: String,
-    pub runner_id: String,
-    pub transport: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub materialized_paths: Vec<PathMaterializationProjection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<JobArtifactMetadata>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_actions: Vec<RunnerExecutionNextAction>,
-}
+/// The inspection view of a runner execution record: the stored
+/// `path_materialization_plan` swapped for its flattened runtime projection,
+/// and `orchestration_provenance` dropped.
+///
+/// This used to be a second struct repeating ten of the record's fields
+/// verbatim, rebuilt field-by-field by `projection()`. Every field the two
+/// states disagree on is `skip_serializing_if`, so "record" and "projection"
+/// are two *values* of one type, not two types -- the same collapse #10310 and
+/// #11137 applied to the artifact-ref twins above.
+pub type RunnerExecutionProjection = RunnerExecutionRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrchestrationTargetProvenance {
@@ -267,27 +259,39 @@ pub struct RunnerExecutionNextAction {
 }
 
 impl RunnerExecutionRecord {
-    pub fn planned(
+    /// The one empty-record constructor. `planned`, `terminal` and `in_flight`
+    /// differed only in the `status` string they wrote.
+    fn at_status(
         execution_id: impl Into<String>,
         runner_id: impl Into<String>,
         transport: impl Into<String>,
+        status: impl Into<String>,
     ) -> Self {
         Self {
             schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
             execution_id: execution_id.into(),
             runner_id: runner_id.into(),
             transport: transport.into(),
-            status: "planned".to_string(),
+            status: status.into(),
             job_id: None,
             local_run_id: None,
             remote_run_id: None,
             agent_task_run_id: None,
             mirror_run_id: None,
+            materialized_paths: Vec::new(),
             path_materialization_plan: None,
             orchestration_provenance: None,
             artifact_refs: Vec::new(),
             next_actions: Vec::new(),
         }
+    }
+
+    pub fn planned(
+        execution_id: impl Into<String>,
+        runner_id: impl Into<String>,
+        transport: impl Into<String>,
+    ) -> Self {
+        Self::at_status(execution_id, runner_id, transport, "planned")
     }
 
     pub fn terminal(
@@ -296,27 +300,16 @@ impl RunnerExecutionRecord {
         transport: impl Into<String>,
         exit_code: i32,
     ) -> Self {
-        Self {
-            schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
-            execution_id: execution_id.into(),
-            runner_id: runner_id.into(),
-            transport: transport.into(),
-            status: if exit_code == 0 {
+        Self::at_status(
+            execution_id,
+            runner_id,
+            transport,
+            if exit_code == 0 {
                 "succeeded"
             } else {
                 "failed"
-            }
-            .to_string(),
-            job_id: None,
-            local_run_id: None,
-            remote_run_id: None,
-            agent_task_run_id: None,
-            mirror_run_id: None,
-            path_materialization_plan: None,
-            orchestration_provenance: None,
-            artifact_refs: Vec::new(),
-            next_actions: Vec::new(),
-        }
+            },
+        )
     }
 
     pub fn in_flight(
@@ -324,22 +317,7 @@ impl RunnerExecutionRecord {
         runner_id: impl Into<String>,
         transport: impl Into<String>,
     ) -> Self {
-        Self {
-            schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
-            execution_id: execution_id.into(),
-            runner_id: runner_id.into(),
-            transport: transport.into(),
-            status: "running".to_string(),
-            job_id: None,
-            local_run_id: None,
-            remote_run_id: None,
-            agent_task_run_id: None,
-            mirror_run_id: None,
-            path_materialization_plan: None,
-            orchestration_provenance: None,
-            artifact_refs: Vec::new(),
-            next_actions: Vec::new(),
-        }
+        Self::at_status(execution_id, runner_id, transport, "running")
     }
 
     pub fn with_job_id(mut self, job_id: impl Into<String>) -> Self {
@@ -390,25 +368,19 @@ impl RunnerExecutionRecord {
         self
     }
 
+    /// Inspection view: the stored plan is replaced by its flattened runtime
+    /// entries and the orchestration provenance is dropped, so both
+    /// `skip_serializing_if` themselves out of the emitted shape.
     pub fn projection(&self) -> RunnerExecutionProjection {
-        RunnerExecutionProjection {
-            schema: self.schema.clone(),
-            execution_id: self.execution_id.clone(),
-            runner_id: self.runner_id.clone(),
-            transport: self.transport.clone(),
-            status: self.status.clone(),
-            job_id: self.job_id.clone(),
-            local_run_id: self.local_run_id.clone(),
-            remote_run_id: self.remote_run_id.clone(),
-            agent_task_run_id: self.agent_task_run_id.clone(),
-            mirror_run_id: self.mirror_run_id.clone(),
+        Self {
             materialized_paths: self
                 .path_materialization_plan
                 .as_ref()
                 .map(PathMaterializationPlan::projection_entries)
                 .unwrap_or_default(),
-            artifact_refs: self.artifact_refs.clone(),
-            next_actions: self.next_actions.clone(),
+            path_materialization_plan: None,
+            orchestration_provenance: None,
+            ..self.clone()
         }
     }
 }

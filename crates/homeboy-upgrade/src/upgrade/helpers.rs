@@ -482,19 +482,44 @@ pub fn run_upgrade_with_method(
         }
     }
 
-    // Packaged installers still own their download-and-swap command. Keep their
-    // established full-operation lease until that contract is moved in-process;
-    // source builds use the narrower lease at the final rename instead.
-    let controller_mutation_lease = (install_method != InstallMethod::Source)
-        .then(|| {
-            homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")
-        })
-        .transpose()?;
-    let controller_upgrade =
-        run_controller_mutation_after_runner_preflight(runner_preflight, || {
-            if let Some(lease) = &controller_mutation_lease {
-                lease.assert_generation()?;
+    // Keep the same promotion authority from compatibility revalidation through
+    // the controller swap. Source builds retain their isolated build target, but
+    // their final install shares this lease rather than opening a TOCTOU window.
+    let controller_mutation_lease =
+        homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")?;
+    controller_mutation_lease.assert_generation()?;
+    let extension_revalidation = (!skip_extensions)
+        .then(|| preflight_extensions_for_upgrade(&candidate_version))
+        .unwrap_or_default();
+    if !extension_revalidation.is_empty() {
+        return Ok(extension_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            &candidate_version,
+            extension_revalidation,
+        ));
+    }
+    let controller_upgrade = run_controller_mutation_after_runner_preflight(
+        runner_preflight,
+        || {
+            controller_mutation_lease.assert_generation()?;
+            if skip_runners {
+                Ok(Vec::new())
+            } else {
+                super::with_runner_upgrade(|provider| {
+                    provider.preflight_configured_runners_for_upgrade(
+                        runner_method_override,
+                        source_upgrade_path.as_deref(),
+                        source_upgrade_path.is_some(),
+                        runner_targets,
+                        &candidate_version,
+                        &extension::available_extension_ids(),
+                    )
+                })
             }
+        },
+        || {
             execute_upgrade(
                 install_method,
                 source_upgrade_path.as_deref(),
@@ -502,8 +527,10 @@ pub fn run_upgrade_with_method(
                 force,
                 previous_build_identity.as_deref(),
                 selected_release.as_ref(),
+                Some(&controller_mutation_lease),
             )
-        })?;
+        },
+    )?;
     let (success, new_version, new_build_identity, source_revision, superseded) =
         match controller_upgrade {
             Ok(result) => result,
@@ -690,13 +717,17 @@ fn source_upgrade_noop_result(
 
 fn run_controller_mutation_after_runner_preflight<T>(
     runner_preflight: Vec<RunnerUpgradeEntry>,
+    revalidate_runners: impl FnOnce() -> Result<Vec<RunnerUpgradeEntry>>,
     mutate_controller: impl FnOnce() -> Result<T>,
 ) -> Result<std::result::Result<T, Vec<RunnerUpgradeEntry>>> {
-    if runner_preflight.is_empty() {
-        return mutate_controller().map(Ok);
+    if !runner_preflight.is_empty() {
+        return Ok(Err(runner_preflight));
     }
-
-    Ok(Err(runner_preflight))
+    let revalidation = revalidate_runners()?;
+    if !revalidation.is_empty() {
+        return Ok(Err(revalidation));
+    }
+    mutate_controller().map(Ok)
 }
 
 fn runner_preflight_failure_result(
@@ -810,15 +841,12 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
             extension::DiscoveredExtension::Valid(manifest) => {
                 let extension_id = manifest.id.clone();
                 let source_path = manifest.extension_path.as_deref().map(Path::new)?;
-                if extension::is_extension_linked(&extension_id)
-                    && git::get_git_root(&source_path.to_string_lossy()).is_err()
-                {
-                    return Some(ExtensionPreflightBlocker {
-                        extension_id: extension_id.clone(),
-                        classification: "linked_source_root_unrecognized".to_string(),
-                        detail: "linked extension path is not inside a Git checkout".to_string(),
-                        recovery_command: format!("homeboy extension relink {extension_id} <path>"),
-                    });
+                if extension::is_extension_linked(&extension_id) {
+                    if let Some(blocker) =
+                        linked_extension_source_blocker(&extension_id, source_path)
+                    {
+                        return Some(blocker);
+                    }
                 }
                 let requires = manifest
                     .requires
@@ -852,6 +880,61 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
             }
         })
         .collect()
+}
+
+/// A linked extension is refreshable from either a Git checkout or Homeboy's
+/// registered durable source. Canonical paths make moved config roots and
+/// symlinked source roots deterministic while rejecting links that escape the
+/// registered extension workspace.
+fn linked_extension_source_blocker(
+    extension_id: &str,
+    extension_path: &Path,
+) -> Option<ExtensionPreflightBlocker> {
+    if git::get_git_root(&extension_path.to_string_lossy()).is_ok() {
+        return None;
+    }
+
+    let registered_root = homeboy_core::paths::extension_source_root(extension_id)
+        .ok()
+        .and_then(|root| root.canonicalize().ok());
+    let source_path = extension_path.canonicalize().ok();
+    let is_registered_source = matches!(
+        (registered_root.as_deref(), source_path.as_deref()),
+        (Some(root), Some(source)) if source.starts_with(root)
+    );
+    if is_registered_source
+        && homeboy_core::extension_update_check::read_source_revision(extension_id).is_some()
+    {
+        return None;
+    }
+
+    let (classification, detail) = if source_path.is_none() {
+        (
+            "linked_source_missing",
+            "linked extension source cannot be resolved",
+        )
+    } else if registered_root.is_none() {
+        (
+            "linked_source_root_unrecognized",
+            "linked extension source is not registered in the local extension workspace",
+        )
+    } else if !is_registered_source {
+        (
+            "linked_source_root_unrecognized",
+            "linked extension source escapes its registered local extension workspace",
+        )
+    } else {
+        (
+            "linked_source_revision_missing",
+            "registered linked extension source has no resolvable installed revision",
+        )
+    };
+    Some(ExtensionPreflightBlocker {
+        extension_id: extension_id.to_string(),
+        classification: classification.to_string(),
+        detail: format!("{detail}: {}", extension_path.display()),
+        recovery_command: format!("homeboy extension relink {extension_id} <path>"),
+    })
 }
 
 fn upgrade_outcome(
@@ -2135,41 +2218,58 @@ fn is_lowercase_hex(value: &str, length: usize) -> bool {
 #[cfg(test)]
 mod runner_source_upgrade_tests {
     use super::*;
+    use std::cell::RefCell;
     use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
-    fn runner_preflight_failure_does_not_invoke_controller_mutation() {
-        let mut controller_mutated = false;
+    fn changed_runner_compatibility_revalidation_precedes_controller_mutation() {
+        let events = RefCell::new(Vec::new());
+        let changed_manifest_requires_homeboy = ">=3.0.0";
         let result = run_controller_mutation_after_runner_preflight(
-            vec![RunnerUpgradeEntry {
-                runner_id: "lab-a".to_string(),
-                homeboy_path: "homeboy".to_string(),
-                success: false,
-                upgraded: false,
-                previous_version: None,
-                new_version: None,
-                bare_homeboy_version: None,
-                path_drift: None,
-                recovery_commands: Vec::new(),
-                extensions_synced: Vec::new(),
-                extensions_skipped: Vec::new(),
-                extensions_failed: Vec::new(),
-                stale_daemon: None,
-                daemon_previous_version: None,
-                daemon_new_version: None,
-                exit_code: 1,
-                detail: "runner preflight materialization failed".to_string(),
-            }],
+            Vec::new(),
             || {
-                controller_mutated = true;
+                events.borrow_mut().push("runner manifest revalidation");
+                let compatible = homeboy_extension::evaluate_core_compatibility_for_version(
+                    Some(changed_manifest_requires_homeboy),
+                    None,
+                    "2.1.0",
+                )?
+                .status
+                    != "incompatible";
+                Ok((!compatible)
+                    .then(|| RunnerUpgradeEntry {
+                        runner_id: "lab-a".to_string(),
+                        homeboy_path: "homeboy".to_string(),
+                        success: false,
+                        upgraded: false,
+                        previous_version: None,
+                        new_version: None,
+                        bare_homeboy_version: None,
+                        path_drift: None,
+                        recovery_commands: Vec::new(),
+                        extensions_synced: Vec::new(),
+                        extensions_skipped: Vec::new(),
+                        extensions_failed: Vec::new(),
+                        stale_daemon: None,
+                        daemon_previous_version: None,
+                        daemon_new_version: None,
+                        exit_code: 1,
+                        detail: "runner manifest changed to an incompatible requirement"
+                            .to_string(),
+                    })
+                    .into_iter()
+                    .collect())
+            },
+            || {
+                events.borrow_mut().push("controller mutation");
                 Ok(())
             },
         )
         .expect("preflight evaluation");
 
-        assert!(!controller_mutated, "controller build/install must not run");
         let runners_skipped = result.unwrap_err();
+        assert_eq!(*events.borrow(), ["runner manifest revalidation"]);
         assert_eq!(runners_skipped[0].runner_id, "lab-a");
         let upgrade = runner_preflight_failure_result(
             InstallMethod::Source,
@@ -2196,6 +2296,19 @@ mod runner_source_upgrade_tests {
     fn write_extension(dir: &Path, id: &str, manifest: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), manifest).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn link_registered_extension(home: &Path, id: &str, source: &Path) {
+        let extensions = home.join(".config/homeboy/extensions");
+        write_extension(source, id, r#"{"name":"linked","version":"1.0.0"}"#);
+        std::fs::create_dir_all(&extensions).expect("extensions directory");
+        std::os::unix::fs::symlink(source, extensions.join(id)).expect("linked extension");
+        std::fs::write(
+            extensions.join(format!(".{id}.source-revision")),
+            "fixture-revision",
+        )
+        .expect("registered revision");
     }
 
     #[test]
@@ -2250,6 +2363,114 @@ mod runner_source_upgrade_tests {
             );
 
             assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_registered_linked_local_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home
+                .path()
+                .join(".config/homeboy/extension-sources/linked/linked");
+            link_registered_extension(home.path(), "linked", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_moved_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let moved_sources = home.path().join("moved-extension-sources");
+            let source = moved_sources.join("moved/moved");
+            std::fs::create_dir_all(&config).expect("config directory");
+            std::os::unix::fs::symlink(&moved_sources, config.join("extension-sources"))
+                .expect("moved source root");
+            link_registered_extension(home.path(), "moved", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_symlinked_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extension-sources/symlinked");
+            let target = home.path().join("registered-source-target");
+            std::fs::create_dir_all(root.parent().expect("source parent")).expect("source parent");
+            std::os::unix::fs::symlink(&target, &root).expect("registered source link");
+            link_registered_extension(home.path(), "symlinked", &target.join("symlinked"));
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_rejects_unregistered_external_linked_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home.path().join("external/external");
+            link_registered_extension(home.path(), "external", &source);
+
+            let blockers = preflight_extensions_for_upgrade("1.0.0");
+            assert_eq!(
+                blockers[0].classification,
+                "linked_source_root_unrecognized"
+            );
+            assert!(blockers[0].detail.contains("registered"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_rejects_traversal_outside_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extension-sources/traversal");
+            let source = root.join("../outside/traversal");
+            link_registered_extension(home.path(), "traversal", &source);
+
+            let blockers = preflight_extensions_for_upgrade("1.0.0");
+            assert_eq!(
+                blockers[0].classification,
+                "linked_source_root_unrecognized"
+            );
+            assert!(blockers[0].detail.contains("escapes"));
+        });
+    }
+
+    #[test]
+    fn extension_preflight_reports_missing_linked_source_without_mutation() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let path = home.path().join("missing-linked-source");
+            let blocker = linked_extension_source_blocker("missing", &path).expect("blocker");
+
+            assert_eq!(blocker.classification, "linked_source_missing");
+            assert!(!path.exists(), "preflight must not create a missing source");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_dry_run_does_not_mutate_registered_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home
+                .path()
+                .join(".config/homeboy/extension-sources/dry-run/dry-run");
+            link_registered_extension(home.path(), "dry-run", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+            assert!(
+                !source.join(".source-url").exists(),
+                "preflight must not write source metadata"
+            );
         });
     }
 

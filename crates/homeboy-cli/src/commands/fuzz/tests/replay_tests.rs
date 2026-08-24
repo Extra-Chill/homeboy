@@ -87,7 +87,7 @@ fn fuzz_replay_resolves_campaign_metadata_without_executing() {
     });
     std::fs::write(&path, serde_json::to_string(&campaign).unwrap()).expect("write campaign");
 
-    let output = run_replay(FuzzReplayArgs {
+    let output = run_replay(FuzzReplayLikeArgs {
         component: None,
         path: None,
         rig: None,
@@ -143,7 +143,7 @@ fn fuzz_replay_resolves_persisted_run_artifact_without_path() {
             .record_artifact(&run.id, "fuzz_results", &path)
             .expect("artifact");
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: None,
             path: None,
             rig: None,
@@ -221,7 +221,7 @@ fn fuzz_replay_resolves_case_from_nested_lab_normalized_result_payload() {
             .record_artifact(&run.id, "fuzz_result_envelope", &path)
             .expect("artifact");
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: None,
             path: None,
             rig: None,
@@ -299,7 +299,7 @@ fn fuzz_minimize_resolves_case_from_nested_lab_fuzz_result_artifact_payload() {
     )
     .expect("write lab wrapper");
 
-    let (output, exit) = run_minimize(FuzzMinimizeArgs {
+    let (output, exit) = run_minimize(FuzzReplayLikeArgs {
         component: None,
         path: None,
         rig: None,
@@ -359,7 +359,7 @@ fn fuzz_replay_preserves_clear_error_when_nested_case_is_absent() {
     )
     .expect("write lab envelope");
 
-    let result = run_replay(FuzzReplayArgs {
+    let result = run_replay(FuzzReplayLikeArgs {
         component: None,
         path: None,
         rig: None,
@@ -445,7 +445,7 @@ fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_byt
             std::env::remove_var("HOMEBOY_EMPTY_COMPONENT_PATH");
         }
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),
@@ -474,7 +474,7 @@ fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_byt
 fn fuzz_replay_dry_run_accepts_runner_artifact_ref_without_local_bytes() {
     let reference = "runner-artifact://lab-runner/proof-run/fuzz-result-envelope";
 
-    let (output, exit) = run_replay(FuzzReplayArgs {
+    let (output, exit) = run_replay(FuzzReplayLikeArgs {
         component: None,
         path: None,
         rig: None,
@@ -513,7 +513,7 @@ fn fuzz_replay_dry_run_explains_missing_extension_replay_command() {
         );
         let path = write_replay_campaign(component_dir.path());
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),
@@ -583,7 +583,7 @@ fn fuzz_replay_dry_run_surfaces_persisted_artifact_public_access() {
             })
             .expect("import artifact ref");
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: None,
             path: None,
             rig: None,
@@ -616,7 +616,7 @@ fn fuzz_replay_dry_run_surfaces_persisted_artifact_public_access() {
 
 #[test]
 fn fuzz_replay_runner_artifact_ref_without_dry_run_is_actionable() {
-    let result = run_replay(FuzzReplayArgs {
+    let result = run_replay(FuzzReplayLikeArgs {
         component: None,
         path: None,
         rig: None,
@@ -668,7 +668,7 @@ fn fuzz_replay_executes_manifest_replay_command_with_env() {
         );
         let path = write_replay_campaign(component_dir.path());
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),
@@ -709,7 +709,7 @@ fn fuzz_replay_reports_unsupported_when_manifest_has_no_replay_command() {
         );
         let path = write_replay_campaign(component_dir.path());
 
-        let (output, exit) = run_replay(FuzzReplayArgs {
+        let (output, exit) = run_replay(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),
@@ -754,7 +754,7 @@ fn fuzz_minimize_executes_manifest_minimize_command_with_replay_env() {
         );
         let path = write_replay_campaign(component_dir.path());
 
-        let (output, exit) = run_minimize(FuzzMinimizeArgs {
+        let (output, exit) = run_minimize(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),
@@ -793,7 +793,7 @@ fn fuzz_minimize_reports_unsupported_without_minimize_command() {
         );
         let path = write_replay_campaign(component_dir.path());
 
-        let (output, exit) = run_minimize(FuzzMinimizeArgs {
+        let (output, exit) = run_minimize(FuzzReplayLikeArgs {
             component: Some("component-a".to_string()),
             path: None,
             rig: Some("fixture-rig".to_string()),

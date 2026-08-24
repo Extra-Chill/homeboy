@@ -4358,6 +4358,18 @@ fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> R
     })
 }
 
+/// Shared continuation/finalization admission. Legacy attempts without durable
+/// model evidence are rejected before a continuation can claim or promote them.
+pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    required_execution_model(
+        &cook_attempt_execution_in_store(&lifecycle_store, run_id)?,
+        run_id,
+    )
+    .map(|_| ())
+}
+
 fn cook_ai_lineage_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,

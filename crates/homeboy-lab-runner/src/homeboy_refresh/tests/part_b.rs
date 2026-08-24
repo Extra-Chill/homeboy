@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+use crate::{RunnerExecMode, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 use std::time::{Duration, Instant};
 
@@ -830,7 +830,8 @@ fn verified_materialized_refresh_defers_controller_materialization_to_exact_cont
         followup_commands: Vec::new(),
     };
 
-    let actions = controller_continuation_actions(&plan, &identity).expect("continuation");
+    let actions =
+        controller_continuation_actions(&plan, &identity, Vec::new()).expect("continuation");
     assert_eq!(actions.len(), 1);
     let action = &actions[0];
     assert_eq!(action.commit, "exact-remote-sha");
@@ -855,9 +856,81 @@ fn verified_materialized_refresh_defers_controller_materialization_to_exact_cont
         source: None,
         ..plan
     };
-    assert!(controller_continuation_actions(&select, &identity)
-        .expect("select continuation")
-        .is_empty());
+    assert!(
+        controller_continuation_actions(&select, &identity, Vec::new())
+            .expect("select continuation")
+            .is_empty()
+    );
+}
+
+#[test]
+fn candidate_reconnect_retry_executes_the_materialized_controller_not_ambient_homeboy() {
+    let identity = serde_json::json!({
+        "data": {
+            "display": "homeboy 1.2.3+candidate-commit",
+            "git_commit": "candidate-commit"
+        }
+    });
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "generic-lab".to_string(),
+        mode: "materialize".to_string(),
+        source: Some("https://example.test/homeboy.git".to_string()),
+        git_ref: Some("candidate".to_string()),
+        target_dir: Some("/runner/homeboy".to_string()),
+        binary_path: "/runner/homeboy/target/release/homeboy".to_string(),
+        script: "fixture".to_string(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+    let execution = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "generic-lab".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: Vec::new(),
+        remote_cwd: "/runner".to_string(),
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: None,
+        job_events: None,
+        mirror_run_id: None,
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+
+    let failure = refresh_reconnect_failure_with_message(
+        &plan,
+        &identity,
+        &execution,
+        "transient reconnect failure",
+    )
+    .expect("candidate reconnect continuation");
+    let command = &failure.recovery_actions[0].command;
+
+    assert_eq!(
+        command[0..3],
+        ["homeboy", "runtime", "materialize-controller"]
+    );
+    assert_eq!(
+        command[command.len() - 4..],
+        ["--", "runner", "connect", "generic-lab"]
+    );
+    assert!(command.iter().any(|arg| arg == "candidate-commit"));
+    assert_ne!(command, &["homeboy", "runner", "connect", "generic-lab"]);
 }
 
 #[test]

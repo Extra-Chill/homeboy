@@ -428,6 +428,11 @@ pub struct RigRequirementsSpec {
     /// semantics belong to the referenced runner or extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_materialization: Vec<DependencyMaterializationStepSpec>,
+
+    /// Named SSH broker targets required by this rig's workloads. Lab projects
+    /// their connection-safe configuration into the job-scoped runner home.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broker_targets: Vec<String>,
 }
 
 impl RigRequirementsSpec {
@@ -437,6 +442,7 @@ impl RigRequirementsSpec {
             && self.runner_tools.is_empty()
             && self.extensions.is_empty()
             && self.dependency_materialization.is_empty()
+            && self.broker_targets.is_empty()
     }
 }
 

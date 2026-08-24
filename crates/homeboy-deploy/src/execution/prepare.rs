@@ -22,19 +22,19 @@ use super::strategies::{
 use homeboy_core::git::release_download::ReleaseArtifactLease;
 
 pub(crate) struct PreparedComponentDeploy {
-    pub component: Component,
-    pub config: DeployConfig,
-    pub install_dir: String,
-    pub local_version: Option<String>,
-    pub remote_version: Option<String>,
-    pub build_exit_code: Option<i32>,
-    pub artifact_path: Option<PathBuf>,
-    pub artifact_source: Option<DeployArtifactSource>,
-    pub canonical_release_artifact: Option<ReleaseArtifactLease>,
-    pub package_manifest: Option<super::super::content_manifest::Manifest>,
-    pub payload_sha256: Option<String>,
-    pub build_provenance: BuildProvenance,
-    pub cleanup_local_artifact: bool,
+    pub(crate) component: Component,
+    pub(crate) config: DeployConfig,
+    pub(crate) install_dir: String,
+    pub(crate) local_version: Option<String>,
+    pub(crate) remote_version: Option<String>,
+    pub(crate) build_exit_code: Option<i32>,
+    pub(crate) artifact_path: Option<PathBuf>,
+    pub(crate) artifact_source: Option<DeployArtifactSource>,
+    pub(crate) canonical_release_artifact: Option<ReleaseArtifactLease>,
+    pub(crate) package_manifest: Option<super::super::content_manifest::Manifest>,
+    pub(crate) payload_sha256: Option<String>,
+    pub(crate) build_provenance: BuildProvenance,
+    pub(crate) cleanup_local_artifact: bool,
 }
 
 #[allow(clippy::result_large_err)]

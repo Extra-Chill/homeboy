@@ -3,6 +3,7 @@ mod messages;
 
 use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
+use crate::command_contract::LabCommandRoute;
 use crate::commands::agent_task;
 use crate::runner::runners::LabRunnerReadiness;
 
@@ -274,7 +275,7 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
     }) = command
     {
         if !cook.gates.has_deterministic_gate() {
-            let contract = command.lab_contract()?;
+            let contract = command.lab_route().ok()?.lab_contract()?;
             let LabCommandPortability::LocalOnly(reason) = contract.portability else {
                 unreachable!("an unverified cook must retain its local-only portability contract");
             };
@@ -308,11 +309,12 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         });
     }
 
-    if !command.portability_contract().is_resource_intensive() {
+    let route = command.lab_route().ok()?;
+    if !route.portability_contract().is_resource_intensive() {
         return None;
     }
 
-    let contract = command.lab_contract()?;
+    let contract = route.lab_contract()?;
 
     match contract.portability {
         LabCommandPortability::Portable => {
@@ -324,6 +326,24 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
             hot.offload_only_when_hot = contract.routing_policy.offload_only_when_hot;
             Some(hot)
         }
+        LabCommandPortability::LocalOnly(reason) => {
+            Some(HotCommand::local_only(contract.hot_label, Some(reason)))
+        }
+    }
+}
+
+/// Classify a descriptor-composed route with the exact portable/local-only and
+/// pressure-threshold rules used after built-in command classification.
+pub(crate) fn hot_command_for_lab_route(route: &LabCommandRoute) -> Option<HotCommand> {
+    if !route.portability_contract().is_resource_intensive() {
+        return None;
+    }
+    let contract = route.lab_contract()?;
+    match contract.portability {
+        LabCommandPortability::Portable => Some(HotCommand {
+            offload_only_when_hot: contract.routing_policy.offload_only_when_hot,
+            ..HotCommand::lab_supported(contract.hot_label)
+        }),
         LabCommandPortability::LocalOnly(reason) => {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }

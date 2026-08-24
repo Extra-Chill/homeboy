@@ -53,7 +53,7 @@ pub(crate) fn run_changelog_finalize(
 mod tests {
     use super::run_changelog_finalize;
     use crate::release::types::ReleaseState;
-    use crate::release::ReleaseStepStatus;
+    use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::plan::PlanStep;
 

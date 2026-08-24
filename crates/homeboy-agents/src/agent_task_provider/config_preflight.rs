@@ -367,7 +367,7 @@ mod tests {
 
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
+        AGENT_TASK_REQUEST_SCHEMA,
     };
 
     use super::*;

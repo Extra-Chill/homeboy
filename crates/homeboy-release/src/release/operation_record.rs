@@ -33,7 +33,7 @@ pub struct OperationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FinalizationClaim {
+pub(crate) enum FinalizationClaim {
     Claimed {
         lease: String,
         record: OperationRecord,
@@ -43,7 +43,7 @@ pub enum FinalizationClaim {
 }
 
 impl OperationRecord {
-    pub fn finalization_pending(&self) -> bool {
+    pub(crate) fn finalization_pending(&self) -> bool {
         self.finalization_status != "completed"
     }
 }
@@ -79,7 +79,7 @@ impl OperationRecordStore {
     /// resolved the data root twice — once inside `lock()` and again inside
     /// `record_path()` — so a repoint between them could have serialized
     /// against one home's `.lock` while replacing the other home's record.
-    pub fn update(
+    pub(crate) fn update(
         &self,
         owner_run_ref: &str,
         update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
@@ -117,7 +117,7 @@ impl OperationRecordStore {
 
     /// Claims finalization before an external provider call. A live lease is
     /// never stolen; only a bounded stale lease can be retried.
-    pub fn claim_finalization(&self, owner_run_ref: &str) -> Result<FinalizationClaim> {
+    pub(crate) fn claim_finalization(&self, owner_run_ref: &str) -> Result<FinalizationClaim> {
         const STALE_LEASE_MS: u128 = 5 * 60 * 1000;
         let now = now_ms();
         let candidate_lease = uuid::Uuid::new_v4().to_string();
@@ -162,7 +162,7 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn complete_finalization(
+    pub(crate) fn complete_finalization(
         &self,
         owner_run_ref: &str,
         lease: &str,
@@ -190,7 +190,7 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn fail_finalization(
+    pub(crate) fn fail_finalization(
         &self,
         owner_run_ref: &str,
         lease: &str,
@@ -217,7 +217,7 @@ impl OperationRecordStore {
         })
     }
 
-    pub fn pending_for_subject(
+    pub(crate) fn pending_for_subject(
         &self,
         operation: &str,
         subject: &str,
