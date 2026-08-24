@@ -2654,6 +2654,35 @@ mod tests {
     }
 
     #[test]
+    fn package_lint_scopes_explicit_rig_file_to_its_package() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        git(temp.path(), &["init", "--quiet"]);
+        let rig_dir = temp.path().join("rigs").join("isolated");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        let rig_path = rig_dir.join("rig.json");
+        fs::write(
+            &rig_path,
+            r#"{
+                "id": "isolated",
+                "components": { "app": { "path": "${package.root}/app" } }
+            }"#,
+        )
+        .expect("rig spec");
+        fs::write(
+            temp.path().join("unrelated.mjs"),
+            "const checkout = '/Users/example/project';\n",
+        )
+        .expect("unrelated source");
+        git(temp.path(), &["add", "."]);
+
+        let rig = super::super::load_local_source(rig_path.to_str().expect("UTF-8 path"), None)
+            .expect("load local rig");
+        let outcome = run_package_lint(&rig).expect("lint explicit rig package");
+
+        assert_eq!(portability_step(&outcome).status, "pass", "{outcome:?}");
+    }
+
+    #[test]
     fn package_lint_reports_profile_reference_failures() {
         let temp = tempfile::TempDir::new().expect("temp package");
         let rig_dir = temp.path().join("rigs").join("profiles");

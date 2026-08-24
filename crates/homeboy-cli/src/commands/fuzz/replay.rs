@@ -14,26 +14,25 @@ use homeboy_extension::{self, ExtensionCapability, ExtensionRunner};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
-    FuzzMinimizeArgs, FuzzReplayArgs, FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution,
+    FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayLikeArgs,
     FuzzReplayOutput,
 };
 use super::workloads::{load_rig, resolve_component_id, resolve_fuzz_context};
 
-pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
-    run_replay_like(ReplayLikeArgs::from_replay(args), ReplayLikeMode::Replay)
+pub(super) fn run_replay(
+    args: FuzzReplayLikeArgs,
+) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
+    run_replay_like(args, ReplayLikeMode::Replay)
 }
 
 pub(super) fn run_minimize(
-    args: FuzzMinimizeArgs,
+    args: FuzzReplayLikeArgs,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
-    run_replay_like(
-        ReplayLikeArgs::from_minimize(args),
-        ReplayLikeMode::Minimize,
-    )
+    run_replay_like(args, ReplayLikeMode::Minimize)
 }
 
 fn run_replay_like(
-    args: ReplayLikeArgs,
+    args: FuzzReplayLikeArgs,
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
     let mut artifact_ref = replay_artifact_ref(&args);
@@ -270,55 +269,6 @@ fn run_replay_like(
     Ok(result)
 }
 
-#[derive(Clone)]
-struct ReplayLikeArgs {
-    component: Option<String>,
-    path: Option<String>,
-    rig: Option<String>,
-    extension_override: super::super::utils::args::ExtensionOverrideArgs,
-    setting_args: super::super::utils::args::SettingArgs,
-    artifact_or_case: Option<String>,
-    artifact: Option<PathBuf>,
-    case_id: Option<String>,
-    run_id: Option<String>,
-    dry_run: bool,
-    args: Vec<String>,
-}
-
-impl ReplayLikeArgs {
-    fn from_replay(args: FuzzReplayArgs) -> Self {
-        Self {
-            component: args.component,
-            path: args.path,
-            rig: args.rig,
-            extension_override: args.extension_override,
-            setting_args: args.setting_args,
-            artifact_or_case: args.artifact_or_case,
-            artifact: args.artifact,
-            case_id: args.case_id,
-            run_id: args.run_id,
-            dry_run: args.dry_run,
-            args: args.args,
-        }
-    }
-
-    fn from_minimize(args: FuzzMinimizeArgs) -> Self {
-        Self {
-            component: args.component,
-            path: args.path,
-            rig: args.rig,
-            extension_override: args.extension_override,
-            setting_args: args.setting_args,
-            artifact_or_case: args.artifact_or_case,
-            artifact: args.artifact,
-            case_id: args.case_id,
-            run_id: args.run_id,
-            dry_run: args.dry_run,
-            args: args.args,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ReplayLikeMode {
     Replay,
@@ -363,7 +313,7 @@ struct ResolvedReplayContext {
 }
 
 fn resolve_replay_context(
-    args: &ReplayLikeArgs,
+    args: &FuzzReplayLikeArgs,
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<Option<ResolvedReplayContext>> {
     let comp = replay_component_args(args);
@@ -399,7 +349,7 @@ fn resolve_replay_context(
     }))
 }
 
-fn replay_component_args(args: &ReplayLikeArgs) -> PositionalComponentArgs {
+fn replay_component_args(args: &FuzzReplayLikeArgs) -> PositionalComponentArgs {
     PositionalComponentArgs {
         component: args.component.clone(),
         path: args.path.clone(),
@@ -554,7 +504,7 @@ struct ResolvedReplayArtifact {
     replay: Option<FuzzReplayMetadata>,
 }
 
-fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
+fn replay_artifact_path(args: &FuzzReplayLikeArgs) -> Option<PathBuf> {
     args.artifact.clone().or_else(|| {
         args.artifact_or_case.as_ref().and_then(|value| {
             if is_replay_artifact_ref(value) {
@@ -567,7 +517,7 @@ fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
     })
 }
 
-fn replay_artifact_ref(args: &ReplayLikeArgs) -> Option<String> {
+fn replay_artifact_ref(args: &FuzzReplayLikeArgs) -> Option<String> {
     args.artifact_or_case
         .as_deref()
         .filter(|value| is_replay_artifact_ref(value))

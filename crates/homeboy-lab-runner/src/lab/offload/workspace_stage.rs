@@ -72,6 +72,10 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) remote_command: Vec<String>,
     pub(crate) remote_output_file: Option<String>,
     pub(crate) rig_component_path_overrides: Vec<(String, String)>,
+    /// Job-scoped HOME containing declared rig broker-target resolution config.
+    pub(crate) broker_target_home: Option<String>,
+    /// Named targets explicitly admitted to the job-scoped SSH broker config.
+    pub(crate) broker_target_ids: Vec<String>,
     pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Env-var overrides surfacing synced runtime-overlay remote paths to the
     /// hot command. Empty when no overlay declared `expose_remote_path_env`.
@@ -119,6 +123,8 @@ pub(crate) fn durable_workspace_stage_projection(
         "remote_command": stage.remote_command,
         "remote_output_file": stage.remote_output_file,
         "rig_component_path_overrides": stage.rig_component_path_overrides,
+        "broker_target_home": stage.broker_target_home.as_ref().map(|_| "[job-scoped]"),
+        "broker_targets": stage.broker_target_ids,
         "dependency_cache_saves": stage.dependency_cache_saves,
         "runtime_overlay_env": stage.runtime_overlay_env,
         "runtime_overlay_metadata": stage.runtime_overlay_metadata,
@@ -508,6 +514,25 @@ fn prepare_lab_offload_workspace_stage_inner(
     let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
     let rig_component_path_overrides = rig_component_sync.component_path_env;
     let selected_rig_component_path = rig_component_sync.selected_component_path;
+    let broker_target_sync = rig_materialization::sync_lab_offload_broker_targets(
+        runner_id,
+        &changed_since_preflight.args,
+        &remote_cwd,
+    )?;
+    let broker_target_home = broker_target_sync.home;
+    let broker_target_ids = broker_target_sync
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    if !broker_target_sync.targets.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_rig_broker_targets", "lab.sync_rig_broker_targets")
+                .inputs(PlanValues::new().json("targets", &broker_target_sync.targets))
+                .build(),
+        );
+    }
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
             workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
@@ -701,6 +726,8 @@ fn prepare_lab_offload_workspace_stage_inner(
         remote_command,
         remote_output_file,
         rig_component_path_overrides,
+        broker_target_home,
+        broker_target_ids,
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,

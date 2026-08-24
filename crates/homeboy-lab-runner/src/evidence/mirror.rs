@@ -257,7 +257,7 @@ pub(crate) fn mirror_daemon_evidence(
             request.runner,
             request.job,
             request.result,
-            controller_owned_generic_run_id(request),
+            controller_owned_run_id(request),
             request.notification_route,
         )?;
         if request.job.status.is_terminal()
@@ -335,7 +335,7 @@ pub(crate) fn mirror_reverse_broker_evidence(
         };
         let declared_run_ids = explicit_observation_run_ids(request.result, request.job)
             .into_iter()
-            .filter(|run_id| Some(run_id.as_str()) != controller_owned_generic_run_id(request))
+            .filter(|run_id| Some(run_id.as_str()) != controller_owned_run_id(request))
             .collect::<Vec<_>>();
         let runs;
         let local_artifacts = if request.job.status == JobStatus::Failed {
@@ -751,7 +751,7 @@ where
             request.runner,
             request.job,
             request.result,
-            controller_owned_generic_run_id(request),
+            controller_owned_run_id(request),
             request.notification_route,
         )?;
         let terminal = matches!(
@@ -1387,11 +1387,10 @@ fn mirror_remote_observation_runs(
     Ok(Vec::new())
 }
 
-fn controller_owned_generic_run_id(request: MirrorEvidenceRequest<'_>) -> Option<&str> {
-    let run_id = request.run_id?;
-    // This flag is set only by the explicit generic runner-exec admission path,
-    // which creates and ownership-checks the run before the daemon is called.
-    request.generic_runner_exec_run.then_some(run_id)
+fn controller_owned_run_id(request: MirrorEvidenceRequest<'_>) -> Option<&str> {
+    // An explicit request run ID is created and ownership-checked by the
+    // controller before dispatch. It is never a runner observation to mirror.
+    request.run_id
 }
 
 /// Legacy terminal producers may advertise artifacts without a durable

@@ -116,7 +116,7 @@ fn extension_action_failure_message(
 #[cfg(test)]
 mod tests {
     use super::prepare_step_result;
-    use crate::release::ReleaseStepStatus;
+    use crate::release::types::ReleaseStepStatus;
 
     #[test]
     fn prepare_step_fails_when_extension_command_fails() {

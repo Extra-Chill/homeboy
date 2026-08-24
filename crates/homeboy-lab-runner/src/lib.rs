@@ -23,6 +23,7 @@ mod apply;
 pub mod artifact_attach;
 mod availability_provider;
 mod broker_http;
+mod cancellable_sleep;
 pub mod dev_run;
 pub use homeboy_core::broker_auth::{
     broker_submit_token_for_runner, broker_token_from_env, extract_bearer_token,

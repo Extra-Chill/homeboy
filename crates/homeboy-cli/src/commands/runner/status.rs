@@ -2151,9 +2151,7 @@ mod tests {
             .find(|command| command.scope == "daemon_refresh")
             .expect("daemon refresh command");
         assert!(refresh.command.starts_with(&job_binary_refresh));
-        assert!(refresh
-            .description
-            .contains("configured job command binary"));
+        assert!(refresh.description.contains("configured Homeboy binary"));
     }
 
     #[test]

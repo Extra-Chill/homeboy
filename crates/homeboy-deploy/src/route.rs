@@ -31,7 +31,7 @@ pub enum DeployTarget {
 }
 
 impl DeployTarget {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Server => "server",
             Self::Provider => "provider",
@@ -39,7 +39,11 @@ impl DeployTarget {
     }
 
     /// Parse the operator-facing `--target` value.
-    pub fn parse(value: &str) -> Result<Self> {
+    #[allow(
+        dead_code,
+        reason = "No production caller: clap owns `--target` parsing through `DeployTargetArg` and converts with `From`, so only this module's tests reach the string form."
+    )]
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "server" => Ok(Self::Server),
             "provider" => Ok(Self::Provider),

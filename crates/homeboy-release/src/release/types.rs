@@ -12,14 +12,14 @@ use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
 /// `pipeline::run()` for real releases so the previewed steps match execution.
 #[derive(Debug, Clone)]
 pub struct ReleasePlan {
-    pub plan: HomeboyPlan,
+    pub(crate) plan: HomeboyPlan,
 }
 
 impl ReleasePlan {
     const ENABLED_POLICY_KEY: &'static str = "enabled";
     const SEMVER_RECOMMENDATION_POLICY_KEY: &'static str = "semver_recommendation";
 
-    pub fn new(
+    pub(crate) fn new(
         component_id: impl Into<String>,
         enabled: bool,
         steps: Vec<PlanStep>,
@@ -53,15 +53,15 @@ impl ReleasePlan {
     /// projected from the generic plan subject/policy during serialization so
     /// existing release JSON consumers keep the same shape without creating a
     /// second authoritative release data store.
-    pub fn from_plan(plan: HomeboyPlan) -> Self {
+    pub(crate) fn from_plan(plan: HomeboyPlan) -> Self {
         Self { plan }
     }
 
-    pub fn component_id(&self) -> Option<&str> {
+    pub(crate) fn component_id(&self) -> Option<&str> {
         self.plan.subject.component_id.as_deref()
     }
 
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         if let Some(enabled) = self
             .plan
             .policy
@@ -77,7 +77,7 @@ impl ReleasePlan {
             .any(|step| matches!(step.status, PlanStepStatus::Ready | PlanStepStatus::Running))
     }
 
-    pub fn semver_recommendation(&self) -> Option<ReleaseSemverRecommendation> {
+    pub(crate) fn semver_recommendation(&self) -> Option<ReleaseSemverRecommendation> {
         self.plan
             .policy
             .get(Self::SEMVER_RECOMMENDATION_POLICY_KEY)
@@ -118,50 +118,50 @@ impl Serialize for ReleasePlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseSemverCommit {
-    pub sha: String,
-    pub subject: String,
-    pub commit_type: String,
-    pub breaking: bool,
+pub(crate) struct ReleaseSemverCommit {
+    pub(crate) sha: String,
+    pub(crate) subject: String,
+    pub(crate) commit_type: String,
+    pub(crate) breaking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseSemverRecommendation {
+pub(crate) struct ReleaseSemverRecommendation {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_tag: Option<String>,
-    pub range: String,
-    pub commits: Vec<ReleaseSemverCommit>,
+    pub(crate) latest_tag: Option<String>,
+    pub(crate) range: String,
+    pub(crate) commits: Vec<ReleaseSemverCommit>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recommended_bump: Option<String>,
-    pub requested_bump: String,
-    pub is_underbump: bool,
-    pub reasons: Vec<String>,
+    pub(crate) recommended_bump: Option<String>,
+    pub(crate) requested_bump: String,
+    pub(crate) is_underbump: bool,
+    pub(crate) reasons: Vec<String>,
     /// How many commits in range carried no recognizable conventional-commit
     /// prefix (`feat:`/`fix:`/etc.). On repos that don't use conventional commits
     /// these are classified `other` and only ever drive a `patch` bump, so a
     /// high count next to a low bump is a silent under-bump signal (#6851).
     #[serde(default)]
-    pub non_conventional_commit_count: usize,
+    pub(crate) non_conventional_commit_count: usize,
     /// Total commits considered for the bump (excludes merge/release noise).
     #[serde(default)]
-    pub considered_commit_count: usize,
+    pub(crate) considered_commit_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bump_policy: Option<ReleaseBumpPolicy>,
+    pub(crate) bump_policy: Option<ReleaseBumpPolicy>,
 }
 
 /// Structured evidence for a release bump policy decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseBumpPolicy {
-    pub policy: String,
-    pub signals: Vec<ReleaseBumpPolicySignal>,
-    pub override_used: bool,
+pub(crate) struct ReleaseBumpPolicy {
+    pub(crate) policy: String,
+    pub(crate) signals: Vec<ReleaseBumpPolicySignal>,
+    pub(crate) override_used: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseBumpPolicySignal {
-    pub name: String,
-    pub observed: usize,
-    pub threshold: usize,
+pub(crate) struct ReleaseBumpPolicySignal {
+    pub(crate) name: String,
+    pub(crate) observed: usize,
+    pub(crate) threshold: usize,
 }
 
 /// Explicit changelog contract carried by the release plan.
@@ -170,12 +170,12 @@ pub struct ReleaseBumpPolicySignal {
 /// release execution share one source of truth. The release executor consumes
 /// this contract when the version step finalizes the changelog on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseChangelogPlan {
-    pub policy: String,
-    pub path: String,
-    pub dry_run: bool,
-    pub entries: HashMap<String, Vec<String>>,
-    pub entry_count: usize,
+pub(crate) struct ReleaseChangelogPlan {
+    pub(crate) policy: String,
+    pub(crate) path: String,
+    pub(crate) dry_run: bool,
+    pub(crate) entries: HashMap<String, Vec<String>>,
+    pub(crate) entry_count: usize,
 }
 
 /// Run result for a single release. Shape is preserved from the pre-refactor
@@ -183,49 +183,49 @@ pub struct ReleaseChangelogPlan {
 /// consumers see no change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRun {
-    pub component_id: String,
-    pub enabled: bool,
-    pub result: ReleaseRunResult,
+    pub(crate) component_id: String,
+    pub(crate) enabled: bool,
+    pub(crate) result: ReleaseRunResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRunResult {
-    pub steps: Vec<ReleaseStepResult>,
-    pub status: ReleaseStepStatus,
+    pub(crate) steps: Vec<ReleaseStepResult>,
+    pub(crate) status: ReleaseStepStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<ReleaseRunSummary>,
+    pub(crate) summary: Option<ReleaseRunSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_timings: Option<PhaseTimingReport>,
+    pub(crate) phase_timings: Option<PhaseTimingReport>,
     /// Recorded only after a failed release has restored the checkout. This
     /// makes the result describe the durable exit state rather than mutations
     /// attempted before rollback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rollback: Option<ReleaseRollbackEvidence>,
+    pub(crate) rollback: Option<ReleaseRollbackEvidence>,
 }
 
 /// The authoritative checkout used by a release and its terminal disposition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseWorkspaceOutput {
-    pub kind: String,
-    pub path: String,
+    pub(crate) kind: String,
+    pub(crate) path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
+    pub(crate) provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
+    pub(crate) handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_run_ref: Option<String>,
+    pub(crate) owner_run_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_sha: Option<String>,
+    pub(crate) source_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub final_disposition: Option<String>,
+    pub(crate) final_disposition: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub continuation_ref: Option<String>,
+    pub(crate) continuation_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finalization_error: Option<String>,
+    pub(crate) finalization_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconciliation_ref: Option<String>,
+    pub(crate) reconciliation_ref: Option<String>,
 }
 
 impl ReleaseWorkspaceOutput {
@@ -259,34 +259,34 @@ pub struct ReleaseRollbackEvidence {
     /// `restored` means final_head was independently observed at original_head.
     /// `interrupted` requires operator recovery and must never be presented as
     /// rollback success.
-    pub status: String,
-    pub original_head: String,
-    pub temporary_head: String,
-    pub release_commit: String,
-    pub final_head: Option<String>,
-    pub tag_state: String,
+    pub(crate) status: String,
+    pub(crate) original_head: String,
+    pub(crate) temporary_head: String,
+    pub(crate) release_commit: String,
+    pub(crate) final_head: Option<String>,
+    pub(crate) tag_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recovery_action: Option<String>,
+    pub(crate) recovery_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseStepResult {
-    pub id: String,
+    pub(crate) id: String,
     #[serde(rename = "type")]
-    pub step_type: String,
-    pub status: ReleaseStepStatus,
+    pub(crate) step_type: String,
+    pub(crate) status: ReleaseStepStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missing: Vec<String>,
+    pub(crate) missing: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hints: Vec<homeboy_core::error::Hint>,
+    pub(crate) hints: Vec<homeboy_core::error::Hint>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+    pub(crate) data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 impl Default for ReleaseStepResult {
@@ -322,40 +322,40 @@ pub enum ReleaseStepStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRunSummary {
-    pub total_steps: usize,
-    pub succeeded: usize,
-    pub failed: usize,
-    pub skipped: usize,
-    pub missing: usize,
+    pub(crate) total_steps: usize,
+    pub(crate) succeeded: usize,
+    pub(crate) failed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) missing: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_actions: Vec<String>,
+    pub(crate) next_actions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub success_summary: Vec<String>,
+    pub(crate) success_summary: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseArtifact {
-    pub path: String,
+    pub(crate) path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable_path: Option<String>,
+    pub(crate) durable_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_type: Option<String>,
+    pub(crate) artifact_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform: Option<String>,
+    pub(crate) platform: Option<String>,
     /// Lifecycle phase that produced these bytes. Final package output has
     /// precedence over validation/preflight output with the same target name.
     #[serde(default = "default_artifact_phase")]
-    pub phase: String,
+    pub(crate) phase: String,
     /// Producer responsible for the artifact (component build, extension, or
     /// externally supplied recovery inventory).
     #[serde(default = "default_artifact_producer")]
-    pub producer: String,
+    pub(crate) producer: String,
     /// Content identity persisted with the durable inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    pub(crate) sha256: Option<String>,
     /// Exactly one artifact per target name is allowed to publish.
     #[serde(default)]
-    pub publication_authority: bool,
+    pub(crate) publication_authority: bool,
 }
 
 fn default_artifact_phase() -> String {
@@ -374,31 +374,31 @@ fn default_artifact_producer() -> String {
 /// through a generic pipeline DAG — a pattern the execution never actually
 /// needed because every step runs sequentially.
 #[derive(Debug, Clone, Default)]
-pub struct ReleaseState {
-    pub version: Option<String>,
-    pub tag: Option<String>,
-    pub notes: Option<String>,
+pub(crate) struct ReleaseState {
+    pub(crate) version: Option<String>,
+    pub(crate) tag: Option<String>,
+    pub(crate) notes: Option<String>,
     /// A manifest-bound final GitHub Release body recovered without regeneration.
-    pub exact_release_notes: Option<ExactReleaseNotes>,
-    pub artifacts: Vec<ReleaseArtifact>,
+    pub(crate) exact_release_notes: Option<ExactReleaseNotes>,
+    pub(crate) artifacts: Vec<ReleaseArtifact>,
     /// Component-relative checkout paths proven absent before packaging and
     /// created by the current package invocation.
-    pub package_owned_paths: Vec<String>,
-    pub changelog_validation: Option<crate::release::version::ChangelogValidationResult>,
+    pub(crate) package_owned_paths: Vec<String>,
+    pub(crate) changelog_validation: Option<crate::release::version::ChangelogValidationResult>,
     /// A remote-only draft may be published only when this manifest-bound
     /// intent has been validated against the active release identity.
-    pub draft_adoption: Option<DraftAdoptionIntent>,
+    pub(crate) draft_adoption: Option<DraftAdoptionIntent>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ExactReleaseNotes {
-    pub body: String,
-    pub source: String,
+pub(crate) struct ExactReleaseNotes {
+    pub(crate) body: String,
+    pub(crate) source: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct DraftAdoptionIntent {
-    pub expected_assets: Vec<String>,
+pub(crate) struct DraftAdoptionIntent {
+    pub(crate) expected_assets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -420,19 +420,19 @@ pub struct ReleasePipelineOptions {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReleaseOptions {
-    pub bump_type: String,
-    pub dry_run: bool,
+    pub(crate) bump_type: String,
+    pub(crate) dry_run: bool,
     /// Override the component's `local_path` for this release.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub path_override: Option<String>,
+    pub(crate) path_override: Option<String>,
     /// Skip lint/test code quality checks before release.
     #[serde(default)]
-    pub skip_checks: bool,
+    pub(crate) skip_checks: bool,
     /// Granular per-check skips (e.g. `["lint"]`). Disables only the listed
     /// preflight quality checks while leaving working_tree/remote_sync and the
     /// other checks active. Honored independently of `skip_checks`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skip_checks_granular: Vec<String>,
+    pub(crate) skip_checks_granular: Vec<String>,
     /// Bypass the package/build-structure validation that runs inside the
     /// `preflight.package` and `package` steps, while still running the build
     /// itself. The flag is forwarded to the packaging extension as a generic
@@ -442,28 +442,28 @@ pub struct ReleaseOptions {
     /// bypassed. Use when an operator knows a structure assertion is a false
     /// positive (see issue #5425).
     #[serde(default)]
-    pub skip_build_validation: bool,
+    pub(crate) skip_build_validation: bool,
     /// Skip dependency hydration during release preflight.
     #[serde(default)]
-    pub skip_deps_hydration: bool,
+    pub(crate) skip_deps_hydration: bool,
     #[serde(default, flatten)]
-    pub pipeline: ReleasePipelineOptions,
+    pub(crate) pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
     /// Use when another pipeline (CI, semantic-release, etc.) already owns that step.
     #[serde(default)]
-    pub skip_github_release: bool,
+    pub(crate) skip_github_release: bool,
     /// Git identity for release commits: "bot", "Name <email>", or None (use existing config).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_identity: Option<String>,
+    pub(crate) git_identity: Option<String>,
     /// Bump policy controls that affect release plan validation.
     #[serde(default, skip_serializing_if = "ReleaseBumpPolicyOptions::is_default")]
-    pub bump_policy: ReleaseBumpPolicyOptions,
+    pub(crate) bump_policy: ReleaseBumpPolicyOptions,
     /// Placement selected for portable release-readiness gates. Release mutation
     /// always remains controller-owned; a runner is evidence provenance only.
     #[serde(default, skip_serializing_if = "ReleasePreflightPlacement::is_default")]
-    pub preflight_placement: ReleasePreflightPlacement,
+    pub(crate) preflight_placement: ReleasePreflightPlacement,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub readiness: Option<ReleaseReadinessEnvelope>,
+    pub(crate) readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 /// Typed placement policy for the portable portion of release preflight.
@@ -593,13 +593,13 @@ pub struct ReleaseReadinessLocalOnly {
 pub struct ReleaseBumpPolicyOptions {
     /// Permit a keyword bump lower than the commit-derived recommendation.
     #[serde(default)]
-    pub force_lower_bump: bool,
+    pub(crate) force_lower_bump: bool,
     /// Permit a release when no releasable commits were detected.
     #[serde(default)]
-    pub force_empty_release: bool,
+    pub(crate) force_empty_release: bool,
     /// Require an explicit `--bump major` for stable major releases.
     #[serde(default)]
-    pub require_explicit_major: bool,
+    pub(crate) require_explicit_major: bool,
 }
 
 impl ReleaseBumpPolicyOptions {
@@ -675,7 +675,7 @@ impl ReleaseExecutionPlan {
         }
     }
 
-    pub fn default_for_command_input(input: &ReleaseCommandInput) -> Self {
+    pub(crate) fn default_for_command_input(input: &ReleaseCommandInput) -> Self {
         let phase = if input.recover {
             ReleasePhase::Recover
         } else if input.dry_run {
@@ -695,13 +695,13 @@ impl ReleaseExecutionPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ReleaseDeploymentSummary {
-    pub total_projects: u32,
-    pub succeeded: u32,
-    pub failed: u32,
+    pub(crate) total_projects: u32,
+    pub(crate) succeeded: u32,
+    pub(crate) failed: u32,
     #[serde(skip_serializing_if = "is_zero_u32")]
-    pub skipped: u32,
+    pub(crate) skipped: u32,
     #[serde(skip_serializing_if = "is_zero_u32")]
-    pub planned: u32,
+    pub(crate) planned: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,18 +716,18 @@ pub enum ReleasePhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseProjectDeployResult {
-    pub project_id: String,
-    pub status: String,
+    pub(crate) project_id: String,
+    pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_result: Option<homeboy_deploy::ComponentDeployResult>,
+    pub(crate) component_result: Option<homeboy_deploy::ComponentDeployResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseDeploymentResult {
-    pub projects: Vec<ReleaseProjectDeployResult>,
-    pub summary: ReleaseDeploymentSummary,
+    pub(crate) projects: Vec<ReleaseProjectDeployResult>,
+    pub(crate) summary: ReleaseDeploymentSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -763,25 +763,25 @@ pub struct ReleaseCommandResult {
 /// Result of a batch release across multiple components.
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchReleaseResult {
-    pub results: Vec<BatchReleaseComponentResult>,
+    pub(crate) results: Vec<BatchReleaseComponentResult>,
     pub summary: BatchReleaseSummary,
 }
 
 /// Per-component result within a batch release.
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchReleaseComponentResult {
-    pub component_id: String,
-    pub status: String,
+    pub(crate) component_id: String,
+    pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<ReleaseCommandResult>,
+    pub(crate) result: Option<ReleaseCommandResult>,
 }
 
 /// Summary counts for a batch release.
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchReleaseSummary {
-    pub total: u32,
+    pub(crate) total: u32,
     pub released: u32,
     pub skipped: u32,
     pub failed: u32,

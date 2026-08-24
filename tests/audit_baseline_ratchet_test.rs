@@ -47,7 +47,7 @@ use serde_json::Value;
 /// a ceiling, not a target: lower it whenever suppressions are retired, and
 /// never raise it. Raising this number is the one edit this test exists to make
 /// someone argue for in review.
-const AUDIT_BASELINE_CEILING: usize = 1129;
+const AUDIT_BASELINE_CEILING: usize = 1128;
 
 fn baseline_fingerprints() -> Vec<String> {
     let config: Value =
@@ -232,9 +232,14 @@ A full-tree `homeboy review audit` FAILS on this — it does not merely warn.
 `--changed-since` runs skip the check, so PR CI and rolling releases stay green
 while the weekly Audit Debt sweep is dead.
 
-Fix: repoint the row at the file's new path if the finding still applies, or
-prune it with `homeboy audit --prune-baseline <fingerprint>` if it does not.
-Do it in the same PR as the move.
+Fix: repoint the row at the file's new path if the finding still applies. If it
+does not, remove that exact row with:
+
+  homeboy review audit baseline prune --path . --fingerprint <fingerprint>
+
+Then run `homeboy review audit baseline validate --path .`. Prune refuses an
+unmatched fingerprint; inspect its deterministic diff rather than regenerating
+or hand-editing the baseline. Do this in the same PR as the move.
 
 See docs/audit/baseline-ratchet.md
 "#

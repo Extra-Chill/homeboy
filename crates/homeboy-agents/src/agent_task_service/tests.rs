@@ -2533,16 +2533,10 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
                 .upsert_imported_run(&homeboy_core::observation::RunRecord {
                     id: format!("malformed-upgrade-{index}"),
                     kind: "agent-task".to_string(),
-                    component_id: None,
                     started_at: "2026-01-01T00:00:00Z".to_string(),
-                    finished_at: None,
                     status: "running".to_string(),
-                    command: None,
-                    cwd: None,
-                    homeboy_version: None,
-                    git_sha: None,
-                    rig_id: None,
                     metadata_json: serde_json::json!({}),
+                    ..Default::default()
                 })
                 .expect("insert malformed record");
         }

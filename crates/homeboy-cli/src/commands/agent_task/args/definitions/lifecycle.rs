@@ -65,6 +65,7 @@ pub struct LifecycleReadArgs {
     pub no_runner_probe: bool,
 }
 
+#[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
     pub run_id: String,

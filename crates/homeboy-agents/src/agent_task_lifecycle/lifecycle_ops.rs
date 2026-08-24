@@ -2420,6 +2420,7 @@ impl RuntimeAdmissionEvidence for Value {
 
 /// Persist the run identity before controller admission so an admission failure
 /// remains inspectable and retryable through the normal lifecycle commands.
+#[cfg(test)]
 pub(crate) fn submit_plan_with_runtime_admission<F, A>(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -5790,6 +5791,7 @@ fn retry_with_force_inner_in_store(
 /// `paths::controller_runtimes_store()` and takes a cross-process lock — but the
 /// cancellation check inside it reads *lifecycle* state, and that read is rooted
 /// by the caller that owns the store.
+#[cfg(test)]
 pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

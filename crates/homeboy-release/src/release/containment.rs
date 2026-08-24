@@ -45,9 +45,9 @@ use homeboy_core::git;
 use crate::release::scope::ReleaseScope;
 
 /// Command an operator runs when a fix is merged but no release contains it.
-pub const REMEDIATION_RELEASE: &str = "homeboy release";
+pub(crate) const REMEDIATION_RELEASE: &str = "homeboy release";
 /// Command an operator runs when a release contains the fix but this binary does not.
-pub const REMEDIATION_UPGRADE: &str = "homeboy upgrade";
+pub(crate) const REMEDIATION_UPGRADE: &str = "homeboy upgrade";
 
 /// A release tag paired with the exact semantic version it encodes.
 ///
@@ -55,9 +55,9 @@ pub const REMEDIATION_UPGRADE: &str = "homeboy upgrade";
 /// `v1.2`-style short tag, or an arbitrary annotation is not a release this
 /// query can order, so it is dropped rather than guessed at.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReleaseTag {
-    pub tag: String,
-    pub version: Version,
+pub(crate) struct ReleaseTag {
+    pub(crate) tag: String,
+    pub(crate) version: Version,
 }
 
 /// Parse the exact release version a tag encodes inside a component's tag
@@ -158,7 +158,7 @@ impl ContainmentStatus {
 
     /// The command that closes the gap, or `None` when there is nothing to do
     /// or nothing established.
-    pub fn remediation(self) -> Option<&'static str> {
+    pub(crate) fn remediation(self) -> Option<&'static str> {
         match self {
             Self::NotYetReleased => Some(REMEDIATION_RELEASE),
             Self::ReleasedNotInstalled => Some(REMEDIATION_UPGRADE),
@@ -172,45 +172,48 @@ impl ContainmentStatus {
 /// Separated from the git layer so the ordering rule, the status split, and the
 /// message are testable without a repository.
 #[derive(Debug, Clone, Copy)]
-pub struct ContainmentFacts<'a> {
+pub(crate) struct ContainmentFacts<'a> {
     /// Every tag present in this checkout (release and otherwise).
-    pub known_tags: &'a [String],
+    pub(crate) known_tags: &'a [String],
     /// The subset that contains the commit — `git tag --contains <sha>`.
-    pub containing_tags: &'a [String],
+    pub(crate) containing_tags: &'a [String],
     /// The release tag the installed build corresponds to, when one is known.
-    pub installed_tag: Option<&'a str>,
+    pub(crate) installed_tag: Option<&'a str>,
 }
 
 /// The containment verdict for one commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainmentAssessment {
-    pub status: ContainmentStatus,
+    pub(crate) status: ContainmentStatus,
     /// Earliest release tag containing the commit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub first_released_in: Option<String>,
+    pub(crate) first_released_in: Option<String>,
     /// That tag's version, without the tag namespace or `v` prefix.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub first_released_version: Option<String>,
+    pub(crate) first_released_version: Option<String>,
     /// Release tag the installed build corresponds to.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_tag: Option<String>,
+    pub(crate) installed_tag: Option<String>,
     /// Whether that tag exists in this checkout at all. When false the
     /// installed comparison is not attempted — an absent tag is missing
     /// evidence, not evidence of absence.
-    pub installed_tag_known_locally: bool,
+    pub(crate) installed_tag_known_locally: bool,
     /// Whether the installed build contains the commit. `None` when the
     /// comparison could not be made.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_contains: Option<bool>,
+    pub(crate) installed_contains: Option<bool>,
     /// Number of releases cut at or after the first containing one.
-    pub releases_since: usize,
-    pub detail: String,
+    pub(crate) releases_since: usize,
+    pub(crate) detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
+    pub(crate) remediation: Option<String>,
 }
 
 /// Pure containment assessment. No git, no network, no clock.
-pub fn assess(facts: ContainmentFacts<'_>, tag_prefix: Option<&str>) -> ContainmentAssessment {
+pub(crate) fn assess(
+    facts: ContainmentFacts<'_>,
+    tag_prefix: Option<&str>,
+) -> ContainmentAssessment {
     let first = earliest_containing_release(facts.containing_tags, tag_prefix);
     let known = parse_release_tags(facts.known_tags, tag_prefix);
 
@@ -305,24 +308,24 @@ pub enum GapStatus {
 /// The installed-versus-latest verdict for one component checkout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseGapAssessment {
-    pub status: GapStatus,
+    pub(crate) status: GapStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_version: Option<String>,
+    pub(crate) installed_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_tag: Option<String>,
+    pub(crate) installed_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_tag: Option<String>,
+    pub(crate) latest_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_version: Option<String>,
+    pub(crate) latest_version: Option<String>,
     /// Releases published after the installed one.
-    pub releases_behind: usize,
+    pub(crate) releases_behind: usize,
     /// Commits on the newest release that the installed release does not have.
     /// `None` when it could not be counted offline.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commits_behind: Option<u64>,
-    pub detail: String,
+    pub(crate) commits_behind: Option<u64>,
+    pub(crate) detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
+    pub(crate) remediation: Option<String>,
 }
 
 /// Pure gap assessment. `commits_behind` is filled in by the git layer.
@@ -413,18 +416,18 @@ fn gap_detail(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedCommit {
     /// Full resolved commit sha.
-    pub commit: String,
+    pub(crate) commit: String,
     /// Abbreviated sha, as an operator would paste it.
-    pub short_commit: String,
+    pub(crate) short_commit: String,
     /// Commit subject, when the checkout has the commit's metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
+    pub(crate) subject: Option<String>,
     /// Issue number the commit was resolved from, when `--issue` was used.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_from_issue: Option<u64>,
+    pub(crate) resolved_from_issue: Option<u64>,
     /// Pull request the issue resolved through.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_via_pull_request: Option<u64>,
+    pub(crate) resolved_via_pull_request: Option<u64>,
 }
 
 /// What to ask about, and against which checkout.
@@ -443,21 +446,21 @@ pub struct ContainsQuery {
 /// The full `homeboy release contains` answer.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseContainsReport {
-    pub command: String,
-    pub component_id: String,
-    pub resolved: ResolvedCommit,
-    pub containment: ContainmentAssessment,
+    pub(crate) command: String,
+    pub(crate) component_id: String,
+    pub(crate) resolved: ResolvedCommit,
+    pub(crate) containment: ContainmentAssessment,
     /// Human-readable lines, in the order an operator should read them.
-    pub summary: Vec<String>,
+    pub(crate) summary: Vec<String>,
 }
 
 /// The full `homeboy release gap` answer.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseGapReport {
-    pub command: String,
-    pub component_id: String,
-    pub gap: ReleaseGapAssessment,
-    pub summary: Vec<String>,
+    pub(crate) command: String,
+    pub(crate) component_id: String,
+    pub(crate) gap: ReleaseGapAssessment,
+    pub(crate) summary: Vec<String>,
 }
 
 /// Answer "which release first contained this commit, and does this binary
@@ -713,9 +716,9 @@ fn resolve_commit(
 
 /// A pull request that closed an issue, and the commit it merged as.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssueResolution {
-    pub pull_request: u64,
-    pub commit: String,
+pub(crate) struct IssueResolution {
+    pub(crate) pull_request: u64,
+    pub(crate) commit: String,
 }
 
 /// Resolve an issue number to the commit of the pull request that closed it.

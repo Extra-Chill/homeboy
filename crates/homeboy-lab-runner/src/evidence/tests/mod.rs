@@ -649,6 +649,69 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
 }
 
 #[test]
+fn explicit_agent_task_run_skips_missing_remote_run_projection() {
+    // #13263: agent-task results echo their controller lifecycle ID as the
+    // durable run ID. That identity is not a runner `/runs/<id>` observation.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let job = terminal_runner_job();
+        let run_id = "agent-task-controller-owned-13263";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
+            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id,
+                runner_id: "lab",
+                remote_workspace: "/runner/project",
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("controller agent-task run is persisted before dispatch");
+
+        let result = json!({ "exit_code": 0, "durable_run_id": run_id });
+        let evidence = mirror_daemon_evidence(
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner/project",
+                &command,
+                &job,
+                &[],
+                &result,
+                Some(run_id),
+                None,
+            ),
+            &test_roots(),
+        )
+        .expect("controller agent-task run does not require a remote run lookup")
+        .expect("terminal evidence");
+
+        assert_eq!(evidence.run.id, run_id);
+        assert!(evidence.run.metadata_json.get("agent_task_run").is_some());
+
+        let reverse = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
+            request: MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner/project",
+                &command,
+                &job,
+                &[],
+                &result,
+                Some(run_id),
+                None,
+            ),
+            broker_url: "http://127.0.0.1:1",
+        })
+        .expect("reverse broker also skips the controller agent-task run")
+        .expect("reverse terminal evidence");
+
+        assert_eq!(reverse.run.id, run_id);
+    });
+}
+
+#[test]
 fn failed_job_without_terminal_exit_code_projects_root_failure_fallback() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
@@ -1137,10 +1200,8 @@ fn test_remote_fuzz_artifacts_become_controller_owned_before_runner_cleanup() {
         status: "pass".to_string(),
         command: Some("homeboy fuzz run component-a".to_string()),
         cwd: Some("/srv/component-a".to_string()),
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: json!({}),
+        ..Default::default()
     };
     store.import_run(&run).expect("import fuzz run");
 
@@ -1317,16 +1378,11 @@ fn test_primary_mirrored_run_prefers_fuzz_run_identity() {
     let runner_exec = RunRecord {
         id: "runner-exec-lab-job".to_string(),
         kind: "runner-exec".to_string(),
-        component_id: None,
         started_at: "2026-05-16T00:00:00Z".to_string(),
         finished_at: Some("2026-05-16T00:00:01Z".to_string()),
         status: "pass".to_string(),
-        command: None,
-        cwd: None,
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: json!({}),
+        ..Default::default()
     };
     let fuzz = RunRecord {
         id: "requested-proof".to_string(),
@@ -1779,16 +1835,11 @@ fn reverse_broker_lookup_projects_only_embedded_typed_run_details() {
         let run = RunRecord {
             id: "embedded-run".to_string(),
             kind: "bench".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: Some("2026-01-01T00:01:00Z".to_string()),
             status: "succeeded".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({}),
+            ..Default::default()
         };
         let result = json!({
             "exit_code": 0,

@@ -49,8 +49,8 @@ convention::file::description::Kind
 
 so it is per file + kind + message. Still not per instance.
 
-Of the current rows, 821 are the three-segment per-file+kind form (covering 821
-distinct file+kind pairs across 582 files) and 312 are the four-segment
+Of the current rows, 820 are the three-segment per-file+kind form (covering 820
+distinct file+kind pairs across 581 files) and 312 are the four-segment
 `CoreBoundaryLeak` form.
 
 ## Two ways the list grows on its own
@@ -79,7 +79,24 @@ In order of preference:
 1. Fix the finding. This is the default and usually the cheaper option.
 2. Retire an existing suppression in the same PR, so the total does not rise.
 3. Raise `AUDIT_BASELINE_CEILING` in the same PR, and justify it in the PR body.
-   Expect to be asked why the finding cannot be fixed.
+    Expect to be asked why the finding cannot be fixed.
+
+## Updating and validating rows
+
+Treat the baseline as generated configuration, not an audit result to accept
+wholesale. For a moved or deleted path, use the explicit, reproducible sequence:
+
+```sh
+homeboy review audit baseline validate --path .
+homeboy review audit baseline prune --path . --fingerprint '<exact fingerprint from validate>'
+homeboy review audit baseline validate --path .
+```
+
+`validate` uses the production full-tree path validator and fails with every
+stale fingerprint. `prune` changes only the exact named rows semantically,
+fails when none match, writes a deterministic canonical baseline, and updates
+`item_count`; review its generated diff before committing. Repoint a row rather
+than pruning it when the finding still applies at its new path.
 
 ### Lowering the ceiling
 
@@ -95,7 +112,7 @@ you forget.
 
 ## Current debt, by finding kind
 
-1,133 rows as of the commit that introduced this ratchet. This table exists so
+1,128 rows as of the current ratchet update. This table exists so
 the debt is visible rather than hidden inside a 158 KB JSON blob — that array is
 93% of `homeboy.json` by byte count.
 
@@ -104,7 +121,7 @@ the debt is visible rather than hidden inside a 158 KB JSON blob — that array 
 | `CoreBoundaryLeak` | 312 |
 | `SkeletonDuplicate` | 147 |
 | `HighItemCount` | 133 |
-| `ConstantBypassLiteral` | 128 |
+| `ConstantBypassLiteral` | 127 |
 | `IntraMethodDuplicate` | 114 |
 | `GodFile` | 94 |
 | `UnreferencedExport` | 47 |
@@ -129,7 +146,7 @@ the debt is visible rather than hidden inside a 158 KB JSON blob — that array 
 | `MissingInterface` | 1 |
 | `NamingMismatch` | 1 |
 | `ParallelRunnerSetup` | 1 |
-| **Total** | **1133** |
+| **Total** | **1128** |
 
 Roughly: 307 duplication findings, 227 size findings, 47 dead public exports.
 
@@ -145,16 +162,9 @@ it from getting worse.
 
 ## Known wrinkles
 
-- **`metadata.item_count` is stale.** It reads 1137 while the array holds 1133.
-  `normalize_loaded_baseline` only recomputes `item_count` when a policy section
-  enumerates fingerprints, and the sections now use the `fingerprint_prefix`
-  form with empty enumerations, so that branch never runs. `compare` uses
-  `item_count` for its reported `delta`, so that number is off by four. It does
-  not affect `drift_increased`, which is computed from the fingerprint set, so
-  suppression behavior is correct. The ratchet measures the array length, not
-  `item_count`.
-- **Rows are not sorted.** `save` sorts, but 363 of the 1,133 rows are out of
-  sorted position, so order is not an invariant and no test pins it.
+- **Rows are canonicalized by baseline tooling.** `prune` and `save` sort
+  fingerprints and serialize the baseline deterministically, so generated
+  changes are reproducible and reviewable.
 - **The baseline is not in a separate file.** Splitting it out would make config
   diffs readable, but `BaselineConfig::json_path()` hardcodes `homeboy.json`,
   and so do the git-ref reader (`git show <ref>:homeboy.json`) and the whole

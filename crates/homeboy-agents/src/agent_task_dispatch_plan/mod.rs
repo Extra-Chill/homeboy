@@ -168,7 +168,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let policy_model = initial_route
         .as_ref()
         .and_then(|route| route.model.clone())
-        .or_else(|| request.model.clone());
+        .or_else(|| request.model.clone())
+        // Provider configuration is part of Cook's declared selection surface.
+        // Persist it so readiness, execution, and finalization share one model.
+        .or_else(|| config_string(&provider_config, "model"));
     let resolved_rotation = initial_route
         .as_ref()
         .and_then(|route| route.rotation.clone());

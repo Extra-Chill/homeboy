@@ -56,15 +56,15 @@ fn is_cross_device_link_error(error: &Error) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactRefIdentity {
-    pub requested_ref: String,
-    pub resolved_sha: String,
-    pub source: String,
-    pub resolution_mode: String,
+    pub(crate) requested_ref: String,
+    pub(crate) resolved_sha: String,
+    pub(crate) source: String,
+    pub(crate) resolution_mode: String,
 }
 
 pub(super) struct ExactRefCheckout {
-    pub component: Component,
-    pub identity: ExactRefIdentity,
+    pub(crate) component: Component,
+    pub(crate) identity: ExactRefIdentity,
     worktree_path: PathBuf,
 }
 
