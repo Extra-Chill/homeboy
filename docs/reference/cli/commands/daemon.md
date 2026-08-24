@@ -154,6 +154,7 @@ On Linux, preview unleased daemon candidates, or explicitly retire only proven o
 | --- | --- | --- |
 | `--addr` | `<ADDR>` | _no help text_ |
 | `--apply` | flag | Signal only candidates whose store, binary, startup token, and unreachable endpoint were proven by this invocation |
+| `--review-token` | `<REVIEW_TOKEN>` | Exact review token emitted by the preview for a legacy candidate |
 | `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for this replacement operation |
 
 ## `homeboy daemon recover-missing-lease-state`

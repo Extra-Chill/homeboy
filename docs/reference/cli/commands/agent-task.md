@@ -993,7 +993,7 @@ Adopt an immutable commit candidate through a tracked cook's normal gates and fi
 | --- | --- | --- |
 | `--attempt` | `<N>` | Select an exact durable attempt from the resolved Cook recipe. Required when attempts use different policies |
 | `--candidate-ref` | `<SHA>` | Immutable commit revision in the recorded source worktree |
-| `--ai-model` | `<MODEL>` | Concrete model that prepared the externally supplied candidate |
+| `--model` | `<MODEL>` | Concrete model that prepared the externally supplied candidate. Use `--model`; `--ai-model` is a deprecated compatibility alias and will be removed in the next minor release |
 | `--replace-interrupted` | flag | Replace a stale interrupted adoption while retaining its lifecycle evidence |
 | `--accept-inherited-failures` | flag | Permit finalization only when a failed recorded gate reproduces with the same bounded fingerprint on the immutable candidate base. New or changed failures remain blocking and inherited-red evidence remains in the report |
 | `--full` | flag | Return the complete cook adoption report, including nested gate evidence |
@@ -1023,7 +1023,7 @@ This is the core-owned publication boundary for external runtimes.
 | `--source-ref` | `<REF>` | Source tracker/reference URL or identifier. Repeatable |
 | `--artifact-ref` | `<REF>` | Artifact/evidence URL, path, or identifier. Repeatable |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure line for the PR body |
-| `--ai-model` | `<MODEL>` | Actual model identifier for AI disclosure. Finalization requires a recorded model |
+| `--model` | `<MODEL>` | Actual model identifier for AI disclosure. Use `--model`; `--ai-model` is a deprecated compatibility alias and will be removed in the next minor release. Recovery uses durable provenance and rejects model overrides. Finalization requires a recorded model |
 | `--related-finding-id` | `<ID>` | Source finding id shared by sibling generated PRs |
 | `--source-packet-id` | `<ID>` | Source validation packet id shared by sibling generated PRs |
 | `--change-kind` | `<KIND>` | Generated change kind, e.g. evidence-only, runtime-fix, or test-only |

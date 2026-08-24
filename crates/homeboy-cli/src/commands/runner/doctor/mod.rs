@@ -227,10 +227,13 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
 }
 
 fn projection_envelope_bytes(payload: &serde_json::Value) -> serde_json::Result<usize> {
-    let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
-        &Ok(payload.clone()),
+    let data = serde_json::to_value(super::types::RunnerCommandOutput::Doctor(Box::new(
+        payload.clone(),
+    )))?;
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+        &Ok(data),
         0,
-        "runner",
+        &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
         None,
     );
     serde_json::to_vec(&response).map(|rendered| rendered.len())

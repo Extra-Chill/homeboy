@@ -6,7 +6,7 @@ Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # Homeboy CLI reference (generated)
 
-`homeboy` exposes 568 visible commands across 40 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
+`homeboy` exposes 561 visible commands across 39 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
 
 Hand-written narrative lives in the [commands index](../../../commands/commands-index.md). Global flags are documented in [the root command reference](../homeboy-root-command.md). Machine-readable safety, docs, output, and Lab metadata come from `homeboy contract manifest`.
 
@@ -26,7 +26,6 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 | `homeboy file` | [file.md](file.md) | Remote file operations |
 | `homeboy fleet` | [fleet.md](fleet.md) | Manage fleets (groups of projects) |
 | `homeboy logs` | [logs.md](logs.md) | Remote log viewing |
-| `homeboy triage` | [triage.md](triage.md) | Attention reports and watch utilities for components, projects, fleets, and rigs |
 | `homeboy deploy` | [deploy.md](deploy.md) | Deploy components to remote server |
 | `homeboy harvest` | [harvest.md](harvest.md) | Recover remote component content into local Git history |
 | `homeboy component` | [component.md](component.md) | Manage standalone component configurations |

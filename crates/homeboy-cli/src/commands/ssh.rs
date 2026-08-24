@@ -83,7 +83,7 @@ pub enum SshOutput {
 
 /// An internally tagged enum variant must serialize as an object. Keeping the
 /// list payload in this wrapper also gives `--full` the same stable shape.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SshListOutput {
     #[serde(flatten)]
     payload: Value,
@@ -321,7 +321,10 @@ fn list_output(servers: Vec<Server>, full: bool) -> SshListOutput {
 /// Validate the rendered command envelope rather than trusting per-field caps.
 fn bounded_list_envelope(projection: Value) -> Value {
     let projection = homeboy::core::redaction::redact_json(&projection);
-    if list_envelope_bytes(&projection).is_ok_and(|bytes| bytes <= SSH_LIST_PROJECTION_BYTES) {
+    let output = SshListOutput {
+        payload: projection.clone(),
+    };
+    if list_envelope_bytes(&output).is_ok_and(|bytes| bytes <= SSH_LIST_PROJECTION_BYTES) {
         return projection;
     }
     serde_json::json!({
@@ -344,11 +347,12 @@ fn bounded_list_envelope(projection: Value) -> Value {
     })
 }
 
-fn list_envelope_bytes(payload: &Value) -> serde_json::Result<usize> {
-    let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
-        &Ok(payload.clone()),
+fn list_envelope_bytes(output: &SshListOutput) -> serde_json::Result<usize> {
+    let data = serde_json::to_value(SshOutput::List(output.clone()))?;
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+        &Ok(data),
         0,
-        "ssh",
+        &crate::commands::utils::response::CommandIdentity::with_operation("ssh", "list"),
         None,
     );
     serde_json::to_vec(&response).map(|rendered| rendered.len())
@@ -711,8 +715,7 @@ mod tests {
             }),
         }];
         let compact = list_output(servers.clone(), false);
-        let compact_json = serde_json::to_value(&compact).expect("compact serializes");
-        assert!(list_envelope_bytes(&compact_json).unwrap() <= SSH_LIST_PROJECTION_BYTES);
+        assert!(list_envelope_bytes(&compact).unwrap() <= SSH_LIST_PROJECTION_BYTES);
         let full = serde_json::to_string(&SshOutput::List(list_output(servers, true)))
             .expect("full list serializes");
         let round_trip: Value = serde_json::from_str(&full).expect("full list round trips");
@@ -740,9 +743,67 @@ mod tests {
                 runner: None,
             };
             let compact = list_output(vec![server], false);
-            let json = serde_json::to_value(compact).expect("fuzz case serializes");
-            assert!(list_envelope_bytes(&json).unwrap() <= SSH_LIST_PROJECTION_BYTES);
+            assert!(list_envelope_bytes(&compact).unwrap() <= SSH_LIST_PROJECTION_BYTES);
         }
+    }
+
+    #[test]
+    fn list_projection_bounds_the_actual_tagged_command_result_wire_output() {
+        let output = list_output(
+            vec![Server {
+                id: "id-".repeat(10_000),
+                aliases: Vec::new(),
+                host: "host-".repeat(10_000),
+                user: "user-".repeat(10_000),
+                port: 22,
+                identity_file: None,
+                kind: Some("kind-".repeat(10_000)),
+                auth: None,
+                env: HashMap::new(),
+                runner: None,
+            }],
+            false,
+        );
+        let data = serde_json::to_value(SshOutput::List(output.clone())).expect("tagged data");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+            &Ok(data),
+            0,
+            &crate::commands::utils::response::CommandIdentity::with_operation("ssh", "list"),
+            None,
+        );
+        let wire = serde_json::to_vec(&envelope).expect("wire serializes");
+
+        assert!(wire.len() <= SSH_LIST_PROJECTION_BYTES);
+        let wire: Value = serde_json::from_slice(&wire).expect("wire round trips");
+        assert_eq!(wire["operation"], "list");
+        assert_eq!(wire["data"]["action"], "List");
+    }
+
+    #[test]
+    fn list_projection_falls_back_at_the_actual_wire_budget_boundary() {
+        let escaped = "\"\\\n".repeat(10_000);
+        let servers = (0..SSH_LIST_LIMIT)
+            .map(|index| Server {
+                id: format!("{index}-{escaped}"),
+                aliases: Vec::new(),
+                host: escaped.clone(),
+                user: escaped.clone(),
+                port: 22,
+                identity_file: None,
+                kind: Some(escaped.clone()),
+                auth: None,
+                env: HashMap::new(),
+                runner: None,
+            })
+            .collect();
+        let output = list_output(servers, false);
+
+        assert!(list_envelope_bytes(&output).unwrap() <= SSH_LIST_PROJECTION_BYTES);
+        assert!(output.payload["servers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            output.payload["truncation"]["servers"]["omitted"],
+            "see_full_output"
+        );
     }
 
     /// A cwd-rooted interactive session must hand back a shell, not run `cd` and quit.

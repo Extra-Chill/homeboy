@@ -43,7 +43,7 @@ homeboy ssh list
 
 ```json
 {
-  "action": "list",
+  "action": "List",
   "schema": "homeboy/ssh-list/v1",
   "operator_summary": {
     "identity": "ssh list",

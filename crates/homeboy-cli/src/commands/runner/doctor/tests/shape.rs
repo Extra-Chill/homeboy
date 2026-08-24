@@ -130,6 +130,43 @@ fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
     let compact = output_projection(report, false);
     assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
     assert!(compact["runner_id"].as_str().unwrap().len() <= COMPACT_TEXT_LIMIT + 3);
+    let data = serde_json::to_value(crate::commands::runner::types::RunnerCommandOutput::Doctor(
+        Box::new(compact),
+    ))
+    .expect("doctor output serializes");
+    let envelope = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+        &Ok(data),
+        0,
+        &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
+        None,
+    );
+    let wire = serde_json::to_vec(&envelope).expect("doctor wire serializes");
+    assert!(wire.len() <= COMPACT_PROJECTION_BYTES);
+    let wire: serde_json::Value = serde_json::from_slice(&wire).expect("doctor wire round trips");
+    assert_eq!(wire["operation"], "doctor");
+}
+
+#[test]
+fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budget() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    let escaped = "\"\\\n".repeat(10_000);
+    report.checks = (0..COMPACT_CHECK_LIMIT)
+        .map(|index| types::RunnerCheck {
+            id: format!("{index}-{escaped}"),
+            status: RunnerDoctorStatus::Error,
+            message: escaped.clone(),
+            remediation: Some(escaped.clone()),
+            details: BTreeMap::new(),
+        })
+        .collect();
+
+    let compact = output_projection(report, false);
+    assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
+    assert!(compact["checks"].as_array().unwrap().is_empty());
+    assert_eq!(
+        compact["truncation"]["checks"]["omitted"],
+        "see_full_output"
+    );
 }
 
 #[test]
