@@ -4,6 +4,10 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,7 +64,7 @@ use super::cook_promotion::{
     refreshed_moving_base_recovery, retryable_provider_discovery_failure,
     retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
-use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
+use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization, TaskBaseCaptureClaim};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
@@ -71,6 +75,16 @@ use super::AgentTaskRunResult;
 /// controller finishes promoting and records the result within it; a crashed
 /// controller's lease elapses so a resumed pass can reconcile and continue.
 const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+#[cfg(test)]
+static WORKSPACE_BASE_CAPTURE_COUNTER: LazyLock<Mutex<Option<Arc<WorkspaceBaseCaptureCounter>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+struct WorkspaceBaseCaptureCounter {
+    workspace: PathBuf,
+    count: AtomicUsize,
+}
 
 /// Render the public CLI continuation route.
 ///
@@ -6671,11 +6685,41 @@ fn pin_and_persist_initial_cook_workspace_base(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    pin_initial_cook_workspace_base(options)?;
-    let Some(task_base_sha) = options.task_base_sha.as_ref() else {
-        return Ok(());
+    let claim = store.claim_missing_task_base(&options.cook_id)?;
+    let mut recipe = match claim {
+        TaskBaseCaptureClaim::Observed(recipe) => {
+            apply_persisted_task_base(options, &recipe)?;
+            return Ok(());
+        }
+        TaskBaseCaptureClaim::InProgress => {
+            return Err(Error::validation_invalid_argument(
+                "task_base_sha",
+                "workspace_base_capture_in_progress",
+                Some(options.cook_id.clone()),
+                Some(vec![cook_continue_command(
+                    None,
+                    &options.initial_run_id,
+                    false,
+                    None,
+                )]),
+            ));
+        }
+        // The lease stays live across the origin lookup, but it is scoped to
+        // this one recipe field rather than a broad recipe mutation lock.
+        TaskBaseCaptureClaim::Acquired(_lease) => {
+            pin_initial_cook_workspace_base(options)?;
+            let Some(_) = options.task_base_sha.as_ref() else {
+                return Ok(());
+            };
+            let recipe = store.load_recipe(&options.cook_id)?;
+            if recipe.finalization["task_base_sha"].is_string() {
+                apply_persisted_task_base(options, &recipe)?;
+                return Ok(());
+            }
+            recipe
+        }
     };
-    let mut recipe = store.load_recipe(&options.cook_id)?;
+    let task_base_sha = options.task_base_sha.as_ref().expect("captured task base");
     let attempt = recipe
         .attempts
         .iter_mut()
@@ -6698,12 +6742,45 @@ fn pin_and_persist_initial_cook_workspace_base(
     )
 }
 
+fn apply_persisted_task_base(
+    options: &mut AgentTaskCookServiceOptions,
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+) -> Result<()> {
+    let task_base_sha = recipe.finalization["task_base_sha"]
+        .as_str()
+        .ok_or_else(|| Error::internal_json("persisted Cook task base is not a string", None))?;
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == options.initial_run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "initial Cook recipe is missing its materialized attempt",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    options.task_base_sha = Some(task_base_sha.to_string());
+    options.initial_plan = attempt.plan.clone();
+    Ok(())
+}
+
 fn pin_cook_workspace_base_at(
     options: &mut AgentTaskCookServiceOptions,
     workspace: &Path,
 ) -> Result<()> {
     if options.task_base_sha.is_some() {
         return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(counter) = WORKSPACE_BASE_CAPTURE_COUNTER
+        .lock()
+        .expect("workspace base capture counter")
+        .clone()
+        .filter(|counter| counter.workspace == workspace)
+    {
+        counter.count.fetch_add(1, Ordering::SeqCst);
     }
     let Some(base) =
         crate::agent_task_promotion::capture_declared_base(workspace, Some(&options.base))?

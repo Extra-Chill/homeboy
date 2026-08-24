@@ -8789,6 +8789,144 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
 }
 
 #[test]
+fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        let expected_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .expect("resolve base")
+                .stdout,
+        )
+        .expect("base is UTF-8")
+        .trim()
+        .to_string();
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let cook_id = "cook-concurrent-task-base-capture";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.source_worktree_path = Some(repository.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(repository.display().to_string());
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist incomplete recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+
+        let capture_counter = Arc::new(WorkspaceBaseCaptureCounter {
+            workspace: repository.clone(),
+            count: AtomicUsize::new(0),
+        });
+        *WORKSPACE_BASE_CAPTURE_COUNTER
+            .lock()
+            .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
+        let mut winner_options = options.clone();
+        let mut loser_options = options.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let (winner, loser) = std::thread::scope(|scope| {
+            let winner = scope.spawn(|| {
+                barrier.wait();
+                pin_and_persist_initial_cook_workspace_base(
+                    &store,
+                    &lifecycle_store,
+                    &mut winner_options,
+                )
+            });
+            let loser = scope.spawn(|| {
+                barrier.wait();
+                pin_and_persist_initial_cook_workspace_base(
+                    &store,
+                    &lifecycle_store,
+                    &mut loser_options,
+                )
+            });
+            (
+                winner.join().expect("capture owner joins"),
+                loser.join().expect("capture peer joins"),
+            )
+        });
+        assert!(
+            winner.is_ok() || loser.is_ok(),
+            "one concurrent continuation owns the capture: winner={winner:?}, loser={loser:?}"
+        );
+        if let Err(error) = winner {
+            assert_eq!(
+                error.details["problem"],
+                "workspace_base_capture_in_progress"
+            );
+            pin_and_persist_initial_cook_workspace_base(
+                &store,
+                &lifecycle_store,
+                &mut winner_options,
+            )
+            .expect("later owner continuation reloads captured base");
+        }
+        if let Err(error) = loser {
+            assert_eq!(
+                error.details["problem"],
+                "workspace_base_capture_in_progress"
+            );
+            pin_and_persist_initial_cook_workspace_base(
+                &store,
+                &lifecycle_store,
+                &mut loser_options,
+            )
+            .expect("later continuation reloads captured base");
+        }
+        *WORKSPACE_BASE_CAPTURE_COUNTER
+            .lock()
+            .expect("remove workspace base capture counter") = None;
+        assert_eq!(
+            capture_counter.count.load(Ordering::SeqCst),
+            1,
+            "only the claim owner reaches origin"
+        );
+        let recipe = store.load_recipe(cook_id).expect("captured recipe");
+        assert_eq!(
+            recipe.finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
+        );
+        assert_eq!(winner_options.task_base_sha, loser_options.task_base_sha);
+        assert_eq!(
+            winner_options.task_base_sha.as_deref(),
+            Some(expected_sha.as_str())
+        );
+    });
+}
+
+#[test]
 fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-recipe-only-initial";
