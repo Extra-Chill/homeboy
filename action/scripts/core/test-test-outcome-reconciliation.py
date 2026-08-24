@@ -61,6 +61,19 @@ def main() -> None:
         (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "duplicate identities must fail closed"
 
+        install_pair(current, "13290-candidate")
+        payload = json.loads((current / f"{STEM}.test-inventory.json").read_text(encoding="utf-8"))
+        payload["inventory_fingerprint"] = "0" * 64
+        (current / f"{STEM}.test-inventory.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "arbitrary inventory fingerprints must fail closed"
+
+        install_pair(current, "13290-candidate")
+        payload = json.loads((current / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
+        for outcome in payload["outcomes"]:
+            outcome["outcome"] = "passed"
+        (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "failed commands need a failed candidate identity"
+
     print("PASS: Test outcome/inventory reconciliation fixtures")
 
 

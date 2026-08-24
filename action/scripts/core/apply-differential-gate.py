@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from hashlib import sha256
 from typing import Any
 
 
@@ -174,6 +175,7 @@ def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | N
         return "missing", None
     tests = inventory.get("tests") if isinstance(inventory, dict) else None
     records = outcomes.get("outcomes") if isinstance(outcomes, dict) else None
+    provenance = ("runner", "runner_fingerprint", "workspace_fingerprint", "execution_fingerprint")
     if (
         not isinstance(outcomes, dict)
         or not isinstance(inventory, dict)
@@ -181,8 +183,11 @@ def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | N
         or inventory.get("schema") != "homeboy/test-inventory/v1"
         or outcomes.get("command") != command
         or inventory.get("command") != command
+        or any(not isinstance(inventory.get(key), str) or not inventory[key] for key in provenance)
+        or any(not isinstance(outcomes.get(key), str) or outcomes[key] != inventory[key] for key in provenance)
+        or not isinstance(inventory.get("inventory_fingerprint"), str)
         or not isinstance(outcomes.get("inventory_fingerprint"), str)
-        or outcomes.get("inventory_fingerprint") != inventory.get("inventory_fingerprint")
+        or outcomes["inventory_fingerprint"] != inventory["inventory_fingerprint"]
         or not isinstance(tests, list)
         or not isinstance(records, list)
     ):
@@ -191,12 +196,30 @@ def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | N
     outcome_ids = [item.get("id") for item in records if isinstance(item, dict)]
     if (
         len(inventory_ids) != len(tests)
+        or not inventory_ids
         or len(outcome_ids) != len(records)
         or any(not isinstance(value, str) or not value for value in inventory_ids + outcome_ids)
         or len(set(inventory_ids)) != len(inventory_ids)
         or len(set(outcome_ids)) != len(outcome_ids)
         or set(inventory_ids) != set(outcome_ids)
         or any(item.get("outcome") not in {"passed", "failed", "skipped"} for item in records)
+    ):
+        return "invalid", None
+    canonical_inventory = {
+        "command": command,
+        "execution_fingerprint": inventory["execution_fingerprint"],
+        "runner": inventory["runner"],
+        "runner_fingerprint": inventory["runner_fingerprint"],
+        "schema": "homeboy/test-inventory/v1",
+        "tests": [{"id": identity} for identity in sorted(inventory_ids)],
+        "workspace_fingerprint": inventory["workspace_fingerprint"],
+    }
+    expected_fingerprint = sha256(
+        json.dumps(canonical_inventory, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (
+        any(len(inventory[key]) != 64 or any(char not in "0123456789abcdef" for char in inventory[key]) for key in ("runner_fingerprint", "workspace_fingerprint", "execution_fingerprint", "inventory_fingerprint"))
+        or inventory["inventory_fingerprint"] != expected_fingerprint
     ):
         return "invalid", None
     return "complete", {item["id"]: item["outcome"] for item in records}
@@ -272,6 +295,15 @@ def main() -> int:
                 )
                 continue
             assert current_outcomes is not None and base_outcomes is not None
+            candidate_failed = {identity for identity, outcome in current_outcomes.items() if outcome == "failed"}
+            if not candidate_failed:
+                adjusted[command] = "invalid_evidence"
+                print(
+                    f"::error::Differential gate rejected {command}: type=invalid_evidence; "
+                    "the candidate command failed but its complete outcome evidence contains no failed identity.",
+                    file=sys.stderr,
+                )
+                continue
             candidate_ids = set(current_outcomes)
             baseline_ids = set(base_outcomes)
             candidate_only_inventory = candidate_ids - baseline_ids
@@ -284,11 +316,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            introduced = {
-                identity
-                for identity in candidate_ids & baseline_ids
-                if current_outcomes[identity] == "failed" and base_outcomes[identity] != "failed"
-            }
+            introduced = {identity for identity in candidate_failed if base_outcomes[identity] != "failed"}
             if introduced:
                 print(
                     f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only failed test identity(s).",

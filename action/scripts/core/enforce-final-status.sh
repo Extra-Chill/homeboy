@@ -82,12 +82,12 @@ if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "inconclusive")' > /dev/null; then
     echo "::warning::One or more quality commands were inconclusive; preserving evidence without failing the PR"
   fi
-  # Non-blocking, like `baseline_red`: the candidate is not answerable for an
-  # infrastructure condition it did not cause. Distinct from `baseline_red`
-  # because nothing was measured on either side, so nothing is known -- this is
-  # not a finding that the failure is pre-existing. See Extra-Chill/homeboy#10999.
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any((.key == "lint" or .key == "test" or .key == "review lint" or .key == "review test") and .value == "no_measurement")' > /dev/null; then
+    echo "::error::Required lint or test commands produced no measurement; this is not acceptable gate evidence."
+    FAILED=true
+  fi
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "no_measurement")' > /dev/null; then
-    echo "::warning::One or more quality commands produced no measurement on either the candidate or the baseline; nothing is known about them. Not failing the PR, but this is not a pass."
+    echo "::warning::One or more optional quality commands produced no measurement on either the candidate or the baseline."
   fi
 fi
 

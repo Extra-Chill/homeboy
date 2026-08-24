@@ -75,22 +75,31 @@ assert_exit 0 "baseline red quality results do not fail PR" \
 assert_exit 0 "inconclusive quality results do not fail PR" \
   env RESULTS='{"review lint":"inconclusive"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
-# `no_measurement` is non-blocking by design: a candidate is not answerable for
-# an infrastructure condition it did not cause. This pins that, so the split
-# introduced for Extra-Chill/homeboy#10999 cannot quietly start failing PRs.
-assert_exit 0 "no_measurement quality results do not fail PR" \
+# Required lint/Test evidence cannot be absent; audit remains candidate-only.
+assert_exit 1 "no_measurement required Test results fail PR" \
   env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "no_measurement required Lint results fail PR" \
+  env RESULTS='{"review lint":"no_measurement"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 0 "no_measurement Audit remains candidate-only" \
+  env RESULTS='{"review audit":"no_measurement"}' COMMANDS='review audit' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 1 "invalid Test evidence fails final enforcement" \
   env RESULTS='{"review test":"invalid_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 assert_exit 1 "incomparable Test evidence fails final enforcement" \
   env RESULTS='{"review test":"no_comparable_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
-# ...and it must still say so out loud. A silent non-blocking verdict is how an
-# unmeasured command reads as a clean run.
+# ...and it must still say so out loud. A silent blocking verdict is not
+# actionable, and a warning would misrepresent this as non-blocking.
+set +e
 output="$(env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}" 2>&1)"
+status=$?
+set -e
+if [ "${status}" -eq 0 ]; then
+  printf 'FAIL: no_measurement required Test result unexpectedly passed\n'
+  exit 1
+fi
 case "${output}" in
-  *"::warning::"*"no measurement"*) printf 'PASS: no_measurement emits a warning annotation\n' ;;
+  *"::error::"*"no measurement"*) printf 'PASS: no_measurement emits a blocking annotation\n' ;;
   *) printf 'FAIL: no_measurement did not annotate; got: %s\n' "${output}"; exit 1 ;;
 esac
 

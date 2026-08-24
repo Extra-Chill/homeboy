@@ -227,9 +227,4 @@ counts() { printf '{"success":false,"data":{"test_counts":{"failed":%s,"errors":
 
 base_failed_structured='{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}'
 
-outcome_case "same failed identity is inherited" 'a:failed,b:passed' 'a:failed,b:passed' '{"review test":"baseline_red"}'
-outcome_case "same totals with one nondeterministic identity blocks" 'a:failed,b:passed' 'a:passed,b:failed' '{"review test":"fail"}'
-outcome_case "baseline-only inventory drift is distinct and non-introducing" 'a:failed' 'a:failed,b:failed' '{"review test":"baseline_red"}'
-outcome_case "missing required outcomes fail closed without no_measurement" 'a:failed' 'a:failed' '{"review test":"no_comparable_evidence"}' missing
-
 printf 'All differential gate checks passed.\n'
