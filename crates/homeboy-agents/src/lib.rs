@@ -25,11 +25,6 @@ pub mod agent_task_fanout_supervisor;
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
 pub mod agent_task_gate_executor;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Lifecycle test shards share fixtures and recovery helpers."
-)]
 pub mod agent_task_lifecycle;
 pub mod agent_task_loop_controller;
 pub mod agent_task_loop_definition;

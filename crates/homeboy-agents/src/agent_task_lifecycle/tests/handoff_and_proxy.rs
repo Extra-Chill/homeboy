@@ -3,20 +3,19 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle,
     AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
