@@ -13,6 +13,7 @@ use crate::command_capability::{
     classify as classify_command_capability, homeboy_owned_args, requires_startup_reconciliation,
     CommandCapability,
 };
+use crate::command_contract::{LabCommandRoute, LabCommandRouteSupport};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -34,6 +35,20 @@ pub trait CliCapability: Sync {
     fn name(&self) -> &'static str;
     fn command(&self) -> Command;
     fn run(&self, matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)>;
+
+    /// Resolve a descriptor-composed command through the same typed Lab route
+    /// contract as a built-in command. Absent remains fail-closed.
+    fn lab_command_route(
+        &self,
+        _matches: &ArgMatches,
+    ) -> crate::core::Result<Option<LabCommandRoute>> {
+        Ok(None)
+    }
+
+    /// Declares scoped help and runner-guidance metadata for the route.
+    fn lab_command_route_support(&self) -> Option<LabCommandRouteSupport> {
+        None
+    }
 }
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
@@ -247,6 +262,7 @@ pub(crate) fn register_startup_providers_before_reconcile() {
 /// directory.
 fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
+    capabilities: &[&dyn CliCapability],
 ) -> Result<(), crate::core::error::Error> {
     // Register the runner daemon-exec driver so the daemon's /exec endpoint
     // can prepare and run a runner job as a local child without core
@@ -365,8 +381,12 @@ fn register_startup_providers_after_reconcile(
     // Register the Lab-runner hint provider so core::runner can compose
     // `--runner`/`--placement` unsupported errors from the command-spec table
     // without depending on `command_contract`.
-    crate::runner::set_lab_runner_hint_provider(|| {
-        let summary = crate::command_contract::lab_runner_support_summary();
+    let lab_support = capabilities
+        .iter()
+        .filter_map(|capability| capability.lab_command_route_support())
+        .collect::<Vec<_>>();
+    crate::runner::set_lab_runner_hint_provider(move || {
+        let summary = crate::command_contract::lab_runner_support_summary(&lab_support);
         crate::runner::LabRunnerHint {
             hint: summary.hint,
             unsupported_message: summary.unsupported_message,
@@ -388,7 +408,7 @@ pub fn register_all_providers(
     agent_task: &crate::core::defaults::AgentTaskConfig,
 ) -> Result<(), crate::core::error::Error> {
     register_startup_providers_before_reconcile();
-    register_startup_providers_after_reconcile(agent_task)
+    register_startup_providers_after_reconcile(agent_task, &[])
 }
 
 impl CliRuntime {
@@ -414,7 +434,9 @@ impl CliRuntime {
         register_startup_providers_before_reconcile();
         if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
             let config = crate::core::defaults::load_config();
-            if register_startup_providers_after_reconcile(&config.agent_task).is_err() {
+            if register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
+                .is_err()
+            {
                 return std::process::ExitCode::from(2);
             }
             let _ =
@@ -468,7 +490,9 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
-        if let Err(error) = register_startup_providers_after_reconcile(&config.agent_task) {
+        if let Err(error) =
+            register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
+        {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
@@ -555,6 +579,104 @@ impl CliRuntime {
         crate::core::set_artifact_root_override(artifact_root_override.clone());
 
         if let Some((capability, capability_matches)) = self.capability_matches(&matches) {
+            let route = match capability.lab_command_route(capability_matches) {
+                Ok(route) => route,
+                Err(error) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(error),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
+            let placement = *matches
+                .get_one::<crate::cli_surface::Placement>("placement")
+                .unwrap_or(&crate::cli_surface::Placement::Auto);
+            let runner = matches.get_one::<String>("runner").map(String::as_str);
+            if route.is_none()
+                && (placement == crate::cli_surface::Placement::Lab || runner.is_some())
+            {
+                let error = crate::core::Error::validation_invalid_argument(
+                    "placement",
+                    "this composed command has no Lab route contract",
+                    None,
+                    None,
+                );
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
+            if let Some(route) = route {
+                let runner_env = matches
+                    .get_many::<String>("runner_env")
+                    .map(|values| values.cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let runner_secret_env = matches
+                    .get_many::<String>("runner_secret_env")
+                    .map(|values| values.cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let options = crate::commands::route::ComposedLabRouteOptions {
+                    placement,
+                    runner,
+                    allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
+                    skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
+                    preserve_workspace_on_failure: matches
+                        .get_flag("preserve_workspace_on_failure"),
+                    detach_after_handoff: matches.get_flag("detach_after_handoff"),
+                    runner_env: &runner_env,
+                    runner_secret_env: &runner_secret_env,
+                    lab_env_json: matches
+                        .get_one::<String>("lab_env_json")
+                        .map(String::as_str),
+                    runner_workspace_root: matches
+                        .get_one::<String>("runner_workspace_root")
+                        .map(String::as_str),
+                };
+                if let Some(exit_code) = preflight_composed_lab_route(
+                    &route,
+                    &options,
+                    output_file.as_deref(),
+                    &command_identity,
+                ) {
+                    return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+                }
+                crate::commands::utils::execution_provenance::capture_composed(
+                    options.placement,
+                    options.runner,
+                    options.detach_after_handoff,
+                    options.allow_dirty_lab_workspace,
+                    options.skip_deps_hydration,
+                    options.runner_env,
+                    options.lab_env_json,
+                    &normalized,
+                );
+                match crate::commands::route::route_composed_lab_command(
+                    &route,
+                    options,
+                    &normalized,
+                    output_file.as_deref(),
+                ) {
+                    Ok(Some(exit_code)) => {
+                        return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(error),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                }
+            }
             if let Some(path) = output_file.as_deref() {
                 if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                     return exit;
@@ -886,7 +1008,12 @@ impl CliRuntime {
         for capability in self.capabilities {
             command = command.subcommand(capability.command());
         }
-        command
+        let support = self
+            .capabilities
+            .iter()
+            .filter_map(|capability| capability.lab_command_route_support())
+            .collect::<Vec<_>>();
+        crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
     }
 
     fn capability_matches<'a>(
@@ -1931,6 +2058,84 @@ fn preflight_hot_command(
     preflight_hot_command_with(cli, output_file, command_identity, || {
         crate::commands::resources::run_preflight()
     })
+}
+
+fn preflight_composed_lab_route(
+    route: &LabCommandRoute,
+    options: &crate::commands::route::ComposedLabRouteOptions<'_>,
+    output_file: Option<&str>,
+    command_identity: &output::CommandIdentity,
+) -> Option<i32> {
+    let hot_command = resource_policy::hot_command_for_lab_route(route)?;
+    let Ok((resources, _)) = crate::commands::resources::run_preflight() else {
+        return None;
+    };
+    let mut readiness = hot_command
+        .lab_offload_supported
+        .then(|| crate::runner::lab_runner_readiness().ok())
+        .flatten();
+    let observed_at_ms = unix_timestamp_ms();
+    if hot_command.lab_offload_supported
+        && options.runner.is_none()
+        && !matches!(options.placement, crate::cli_surface::Placement::Local)
+        && resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref())
+            .is_some()
+    {
+        if let Some(observed) = readiness.take() {
+            let (resolved, _) = resolve_terminal_lab_inventory(observed, observed_at_ms, || {
+                let refreshed = crate::runner::refresh_lab_runner_readiness_for_admission()?;
+                Ok((refreshed, unix_timestamp_ms()))
+            });
+            readiness = Some(resolved);
+        }
+    }
+    let warning =
+        resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref());
+    let runner_hosted = resource_policy::is_runner_hosted_exec();
+    let runner_admits_offload = options.runner.is_some()
+        || readiness.as_ref().is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                && readiness.selected_runner_id.is_some()
+        });
+    let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
+        hot_command,
+        &resources,
+        readiness.as_ref(),
+        options.placement,
+    );
+    let mut context = resource_policy::resource_policy_context_from_evaluation(
+        hot_command,
+        &resources,
+        if runner_hosted {
+            None
+        } else {
+            warning.as_ref()
+        },
+        options.placement.is_explicit_local_override(),
+        auto_local_capacity_fallback,
+        readiness.as_ref(),
+        runner_hosted,
+    );
+    if let Some(runner) = options.runner {
+        context.runner_selection.reason = "explicit_lab_runner".to_string();
+        context.runner_selection.runner_id = Some(runner.to_string());
+    }
+    resource_policy::capture_context(context);
+    let warning = warning?;
+    if let Some(error) = resource_policy::non_interactive_preflight_error(
+        &warning,
+        options.placement.is_explicit_local_override() || runner_hosted,
+        is_interactive_shell(),
+        resource_policy::admission_recovery(
+            &std::env::args().collect::<Vec<_>>(),
+            readiness.as_ref(),
+        ),
+        runner_admits_offload || auto_local_capacity_fallback,
+    ) {
+        output_runtime::emit_json_result_for_identity(Err(error), output_file, 2, command_identity);
+        return Some(2);
+    }
+    None
 }
 
 fn preflight_hot_command_with(
