@@ -6,8 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const requireFromHere = createRequire(import.meta.url);
-const { requireAgentRuntimeModule } = requireFromHere('../lib/agent-runtime-paths.cjs');
-const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
+const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand } = requireFromHere('../../lib/wp-codebox-runtime-selection.js');
 
 const settings = json(process.env.HOMEBOY_SETTINGS_JSON, {});
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');

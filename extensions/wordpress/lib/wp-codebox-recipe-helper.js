@@ -25,8 +25,7 @@ const {
 	homeboySettings,
 	wpCodeboxCommand,
 } = require('./wp-codebox-resolver');
-const { requireAgentRuntimeModule } = require('../scripts/lib/agent-runtime-paths.cjs');
-const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, selectWpCodeboxRuntime, wpCodeboxCommand: runtimeCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
+const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, selectWpCodeboxRuntime, wpCodeboxCommand: runtimeCommand } = require('./wp-codebox-runtime-selection');
 
 function wpCodeboxBin(options = {}) {
   const env = { ...process.env, ...(options.env || {}) };
