@@ -408,4 +408,20 @@ mod tests {
                 .contains("no artifact runner provenance is recorded"));
         });
     }
+
+    #[test]
+    fn mismatched_runner_artifact_fails_before_any_promotion_mutation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("source");
+            fs::write(source.path(), b"altered patch bytes!").expect("write source");
+            let mut artifact = artifact(b"expected patch bytes");
+            artifact.path = Some(source.path().display().to_string());
+
+            let error = materialize_artifact(&mut artifact, "run", "task", None)
+                .expect_err("mismatched bytes must fail before promotion can apply");
+
+            assert!(error.message.contains("SHA-256 does not match"));
+            assert_eq!(artifact.path.as_deref(), source.path().to_str());
+        });
+    }
 }

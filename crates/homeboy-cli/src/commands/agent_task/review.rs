@@ -446,8 +446,27 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let to_worktree = args.to_worktree.clone();
-    let (raw, source_path) = read_promotion_source(&args.source)?;
-    let source_run_id = match agent_task_lifecycle::status(&args.source) {
+    let source_reference = parse_promotion_run_artifact_reference(&args.source)?;
+    let source_spec = source_reference
+        .as_ref()
+        .map(|reference| reference.run_id.as_str())
+        .unwrap_or(&args.source);
+    let task_id = resolve_promotion_selector(
+        "task_id",
+        args.task_id,
+        source_reference
+            .as_ref()
+            .and_then(|reference| reference.task_id.clone()),
+    )?;
+    let requested_artifact_id = resolve_promotion_selector(
+        "artifact_id",
+        args.artifact_id,
+        source_reference
+            .as_ref()
+            .map(|reference| reference.artifact_id.clone()),
+    )?;
+    let (raw, source_path) = read_promotion_source(source_spec)?;
+    let source_run_id = match agent_task_lifecycle::status(source_spec) {
         Ok(record) => Some(record.run_id),
         Err(_) => match source_path.as_deref() {
             Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
@@ -455,23 +474,23 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         },
     };
     let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
-        args.artifact_id
+        requested_artifact_id
             .as_deref()
             .map(|artifact_id| {
                 agent_task_lifecycle::resolve_promotion_patch_artifact_id(
                     run_id,
-                    args.task_id.as_deref(),
+                    task_id.as_deref(),
                     artifact_id,
                 )
             })
             .transpose()?
     } else {
-        args.artifact_id.clone()
+        requested_artifact_id
     };
     if let Some(run_id) = source_run_id.as_deref() {
         agent_task_lifecycle::materialize_recovered_patch_artifact(
             run_id,
-            args.task_id.as_deref(),
+            task_id.as_deref(),
             artifact_id.as_deref(),
         )?;
     }
@@ -484,7 +503,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         task_base_sha: None,
         candidate_ref: None,
         to_worktree: args.to_worktree,
-        task_id: args.task_id,
+        task_id,
         artifact_id,
         dry_run: args.dry_run,
         gates: args.gates.into(),
@@ -522,6 +541,112 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     }
 
     Ok((value, exit_code))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromotionRunArtifactReference {
+    run_id: String,
+    task_id: Option<String>,
+    artifact_id: String,
+}
+
+/// Parse the immutable artifact selector emitted in durable agent-task output.
+/// It is a controller-owned source, not a runner-local path.
+fn parse_promotion_run_artifact_reference(
+    source: &str,
+) -> homeboy::core::Result<Option<PromotionRunArtifactReference>> {
+    let Some(rest) = source.strip_prefix("homeboy://agent-task/run/") else {
+        return Ok(None);
+    };
+    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let mut path = path.split('/');
+    let encoded_run_id = path.next().unwrap_or_default();
+    if encoded_run_id.is_empty() || path.next() != Some("artifacts") || path.next().is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "source",
+            "agent-task promotion URI must select exactly one run artifact",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    let run_id = homeboy::core::execution_contract::decode_uri_component_strict(encoded_run_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "source",
+                "agent-task promotion URI has malformed run id encoding",
+                Some(source.to_string()),
+                None,
+            )
+        })?;
+    let mut task_id = None;
+    let mut artifact_id = None;
+    for part in fragment.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = homeboy::core::execution_contract::decode_uri_component_strict(value)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "source",
+                    "agent-task promotion URI has malformed artifact selector encoding",
+                    Some(source.to_string()),
+                    None,
+                )
+            })?;
+        match key {
+            "task" => {
+                if task_id.replace(value).is_some() {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "source",
+                        "agent-task promotion URI repeats its task selector",
+                        Some(source.to_string()),
+                        None,
+                    ));
+                }
+            }
+            "artifact" => {
+                if artifact_id.replace(value).is_some() {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "source",
+                        "agent-task promotion URI repeats its artifact selector",
+                        Some(source.to_string()),
+                        None,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    let artifact_id = artifact_id.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "source",
+            "agent-task promotion URI must include an artifact selector",
+            Some(source.to_string()),
+            None,
+        )
+    })?;
+    Ok(Some(PromotionRunArtifactReference {
+        run_id,
+        task_id,
+        artifact_id,
+    }))
+}
+
+fn resolve_promotion_selector(
+    name: &str,
+    requested: Option<String>,
+    immutable: Option<String>,
+) -> homeboy::core::Result<Option<String>> {
+    if requested.is_some() && immutable.is_some() && requested != immutable {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            name,
+            format!("{name} conflicts with the immutable agent-task promotion URI selector"),
+            requested,
+            None,
+        ));
+    }
+    Ok(immutable.or(requested))
 }
 
 #[derive(Clone)]
@@ -2868,6 +2993,34 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
     use std::process::Command;
+
+    #[test]
+    fn immutable_promotion_uri_selects_its_controller_run_and_artifact() {
+        assert_eq!(
+            parse_promotion_run_artifact_reference(
+                "homeboy://agent-task/run/runner%2Fowned/artifacts#task=cook%20task&artifact=patch%2F1"
+            )
+            .expect("parse"),
+            Some(PromotionRunArtifactReference {
+                run_id: "runner/owned".to_string(),
+                task_id: Some("cook task".to_string()),
+                artifact_id: "patch/1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn immutable_promotion_uri_rejects_conflicting_cli_selector_before_materialization() {
+        let error = resolve_promotion_selector(
+            "artifact_id",
+            Some("different-patch".to_string()),
+            Some("patch".to_string()),
+        )
+        .expect_err("conflicting immutable selector must fail");
+        assert!(error
+            .message
+            .contains("immutable agent-task promotion URI selector"));
+    }
 
     #[test]
     fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
