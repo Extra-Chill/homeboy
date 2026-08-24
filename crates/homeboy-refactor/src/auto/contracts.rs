@@ -209,38 +209,7 @@ pub struct DecomposeFixPlan {
     pub applied: bool,
 }
 
-impl FixResult {
-    /// Strip generated code from insertions and new files, replacing with byte-count placeholders.
-    pub fn strip_code(&mut self) {
-        for fix in &mut self.fixes {
-            for insertion in &mut fix.insertions {
-                let len = insertion.code.len();
-                insertion.code = format!("[{len} bytes]");
-            }
-        }
-        for new_file in &mut self.new_files {
-            let len = new_file.content.len();
-            new_file.content = format!("[{len} bytes]");
-        }
-    }
-
-    /// Compute a breakdown of finding types and their fix counts.
-    pub fn finding_counts(&self) -> std::collections::BTreeMap<AuditFinding, usize> {
-        let mut counts = std::collections::BTreeMap::new();
-        for fix in &self.fixes {
-            for insertion in &fix.insertions {
-                *counts.entry(insertion.finding.clone()).or_insert(0) += 1;
-            }
-        }
-        for new_file in &self.new_files {
-            *counts.entry(new_file.finding.clone()).or_insert(0) += 1;
-        }
-        for plan in &self.decompose_plans {
-            *counts.entry(plan.source_finding.clone()).or_insert(0) += 1;
-        }
-        counts
-    }
-}
+impl FixResult {}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApplyChunkResult {
@@ -265,13 +234,13 @@ pub enum ChunkStatus {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct FixPolicy {
+pub(crate) struct FixPolicy {
     pub only: Option<Vec<AuditFinding>>,
     pub exclude: Vec<AuditFinding>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PolicySummary {
+pub(crate) struct PolicySummary {
     pub visible_insertions: usize,
     pub visible_new_files: usize,
     pub auto_apply_insertions: usize,
@@ -283,11 +252,7 @@ pub struct PolicySummary {
     pub dropped_manual_only: usize,
 }
 
-impl PolicySummary {
-    pub fn has_blocked_items(&self) -> bool {
-        self.blocked_insertions > 0 || self.blocked_new_files > 0
-    }
-}
+impl PolicySummary {}
 
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0

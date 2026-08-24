@@ -231,7 +231,7 @@ fn is_inside_test_module(root: &Path, suggestion: &CompilerSuggestion) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InsertionKind;
+    use crate::auto::InsertionKind;
 
     #[test]
     fn build_line_removal_fix_creates_function_removal() {
@@ -289,7 +289,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
         let content = r#"
-pub fn public_function() {}
+pub(crate) fn public_function() {}
 
 #[cfg(test)]
 mod tests {

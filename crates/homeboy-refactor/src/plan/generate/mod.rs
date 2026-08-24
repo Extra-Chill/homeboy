@@ -34,7 +34,7 @@ pub(crate) use signatures::{
     generate_method_stub, parse_items_for_dedup, primary_type_name_from_declaration,
 };
 
-pub fn generate_audit_fixes(
+pub(crate) fn generate_audit_fixes(
     result: &CodeAuditResult,
     root: &Path,
     policy: &FixPolicy,
@@ -42,7 +42,7 @@ pub fn generate_audit_fixes(
     generate_fixes_impl(result, root, policy, None)
 }
 
-pub fn generate_audit_fixes_with_fingerprints(
+pub(crate) fn generate_audit_fixes_with_fingerprints(
     result: &CodeAuditResult,
     root: &Path,
     policy: &FixPolicy,

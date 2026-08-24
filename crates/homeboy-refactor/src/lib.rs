@@ -3,25 +3,30 @@
 //! Walks source files, finds all references to a term (with word-boundary matching
 //! and case-variant awareness), generates edits, and optionally applies them.
 
-use crate::auto::AppliedAutofixCapture;
 use std::path::PathBuf;
 
-pub mod add;
-pub mod audit_fixability_provider;
-pub mod auto;
-pub mod collapse;
-pub mod decompose;
+mod add;
+mod auto;
+mod collapse;
+mod decompose;
 mod definition;
-pub mod edit_op_tagged;
-pub mod move_items;
-pub mod plan;
-pub mod primitive_builders;
-pub mod propagate;
+mod edit_op_tagged;
+mod move_items;
+mod plan;
+mod primitive_builders;
+mod propagate;
 mod rename;
-pub mod transform;
+mod transform;
+
+// Provider-registration seams. Each module exposes exactly one `register()`
+// entry point that `homeboy-cli` calls during runtime wiring, so publishing the
+// module costs no dead-code visibility — the single public item is the one that
+// crosses the boundary.
+pub mod audit_fixability_provider;
 pub mod transform_provider;
 
 /// Resolve the refactor root directory from an explicit path or component id.
+/// Every `homeboy refactor` subcommand resolves its target through this first.
 pub fn resolve_root(
     component_id: Option<&str>,
     path: Option<&str>,
@@ -41,53 +46,65 @@ pub fn resolve_root(
     Ok(target.source_path)
 }
 
-/// Shared output for refactors/fixes.
-///
-// AppliedRefactor and its FixResultsSummary/RuleFixCount/PrimitiveFixCount
-// result-type cluster live in homeboy-refactor-contract so consumers (e.g. the
-// extension lint/test report layer) can carry refactor results without depending
-// on this engine. Re-exported here to preserve crate::AppliedRefactor
-// call sites.
-pub use homeboy_refactor_contract::AppliedRefactor;
+// ---------------------------------------------------------------------------
+// Public API — the `homeboy refactor`, `homeboy refs`, `homeboy lint`,
+// `homeboy test`, and `homeboy ci` command surfaces are the only consumers of
+// this engine. Every item below is re-exported because a command in
+// `homeboy-cli` names it directly; everything else stays crate-private so
+// rustc can see whether it is reachable at all.
+// ---------------------------------------------------------------------------
 
-/// Build an [`AppliedRefactor`] from an autofix capture. Lives in the refactor
-/// engine (not on the contract type) because it consumes the engine-internal
-/// `AppliedAutofixCapture`.
-pub fn applied_refactor_from_capture(
-    capture: AppliedAutofixCapture,
-    rerun_recommended: bool,
-    changed_files: Vec<String>,
-) -> AppliedRefactor {
-    AppliedRefactor {
-        files_modified: capture.files_modified,
-        rerun_recommended,
-        changed_files,
-        fix_summary: capture.fix_summary,
-    }
-}
-
+// `refactor add` — both its --from-audit and --import forms.
 pub use add::{add_import, fixes_from_audit, AddResult};
+// `refactor autofix` reports per-fix outcomes in its JSON payload. The rest of
+// this group is reachable through `FixResult`'s public fields, so it is part of
+// the boundary whether or not a command names it directly.
 pub use auto::{
-    apply_fix_policy, apply_fixes_via_edit_ops, ApplyChunkResult, ChunkStatus, Fix, FixPolicy,
-    FixResult, Insertion, InsertionKind, NewFile, PolicySummary, RefactorPrimitive, SkippedFile,
+    ApplyChunkResult, ChunkStatus, DecomposeFixPlan, Fix, FixResult, Insertion, InsertionKind,
+    NewFile, RefactorPrimitive, SkippedFile,
 };
+// `ci autofix` drives the commit/push transaction, so the whole request and
+// outcome cluster crosses the boundary.
+pub use auto::{
+    run_autofix_transaction, CiContext, TransactionOutcome, TransactionRequest,
+    AUTOFIX_COMMIT_PREFIX,
+};
+// `TransactionOutcome::route` exposes the resolved push route.
+pub use auto::PushRoute;
+// `refactor collapse`. `CollapseEdit` is reachable through `CollapseResult::edits`.
 pub use collapse::{collapse, CollapseConfig, CollapseEdit, CollapseResult};
+// `refactor decompose` previews a plan, then applies it.
 pub use decompose::{
     apply_plan, apply_plan_skeletons, build_plan, DecomposeAuditImpact, DecomposeGroup,
     DecomposePlan,
 };
-pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
+// `refactor move` moves items between files and whole files between paths.
+// `MovedItem` is reachable through `MoveResult::items_moved`/`tests_moved`.
+// `ItemKind`/`MovedItem` are reachable through `MoveResult::items_moved`.
+pub use move_items::{move_file, move_items, ItemKind, MoveFileResult, MoveResult, MovedItem};
+// `lint`, `test`, and `refactor sources` all collect refactor sources through
+// this planning layer and serialize the resulting run into their reports.
 pub use plan::{
-    finding_fingerprint, run_audit_refactor, score_delta, weighted_finding_score_with,
-    AuditConvergenceScoring, AuditRefactorIterationSummary, AuditRefactorOutcome,
+    build_test_refactor_request, collect_refactor_sources, lint_refactor_request,
+    LintSourceOptions, RefactorSourceRequest, RefactorSourceRun, SourceTotals, TestSourceOptions,
 };
+// Reachable through `RefactorSourceRun`'s public fields.
+pub use auto::GuardBlock;
+pub use plan::{CollectedEdit, SourceOverlap, SourceStageSummary};
+// `refactor propagate`. The edit/field pair is reachable through
+// `PropagateResult`'s public fields.
 pub use propagate::{propagate, PropagateConfig, PropagateEdit, PropagateField, PropagateResult};
+// `refactor rename` and `refs` share the targeting vocabulary; `RenameResult`
+// and `Reference` are the values those entry points return, and `CaseVariant`
+// is reachable through `RenameSpec::variants`.
 pub use rename::{
-    apply_renames, find_references, find_references_with_targeting, generate_renames,
-    generate_renames_with_targeting, CaseVariant, FileEdit, FileRename, Reference, RenameContext,
-    RenameResult, RenameScope, RenameSpec, RenameTargeting, RenameWarning,
+    apply_renames, find_references_with_targeting, generate_renames_with_targeting, CaseVariant,
+    FileEdit, FileRename, Reference, RenameContext, RenameResult, RenameScope, RenameSpec,
+    RenameTargeting, RenameWarning,
 };
+// `refactor transform`.
+// `refactor transform`. `TransformMatch` is reachable through `RuleResult::matches`.
 pub use transform::{
-    ad_hoc_transform, apply_transforms, RuleResult, TransformMatch, TransformResult, TransformRule,
-    TransformSet, DEFAULT_MATCH_DETAIL_LIMIT,
+    ad_hoc_transform, apply_transforms, RuleResult, TransformMatch, TransformResult,
+    DEFAULT_MATCH_DETAIL_LIMIT,
 };

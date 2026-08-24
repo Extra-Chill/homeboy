@@ -19,7 +19,7 @@ use homeboy_core::error::{Error, Result};
 // Rule model
 // ============================================================================
 
-pub use homeboy_refactor_contract::{TransformRule, TransformSet};
+pub(crate) use homeboy_refactor_contract::{TransformRule, TransformSet};
 
 // ============================================================================
 // Output model
