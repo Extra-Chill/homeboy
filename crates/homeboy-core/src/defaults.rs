@@ -244,6 +244,12 @@ pub struct RetentionConfig {
     /// artifact retention may bypass its age floor before managed work starts.
     #[serde(default = "default_reconstructable_artifact_reserve_bytes")]
     pub reconstructable_artifact_reserve_bytes: u64,
+    #[serde(default = "default_external_storage_retention_days")]
+    pub external_storage_days: u64,
+    #[serde(default = "default_external_storage_max_bytes")]
+    pub external_storage_max_bytes: u64,
+    #[serde(default = "default_external_storage_reserve_bytes")]
+    pub external_storage_reserve_bytes: u64,
     /// Cooperative wall-clock budget for one automatic pass. Category owners
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
@@ -268,6 +274,9 @@ impl Default for RetentionConfig {
             reconstructable_artifact_days: default_reconstructable_artifact_retention_days(),
             reconstructable_artifact_reserve_bytes: default_reconstructable_artifact_reserve_bytes(
             ),
+            external_storage_days: default_external_storage_retention_days(),
+            external_storage_max_bytes: default_external_storage_max_bytes(),
+            external_storage_reserve_bytes: default_external_storage_reserve_bytes(),
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
         }
     }
@@ -326,6 +335,16 @@ fn default_reconstructable_artifact_retention_days() -> u64 {
 }
 
 fn default_reconstructable_artifact_reserve_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
+}
+
+fn default_external_storage_retention_days() -> u64 {
+    7
+}
+fn default_external_storage_max_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
+}
+fn default_external_storage_reserve_bytes() -> u64 {
     20 * 1024 * 1024 * 1024
 }
 

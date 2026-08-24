@@ -84,6 +84,9 @@ pub enum CleanupCategoryArg {
     /// filename marker plus the liveness of the PID stamped into it, so it can
     /// plan and apply with the observation store shut (#11073).
     LeakedTestHomes,
+    /// Installed runtime providers own discovery and native reclaim for roots
+    /// outside Homeboy worktrees.
+    ExternalStorage,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -279,6 +282,17 @@ mod tests {
             ]
         );
         assert_eq!(parsed.cleanup.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
+    }
+
+    #[test]
+    fn parser_accepts_external_storage_cleanup_category() {
+        let parsed =
+            CleanupParserTest::parse_from(["cleanup", "--include", "external-storage", "--apply"]);
+        assert_eq!(
+            parsed.cleanup.include,
+            vec![CleanupCategoryArg::ExternalStorage]
+        );
+        assert!(parsed.cleanup.apply);
     }
 
     #[test]
