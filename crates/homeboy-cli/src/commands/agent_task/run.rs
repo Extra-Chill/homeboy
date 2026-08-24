@@ -3071,13 +3071,23 @@ pub(crate) fn resolve_cook_destination(
             "--task-url <url> is required when --to-worktree is omitted".to_string(),
         ])
     })?;
+    let task_url = canonical_cook_task_url(task_url);
+    args.dispatch.task_url = Some(task_url.clone());
     let config = defaults::load_config();
-    // DMC's provider mapping currently exposes safety and handle metadata but
-    // not task ownership. In that mode the canonical handle is still resolved
-    // first; its ensure operation must reject a different task-owned worktree.
-    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_from_config(task_url, &config) {
-        Ok(Some(resolution)) => resolution.worktree.handle,
-        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&derived_cook_branch(task_url)?)),
+    // Resolve the requested branch before task discovery. An explicit --head is
+    // authoritative through candidate reuse, provisioning, and finalization.
+    let head = match args.head.clone() {
+        Some(head) => head,
+        None => derived_cook_branch(&task_url)?,
+    };
+    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(&task_url, args.head.as_deref(), &config) {
+        Ok(Some(resolution)) => {
+            if args.head.is_none() {
+                args.head = Some(resolution.worktree.branch.clone());
+            }
+            resolution.worktree.handle
+        }
+        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&head)),
         Err(mut error) => {
             if let Some(handles) = error.message.strip_prefix(&format!("multiple active apply-enabled worktrees are owned by `{task_url}`: ")) {
                 error.details["recovery"] = serde_json::json!(handles.split(", ").map(|handle| format!("homeboy agent-task cook --to-worktree {handle}")).collect::<Vec<_>>());
@@ -3086,7 +3096,7 @@ pub(crate) fn resolve_cook_destination(
         }
     });
     if args.head.is_none() {
-        args.head = Some(derived_cook_branch(task_url)?);
+        args.head = Some(head);
     }
     resolve_cook_base(&mut args)?;
     Ok(args)
@@ -3843,12 +3853,8 @@ fn repository_identity_error(
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
-    let issue = task_url
-        .trim()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('/');
+    let issue = canonical_cook_task_url(task_url);
+    let issue = issue.as_str();
     let Some((repository, number)) = issue.rsplit_once("/issues/") else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
@@ -3878,6 +3884,16 @@ fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
         ));
     }
     Ok(format!("fix/issue-{number}-{}", slugify_cook_branch(repo)))
+}
+
+fn canonical_cook_task_url(task_url: &str) -> String {
+    task_url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn slugify_cook_branch(value: &str) -> String {

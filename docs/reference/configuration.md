@@ -189,6 +189,7 @@ persisted default that would silently apply to every future sweep.
 ### `WorktreeProviderCommands`
 
 - `resolve` — Targeted handle lookup. Configure `resolve_not_found_exit_codes` when the provider signals an absent handle with a non-zero status; all statuses not listed remain hard lookup failures.
+- `resolve_task` — Targeted task URL lookup. Homeboy expands `{task_url}` and the provider returns the complete candidate set for that task, including any pagination required by its own backend.
 - `resolve_not_found_exit_codes` — Provider-native statuses that mean `resolve` found no matching handle.
 - `list`
 - `ensure` — Atomic create-or-return-existing argv template. Homeboy invokes it only after an explicit typed provider no-match, expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and `{idempotency_key}`, and requires `apply_enabled: true`.
