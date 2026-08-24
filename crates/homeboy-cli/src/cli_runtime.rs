@@ -591,6 +591,27 @@ impl CliRuntime {
                     return std::process::ExitCode::from(2);
                 }
             };
+            let placement = *matches
+                .get_one::<crate::cli_surface::Placement>("placement")
+                .unwrap_or(&crate::cli_surface::Placement::Auto);
+            let runner = matches.get_one::<String>("runner").map(String::as_str);
+            if route.is_none()
+                && (placement == crate::cli_surface::Placement::Lab || runner.is_some())
+            {
+                let error = crate::core::Error::validation_invalid_argument(
+                    "placement",
+                    "this composed command has no Lab route contract",
+                    None,
+                    None,
+                );
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
             if let Some(route) = route {
                 let runner_env = matches
                     .get_many::<String>("runner_env")
@@ -601,10 +622,8 @@ impl CliRuntime {
                     .map(|values| values.cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
                 let options = crate::commands::route::ComposedLabRouteOptions {
-                    placement: *matches
-                        .get_one::<crate::cli_surface::Placement>("placement")
-                        .unwrap_or(&crate::cli_surface::Placement::Auto),
-                    runner: matches.get_one::<String>("runner").map(String::as_str),
+                    placement,
+                    runner,
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
                     preserve_workspace_on_failure: matches
