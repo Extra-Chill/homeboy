@@ -579,14 +579,66 @@ impl CliRuntime {
         crate::core::set_artifact_root_override(artifact_root_override.clone());
 
         if let Some((capability, capability_matches)) = self.capability_matches(&matches) {
-            if let Err(error) = capability.lab_command_route(capability_matches) {
-                output_runtime::emit_json_result_for_identity(
-                    Err(error),
+            let route = match capability.lab_command_route(capability_matches) {
+                Ok(route) => route,
+                Err(error) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(error),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
+            if let Some(route) = route {
+                let runner_env = matches
+                    .get_many::<String>("runner_env")
+                    .map(|values| values.cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let runner_secret_env = matches
+                    .get_many::<String>("runner_secret_env")
+                    .map(|values| values.cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let options = crate::commands::route::ComposedLabRouteOptions {
+                    placement: *matches
+                        .get_one::<crate::cli_surface::Placement>("placement")
+                        .unwrap_or(&crate::cli_surface::Placement::Auto),
+                    runner: matches.get_one::<String>("runner").map(String::as_str),
+                    allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
+                    skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
+                    preserve_workspace_on_failure: matches
+                        .get_flag("preserve_workspace_on_failure"),
+                    detach_after_handoff: matches.get_flag("detach_after_handoff"),
+                    runner_env: &runner_env,
+                    runner_secret_env: &runner_secret_env,
+                    lab_env_json: matches
+                        .get_one::<String>("lab_env_json")
+                        .map(String::as_str),
+                    runner_workspace_root: matches
+                        .get_one::<String>("runner_workspace_root")
+                        .map(String::as_str),
+                };
+                match crate::commands::route::route_composed_lab_command(
+                    &route,
+                    options,
+                    &normalized,
                     output_file.as_deref(),
-                    2,
-                    &command_identity,
-                );
-                return std::process::ExitCode::from(2);
+                ) {
+                    Ok(Some(exit_code)) => {
+                        return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(error),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                }
             }
             if let Some(path) = output_file.as_deref() {
                 if let Some(exit) = output_file_path_exit_code(path, &command_identity) {

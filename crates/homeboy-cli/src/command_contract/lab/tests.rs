@@ -20,6 +20,7 @@ use super::{
 use crate::cli_runtime::CliCapability;
 use crate::cli_surface::{current_command_surface, Cli, CommandSurfaceEntry};
 use crate::command_contract::{CommandPortabilityContract, LabCommandContract, LabCommandRoute};
+use crate::commands::route::{route_composed_lab_command, ComposedLabRouteOptions};
 use clap::{CommandFactory, FromArgMatches};
 
 fn cook_command(command: clap::Command) -> clap::Command {
@@ -422,4 +423,69 @@ fn composed_command_uses_the_typed_route_and_scoped_lab_surface() {
         .lab_contract()
         .expect("contract")
         .is_portable());
+}
+
+fn composed_options(placement: crate::cli_surface::Placement) -> ComposedLabRouteOptions<'static> {
+    ComposedLabRouteOptions {
+        placement,
+        runner: None,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        preserve_workspace_on_failure: false,
+        detach_after_handoff: false,
+        runner_env: &[],
+        runner_secret_env: &[],
+        lab_env_json: None,
+        runner_workspace_root: None,
+    }
+}
+
+#[test]
+fn composed_routes_enter_generic_lab_dispatch_and_reject_local_only_lab_placement() {
+    let portable = LabCommandRoute::new(
+        CommandPortabilityContract::lab(LabCommandContract::portable(
+            "composed portable",
+            Some("--write"),
+            true,
+            &["fixture-capability"],
+        )),
+        vec!["fixture-extension".to_string()],
+        None,
+    );
+    let error = route_composed_lab_command(
+        &portable,
+        composed_options(crate::cli_surface::Placement::Lab),
+        &["homeboy".to_string(), "composed-lab".to_string()],
+        None,
+    )
+    .expect_err("required Lab placement enters the generic dispatcher and requires a runner");
+    assert!(error
+        .message
+        .contains("required Lab placement has no selected ready runner"));
+    let contract = portable
+        .lab_route_contract()
+        .expect("portable route contract");
+    assert_eq!(contract.required_extensions, ["fixture-extension"]);
+    assert_eq!(contract.required_capabilities[0].name, "fixture-capability");
+    assert_eq!(portable.lab_offload_mutation_flag(), Some("--write"));
+    assert!(portable.lab_offload_captures_mutation_patch());
+
+    let local_only = LabCommandRoute::new(
+        CommandPortabilityContract::lab(LabCommandContract::local_only(
+            "composed destructive",
+            "destructive composed commands stay local",
+        )),
+        Vec::new(),
+        None,
+    );
+    let error = route_composed_lab_command(
+        &local_only,
+        composed_options(crate::cli_surface::Placement::Lab),
+        &["homeboy".to_string(), "composed-lab".to_string()],
+        None,
+    )
+    .expect_err("local-only composed routes fail closed for explicit Lab placement");
+    assert!(error
+        .message
+        .contains("destructive composed commands stay local"));
 }
