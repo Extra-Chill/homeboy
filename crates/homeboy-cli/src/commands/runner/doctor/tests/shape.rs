@@ -75,6 +75,61 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
         render_summary(&compact).as_deref(),
         Some("Runner doctor\nStatus: degraded\nChecks shown: 12\nNext: homeboy runner doctor local --full")
     );
+    assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
+}
+
+#[test]
+fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.checks = (0..COMPACT_CHECK_LIMIT)
+        .map(|index| types::RunnerCheck {
+            id: format!("ok-{index}"),
+            status: RunnerDoctorStatus::Ok,
+            message: "ready".to_string(),
+            remediation: None,
+            details: BTreeMap::new(),
+        })
+        .chain(std::iter::once(types::RunnerCheck {
+            id: "blocked".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: "runner is unavailable".to_string(),
+            remediation: Some("homeboy runner doctor local --repair".to_string()),
+            details: BTreeMap::new(),
+        }))
+        .collect();
+
+    let compact = output_projection(report, false);
+    assert_eq!(compact["checks"][0]["id"], "blocked");
+    assert_eq!(
+        compact["checks"][0]["remediation"],
+        "homeboy runner doctor local --repair"
+    );
+    assert_eq!(compact["truncation"]["checks"]["omitted"], 1);
+}
+
+#[test]
+fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.runner_id = "runner-".repeat(10_000);
+    report.runner.registry.as_mut().expect("registry").id = "registry-".repeat(10_000);
+    report.runner.server = Some(types::RunnerServerSummary {
+        id: "server-".repeat(10_000),
+        host: "host-".repeat(10_000),
+        user: "user-".repeat(10_000),
+        port: 22,
+        is_localhost: false,
+    });
+    report.checks = vec![types::RunnerCheck {
+        id: "check-".repeat(10_000),
+        status: RunnerDoctorStatus::Error,
+        message: "message-".repeat(10_000),
+        remediation: Some("command-".repeat(10_000)),
+        details: BTreeMap::new(),
+    }];
+
+    let compact = output_projection(report, false);
+    assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
+    assert!(compact["runner_id"].as_str().unwrap().len() <= COMPACT_TEXT_LIMIT + 3);
 }
 
 #[test]

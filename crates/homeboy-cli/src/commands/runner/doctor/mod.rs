@@ -107,6 +107,7 @@ pub(crate) fn run_with_options(
 const COMPACT_CHECK_LIMIT: usize = 12;
 const COMPACT_PROVIDER_LIMIT: usize = 10;
 const COMPACT_TEXT_LIMIT: usize = 256;
+const COMPACT_PROJECTION_BYTES: usize = 8 * 1024;
 
 /// Keep default doctor output to the facts needed to decide whether the runner
 /// is usable. `--full` remains a lossless, redacted evidence surface.
@@ -121,9 +122,14 @@ pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde
         .iter()
         .filter(|check| check.status != RunnerDoctorStatus::Ok)
         .count();
-    let checks = report
-        .checks
-        .iter()
+    let mut prioritized_checks = report.checks.iter().collect::<Vec<_>>();
+    prioritized_checks.sort_by_key(|check| match check.status {
+        RunnerDoctorStatus::Error => 0,
+        RunnerDoctorStatus::Warning => 1,
+        RunnerDoctorStatus::Ok => 2,
+    });
+    let checks = prioritized_checks
+        .into_iter()
         .take(COMPACT_CHECK_LIMIT)
         .map(|check| {
             serde_json::json!({
@@ -157,17 +163,17 @@ pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde
         readiness.ready_for.len() + readiness.blocked_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
-    serde_json::json!({
+    let projection = serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": report.command,
         "runner_id": runner_id,
-        "runner": report.runner,
+        "runner": compact_runner_summary(&report.runner),
         "status": report.status,
         "operator_summary": {
             "identity": "runner doctor",
             "state": match report.status { RunnerDoctorStatus::Ok => "ready", RunnerDoctorStatus::Warning => "degraded", RunnerDoctorStatus::Error => "blocked" },
             "risk": if failed_checks == 0 { Vec::new() } else { vec![format!("{failed_checks} check(s) need attention")] },
-            "next_action": format!("homeboy runner doctor {} --full", report.runner_id),
+            "next_action": format!("homeboy runner doctor {runner_id} --full"),
         },
         "capabilities": report.capabilities,
         "resources": {
@@ -178,11 +184,56 @@ pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde
         "checks": checks,
         "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
         "truncation": {
-            "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {} --full", report.runner_id) },
-            "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {} --full", report.runner_id) },
+            "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {runner_id} --full") },
+            "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
             "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
+    });
+    bounded_projection_envelope(projection)
+}
+
+fn compact_runner_summary(runner: &types::RunnerTargetSummary) -> serde_json::Value {
+    serde_json::json!({
+        "type": runner.target_type,
+        "registry": runner.registry.as_ref().map(|registry| serde_json::json!({
+            "id": bounded_text(&registry.id), "kind": registry.kind,
+        })),
+        "server": runner.server.as_ref().map(|server| serde_json::json!({
+            "id": bounded_text(&server.id), "host": bounded_text(&server.host),
+            "user": bounded_text(&server.user), "port": server.port,
+            "is_localhost": server.is_localhost,
+        })),
     })
+}
+
+fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Value {
+    let projection = homeboy::core::redaction::redact_json(&projection);
+    if projection_envelope_bytes(&projection).is_ok_and(|bytes| bytes <= COMPACT_PROJECTION_BYTES) {
+        return projection;
+    }
+    serde_json::json!({
+        "schema": "homeboy/runner-doctor/v1",
+        "command": "runner.doctor",
+        "status": "error",
+        "operator_summary": {
+            "identity": "runner doctor",
+            "state": "blocked",
+            "risk": ["doctor details exceed the default response budget"],
+            "next_action": "homeboy runner doctor <runner-id> --full",
+        },
+        "checks": [],
+        "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },
+    })
+}
+
+fn projection_envelope_bytes(payload: &serde_json::Value) -> serde_json::Result<usize> {
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+        &Ok(payload.clone()),
+        0,
+        "runner",
+        None,
+    );
+    serde_json::to_vec(&response).map(|rendered| rendered.len())
 }
 
 fn bounded_text(value: &str) -> String {
