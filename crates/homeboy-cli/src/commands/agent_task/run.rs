@@ -44,9 +44,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// fixture bytes in Cook command state or JSON output.
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// Preview probes must return promptly even when an operator configured a much
-/// larger provider lookup budget for live lifecycle recovery.
-const PREVIEW_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
+const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
 
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
@@ -303,9 +301,15 @@ pub(crate) fn preview_cook(
     validate_cook_request_with_provenance(&args, provenance)?;
     bind_cook_preview_lifecycle(&mut args);
     record_preview_phase(&mut progress, "destination_resolution");
-    let (args, mut provision) = resolve_cook_preview_destination(args)?;
+    let (args, mut provision) =
+        with_preview_heartbeat(&mut progress, "destination_resolution", || {
+            resolve_cook_preview_destination(args)
+        })?;
     project_preview_dirty_admission(&mut provision);
     let replay = cook_preview_replay_argv(&args);
+    if provision["details"]["worktree_provider_lookup"] == "timed_out" {
+        provision["recovery_argv"] = serde_json::json!(replay.argv.clone());
+    }
     record_preview_phase(&mut progress, "placement_projection");
     let placement = preview_placement_policy_with_admission(&replay.argv);
     let notification_resolution = homeboy::core::notification_route::current_resolution();
@@ -459,6 +463,62 @@ fn record_preview_phase(progress: &mut Vec<Value>, phase: &'static str) {
     });
     eprintln!("{event}");
     progress.push(event);
+}
+
+fn with_preview_heartbeat<T>(
+    progress: &mut Vec<Value>,
+    phase: &'static str,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct StopHeartbeat(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for StopHeartbeat {
+        fn drop(&mut self) {
+            *self.0 .0.lock().expect("preview heartbeat state") = true;
+            self.0 .1.notify_one();
+        }
+    }
+
+    let state = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let started = std::time::Instant::now();
+    let result = std::thread::scope(|scope| {
+        let state_for_heartbeat = Arc::clone(&state);
+        let events_for_heartbeat = Arc::clone(&events);
+        scope.spawn(move || loop {
+            let (done, wake) = state_for_heartbeat
+                .1
+                .wait_timeout(
+                    state_for_heartbeat
+                        .0
+                        .lock()
+                        .expect("preview heartbeat state"),
+                    PREVIEW_PROGRESS_HEARTBEAT,
+                )
+                .expect("preview heartbeat wait");
+            if *done {
+                break;
+            }
+            if wake.timed_out() {
+                let event = serde_json::json!({
+                    "event": "cook_preview_heartbeat",
+                    "phase": phase,
+                    "elapsed_ms": started.elapsed().as_millis(),
+                });
+                eprintln!("{event}");
+                events_for_heartbeat
+                    .lock()
+                    .expect("preview heartbeat events")
+                    .push(event);
+            }
+        });
+
+        let stop = StopHeartbeat(Arc::clone(&state));
+        let result = operation();
+        drop(stop);
+        result
+    });
+    progress.extend(events.lock().expect("preview heartbeat events").drain(..));
+    result
 }
 
 /// Resolve missing backend policy before validating task content. This keeps the
@@ -1178,7 +1238,7 @@ mod preview_tests {
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-issue-12890-homeboy\",\"path\":\"{}\",\"branch\":\"{}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nmissing) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nslow-plan) sleep 1 ;;\nensure) touch '{}' ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-issue-12890-homeboy\",\"path\":\"{}\",\"branch\":\"{}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nmissing) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nslow-plan) sleep 1 ;;\nlong-plan) sleep 10.1; printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$3\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
                     workspace.display(),
                     branch,
                     marker.display(),
@@ -1275,7 +1335,7 @@ mod preview_tests {
             );
             assert_eq!(
                 unresolved["resolved"]["workspace"]["planning_timeout_ms"],
-                PREVIEW_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
+                10_000
             );
             assert_eq!(
                 unresolved["resolved"]["workspace"]["provider_id"],
@@ -1312,12 +1372,57 @@ mod preview_tests {
                 slow["resolved"]["workspace"]["details"]["lookup_timeout_ms"],
                 25
             );
+            assert_eq!(
+                slow["resolved"]["workspace"]["planning_timeout"]["configured_timeout_ms"],
+                25
+            );
+            assert_eq!(
+                slow["resolved"]["workspace"]["planning_timeout"]["effective_timeout_ms"],
+                25
+            );
+            assert_eq!(
+                slow["resolved"]["workspace"]["recovery_argv"],
+                serde_json::json!(cook_replay_argv(&args()))
+            );
+
+            let provider_config = config.worktree_providers.get_mut("fixture").unwrap();
+            provider_config.lookup_timeout_ms = 60_000;
+            provider_config.commands.plan = Some(vec![
+                provider.display().to_string(),
+                "long-plan".to_string(),
+                "{handle}".to_string(),
+                "{head}".to_string(),
+            ]);
+            homeboy::core::defaults::save_config(&config).expect("save long plan config");
+            let (planned, exit_code) =
+                preview_cook(args(), None).expect("plan within provider budget");
+            assert_eq!(exit_code, 0, "{planned}");
+            assert_eq!(
+                planned["resolved"]["workspace"]["action"], "planned_create",
+                "{planned}"
+            );
+            let budget = &planned["resolved"]["workspace"]["planning_timeout"];
+            assert_eq!(budget["requested_timeout_ms"], 60_000);
+            assert_eq!(budget["configured_timeout_ms"], 60_000);
+            assert_eq!(budget["maximum_timeout_ms"], 300_000);
+            assert_eq!(budget["capped_timeout_ms"], 60_000);
+            assert_eq!(budget["effective_timeout_ms"], 60_000);
+            assert_eq!(
+                budget["source"],
+                "worktree_providers.fixture.lookup_timeout_ms"
+            );
+            assert!(planned["progress"]
+                .as_array()
+                .expect("preview progress")
+                .iter()
+                .any(|event| event["event"] == "cook_preview_heartbeat"
+                    && event["phase"] == "destination_resolution"));
             assert!(!marker.exists(), "preview must never invoke ensure");
         });
     }
 
     #[test]
-    fn preview_caps_provider_lookup_budgets_without_changing_live_config() {
+    fn preview_uses_the_validated_provider_plan_budget() {
         let mut config = homeboy::core::defaults::HomeboyConfig::default();
         config.worktree_providers.insert(
             "fixture".to_string(),
@@ -1333,11 +1438,15 @@ mod preview_tests {
             },
         );
 
-        super::bound_preview_worktree_provider_lookup_timeouts(&mut config);
+        let budget = super::preview_provider_plan_timeout(&config, "fixture");
 
+        assert_eq!(budget["requested_timeout_ms"], 30_000);
+        assert_eq!(budget["configured_timeout_ms"], 30_000);
+        assert_eq!(budget["capped_timeout_ms"], 30_000);
+        assert_eq!(budget["effective_timeout_ms"], 30_000);
         assert_eq!(
             config.worktree_providers["fixture"].lookup_timeout_ms,
-            PREVIEW_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
+            30_000
         );
     }
 
@@ -3396,8 +3505,7 @@ fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        let mut config = defaults::load_config();
-        bound_preview_worktree_provider_lookup_timeouts(&mut config);
+        let config = defaults::load_config();
         let identity = match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(&handle, &config) {
             Ok(identity) => identity,
             Err(error)
@@ -3419,7 +3527,10 @@ fn resolve_cook_preview_destination(
                 ) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        return Ok((args, unresolved_provider_preview(&handle, error)));
+                        return Ok((
+                            args,
+                            unresolved_provider_preview(&handle, error, &config),
+                        ));
                     }
                 };
                 let WorktreeProviderCreatePlan::WouldCreate(resolution) = plan
@@ -3428,6 +3539,8 @@ fn resolve_cook_preview_destination(
                         "worktree provider changed from absent to existing while previewing Cook".to_string(),
                     ));
                 };
+                let planning_timeout =
+                    preview_provider_plan_timeout(&config, &resolution.provider_id);
                 return Ok((
                     args,
                     serde_json::json!({
@@ -3438,11 +3551,16 @@ fn resolve_cook_preview_destination(
                         "branch": resolution.worktree.branch,
                         "provider_id": resolution.provider_id,
                         "intent": cook_workspace_plan_identity(&intent),
+                        "planning_timeout_ms": planning_timeout["effective_timeout_ms"],
+                        "planning_timeout": planning_timeout,
                     }),
                 ));
             }
             Err(error) if issue_derived => {
-                return Ok((args, unresolved_provider_preview(&handle, error)));
+                return Ok((
+                    args,
+                    unresolved_provider_preview(&handle, error, &config),
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -3529,26 +3647,45 @@ fn project_preview_dirty_admission(provision: &mut Value) {
     }
 }
 
-fn unresolved_provider_preview(handle: &str, error: homeboy::core::Error) -> Value {
+fn unresolved_provider_preview(
+    handle: &str,
+    error: homeboy::core::Error,
+    config: &defaults::HomeboyConfig,
+) -> Value {
+    let provider_id = error.details["worktree_provider_id"]
+        .as_str()
+        .unwrap_or_default();
+    let planning_timeout = preview_provider_plan_timeout(config, provider_id);
     serde_json::json!({
         "action": "unresolved_provider",
         "disposition": "unresolved",
         "kind": "provider",
         "handle": handle,
         "provider_id": error.details["worktree_provider_id"],
-        "planning_timeout_ms": PREVIEW_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS,
+        "planning_timeout_ms": planning_timeout["effective_timeout_ms"],
+        "planning_timeout": planning_timeout,
         "reason": error.message,
         "remediation": error.details["tried"],
         "details": error.details,
     })
 }
 
-fn bound_preview_worktree_provider_lookup_timeouts(config: &mut defaults::HomeboyConfig) {
-    for provider in config.worktree_providers.values_mut() {
-        provider.lookup_timeout_ms = provider
-            .lookup_timeout_ms
-            .min(PREVIEW_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS);
-    }
+fn preview_provider_plan_timeout(config: &defaults::HomeboyConfig, provider_id: &str) -> Value {
+    let Some(provider) = config.worktree_providers.get(provider_id) else {
+        return Value::Null;
+    };
+    let configured_timeout_ms = provider.lookup_timeout_ms;
+    let capped_timeout_ms =
+        configured_timeout_ms.min(defaults::MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS);
+    serde_json::json!({
+        "operation": "plan",
+        "requested_timeout_ms": configured_timeout_ms,
+        "configured_timeout_ms": configured_timeout_ms,
+        "maximum_timeout_ms": defaults::MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS,
+        "capped_timeout_ms": capped_timeout_ms,
+        "effective_timeout_ms": capped_timeout_ms,
+        "source": format!("worktree_providers.{provider_id}.lookup_timeout_ms"),
+    })
 }
 
 fn preview_destination_blocker(handle: &str, problem: &str) -> homeboy::core::Error {
