@@ -53,7 +53,22 @@ pub(crate) fn scope_lab_cli_arguments_with(
         &[],
         &lab_args,
         composed_support,
+        true,
     ))
+}
+
+/// Add scoped Lab arguments only for capability-composed paths. The base CLI
+/// has already scoped its static command tree before capabilities are attached.
+pub(crate) fn scope_composed_lab_cli_arguments(
+    command: Command,
+    composed_support: &[LabCommandRouteSupport],
+) -> Command {
+    let lab_args = command
+        .get_arguments()
+        .filter(|arg| LAB_CLI_ARGUMENT_IDS.contains(&arg.get_id().as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    scope_lab_cli_arguments_at_path(command, &[], &lab_args, composed_support, false)
 }
 
 /// Cook has a large control-plane surface, but the routine tracked-task path
@@ -113,12 +128,13 @@ fn scope_lab_cli_arguments_at_path(
     path: &[String],
     lab_args: &[clap::Arg],
     composed_support: &[LabCommandRouteSupport],
+    include_builtin: bool,
 ) -> Command {
     // Only re-expose the Lab placement/runner flags on commands that actually
     // support Lab offload. A previous refactor collapsed this to
     // `!path.is_empty()`, which advertised the flags on every subcommand
     // (including non-portable ones like `contract manifest`).
-    let visible = lab_cli_arguments_are_visible_for_path(path, composed_support);
+    let visible = lab_cli_arguments_are_visible_for_path(path, composed_support, include_builtin);
     let command = if visible {
         lab_args.iter().fold(command, |command, arg| {
             let already_declared = command
@@ -179,7 +195,13 @@ fn scope_lab_cli_arguments_at_path(
     command.mut_subcommands(|subcommand| {
         let mut subcommand_path = path.to_vec();
         subcommand_path.push(subcommand.get_name().to_string());
-        scope_lab_cli_arguments_at_path(subcommand, &subcommand_path, lab_args, composed_support)
+        scope_lab_cli_arguments_at_path(
+            subcommand,
+            &subcommand_path,
+            lab_args,
+            composed_support,
+            include_builtin,
+        )
     })
 }
 
@@ -258,6 +280,7 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
 fn lab_cli_arguments_are_visible_for_path(
     path: &[String],
     composed_support: &[LabCommandRouteSupport],
+    include_builtin: bool,
 ) -> bool {
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
 
@@ -275,10 +298,11 @@ fn lab_cli_arguments_are_visible_for_path(
     }) {
         return true;
     }
-    if !path
-        .first()
-        .copied()
-        .is_some_and(top_level_command_is_lab_supported)
+    if !include_builtin
+        || !path
+            .first()
+            .copied()
+            .is_some_and(top_level_command_is_lab_supported)
     {
         return false;
     }

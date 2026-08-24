@@ -658,10 +658,8 @@ pub(crate) fn route_composed_lab_command(
     let command = lab_routing::lab_offload_command_from_route_contract(route_contract);
     let task = command.command.hot_label;
     let inferred_runner = options.runner.map(ToOwned::to_owned).or_else(|| {
-        command
-            .command
-            .routing_policy
-            .default_lab_offload
+        (command.command.routing_policy.default_lab_offload
+            || options.placement == homeboy::cli_surface::Placement::Lab)
             .then(|| runners::lab_runner_readiness().ok())
             .flatten()
             .and_then(|readiness| readiness.selected_runner_id)

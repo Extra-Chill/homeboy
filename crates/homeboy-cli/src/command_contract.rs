@@ -38,7 +38,7 @@ pub use lab::LabCommandRouteSupport;
 #[cfg(test)]
 pub(crate) use lab::LabSourcePathMode;
 pub(crate) use lab::{
-    lab_runner_support_summary, scope_lab_cli_arguments, scope_lab_cli_arguments_with,
+    lab_runner_support_summary, scope_composed_lab_cli_arguments, scope_lab_cli_arguments,
     LabRigWorkloadKind, LabWorkspaceModePolicy, LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
     LAB_RUNNER_WORKLOAD_SCHEMA, LAB_TRACE_EXTRA_CAPABILITIES, RUNNER_ARTIFACT_MANIFEST_FILE,
     RUNNER_ARTIFACT_MANIFEST_REF_NAME, RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,

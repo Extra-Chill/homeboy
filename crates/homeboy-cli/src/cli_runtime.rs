@@ -619,6 +619,24 @@ impl CliRuntime {
                         .get_one::<String>("runner_workspace_root")
                         .map(String::as_str),
                 };
+                if let Some(exit_code) = preflight_composed_lab_route(
+                    &route,
+                    &options,
+                    output_file.as_deref(),
+                    &command_identity,
+                ) {
+                    return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+                }
+                crate::commands::utils::execution_provenance::capture_composed(
+                    options.placement,
+                    options.runner,
+                    options.detach_after_handoff,
+                    options.allow_dirty_lab_workspace,
+                    options.skip_deps_hydration,
+                    options.runner_env,
+                    options.lab_env_json,
+                    &normalized,
+                );
                 match crate::commands::route::route_composed_lab_command(
                     &route,
                     options,
@@ -976,7 +994,7 @@ impl CliRuntime {
             .iter()
             .filter_map(|capability| capability.lab_command_route_support())
             .collect::<Vec<_>>();
-        crate::command_contract::scope_lab_cli_arguments_with(command, &support)
+        crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
     }
 
     fn capability_matches<'a>(
@@ -2021,6 +2039,69 @@ fn preflight_hot_command(
     preflight_hot_command_with(cli, output_file, command_identity, || {
         crate::commands::resources::run_preflight()
     })
+}
+
+fn preflight_composed_lab_route(
+    route: &LabCommandRoute,
+    options: &crate::commands::route::ComposedLabRouteOptions<'_>,
+    output_file: Option<&str>,
+    command_identity: &output::CommandIdentity,
+) -> Option<i32> {
+    let hot_command = resource_policy::hot_command_for_lab_route(route)?;
+    let Ok((resources, _)) = crate::commands::resources::run_preflight() else {
+        return None;
+    };
+    let readiness = hot_command
+        .lab_offload_supported
+        .then(|| crate::runner::lab_runner_readiness().ok())
+        .flatten();
+    let warning =
+        resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref());
+    let runner_hosted = resource_policy::is_runner_hosted_exec();
+    let runner_admits_offload = options.runner.is_some()
+        || readiness.as_ref().is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                && readiness.selected_runner_id.is_some()
+        });
+    let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
+        hot_command,
+        &resources,
+        readiness.as_ref(),
+        options.placement,
+    );
+    let mut context = resource_policy::resource_policy_context_from_evaluation(
+        hot_command,
+        &resources,
+        if runner_hosted {
+            None
+        } else {
+            warning.as_ref()
+        },
+        options.placement.is_explicit_local_override(),
+        auto_local_capacity_fallback,
+        readiness.as_ref(),
+        runner_hosted,
+    );
+    if let Some(runner) = options.runner {
+        context.runner_selection.reason = "explicit_lab_runner".to_string();
+        context.runner_selection.runner_id = Some(runner.to_string());
+    }
+    resource_policy::capture_context(context);
+    let warning = warning?;
+    if let Some(error) = resource_policy::non_interactive_preflight_error(
+        &warning,
+        options.placement.is_explicit_local_override() || runner_hosted,
+        is_interactive_shell(),
+        resource_policy::admission_recovery(
+            &std::env::args().collect::<Vec<_>>(),
+            readiness.as_ref(),
+        ),
+        runner_admits_offload || auto_local_capacity_fallback,
+    ) {
+        output_runtime::emit_json_result_for_identity(Err(error), output_file, 2, command_identity);
+        return Some(2);
+    }
+    None
 }
 
 fn preflight_hot_command_with(

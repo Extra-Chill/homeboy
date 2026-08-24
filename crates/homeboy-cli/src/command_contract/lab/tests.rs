@@ -224,7 +224,7 @@ fn owned(path: &[&str]) -> Vec<String> {
 fn every_declared_path_is_visible_and_undeclared_paths_are_not() {
     for path in LAB_VISIBLE_COMMAND_PATHS {
         assert!(
-            lab_cli_arguments_are_visible_for_path(&owned(path), &[]),
+            lab_cli_arguments_are_visible_for_path(&owned(path), &[], true),
             "declared Lab-visible path `{}` is not visible",
             path.join(" ")
         );
@@ -234,7 +234,7 @@ fn every_declared_path_is_visible_and_undeclared_paths_are_not() {
     // subcommand a previous refactor wrongly advertised these flags on.
     for path in [vec![], vec!["contract"], vec!["contract", "manifest"]] {
         assert!(
-            !lab_cli_arguments_are_visible_for_path(&owned(&path), &[]),
+            !lab_cli_arguments_are_visible_for_path(&owned(&path), &[], true),
             "`{}` must not advertise Lab placement flags",
             path.join(" ")
         );
