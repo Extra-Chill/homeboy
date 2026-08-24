@@ -441,30 +441,9 @@ mod tests {
         };
         let config = DeployConfig {
             component_ids: vec!["fixture".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
             dry_run: true,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
             requested_ref: Some("reviewed".to_string()),
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         let result = run_dry_run_mode(
@@ -734,30 +713,9 @@ mod tests {
         };
         let mut config = DeployConfig {
             component_ids: vec!["fixture".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
             dry_run: true,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
             requested_ref: Some(sha.clone()),
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
         config.prepared_artifact = Some(PreparedDeployArtifact {
             component_id: "fixture".to_string(),
@@ -803,30 +761,10 @@ mod tests {
         let remote_versions = HashMap::from([("fixture".to_string(), "1.3.0".to_string())]);
         let config = DeployConfig {
             component_ids: vec!["fixture".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
             dry_run: true,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
             no_pull: true,
-            allow_stale_source: false,
-            allow_downgrade: false,
             head: true,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         let checked = run_check_mode(CheckModeInput {
