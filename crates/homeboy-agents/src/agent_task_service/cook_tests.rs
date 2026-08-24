@@ -9530,7 +9530,7 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
 }
 
 #[test]
-fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
+fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-invalid-input-attempt-1";
         let mut options = batch_cook_options(
@@ -9574,6 +9574,14 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
             "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
         );
         assert!(context
+            .legal_actions
+            .iter()
+            .all(|action| action.action != "retry"));
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| action.action != "retry"));
+        assert!(context
             .next_actions
             .iter()
             .all(|action| action.action != "refresh_lab_runtime"));
@@ -9588,6 +9596,47 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
         let record = agent_task_lifecycle::status(run_id).expect("attempt exists");
         assert!(record.provider_handles.is_empty());
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
+    });
+}
+
+#[test]
+fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-worktree-lookup-attempt-1";
+        let mut options = batch_cook_options(
+            "cook-worktree-lookup",
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "configured worktree could not be resolved before provider dispatch",
+                runtime_recovery: None,
+                phase: "pre_provider_worktree_lookup",
+            }),
+        );
+        options.provider_command = Some("fixture-provider".to_string());
+        options.initial_run_id = run_id.to_string();
+
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook persists the worktree lookup failure");
+        let context = result
+            .value
+            .failure_context
+            .expect("durable failure context");
+
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("pre_provider_worktree_lookup")
+        );
+        assert_eq!(
+            context
+                .legal_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status", "diagnose"]
+        );
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| action.action != "retry"));
     });
 }
 
