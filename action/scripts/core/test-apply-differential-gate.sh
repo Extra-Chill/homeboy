@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLY_GATE="${SCRIPT_DIR}/apply-differential-gate.py"
+IDENTITIES="${SCRIPT_DIR}/generate-test-failure-identities.py"
+FIXTURES="${SCRIPT_DIR}/fixtures/differential-test-identities"
 
 assert_equals() {
   local expected="$1"
@@ -204,6 +206,24 @@ gate_case() {
   fi
 }
 
+identity_case() {
+  local label="$1" candidate_fixture="$2" baseline_fixture="$3" expected="$4" mode="${5:-evidence}"
+  rm -rf "${current_dir}" "${base_dir}"
+  mkdir -p "${current_dir}" "${base_dir}"
+  cp "${FIXTURES}/${candidate_fixture}.json" "${current_dir}/review-test.json"
+  cp "${FIXTURES}/${baseline_fixture}.json" "${base_dir}/review-test.json"
+  printf '%s\n' "${base_failed_structured}" > "${base_dir}/baseline-status.json"
+  if [ "${mode}" = evidence ]; then
+    python3 "${IDENTITIES}" 'review test' "${current_dir}/review-test.json" "${current_dir}/review-test.failure-identities.json"
+    python3 "${IDENTITIES}" 'review test' "${base_dir}/review-test.json" "${base_dir}/review-test.failure-identities.json"
+  elif [ "${mode}" = malformed ]; then
+    python3 "${IDENTITIES}" 'review test' "${current_dir}/review-test.json" "${current_dir}/review-test.failure-identities.json"
+    cp "${FIXTURES}/malformed.json" "${base_dir}/review-test.failure-identities.json"
+  fi
+  actual="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+  assert_equals "${expected}" "${actual}" "${label}"
+}
+
 counts() { printf '{"success":false,"data":{"test_counts":{"failed":%s,"errors":0}}}' "$1"; }
 
 base_failed_structured='{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}'
@@ -266,5 +286,16 @@ scoped_clean='{"success":false,"data":{"test_counts":{"failed":3,"errors":1},"ch
 gate_case "changed-scope zero introduced failures still passes against a red baseline" \
   '{"review test":"fail"}' "${scoped_clean}" "$(counts 3)" "${base_failed_structured}" \
   '{"review test":"pass"}'
+
+# Identity evidence is intentionally hashes only: provenance artifacts can be
+# retained and downloaded by broad CI audiences without copying test names,
+# paths, assertion messages, or raw output.
+identity_case "same test identities are inherited" same same '{"review test":"baseline_red"}'
+identity_case "candidate-only failure blocks even when counts match" candidate-only same '{"review test":"fail"}'
+identity_case "baseline-only flaky removals are non-blocking" same baseline-only '{"review test":"baseline_red"}'
+identity_case "equal counts with different identities block" different same '{"review test":"fail"}'
+identity_case "aggregate-only identity artifacts fall back to counts" aggregate aggregate '{"review test":"baseline_red"}'
+identity_case "legacy artifacts without identity sidecars remain compatible" aggregate aggregate '{"review test":"baseline_red"}' legacy
+identity_case "malformed identity evidence fails closed" same same '{"review test":"inconclusive"}' malformed
 
 printf 'All differential gate checks passed.\n'

@@ -161,6 +161,35 @@ def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def test_identities(command: str, directory: str) -> tuple[str, set[str] | None]:
+    """Return absent, invalid, incomplete, or complete redacted identity evidence."""
+    path = os.path.join(directory, f"{output_stem(command)}.failure-identities.json")
+    if not os.path.exists(path):
+        return "absent", None
+    evidence = read_json(path)
+    if not isinstance(evidence, dict):
+        return "invalid", None
+    identities = evidence.get("identities")
+    if (
+        evidence.get("schema") != "homeboy/test-failure-identities/v1"
+        or evidence.get("command") != command
+        or not isinstance(identities, list)
+        or not isinstance(evidence.get("truncated"), bool)
+        or len(identities) > 256
+        or any(not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value) for value in identities)
+        or identities != sorted(set(identities))
+    ):
+        return "invalid", None
+    if evidence["truncated"]:
+        return "incomplete", None
+    if not identities:
+        # A valid sidecar without identifiers is explicit aggregate-only
+        # evidence. Keep the established count comparator for that legacy
+        # result shape rather than pretending an empty set identifies failures.
+        return "aggregate", None
+    return "complete", set(identities)
+
+
 def command_label(command: str, metadata: dict[str, Any]) -> str:
     full = metadata.get("command")
     if isinstance(full, str) and full:
@@ -266,6 +295,40 @@ def main() -> int:
                 file=sys.stderr,
             )
             continue
+
+        if base_command == "test":
+            current_identity_status, current_identities = test_identities(command, current_dir)
+            base_identity_status, base_identities = test_identities(command, base_dir)
+            if "invalid" in {current_identity_status, base_identity_status}:
+                adjusted[command] = "inconclusive"
+                print(
+                    f"::warning::Differential gate marked {command} inconclusive: malformed per-test failure identity evidence.",
+                    file=sys.stderr,
+                )
+                continue
+            if "incomplete" in {current_identity_status, base_identity_status}:
+                adjusted[command] = "inconclusive"
+                print(
+                    f"::warning::Differential gate marked {command} inconclusive: bounded per-test failure identity evidence was truncated.",
+                    file=sys.stderr,
+                )
+                continue
+            if current_identities is not None and base_identities is not None:
+                introduced = current_identities - base_identities
+                if introduced:
+                    print(
+                        f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only test failure identity(s).",
+                        file=sys.stderr,
+                    )
+                    continue
+                adjusted[command] = "baseline_red"
+                removed = base_identities - current_identities
+                detail = f"; {len(removed)} baseline-only identity(s) disappeared" if removed else ""
+                print(
+                    f"::warning::Differential gate marked {command} baseline_red: all {len(current_identities)} candidate test failure identity(s) reproduce on the baseline{detail}.",
+                    file=sys.stderr,
+                )
+                continue
 
         if current is None or base is None:
             adjusted[command] = "inconclusive"
