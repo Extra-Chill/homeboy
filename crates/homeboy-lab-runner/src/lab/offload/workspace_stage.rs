@@ -1311,6 +1311,32 @@ mod tests {
     }
 
     #[test]
+    fn replay_staging_fails_closed_when_effective_include_policy_changes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("generated.txt"), "recorded")
+            .expect("write recorded bytes");
+        let mut runner: crate::Runner = serde_json::from_value(serde_json::json!({
+            "kind": "local",
+            "policy": {
+                "snapshot_excludes": ["generated.txt"],
+                "snapshot_includes": ["generated.txt"],
+            },
+        }))
+        .expect("runner policy");
+        let recorded_excludes =
+            crate::generic_lab_replay_transfer_excludes(&runner, workspace.path());
+        let recorded =
+            crate::workspace::immutable_replay_snapshot(workspace.path(), &recorded_excludes)
+                .expect("recorded replay artifact");
+
+        runner.policy.snapshot_includes.clear();
+        let error = prepare_replay_snapshot(&runner, workspace.path(), Some(&recorded.identity))
+            .expect_err("changed effective policy must reject replay");
+
+        assert!(error.message.contains("exclusion policy no longer matches"));
+    }
+
+    #[test]
     fn old_daemon_evidence_refusal_precedes_workspace_sync() {
         let synced = Cell::new(false);
         let error = preflight_before_workspace_sync(
