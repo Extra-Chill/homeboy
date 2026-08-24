@@ -39,11 +39,6 @@ pub mod agent_task_model;
 // and controller lifecycle notifications. Cook's own emitters stay internal.
 pub mod agent_task_notify;
 mod agent_task_process_containment;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Promotion test shards share fixtures and provider helpers."
-)]
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
 #[allow(
