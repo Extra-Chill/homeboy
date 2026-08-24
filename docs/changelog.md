@@ -4,6 +4,68 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.7] - 2026-08-24
+
+### Changed
+- one trace run record, because trace_runs assigns no column
+- key both digest caches on one file identity
+- drop trailing blank line left by probe removal in route.rs
+- seal the crate boundary the facade only looked like it had
+- light up agent_task_lifecycle for the dead-code lint
+- declare the replay/minimize argument set once instead of three times
+- seal the crate boundary so rustc can see inside it
+- delete RawComponent and its two 44-field conversions
+- light up agent_task_scheduler for the dead-code lint
+- collapse the two projection twins onto their source types
+
+### Fixed
+- preserve legacy full-scope baselines
+- route runner artifact promotion locally
+
+## [0.359.6] - 2026-08-24
+
+### Changed
+- light up agent_task_provider for the dead-code lint
+- give external_runtime_ids one derivation
+- light up agent_task_promotion for the dead-code lint
+- collapse RunRecord and StatusArgs fixtures onto Default
+- light up agent_task_finalization for the dead-code lint
+- format isolation assertion
+
+### Fixed
+- capture missing persisted base
+- contain untimed SSH descendants
+- persist Cook output bootstrap
+- diagnose controller admission failures
+- preserve provider selection state
+- Fix explicit rig package boundaries
+- materialize declared broker targets
+- preflight provider model identity
+- isolate terminal batch status stores
+
+## [0.359.5] - 2026-08-24
+
+### Changed
+- light up agent_task_batch for the dead-code lint
+
+## [0.359.4] - 2026-08-24
+
+### Fixed
+- retain controller runtime provenance in full status
+
+## [0.359.3] - 2026-08-24
+
+### Changed
+- collapse two parallel-implementation clusters
+- repair stale baseline fingerprint
+
+### Fixed
+- normalize task provider resolution
+- validate and prune stale baseline rows
+- reject invalid terminal evidence
+- recognize registered linked extension sources
+- break repeated pre-provider failures
+
 ## [0.359.2] - 2026-08-24
 
 ### Fixed

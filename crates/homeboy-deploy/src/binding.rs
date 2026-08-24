@@ -17,9 +17,9 @@ use super::PreparedDeployArtifact;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectPayloadBinding {
-    pub component: Component,
-    pub artifact: PreparedDeployArtifact,
-    pub install_dir: String,
+    pub(crate) component: Component,
+    pub(crate) artifact: PreparedDeployArtifact,
+    pub(crate) install_dir: String,
 }
 
 #[allow(
@@ -28,12 +28,12 @@ pub(crate) struct ProjectPayloadBinding {
 )]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct ProjectPayloadBindingEvidence {
-    pub project_id: String,
-    pub component_id: String,
-    pub install_dir: String,
-    pub strategy: String,
-    pub install: InstallInstructions,
-    pub artifact: PayloadIdentityEvidence,
+    pub(crate) project_id: String,
+    pub(crate) component_id: String,
+    pub(crate) install_dir: String,
+    pub(crate) strategy: String,
+    pub(crate) install: InstallInstructions,
+    pub(crate) artifact: PayloadIdentityEvidence,
 }
 
 #[allow(
@@ -42,10 +42,10 @@ pub(crate) struct ProjectPayloadBindingEvidence {
 )]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct InstallInstructions {
-    pub extract_command: Option<String>,
-    pub remote_owner: Option<String>,
-    pub cli_path: Option<String>,
-    pub hooks: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) extract_command: Option<String>,
+    pub(crate) remote_owner: Option<String>,
+    pub(crate) cli_path: Option<String>,
+    pub(crate) hooks: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[allow(
@@ -54,12 +54,12 @@ pub(crate) struct InstallInstructions {
 )]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct PayloadIdentityEvidence {
-    pub component_id: String,
-    pub size_bytes: u64,
-    pub sha256: String,
-    pub version: String,
-    pub tag: String,
-    pub source_commit: String,
+    pub(crate) component_id: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) sha256: String,
+    pub(crate) version: String,
+    pub(crate) tag: String,
+    pub(crate) source_commit: String,
 }
 
 impl ProjectPayloadBinding {
@@ -67,7 +67,7 @@ impl ProjectPayloadBinding {
         dead_code,
         reason = "No production caller: binding evidence is asserted by this module's tests; nothing emits it on a deploy."
     )]
-    pub fn evidence(&self, project_id: &str) -> ProjectPayloadBindingEvidence {
+    pub(crate) fn evidence(&self, project_id: &str) -> ProjectPayloadBindingEvidence {
         ProjectPayloadBindingEvidence {
             project_id: project_id.to_string(),
             component_id: self.component.id.clone(),

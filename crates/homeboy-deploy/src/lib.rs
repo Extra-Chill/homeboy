@@ -23,29 +23,32 @@ mod transfer;
 mod types;
 mod version_overrides;
 
-// Public API — re-export types and entry points used outside the deploy module
-pub use planning::{
-    bucket_release_states, calculate_release_state, calculate_release_state_from_baseline,
-    classify_release_state,
-};
-// The CLI selects a deployment target explicitly, so this crosses the boundary.
-pub use route::DeployTarget;
+// Public API — every item here is named by `homeboy-cli` or `homeboy-release`.
+// Anything they do not name stays `pub(crate)` so `dead_code` can see it.
 // `homeboy-release` reads artifact digests through this when projecting a
 // release deployment, so it crosses the crate boundary now.
 pub use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
-    DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
-    MultiDeploySummary, PreparedDeployArtifact, PreparedDeployProjection, ProjectDeployResult,
-    ReleaseState, ReleaseStateBuckets, ReleaseStateStatus, VersionSource, VersionSources,
+    DeployConfig, DeployOrchestrationResult, DeploySummary, MultiDeployResult, MultiDeploySummary,
+    PreparedDeployArtifact, PreparedDeployProjection, ProjectDeployResult, ReleaseState,
+    ReleaseStateStatus,
 };
-pub use version_overrides::fetch_remote_versions;
-pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
+// `homeboy status` classifies a component's release state from cached git data.
+pub use planning::calculate_release_state;
+pub use version_overrides::RemoteVersionProbeResult;
+
+// Crate-internal re-exports: deploy's own submodules reach these through
+// `crate::` paths, but nothing outside the crate names them.
+pub(crate) use planning::{bucket_release_states, classify_release_state};
+// The CLI selects a deployment target explicitly and `homeboy-release` names it
+// when projecting a release deployment, so this crosses the boundary.
+pub use route::DeployTarget;
 
 /// Resolve an exact component source reference for a caller-owned preflight.
 /// The resolver is shared with deploy materialization so acceptance criteria do
 /// not diverge between a release-set proof and the eventual deploy action.
-pub fn preflight_exact_ref(
+pub(crate) fn preflight_exact_ref(
     component: &component::Component,
     requested_ref: &str,
 ) -> Result<String> {
@@ -311,23 +314,6 @@ fn preflight_prepared_payload_binding(
     );
     binding::bind_project_payloads(&project, &base_path, &components, &payloads)?;
     Ok(())
-}
-
-/// Read deployed component versions without running deploy planning or git
-/// checks. Status uses this narrow probe to keep timeout diagnostics attached to
-/// the affected dashboard component.
-pub fn fetch_project_remote_versions(
-    project_id: &str,
-    components: &[component::Component],
-) -> Result<RemoteVersionProbeResult> {
-    let project = project::load(project_id)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    Ok(version_overrides::fetch_remote_versions_for_project(
-        components,
-        Some(&project),
-        &base_path,
-        &ctx.client,
-    ))
 }
 
 /// Deadline-aware remote-version probe for interactive project status.

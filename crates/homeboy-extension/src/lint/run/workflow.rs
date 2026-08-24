@@ -671,7 +671,7 @@ fn process_baseline(
 
     if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
         if let Some(existing) =
-            lint_baseline::load_baseline_for_scope(source_path, Some(&provenance))
+            lint_baseline::load_baseline_for_scope_or_legacy_full(source_path, &mut provenance)
         {
             provenance.compared = true;
             let comparison = lint_baseline::compare(lint_findings, &existing);

@@ -18,7 +18,7 @@ use super::workflow::{release_execution_plan, short_sha};
 /// `--recover` repairs Git state only. Keep the remaining release lifecycle
 /// explicit so an orchestration result cannot mistake a pushed tag for a
 /// published release.
-pub const RECOVERY_INCOMPLETE_EXIT_CODE: i32 = 4;
+pub(crate) const RECOVERY_INCOMPLETE_EXIT_CODE: i32 = 4;
 
 fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
     let mut command = format!("homeboy release {} --head", input.component_id);

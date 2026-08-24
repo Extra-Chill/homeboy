@@ -30,18 +30,18 @@ pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
     Ok(input.component_ids)
 }
 
-pub struct DeployResult {
-    pub success: bool,
-    pub exit_code: i32,
-    pub error: Option<String>,
-    pub effect: Option<DeployEffect>,
+pub(crate) struct DeployResult {
+    pub(crate) success: bool,
+    pub(crate) exit_code: i32,
+    pub(crate) error: Option<String>,
+    pub(crate) effect: Option<DeployEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DeployEffect {
-    pub remote_path: String,
-    pub artifact_path: Option<String>,
-    pub verified: bool,
+    pub(crate) remote_path: String,
+    pub(crate) artifact_path: Option<String>,
+    pub(crate) verified: bool,
 }
 
 impl DeployResult {
@@ -123,7 +123,7 @@ pub struct DeployConfig {
 impl DeployConfig {
     /// Build the common status/check configuration: inspect every component,
     /// avoid mutating local checkouts, and compare the current HEAD.
-    pub fn check_all_no_pull_head() -> Self {
+    pub(crate) fn check_all_no_pull_head() -> Self {
         Self {
             component_ids: vec![],
             all: true,
@@ -295,7 +295,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeployArtifactSource {
+pub(crate) enum DeployArtifactSource {
     ReleaseAsset,
     LocalBuild,
     Prepared,
@@ -308,7 +308,7 @@ pub enum DeployArtifactSource {
 /// strategy so the deploy result is explicit and consistent about build provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BuildSource {
+pub(crate) enum BuildSource {
     /// A fresh build ran locally against the checked-out source tree.
     FreshBuild,
     /// An existing local build artifact was reused without rebuilding (`--skip-build`).
@@ -331,7 +331,7 @@ pub enum BuildSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum BuildPhase {
+pub(crate) enum BuildPhase {
     /// The deploy phase built the payload directly.
     Deploy,
     /// Lifecycle payload preparation built the payload before deploy transfer.
@@ -345,18 +345,18 @@ pub enum BuildPhase {
 
 /// Content identity of a deployed artifact file, so stale artifacts are detectable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArtifactIdentity {
+pub(crate) struct ArtifactIdentity {
     /// Path to the artifact that was deployed.
-    pub path: String,
+    pub(crate) path: String,
     /// Size of the artifact in bytes (absent for directory artifacts).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
+    pub(crate) size_bytes: Option<u64>,
     /// SHA-256 of the artifact contents (best-effort; absent for directories).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    pub(crate) sha256: Option<String>,
     /// Last-modified time of the artifact, in seconds since the Unix epoch.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modified_unix: Option<i64>,
+    pub(crate) modified_unix: Option<i64>,
 }
 
 /// Explicit, strategy-complete build provenance for a single component deploy.
@@ -367,51 +367,52 @@ pub struct ArtifactIdentity {
 /// otherwise-implicit "working tree vs. committed ref vs. reused artifact" choice
 /// explicit so stale artifacts cannot ship unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BuildProvenance {
+pub(crate) struct BuildProvenance {
     /// Where the deployed payload came from.
-    pub source: BuildSource,
+    pub(crate) source: BuildSource,
     /// The lifecycle phase in which a build ran. Older persisted provenance did
     /// not include a phase and deserializes as `unknown`.
     #[serde(default)]
-    pub phase: BuildPhase,
+    pub(crate) phase: BuildPhase,
     /// Whether a fresh build ran for this deploy (vs. a reused or downloaded
     /// artifact, or a strategy that ships source directly). When the source is
     /// `prepared_artifact`, `phase` distinguishes an upstream preparation build
     /// from an externally supplied artifact.
-    pub build_ran: bool,
+    pub(crate) build_ran: bool,
     /// The git ref the payload was built/deployed from (tag, or `"<branch> (HEAD)"`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub built_from_ref: Option<String>,
+    pub(crate) built_from_ref: Option<String>,
     /// The commit (HEAD) of the source tree the payload was built/deployed from.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub built_from_commit: Option<String>,
+    pub(crate) built_from_commit: Option<String>,
     /// Whether the built source tree had uncommitted changes (excluding generated
     /// build artifacts). `None` when not applicable (e.g. a downloaded release).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub working_tree_dirty: Option<bool>,
+    pub(crate) working_tree_dirty: Option<bool>,
     /// Identity of the deployed artifact, when the strategy produces an artifact file.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_identity: Option<ArtifactIdentity>,
+    pub(crate) artifact_identity: Option<ArtifactIdentity>,
 }
 
 /// The proof that satisfied a project deployment provenance policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeploymentProvenanceEvidence {
-    pub policy: String,
-    pub kind: String,
-    pub resolved_sha: String,
+pub(crate) struct DeploymentProvenanceEvidence {
+    pub(crate) policy: String,
+    pub(crate) kind: String,
+    pub(crate) resolved_sha: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub requested_ref: Option<String>,
+    pub(crate) requested_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub forge: Option<String>,
+    pub(crate) forge: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reference: Option<String>,
+    pub(crate) reference: Option<String>,
 }
 
 // DeployReason and ComponentStatus moved DOWN to homeboy-release-contract so
 // core's fleet/project/context status mechanics can reference them without a
 // cycle. Re-exported here so the deploy/release code keeps its paths.
-pub use homeboy_release_contract::{ComponentStatus, DeployReason};
+pub use homeboy_release_contract::ComponentStatus;
+pub(crate) use homeboy_release_contract::DeployReason;
 
 /// Compare the configured source version with the version observed on the target.
 ///
@@ -438,43 +439,44 @@ pub fn compare_deployed_versions(
 
 // ReleaseState, ReleaseStateStatus, ReleaseStateBuckets moved DOWN to
 // homeboy-release-contract (see the DeployReason/ComponentStatus note above).
-pub use homeboy_release_contract::{ReleaseState, ReleaseStateBuckets, ReleaseStateStatus};
+pub(crate) use homeboy_release_contract::ReleaseStateBuckets;
+pub use homeboy_release_contract::{ReleaseState, ReleaseStateStatus};
 
 /// Bounded, portable evidence from a local/remote tree comparison.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContentManifestComparison {
-    pub algorithm: String,
-    pub scope: String,
+pub(crate) struct ContentManifestComparison {
+    pub(crate) algorithm: String,
+    pub(crate) scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<ContentManifestProvenance>,
-    pub local_digest: Option<String>,
-    pub remote_digest: Option<String>,
-    pub status: String,
+    pub(crate) provenance: Option<ContentManifestProvenance>,
+    pub(crate) local_digest: Option<String>,
+    pub(crate) remote_digest: Option<String>,
+    pub(crate) status: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub differences: Vec<String>,
+    pub(crate) differences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub diagnostic: Option<String>,
+    pub(crate) diagnostic: Option<String>,
 }
 
 /// The immutable payload identity used as the local side of a content comparison.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContentManifestProvenance {
-    pub source: String,
+pub(crate) struct ContentManifestProvenance {
+    pub(crate) source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_name: Option<String>,
+    pub(crate) artifact_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_sha256: Option<String>,
+    pub(crate) artifact_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_tag: Option<String>,
+    pub(crate) artifact_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_commit: Option<String>,
+    pub(crate) artifact_commit: Option<String>,
 }
 
 /// A declared version target and the path from which that version was observed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionSource {
-    pub file: String,
-    pub path: String,
+pub(crate) struct VersionSource {
+    pub(crate) file: String,
+    pub(crate) path: String,
 }
 
 /// The local file a component's version is read from.
@@ -484,7 +486,7 @@ pub struct VersionSource {
 /// them — one of the edges that made release and deploy circular (#11144).
 /// Local source keeps the shared canonical-target policy; artifacts select their
 /// explicitly mapped shipped targets below.
-pub fn local_version_source(component: &Component) -> Option<VersionSource> {
+pub(crate) fn local_version_source(component: &Component) -> Option<VersionSource> {
     let target = homeboy_version::version::canonical_version_target(component)?;
     Some(VersionSource {
         file: target.file.clone(),
@@ -496,7 +498,7 @@ pub fn local_version_source(component: &Component) -> Option<VersionSource> {
 }
 
 /// The path a component's version is read from inside a built artifact.
-pub fn artifact_version_source(component: &Component) -> Option<VersionSource> {
+pub(crate) fn artifact_version_source(component: &Component) -> Option<VersionSource> {
     let target = artifact_version_targets(component).next()?;
     let file = target
         .artifact_path
@@ -529,13 +531,13 @@ pub(crate) fn artifact_version_targets(
 /// Version-target provenance for deploy output. Every populated source follows
 /// the component-wide all-targets-must-match policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct VersionSources {
+pub(crate) struct VersionSources {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub local: Option<VersionSource>,
+    pub(crate) local: Option<VersionSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact: Option<VersionSource>,
+    pub(crate) artifact: Option<VersionSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote: Option<VersionSource>,
+    pub(crate) remote: Option<VersionSource>,
 }
 
 /// Result for a single component deployment.
@@ -543,46 +545,46 @@ pub struct VersionSources {
 
 pub struct ComponentDeployResult {
     pub id: String,
-    pub status: String,
+    pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deploy_reason: Option<DeployReason>,
+    pub(crate) deploy_reason: Option<DeployReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_status: Option<ComponentStatus>,
+    pub(crate) component_status: Option<ComponentStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_manifest: Option<ContentManifestComparison>,
-    pub local_version: Option<String>,
-    pub remote_version: Option<String>,
+    pub(crate) content_manifest: Option<ContentManifestComparison>,
+    pub(crate) local_version: Option<String>,
+    pub(crate) remote_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub version_sources: Option<VersionSources>,
-    pub local_path: Option<String>,
+    pub(crate) version_sources: Option<VersionSources>,
+    pub(crate) local_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_branch: Option<String>,
+    pub(crate) git_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_head: Option<String>,
+    pub(crate) git_head: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_branch: Option<String>,
+    pub(crate) upstream_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_head: Option<String>,
+    pub(crate) upstream_head: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_worktree: Option<bool>,
+    pub(crate) is_worktree: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub behind_upstream: Option<u32>,
+    pub(crate) behind_upstream: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-    pub error: Option<String>,
-    pub artifact_path: Option<String>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) artifact_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_source: Option<DeployArtifactSource>,
+    pub(crate) artifact_source: Option<DeployArtifactSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_inputs: Vec<ResolvedArtifactInput>,
-    pub remote_path: Option<String>,
-    pub build_exit_code: Option<i32>,
-    pub deploy_exit_code: Option<i32>,
+    pub(crate) artifact_inputs: Vec<ResolvedArtifactInput>,
+    pub(crate) remote_path: Option<String>,
+    pub(crate) build_exit_code: Option<i32>,
+    pub(crate) deploy_exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_state: Option<ReleaseState>,
+    pub(crate) release_state: Option<ReleaseState>,
     /// The git ref (tag or branch) that was built and deployed
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployed_ref: Option<String>,
+    pub(crate) deployed_ref: Option<String>,
     /// Operator-provided exact source selector.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_ref: Option<String>,
@@ -594,21 +596,21 @@ pub struct ComponentDeployResult {
     pub source: Option<String>,
     /// Whether exact-ref identity came from the checkout or its configured remote.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolution_mode: Option<String>,
+    pub(crate) resolution_mode: Option<String>,
     /// Explicit build provenance: source/ref, whether a fresh build ran, and the
     /// identity of the artifact that shipped.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_provenance: Option<BuildProvenance>,
+    pub(crate) build_provenance: Option<BuildProvenance>,
     /// Identity of an upstream-prepared artifact, when used.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prepared_artifact: Option<PreparedDeployArtifact>,
+    pub(crate) prepared_artifact: Option<PreparedDeployArtifact>,
     /// Project policy proof that authorized this component's source.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployment_provenance: Option<DeploymentProvenanceEvidence>,
+    pub(crate) deployment_provenance: Option<DeploymentProvenanceEvidence>,
     /// Extension-owned structured provider result (version, gates, rollback,
     /// and remediation evidence). Core preserves it without interpreting it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployment_provider: Option<serde_json::Value>,
+    pub(crate) deployment_provider: Option<serde_json::Value>,
 }
 
 impl ComponentDeployResult {
@@ -1354,11 +1356,11 @@ pub struct ProjectDeployResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub results: Vec<ComponentDeployResult>,
-    pub summary: DeploySummary,
+    pub(crate) summary: DeploySummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_timings: Option<PhaseTimingReport>,
+    pub(crate) phase_timings: Option<PhaseTimingReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observation_run_id: Option<String>,
+    pub(crate) observation_run_id: Option<String>,
 }
 
 /// Result of a multi-project deployment.
@@ -1388,10 +1390,10 @@ pub struct MultiDeploySummary {
 #[derive(Debug, Clone, Serialize)]
 
 pub struct DeploySummary {
-    pub total: u32,
-    pub succeeded: u32,
+    pub(crate) total: u32,
+    pub(crate) succeeded: u32,
     pub failed: u32,
-    pub skipped: u32,
+    pub(crate) skipped: u32,
 }
 
 /// Result of deploy orchestration for multiple components.

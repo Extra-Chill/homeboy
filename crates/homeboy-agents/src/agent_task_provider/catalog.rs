@@ -147,14 +147,15 @@ impl AgentTaskProviderCatalog {
         apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
     }
 
-    /// Validate explicit model requests before provider dispatch when a provider
-    /// declares its supported models. Providers with no declarations retain a
-    /// provider-generic model namespace.
-    pub fn validate_explicit_models(&self, plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
+    /// Validate the concrete model selection before provider dispatch. A Cook
+    /// candidate needs durable model provenance, so a provider that cannot name
+    /// its selected model is not dispatchable for Cook.
+    pub fn validate_selected_models(&self, plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
         for task in &plan.tasks {
-            let Some(requested) = task.metadata["model_selection"]["requested"].as_str() else {
-                continue;
-            };
+            let selected = task
+                .executor
+                .model()
+                .or_else(|| task.metadata["model_selection"]["selected"].as_str());
             let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
                 &self.providers,
                 &task.executor.backend,
@@ -170,14 +171,31 @@ impl AgentTaskProviderCatalog {
                 .collect::<Vec<_>>();
             supported.sort();
             supported.dedup();
-            if !supported.is_empty() && !supported.iter().any(|model| model == requested) {
+            let Some(selected) = selected.filter(|model| !model.trim().is_empty()) else {
+                // Providers without a declared model catalog can only attest an
+                // actual model at runtime. Preserve that generic adapter path;
+                // terminal provenance remains mandatory before promotion.
+                if supported.is_empty() {
+                    continue;
+                }
                 return Err(Error::validation_invalid_argument(
                     "model",
                     format!(
-                        "provider `{}` does not support requested model `{requested}`",
+                        "provider `{}` has no concrete selected model; pass --model or configure provider model selection",
                         provider.id
                     ),
-                    Some(requested.to_string()),
+                    None,
+                    Some(vec!["Run `homeboy agent-task providers --backend <backend> --validate-readiness` to inspect configured model selection.".to_string()]),
+                ));
+            };
+            if !supported.is_empty() && !supported.iter().any(|model| model == selected) {
+                return Err(Error::validation_invalid_argument(
+                    "model",
+                    format!(
+                        "provider `{}` does not support selected model `{selected}`",
+                        provider.id
+                    ),
+                    Some(selected.to_string()),
                     Some(vec![format!("supported models: {}", supported.join(", "))]),
                 ));
             }
@@ -870,12 +888,34 @@ mod tests {
         );
 
         let error = catalog
-            .validate_explicit_models(&plan)
+            .validate_selected_models(&plan)
             .expect_err("unsupported model");
-        assert!(error.message.contains("does not support requested model"));
+        assert!(error.message.contains("does not support selected model"));
         assert_eq!(
             error.details["tried"][0].as_str(),
             Some("supported models: openai/gpt-5.6-sol, openai/gpt-5.6-terra")
         );
+    }
+
+    #[test]
+    fn selected_model_is_required_before_provider_dispatch() {
+        let catalog = disclosure_catalog();
+        let mut plan = AgentTaskPlan::new("missing-model", Vec::new());
+        plan.tasks.push(
+            serde_json::from_value(serde_json::json!({
+                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+                "task_id": "task",
+                "executor": { "backend": "opencode" },
+                "instructions": "Cook",
+                "workspace": { "mode": "existing" }
+            }))
+            .expect("task"),
+        );
+
+        let error = catalog
+            .validate_selected_models(&plan)
+            .expect_err("missing model must fail before execution");
+        assert_eq!(error.details["field"], "model");
+        assert!(error.message.contains("no concrete selected model"));
     }
 }

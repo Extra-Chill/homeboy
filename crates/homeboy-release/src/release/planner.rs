@@ -35,7 +35,7 @@ pub(super) fn oversized_patch_release_bump(bump: &str, item_count: usize) -> &st
 /// without side effects and by release execution to drive the same steps.
 ///
 /// Requires a clean working tree (uncommitted changes cause an error).
-pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan> {
+pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan> {
     let component = load_component(component_id, options)?;
     let extensions = resolve_extensions(&component)?;
 

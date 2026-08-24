@@ -18,7 +18,7 @@ use crate::agent_task_process_containment::{
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
@@ -1536,15 +1536,6 @@ fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest
         },
         resolved_runtime_tools: Vec::new(),
     }
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 fn spawn_output_reader<R>(

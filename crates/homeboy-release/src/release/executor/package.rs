@@ -28,9 +28,9 @@ const PACKAGE_ACTION_MAX_ATTEMPTS: usize = 2;
 /// Step-specific inputs for package execution, kept together to make every
 /// caller name the release context it passes to a provider.
 pub(crate) struct PackageRequest<'a> {
-    pub component_source_path: Option<&'a str>,
-    pub declared_build_artifact: Option<&'a str>,
-    pub skip_build_validation: bool,
+    pub(crate) component_source_path: Option<&'a str>,
+    pub(crate) declared_build_artifact: Option<&'a str>,
+    pub(crate) skip_build_validation: bool,
 }
 
 /// Invoke the `release.package` action on every extension that provides it,

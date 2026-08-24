@@ -51,6 +51,35 @@ impl RunLifecycleRecord {
         }
     }
 
+    /// Recompute `external_runtime_ids` from `provider_runtime`.
+    ///
+    /// The field is a flattened index of the ids already carried by each entry
+    /// in `provider_runtime`; it exists so a consumer can ask "what external
+    /// runtimes did this run touch" without walking the per-task structure. It
+    /// is therefore never independent data, and any writer that sets
+    /// `provider_runtime` owes a call here.
+    ///
+    /// It stays a serialized field rather than becoming a method because it is
+    /// published in `homeboy/run-lifecycle-record/v1` and this crate cannot see
+    /// its out-of-tree consumers.
+    ///
+    /// Readers that test both this field *and* every entry's own ids are not
+    /// being redundant, and collapsing them onto `provider_runtime` alone
+    /// regresses four lifecycle tests plus a cook adoption test. The field is
+    /// `#[serde(default)]`, so a record written before it existed deserializes
+    /// with an empty vector while `provider_runtime` is populated: for those
+    /// records "the flattened index is empty" and "no entry has ids" are
+    /// genuinely different questions, and the conjunction is what keeps a
+    /// migrated legacy run classified as having had no real provider
+    /// execution. Leave those call sites alone.
+    pub fn refresh_external_runtime_ids(&mut self) {
+        self.external_runtime_ids = self
+            .provider_runtime
+            .iter()
+            .flat_map(|runtime| runtime.external_runtime_ids.clone())
+            .collect();
+    }
+
     pub fn provider_runtime_state(&self) -> ProviderRuntimeState {
         let mut states = self.provider_runtime.iter().map(|runtime| runtime.state);
         let Some(first) = states.next() else {

@@ -30,23 +30,16 @@ pub struct RunOutcomeEnvelope {
     pub result: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunOutcomeProjection {
-    pub schema: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<ArtifactRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_refs: Vec<EvidenceRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub handoffs: Vec<RunOutcomeHandoffRef>,
-}
+/// The inspection view of a run outcome: the same envelope with the opaque
+/// `result` payload cleared.
+///
+/// This used to be a second struct repeating all eight of the envelope's other
+/// fields verbatim, rebuilt field-by-field by `projection()`. `result` is
+/// `#[serde(skip_serializing_if = "Value::is_null")]`, so "the envelope without
+/// `result`" is a *value* of `RunOutcomeEnvelope`, not a second type -- the
+/// distinction was never in the serialized shape. Same collapse as #10310 and
+/// #11137 applied to the artifact-ref twins in `runner_execution_envelope`.
+pub type RunOutcomeProjection = RunOutcomeEnvelope;
 
 impl RunOutcomeEnvelope {
     pub fn new(status: impl Into<String>) -> Self {
@@ -140,16 +133,12 @@ impl RunOutcomeEnvelope {
         });
     }
 
+    /// Inspection view: everything except the opaque `result` payload, which is
+    /// cleared to `Value::Null` so `skip_serializing_if` drops the key.
     pub fn projection(&self) -> RunOutcomeProjection {
-        RunOutcomeProjection {
-            schema: self.schema.clone(),
-            status: self.status.clone(),
-            run_id: self.run_id.clone(),
-            runner_id: self.runner_id.clone(),
-            exit_code: self.exit_code,
-            artifact_refs: self.artifact_refs.clone(),
-            evidence_refs: self.evidence_refs.clone(),
-            handoffs: self.handoffs.clone(),
+        Self {
+            result: Value::Null,
+            ..self.clone()
         }
     }
 
