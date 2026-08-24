@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.1] - 2026-08-24
+
+### Changed
+- delete retry_with_force_and_metadata_in_store
+- replace the glob re-exports with an explicit facade
+
+### Fixed
+- expand preview lifecycle placeholders
+- repair resolver fixture and gate policy
+- validate active worktree providers
+
 ## [0.360.0] - 2026-08-24
 
 ### Added
