@@ -1,15 +1,13 @@
-pub mod file_intent;
-pub mod generate;
-pub mod sources;
-pub mod verify;
+pub(crate) mod file_intent;
+pub(crate) mod generate;
+pub(crate) mod sources;
+pub(crate) mod verify;
 
-pub use generate::generate_audit_fixes;
+pub(crate) use generate::generate_audit_fixes;
+// `lint`, `test`, and `refactor sources` build and run refactor source requests.
 pub use sources::{
-    build_test_refactor_request, collect_refactor_sources, lint_refactor_request, CollectedEdit,
-    LintSourceOptions, RefactorSourceRequest, RefactorSourceRun, SourceOverlap, SourceStageSummary,
-    SourceTotals, TestSourceOptions, KNOWN_REFACTOR_SOURCES,
+    build_test_refactor_request, collect_refactor_sources, lint_refactor_request,
+    LintSourceOptions, RefactorSourceRequest, RefactorSourceRun, SourceTotals, TestSourceOptions,
 };
-pub use verify::{
-    finding_fingerprint, run_audit_refactor, score_delta, weighted_finding_score_with,
-    AuditConvergenceScoring, AuditRefactorIterationSummary, AuditRefactorOutcome,
-};
+// Reachable through `RefactorSourceRun`'s public fields.
+pub use sources::{CollectedEdit, SourceOverlap, SourceStageSummary};

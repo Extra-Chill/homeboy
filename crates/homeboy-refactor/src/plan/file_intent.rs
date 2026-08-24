@@ -18,23 +18,26 @@ use crate::auto::contracts::{Fix, InsertionKind};
 /// Intents are ordered by priority: structural operations dominate content
 /// modifications because they fundamentally change the file's role.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileIntent {
+pub(crate) enum FileIntent {
     /// File stays in place. Content fixes apply normally.
     Normal,
     /// File will be decomposed into submodules with `pub use *` re-exports.
     /// Content fixes that modify imports or visibility are dominated because
     /// decompose handles both through its re-export mechanism.
     Decompose,
-    /// File will be moved/renamed. Import fixes targeting the old path are stale.
-    Move { to: String },
     /// File will be deleted. All content fixes are pointless.
+    ///
+    /// Only `plan::file_intent`'s own tests construct this today; production
+    /// callers set `Normal`/`Decompose`. Kept because `dominated_insertion_kinds`
+    /// and `priority` both encode real behaviour for it.
+    #[allow(dead_code, reason = "constructed only by this module's tests")]
     Delete,
 }
 
 impl FileIntent {
     /// Returns which `InsertionKind` categories are dominated (should be dropped)
     /// when this intent is active on a file.
-    pub fn dominated_insertion_kinds(&self) -> Vec<DominatedKind> {
+    pub(crate) fn dominated_insertion_kinds(&self) -> Vec<DominatedKind> {
         match self {
             FileIntent::Normal => vec![],
             FileIntent::Decompose => vec![
@@ -49,10 +52,6 @@ impl FileIntent {
                 // pub use * re-exports.
                 DominatedKind::ByKind(InsertionKindCategory::ReexportRemoval),
             ],
-            FileIntent::Move { .. } => vec![
-                // Import fixes targeting the old path will be stale after move.
-                DominatedKind::ByKind(InsertionKindCategory::ImportAdd),
-            ],
             FileIntent::Delete => vec![
                 // Everything is pointless on a file being deleted.
                 DominatedKind::All,
@@ -63,7 +62,7 @@ impl FileIntent {
 
 /// What category of insertion is dominated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DominatedKind {
+pub(crate) enum DominatedKind {
     /// A specific insertion kind category.
     ByKind(InsertionKindCategory),
     /// All insertion kinds are dominated.
@@ -75,7 +74,7 @@ pub enum DominatedKind {
 /// We don't match on the full enum (which has struct variants with data)
 /// because conflict resolution only needs the category, not the specifics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InsertionKindCategory {
+pub(crate) enum InsertionKindCategory {
     ImportAdd,
     VisibilityChange,
     ReexportRemoval,
@@ -88,7 +87,7 @@ pub enum InsertionKindCategory {
 
 impl InsertionKindCategory {
     /// Classify an `InsertionKind` into its coarse category.
-    pub fn from_kind(kind: &InsertionKind) -> Self {
+    pub(crate) fn from_kind(kind: &InsertionKind) -> Self {
         match kind {
             InsertionKind::ImportAdd => Self::ImportAdd,
             InsertionKind::VisibilityChange { .. } => Self::VisibilityChange,
@@ -107,12 +106,12 @@ impl InsertionKindCategory {
 /// Built before fix generation so fixers can query it, and used after
 /// generation to resolve conflicts by dropping dominated fixes.
 #[derive(Debug, Default)]
-pub struct FileIntentMap {
+pub(crate) struct FileIntentMap {
     intents: HashMap<String, FileIntent>,
 }
 
 impl FileIntentMap {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             intents: HashMap::new(),
         }
@@ -120,7 +119,7 @@ impl FileIntentMap {
 
     /// Register a structural intent for a file. Higher-priority intents
     /// overwrite lower-priority ones (Delete > Move > Decompose > Normal).
-    pub fn set(&mut self, file: String, intent: FileIntent) {
+    pub(crate) fn set(&mut self, file: String, intent: FileIntent) {
         let dominated = match self.intents.get(&file) {
             Some(existing) => priority(existing) < priority(&intent),
             None => true,
@@ -131,21 +130,27 @@ impl FileIntentMap {
     }
 
     /// Check if a file has a structural intent (anything other than Normal).
-    pub fn has_structural_intent(&self, file: &str) -> bool {
+    ///
+    /// No production caller — exercised only by this module's tests.
+    #[allow(
+        dead_code,
+        reason = "no production caller; asserted by this module's tests"
+    )]
+    pub(crate) fn has_structural_intent(&self, file: &str) -> bool {
         matches!(
             self.intents.get(file),
-            Some(FileIntent::Decompose | FileIntent::Move { .. } | FileIntent::Delete)
+            Some(FileIntent::Decompose | FileIntent::Delete)
         )
     }
 
     /// Get the intent for a file, defaulting to Normal.
-    pub fn get(&self, file: &str) -> &FileIntent {
+    pub(crate) fn get(&self, file: &str) -> &FileIntent {
         self.intents.get(file).unwrap_or(&FileIntent::Normal)
     }
 
     /// Resolve conflicts: remove insertions from fixes that are dominated
     /// by the file's structural intent. Returns the number of insertions dropped.
-    pub fn resolve_conflicts(&self, fixes: &mut Vec<Fix>) -> usize {
+    pub(crate) fn resolve_conflicts(&self, fixes: &mut Vec<Fix>) -> usize {
         let mut total_dropped = 0;
 
         for fix in fixes.iter_mut() {
@@ -189,13 +194,12 @@ fn is_dominated(kind: &InsertionKind, dominated: &[DominatedKind]) -> bool {
     })
 }
 
-/// Priority ordering: Delete > Move > Decompose > Normal.
+/// Priority ordering: Delete > Decompose > Normal.
 fn priority(intent: &FileIntent) -> u8 {
     match intent {
         FileIntent::Normal => 0,
         FileIntent::Decompose => 1,
-        FileIntent::Move { .. } => 2,
-        FileIntent::Delete => 3,
+        FileIntent::Delete => 2,
     }
 }
 

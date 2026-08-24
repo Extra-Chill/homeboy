@@ -6,21 +6,21 @@ use homeboy_code_audit::walker;
 use homeboy_core::engine::symbol_graph;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileRole {
+pub(crate) enum FileRole {
     Regular,
     Index,
     PublicApi,
 }
 
 #[derive(Debug, Clone)]
-pub struct SymbolSurface {
+pub(crate) struct SymbolSurface {
     pub incoming_callers: Vec<String>,
     pub incoming_importers: Vec<String>,
     pub reexport_files: Vec<String>,
 }
 
 impl SymbolSurface {
-    pub fn has_external_usage(&self, owner_file: &str) -> bool {
+    pub(crate) fn has_external_usage(&self, owner_file: &str) -> bool {
         self.incoming_callers.iter().any(|file| file != owner_file)
             || self
                 .incoming_importers
@@ -31,7 +31,7 @@ impl SymbolSurface {
 }
 
 #[derive(Debug, Clone)]
-pub struct ModuleSurface {
+pub(crate) struct ModuleSurface {
     pub file: String,
     pub role: FileRole,
     pub public_api: HashSet<String>,
@@ -41,26 +41,26 @@ pub struct ModuleSurface {
 }
 
 impl ModuleSurface {
-    pub fn owns_public_symbol(&self, symbol: &str) -> bool {
+    pub(crate) fn owns_public_symbol(&self, symbol: &str) -> bool {
         self.public_api.contains(symbol)
     }
 
-    pub fn symbol_surface(&self, symbol: &str) -> Option<&SymbolSurface> {
+    pub(crate) fn symbol_surface(&self, symbol: &str) -> Option<&SymbolSurface> {
         self.symbols.get(symbol)
     }
 
-    pub fn is_api_barrel(&self) -> bool {
+    pub(crate) fn is_api_barrel(&self) -> bool {
         matches!(self.role, FileRole::Index | FileRole::PublicApi)
     }
 }
 
 #[derive(Debug, Default)]
-pub struct ModuleSurfaceIndex {
+pub(crate) struct ModuleSurfaceIndex {
     by_file: HashMap<String, ModuleSurface>,
 }
 
 impl ModuleSurfaceIndex {
-    pub fn build(root: &Path) -> Self {
+    pub(crate) fn build(root: &Path) -> Self {
         let snapshot = walker::walk_source_files_snapshot(root);
         let mut fingerprints = Vec::new();
 
@@ -74,7 +74,7 @@ impl ModuleSurfaceIndex {
         Self::from_fingerprints(root, &fingerprints)
     }
 
-    pub fn from_fingerprints(root: &Path, fingerprints: &[FileFingerprint]) -> Self {
+    pub(crate) fn from_fingerprints(root: &Path, fingerprints: &[FileFingerprint]) -> Self {
         let symbol_refs = symbol_graph::SymbolReferenceIndex::from_files(
             fingerprints
                 .iter()
@@ -90,7 +90,7 @@ impl ModuleSurfaceIndex {
         Self { by_file }
     }
 
-    pub fn get(&self, file: &str) -> Option<&ModuleSurface> {
+    pub(crate) fn get(&self, file: &str) -> Option<&ModuleSurface> {
         self.by_file.get(file)
     }
 

@@ -21,7 +21,7 @@ use homeboy_core::engine::edit_op::{EditOp, InsertAnchor};
 
 /// An `EditOp` with metadata about its origin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaggedEditOp {
+pub(crate) struct TaggedEditOp {
     /// The edit operation.
     #[serde(flatten)]
     pub op: EditOp,
@@ -42,7 +42,7 @@ pub struct TaggedEditOp {
 ///
 /// Most insertions map 1:1 to an EditOp. The `file` parameter is the
 /// relative file path from the parent `Fix`.
-pub fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
+pub(crate) fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
     let op = match &insertion.kind {
         InsertionKind::VisibilityChange { line, from, to } => EditOp::ReplaceText {
             file: file.to_string(),
@@ -160,7 +160,7 @@ pub fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
 }
 
 /// Translate an entire `Fix` into a list of `TaggedEditOp`s.
-pub fn fix_to_edit_ops(fix: &crate::auto::Fix) -> Vec<TaggedEditOp> {
+pub(crate) fn fix_to_edit_ops(fix: &crate::auto::Fix) -> Vec<TaggedEditOp> {
     fix.insertions
         .iter()
         .map(|ins| from_insertion(ins, &fix.file))
@@ -168,7 +168,7 @@ pub fn fix_to_edit_ops(fix: &crate::auto::Fix) -> Vec<TaggedEditOp> {
 }
 
 /// Translate a `NewFile` into a `TaggedEditOp`.
-pub fn new_file_to_edit_op(nf: &crate::auto::NewFile) -> TaggedEditOp {
+pub(crate) fn new_file_to_edit_op(nf: &crate::auto::NewFile) -> TaggedEditOp {
     TaggedEditOp {
         op: EditOp::CreateFile {
             file: nf.file.clone(),
@@ -181,26 +181,12 @@ pub fn new_file_to_edit_op(nf: &crate::auto::NewFile) -> TaggedEditOp {
     }
 }
 
-/// Translate an entire `FixResult` into a flat list of `TaggedEditOp`s.
-///
-/// This is the primary reporting/debugging surface — it shows every edit
-/// the refactor engine would perform, in a unified format.
-pub fn fix_result_to_edit_ops(result: &crate::auto::FixResult) -> Vec<TaggedEditOp> {
-    let mut ops: Vec<TaggedEditOp> = result.fixes.iter().flat_map(fix_to_edit_ops).collect();
-
-    for nf in &result.new_files {
-        ops.push(new_file_to_edit_op(nf));
-    }
-
-    ops
-}
-
 // ============================================================================
 // Manual command conversions
 // ============================================================================
 
 /// Translate a `PropagateEdit` into a `TaggedEditOp`.
-pub fn propagate_edit_to_edit_op(edit: &crate::propagate::PropagateEdit) -> TaggedEditOp {
+pub(crate) fn propagate_edit_to_edit_op(edit: &crate::propagate::PropagateEdit) -> TaggedEditOp {
     TaggedEditOp {
         op: EditOp::InsertLines {
             file: edit.file.clone(),
@@ -215,43 +201,10 @@ pub fn propagate_edit_to_edit_op(edit: &crate::propagate::PropagateEdit) -> Tagg
 }
 
 /// Translate a `PropagateResult` into a list of `TaggedEditOp`s.
-pub fn propagate_result_to_edit_ops(
+pub(crate) fn propagate_result_to_edit_ops(
     result: &crate::propagate::PropagateResult,
 ) -> Vec<TaggedEditOp> {
     result.edits.iter().map(propagate_edit_to_edit_op).collect()
-}
-
-/// Translate a `TransformMatch` into a `TaggedEditOp`.
-pub fn transform_match_to_edit_op(m: &crate::transform::TransformMatch) -> TaggedEditOp {
-    TaggedEditOp {
-        op: EditOp::ReplaceText {
-            file: m.file.clone(),
-            line: m.line,
-            old_text: m.before.clone(),
-            new_text: m.after.clone(),
-        },
-        primitive: None,
-        finding: None,
-        description: format!("Transform: {} → {}", m.before, m.after),
-        manual_only: false,
-    }
-}
-
-/// Translate a `TransformResult` into a list of `TaggedEditOp`s.
-pub fn transform_result_to_edit_ops(
-    result: &crate::transform::TransformResult,
-) -> Vec<TaggedEditOp> {
-    result
-        .rules
-        .iter()
-        .flat_map(|rule| {
-            rule.matches.iter().map(|m| {
-                let mut op = transform_match_to_edit_op(m);
-                op.description = format!("{}: {}", rule.description, op.description);
-                op
-            })
-        })
-        .collect()
 }
 
 // ============================================================================
@@ -259,7 +212,7 @@ pub fn transform_result_to_edit_ops(
 // ============================================================================
 
 /// Translate a `FileRename` into a `TaggedEditOp`.
-pub fn file_rename_to_edit_op(rename: &crate::FileRename) -> TaggedEditOp {
+pub(crate) fn file_rename_to_edit_op(rename: &crate::FileRename) -> TaggedEditOp {
     TaggedEditOp {
         op: EditOp::MoveFile {
             from: rename.from.clone(),
@@ -277,7 +230,7 @@ pub fn file_rename_to_edit_op(rename: &crate::FileRename) -> TaggedEditOp {
 /// Only converts file/directory renames (→ `MoveFile`), not content edits.
 /// Content edits operate at whole-file granularity and are applied directly
 /// by the rename engine.
-pub fn rename_file_moves_to_edit_ops(result: &crate::RenameResult) -> Vec<TaggedEditOp> {
+pub(crate) fn rename_file_moves_to_edit_ops(result: &crate::RenameResult) -> Vec<TaggedEditOp> {
     result
         .file_renames
         .iter()

@@ -17,7 +17,7 @@ use std::path::Path;
 /// 3. Calls `apply_edit_ops()` for unified execution (content edits, file moves, file creates)
 /// 4. Runs `format_after_write()` on all modified files
 /// 5. Runs `rewrite_callers_after_dedup()` for duplicate function fixes
-pub fn apply_fixes_via_edit_ops(
+pub(crate) fn apply_fixes_via_edit_ops(
     fixes: &mut [Fix],
     new_files: &mut [NewFile],
     root: &Path,
@@ -188,7 +188,7 @@ pub fn apply_fixes_via_edit_ops(
 /// The pre-apply file set is computed from `fixes` + `new_files` up front so
 /// we can snapshot originals before the write. Files that don't exist yet
 /// are captured as "created" so the rollback removes them on verify failure.
-pub fn apply_fixes_via_edit_ops_with_verify(
+pub(crate) fn apply_fixes_via_edit_ops_with_verify(
     fixes: &mut [Fix],
     new_files: &mut [NewFile],
     root: &Path,

@@ -86,7 +86,7 @@ impl RenameContext {
     /// - `line`: the full line content
     /// - `col`: 0-indexed byte offset of the match start within the line
     /// - `match_len`: byte length of the matched text
-    pub fn matches(&self, line: &str, col: usize, match_len: usize) -> bool {
+    pub(crate) fn matches(&self, line: &str, col: usize, match_len: usize) -> bool {
         match self {
             RenameContext::All => true,
             RenameContext::Key => is_key_context(line, col, match_len),

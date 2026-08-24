@@ -143,7 +143,7 @@ fn decompose_group_step(group: &DecomposeGroup) -> PlanStep {
 }
 
 impl DecomposePlan {
-    pub fn planned_groups(&self) -> Vec<DecomposeGroup> {
+    pub(crate) fn planned_groups(&self) -> Vec<DecomposeGroup> {
         decompose_groups_from_plan(&self.plan)
     }
 }
@@ -834,7 +834,7 @@ mod tests {
         let content = r#"
 macro_rules! entity_crud {
     ($Entity:ty $(; $($feature:ident),+ )?) => {
-        pub fn load(id: &str) -> Result<$Entity> {
+        pub(crate) fn load(id: &str) -> Result<$Entity> {
             config::load::<$Entity>(id)
         }
     };
@@ -875,7 +875,7 @@ macro_rules! entity_crud {
     #[test]
     fn identify_parent_kept_functions_keeps_root_orchestrator() {
         let content = r#"
-pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
+pub(crate) fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
     audit_path_with_id(component_id, ".")
 }
 
@@ -921,10 +921,10 @@ fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResu
     #[test]
     fn effective_module_root_detects_public_surface_regular_file() {
         let content = r#"
-pub fn load() {}
-pub fn list() {}
-pub fn save() {}
-pub fn delete() {}
+pub(crate) fn load() {}
+pub(crate) fn list() {}
+pub(crate) fn save() {}
+pub(crate) fn delete() {}
 "#;
         assert!(has_established_module_surface(content));
         assert!(is_effective_module_root("src/core/config.rs", content));
@@ -933,8 +933,8 @@ pub fn delete() {}
     #[test]
     fn rebalance_for_viable_parent_surface_preserves_public_root_surface() {
         let content = r#"
-pub fn a() {}
-pub fn b() {}
+pub(crate) fn a() {}
+pub(crate) fn b() {}
 fn helper() {}
 "#;
         let items = [
@@ -986,7 +986,7 @@ use something;
 // Models
 // ============================================================================
 
-pub struct Foo {}
+pub(crate) struct Foo {}
 
 // ============================================================================
 // Git operations

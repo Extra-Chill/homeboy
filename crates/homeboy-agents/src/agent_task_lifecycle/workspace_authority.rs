@@ -344,6 +344,7 @@ fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> St
     ])
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {
     WorkspaceTerminalAuthorityStore::from_environment()?.persist(receipt)
 }

@@ -27,7 +27,7 @@ fn run_transform_single(
     component_id: Option<&str>,
     path: Option<&str>,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
     let set_name = "ad-hoc";
     let set = refactor::ad_hoc_transform(
         request.find,

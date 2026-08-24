@@ -21,6 +21,8 @@ use planning::{
     analyze_stage_overlaps, collect_collected_edits, collect_stage_changed_files,
     summarize_source_totals, FixAccumulator,
 };
+// `SourceTotals` is embedded in the run payload the lint/test reports serialize.
+// `SourceTotals` plus every type reachable through `RefactorSourceRun`'s fields.
 pub use planning::{CollectedEdit, SourceOverlap, SourceStageSummary, SourceTotals};
 #[cfg(test)]
 use stages::{
@@ -31,7 +33,7 @@ use stages::{
     run_test_stage, AuditStageRequest,
 };
 
-pub const KNOWN_REFACTOR_SOURCES: &[&str] = &["audit", "lint", "test"];
+pub(crate) const KNOWN_REFACTOR_SOURCES: &[&str] = &["audit", "lint", "test"];
 
 #[derive(Debug, Clone)]
 pub struct RefactorSourceRequest {

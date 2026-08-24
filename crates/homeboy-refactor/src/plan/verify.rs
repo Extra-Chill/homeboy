@@ -5,9 +5,7 @@ use homeboy_extension as extension;
 use serde::Serialize;
 use std::path::Path;
 
-pub use homeboy_code_audit::{
-    finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
-};
+pub(crate) use homeboy_code_audit::{weighted_finding_score_with, AuditConvergenceScoring};
 
 pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
     use homeboy_core::engine::symbol_graph;
@@ -61,7 +59,7 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AuditRefactorIterationSummary {
+pub(crate) struct AuditRefactorIterationSummary {
     pub findings_before: usize,
     pub findings_after: usize,
     pub weighted_score_before: usize,
@@ -74,14 +72,13 @@ pub struct AuditRefactorIterationSummary {
 }
 
 #[derive(Debug, Clone)]
-pub struct AuditRefactorOutcome {
-    pub current_result: CodeAuditResult,
+pub(crate) struct AuditRefactorOutcome {
     pub fix_result: fixer::FixResult,
     pub policy_summary: fixer::PolicySummary,
     pub iteration_summary: Option<AuditRefactorIterationSummary>,
 }
 
-pub fn run_audit_refactor(
+pub(crate) fn run_audit_refactor(
     initial_result: CodeAuditResult,
     only_kinds: &[homeboy_audit_contract::AuditFinding],
     exclude_kinds: &[homeboy_audit_contract::AuditFinding],
@@ -131,7 +128,6 @@ pub fn run_audit_refactor(
     }
 
     Ok(AuditRefactorOutcome {
-        current_result,
         fix_result: final_fix_result,
         policy_summary: final_policy_summary,
         iteration_summary: final_iteration_summary,

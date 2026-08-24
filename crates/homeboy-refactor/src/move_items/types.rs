@@ -19,7 +19,7 @@ pub enum ItemKind {
 
 /// Behavioral options for move operations.
 #[derive(Debug, Clone, Copy)]
-pub struct MoveOptions {
+pub(crate) struct MoveOptions {
     /// Whether related test functions should be moved alongside requested items.
     pub move_related_tests: bool,
     /// Skip rewriting import paths in caller files across the codebase.
@@ -82,7 +82,7 @@ pub struct MovedItem {
 
 /// A submodule entry for module index generation.
 #[derive(Debug, Clone)]
-pub struct ModuleIndexEntry {
+pub(crate) struct ModuleIndexEntry {
     /// Module name (e.g., "types", "unreleased").
     pub name: String,
     /// Public items that should be re-exported. Empty = glob re-export.
@@ -91,7 +91,7 @@ pub struct ModuleIndexEntry {
 
 /// A single import rewrite in a caller file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ImportRewrite {
+pub(crate) struct ImportRewrite {
     /// Line number (1-indexed) in the file.
     pub line: usize,
     /// Original line text.
