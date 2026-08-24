@@ -28,6 +28,8 @@ pub struct AgentTaskProviderEvidenceInput {
     pub source: String,
 }
 
+pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Each source is limited to 64 MiB.";
+
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
     /// Deterministic verification command that must pass before the cook
@@ -682,6 +684,32 @@ mod tests {
         CookHelpCli::command().render_long_help().to_string()
     }
 
+    fn rendered_cook_batch_help() -> String {
+        use clap::CommandFactory;
+
+        crate::cli_surface::Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("fanout")
+            .expect("fanout command")
+            .find_subcommand("cook-batch")
+            .expect("cook-batch command")
+            .clone()
+            .render_long_help()
+            .to_string()
+    }
+
+    #[test]
+    fn provider_evidence_help_and_parse_diagnostic_share_the_declaration_contract() {
+        let error = parse_provider_evidence_input("/absolute/path")
+            .expect_err("bare provider evidence paths must be rejected");
+        assert!(error.contains(PROVIDER_EVIDENCE_DECLARATION), "{error}");
+
+        for help in [rendered_cook_help(), rendered_cook_batch_help()] {
+            assert!(help.contains(PROVIDER_EVIDENCE_DECLARATION), "{help}");
+        }
+    }
+
     #[test]
     fn cook_help_does_not_leak_internal_refactoring_prose() {
         // #9898/#9907: help must describe the operator contract, never the Rust
@@ -949,10 +977,7 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
-    /// Read-only external file streamed into a private, digest-addressed
-    /// projection in `.homeboy/evidence/<id>/` (64 MiB maximum per file).
-    /// Repeat for each source the provider may read.
-    #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
+    #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
@@ -1080,8 +1105,9 @@ pub struct CookPromptSnapshot {
 pub(crate) fn parse_provider_evidence_input(
     value: &str,
 ) -> Result<AgentTaskProviderEvidenceInput, String> {
-    serde_json::from_str(value)
-        .map_err(|error| format!("invalid provider evidence declaration: {error}"))
+    serde_json::from_str(value).map_err(|error| {
+        format!("invalid provider evidence declaration: {error}. {PROVIDER_EVIDENCE_DECLARATION}")
+    })
 }
 
 #[derive(Args, Clone, Debug)]
