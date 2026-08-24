@@ -57,6 +57,8 @@ pub(crate) struct RuntimeTempPin {
 #[derive(Debug)]
 pub struct RuntimeTempOwner {
     path: PathBuf,
+    exported_path: PathBuf,
+    runtime_tmp_alias: Option<PathBuf>,
     pin: Option<RuntimeTempPin>,
 }
 
@@ -64,8 +66,35 @@ impl RuntimeTempOwner {
     /// Allocate a metadata-backed child temp root before launching a workload.
     pub fn allocate(prefix: &str, producer: &str) -> Result<Self> {
         let (path, pin) = managed_run_temp_dir_for_producer(prefix, Some(producer))?;
+        let exported = (|| {
+            let runtime_root = crate::engine::invocation::invocation_runtime_root()?;
+            fs::create_dir_all(&runtime_root).map_err(|error| {
+                Error::internal_io(
+                    format!(
+                        "Failed to create socket-safe runtime directory {}: {error}",
+                        runtime_root.display()
+                    ),
+                    Some("runtime.tmp.alias.root".to_string()),
+                )
+            })?;
+            crate::engine::invocation::exported_runtime_tmp_dir(
+                &runtime_root,
+                &crate::engine::invocation::short_invocation_id(),
+                &path,
+            )
+        })();
+        let (exported_path, runtime_tmp_alias) = match exported {
+            Ok(exported) => exported,
+            Err(error) => {
+                drop(pin);
+                let _ = fs::remove_dir_all(&path);
+                return Err(error);
+            }
+        };
         Ok(Self {
             path,
+            exported_path,
+            runtime_tmp_alias,
             pin: Some(pin),
         })
     }
@@ -87,7 +116,7 @@ impl RuntimeTempOwner {
 
     /// Environment variables understood by common child toolchains.
     pub fn child_env_vars(&self) -> Vec<(String, String)> {
-        let path = self.path.display().to_string();
+        let path = self.exported_path.display().to_string();
         vec![
             ("TMPDIR".to_string(), path.clone()),
             ("TMP".to_string(), path.clone()),
@@ -109,6 +138,7 @@ impl RuntimeTempOwner {
         let runtime_tmpdir_env = runtime_tmpdir_env();
         let data_dir_env = crate::product_identity::PRODUCT_IDENTITY.env_var("DATA_DIR");
         let product_id = crate::product_identity::PRODUCT_IDENTITY.data_dirname;
+        let alias_name = format!("{}.t", crate::engine::invocation::short_invocation_id());
 
         format!(
             r#"set -eu
@@ -123,6 +153,16 @@ else
 fi
 mkdir -p "$runtime_tmp_root"
 runtime_tmp_dir="$(mktemp -d "$runtime_tmp_root/homeboy-runner-tmp.XXXXXX")"
+if [ -d /tmp ] && [ -w /tmp ]; then
+  runtime_tmp_alias_root="/tmp/hb-$(id -u)"
+elif [ -n "${{XDG_RUNTIME_DIR:-}}" ]; then
+  runtime_tmp_alias_root="$XDG_RUNTIME_DIR/hb"
+else
+  runtime_tmp_alias_root="${{TMPDIR:-$HOME/.cache}}/hb"
+fi
+mkdir -p "$runtime_tmp_alias_root"
+runtime_tmp_alias="$runtime_tmp_alias_root/{alias_name}"
+ln -s "$runtime_tmp_dir" "$runtime_tmp_alias"
 runtime_tmp_owner="$runtime_tmp_dir/{RUN_OWNER_FILE}"
 runtime_tmp_pin="$runtime_tmp_dir/{RUNTIME_TEMP_PIN_FILE}"
 runtime_tmp_created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -142,13 +182,14 @@ runtime_tmp_finish() {{
   else
     runtime_tmp_write_owner failed "remote workload exited with status $runtime_tmp_status" "$runtime_tmp_completed"
   fi
+  rm -f "$runtime_tmp_alias"
   rm -f "$runtime_tmp_pin"
   exit "$runtime_tmp_status"
 }}
 trap 'runtime_tmp_finish 143' HUP INT TERM
 set +e
 (
-  export TMPDIR="$runtime_tmp_dir" TMP="$runtime_tmp_dir" TEMP="$runtime_tmp_dir"
+  export TMPDIR="$runtime_tmp_alias" TMP="$runtime_tmp_alias" TEMP="$runtime_tmp_alias"
   {command}
 )
 runtime_tmp_status="$?"
@@ -160,6 +201,9 @@ runtime_tmp_finish "$runtime_tmp_status""#
 
 impl Drop for RuntimeTempOwner {
     fn drop(&mut self) {
+        if let Some(alias) = &self.runtime_tmp_alias {
+            let _ = fs::remove_file(alias);
+        }
         mark_run_dir_succeeded(&self.path);
         self.pin.take();
     }
@@ -2354,8 +2398,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let path = PathBuf::from(fs::read_to_string(&ready).expect("remote workload temp path"));
-        assert!(path.exists());
+        let exported_path =
+            PathBuf::from(fs::read_to_string(&ready).expect("remote workload temp path"));
+        let path = fs::canonicalize(&exported_path).expect("durable remote workload temp path");
+        assert_ne!(exported_path, path);
 
         let mut options = bounded_options(true, Some("homeboy-runner-tmp"));
         options.managed_older_than_days = Some(0);
@@ -2372,6 +2418,7 @@ mod tests {
 
         fs::write(&release, []).expect("release remote workload");
         assert!(child.wait().expect("wait remote workload").success());
+        assert!(!exported_path.exists());
 
         let terminal = cleanup_runtime_tmp_bounded(options).expect("terminal cleanup");
         assert_eq!(terminal.removed_count, 1);
