@@ -358,6 +358,8 @@ pub fn run_upgrade_with_method(
                 // input, even when it was inferred from the source install.
                 source_upgrade_path.is_some(),
                 runner_targets,
+                &candidate_version,
+                &extension::available_extension_ids(),
             )
         })?
     };

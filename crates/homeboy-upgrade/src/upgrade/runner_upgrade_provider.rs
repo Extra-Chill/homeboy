@@ -16,8 +16,10 @@ use homeboy_core::error::Result;
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
-    /// Validate that selected runners can receive a source upgrade before the
-    /// controller build/install begins. Returns one entry per failed runner.
+    /// Read-only admission for selected runners before any controller,
+    /// extension, or runner mutation. Implementations validate source inputs
+    /// when relevant and runner extension manifests against `candidate_version`.
+    /// Returns one bounded failure entry per runner.
     #[allow(clippy::too_many_arguments)]
     fn preflight_configured_runners_for_upgrade(
         &self,
@@ -25,6 +27,8 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         source_path: Option<&Path>,
         explicit_source_path: bool,
         runner_targets: &[String],
+        candidate_version: &str,
+        extension_ids: &[String],
     ) -> Result<Vec<RunnerUpgradeEntry>>;
 
     /// Upgrade the configured runners from an explicit source checkout,
@@ -58,6 +62,8 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _source_path: Option<&Path>,
         _explicit_source_path: bool,
         _runner_targets: &[String],
+        _candidate_version: &str,
+        _extension_ids: &[String],
     ) -> Result<Vec<RunnerUpgradeEntry>> {
         Ok(Vec::new())
     }

@@ -16,11 +16,9 @@ pub fn preflight_configured_runners_for_upgrade(
     source_path: Option<&Path>,
     explicit_source_path: bool,
     runner_targets: &[String],
+    candidate_version: &str,
+    extension_ids: &[String],
 ) -> Result<Vec<RunnerUpgradeEntry>> {
-    if method_override != Some(InstallMethod::Source) || source_path.is_none() {
-        return Ok(Vec::new());
-    }
-
     let runners = runner_upgrade_targets(runner_targets)?;
     let mut failures = Vec::new();
     for runner in &runners {
@@ -33,44 +31,134 @@ pub fn preflight_configured_runners_for_upgrade(
             .homeboy_path
             .clone()
             .unwrap_or_else(|| "homeboy".to_string());
-        let materialized = if explicit_source_path {
-            materialize_explicit_runner_source_path(
+        if method_override == Some(InstallMethod::Source) && source_path.is_some() {
+            let materialized = if explicit_source_path {
+                materialize_explicit_runner_source_path(
+                    runner,
+                    source_path.expect("source path checked"),
+                )
+            } else {
+                materialize_runner_source_path(runner, source_path.expect("source path checked"))
+            };
+            let source_path = match materialized {
+                Ok(path) => path,
+                Err(error) => {
+                    failures.push(runner_upgrade_failure_entry(
+                        &runner.id,
+                        homeboy_path.clone(),
+                        None,
+                        1,
+                        format!("runner preflight materialization failed: {}", error.message),
+                    ));
+                    continue;
+                }
+            };
+            if let Some(detail) = prepare_runner_source_checkout_for_upgrade(
                 runner,
-                source_path.expect("source path checked"),
-            )
-        } else {
-            materialize_runner_source_path(runner, source_path.expect("source path checked"))
-        };
-        let source_path = match materialized {
-            Ok(path) => path,
-            Err(error) => {
+                method_override,
+                Some(&source_path),
+                &mut runner::exec,
+            ) {
                 failures.push(runner_upgrade_failure_entry(
                     &runner.id,
-                    homeboy_path,
+                    homeboy_path.clone(),
                     None,
                     1,
-                    format!("runner preflight materialization failed: {}", error.message),
+                    format!("runner preflight source checkout failed: {detail}"),
                 ));
                 continue;
             }
-        };
-        if let Some(detail) = prepare_runner_source_checkout_for_upgrade(
-            runner,
-            method_override,
-            Some(&source_path),
-            &mut runner::exec,
-        ) {
+        }
+        if let Some(detail) =
+            runner_manifest_preflight(runner, &homeboy_path, candidate_version, extension_ids)
+        {
             failures.push(runner_upgrade_failure_entry(
                 &runner.id,
                 homeboy_path,
                 None,
                 1,
-                format!("runner preflight source checkout failed: {detail}"),
+                detail,
             ));
         }
     }
 
     Ok(failures)
+}
+
+/// Query only the runner's manifest summary. This admission does not install,
+/// refresh, or materialize extensions; those operations remain after promotion.
+fn runner_manifest_preflight(
+    runner: &Runner,
+    homeboy_path: &str,
+    candidate_version: &str,
+    extension_ids: &[String],
+) -> Option<String> {
+    for extension_id in extension_ids {
+        if !runner_supports_extension_sync(runner, extension_id) {
+            continue;
+        }
+        let mut options = runner_exec_options(
+            runner,
+            vec![
+                homeboy_path.to_string(),
+                "extension".to_string(),
+                "show".to_string(),
+                extension_id.clone(),
+            ],
+        );
+        options.print_handoff = false;
+        options.mirror_evidence = false;
+        options.read_only_artifact_access = true;
+        let Ok((output, exit_code)) = runner::exec(&runner.id, options) else {
+            return Some(format!(
+                "runner manifest preflight could not query extension `{extension_id}`"
+            ));
+        };
+        if exit_code != 0 {
+            return Some(format!("runner manifest preflight failed for extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
+        }
+        let Some(requires_homeboy) = runner_extension_requires_homeboy(&output.stdout) else {
+            continue;
+        };
+        match homeboy_extension::evaluate_core_compatibility_for_version(
+            Some(&requires_homeboy),
+            None,
+            candidate_version,
+        ) {
+            Ok(report) if report.status != "incompatible" => {}
+            Ok(_) => return Some(format!("runner extension `{extension_id}` requires homeboy {requires_homeboy}, incompatible with selected controller {candidate_version}; recover with: {homeboy_path} extension update {extension_id}")),
+            Err(error) => return Some(format!("runner extension `{extension_id}` has invalid homeboy compatibility declaration: {}; recover with: {homeboy_path} extension show {extension_id}", error.message)),
+        }
+    }
+    None
+}
+
+fn runner_extension_requires_homeboy(stdout: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    value
+        .pointer("/data/extension/core_compatibility/requires_homeboy")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod manifest_preflight_tests {
+    use super::runner_extension_requires_homeboy;
+
+    #[test]
+    fn reads_runner_manifest_compatibility_from_extension_show_json() {
+        let stdout = r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}}}}"#;
+        assert_eq!(
+            runner_extension_requires_homeboy(stdout).as_deref(),
+            Some(">=2.0.0, <3.0.0")
+        );
+    }
+
+    #[test]
+    fn ignores_extension_show_without_a_compatibility_declaration() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"example"}}}"#;
+        assert!(runner_extension_requires_homeboy(stdout).is_none());
+    }
 }
 
 pub(crate) fn upgrade_configured_runners(
