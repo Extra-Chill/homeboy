@@ -19,6 +19,8 @@ HOMEBOY_ROOT="${FIXTURE_ROOT}/config/homeboy"
 EXTENSION_DIR="${HOMEBOY_ROOT}/extensions/wordpress"
 mkdir -p "${EXTENSION_DIR}" "${HOMEBOY_ROOT}/extensions/scripts"
 cp -R "${WORDPRESS_ROOT}/scripts" "${EXTENSION_DIR}/scripts"
+cp -R "${WORDPRESS_ROOT}/lib" "${EXTENSION_DIR}/lib"
+cp "${WORDPRESS_ROOT}/wordpress.json" "${EXTENSION_DIR}/wordpress.json"
 ln -s "${REPOSITORY_ROOT}/agent-runtimes" "${HOMEBOY_ROOT}/agent-runtimes"
 ln -s "${REPOSITORY_ROOT}/scripts/lib" "${HOMEBOY_ROOT}/extensions/scripts/lib"
 
@@ -94,12 +96,19 @@ case "$parse_output" in
     *) fail "Expected installed result parser to report WP Codebox counts, got: ${parse_output}" ;;
 esac
 
-# An incomplete install must name what is missing instead of emitting a bare
-# MODULE_NOT_FOUND stack that says nothing about shared-asset packaging.
+# WordPress-owned runtime selection remains available without the experimental
+# shared runtime. Wrappers that still consume shared runtimes must name what is
+# missing instead of emitting a bare MODULE_NOT_FOUND stack.
 rm "${HOMEBOY_ROOT}/agent-runtimes"
-missing_output="$(HOMEBOY_SETTINGS_JSON='{}' fixture_node "${EXTENSION_DIR}/scripts/test/wp-codebox-phpunit-adapter.mjs" 2>&1)"
+adapter_output="$(HOMEBOY_SETTINGS_JSON='{}' fixture_node "${EXTENSION_DIR}/scripts/test/wp-codebox-phpunit-adapter.mjs" 2>&1)"
+case "$adapter_output" in
+    *HOMEBOY_COMPONENT_PATH*) ;;
+    *) fail "Expected installed PHPUnit adapter to remain independent of shared runtimes, got: ${adapter_output}" ;;
+esac
+
+missing_output="$(fixture_node "${EXTENSION_DIR}/scripts/agent/homeboy-opencode-agent-task-executor.cjs" </dev/null 2>&1)"
 missing_status=$?
-[ "$missing_status" -ne 0 ] || fail "Expected missing shared runtime to fail the adapter"
+[ "$missing_status" -ne 0 ] || fail "Expected missing shared runtime to fail the opencode wrapper"
 case "$missing_output" in
     *"could not resolve shared agent runtime file"*"${HOMEBOY_ROOT}/agent-runtimes"*"homeboy extension install wordpress"*) ;;
     *) fail "Expected an actionable missing-runtime diagnostic, got: ${missing_output}" ;;

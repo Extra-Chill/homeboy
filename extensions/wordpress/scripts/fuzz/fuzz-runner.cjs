@@ -284,7 +284,7 @@ function wpCodeboxRuntimeCommand(env) {
 		preflightWpCodeboxCommand,
 		preflightWpCodeboxRuntime,
 		wpCodeboxCommand,
-	} = require(path.join(resolveWpCodeboxRuntimePath({ env }), 'lib', 'wp-codebox-runtime-selection.js'));
+	} = require('../../lib/wp-codebox-runtime-selection.js');
 	const runtimePreflight = preflightWpCodeboxRuntime({ env });
 	if (!runtimePreflight.ready) {
 		throw wpCodeboxPreflightError(runtimePreflight);

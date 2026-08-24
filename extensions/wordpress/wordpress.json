@@ -4,6 +4,9 @@
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
+  "wp_codebox": {
+    "minimum_version": "0.21.0"
+  },
   "env_provider": {
     "script": "scripts/env-provider.js"
   },

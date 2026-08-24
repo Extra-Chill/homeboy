@@ -7,9 +7,9 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const require = createRequire(import.meta.url);
-const { preflightWpCodeboxCommand } = require(path.join(root, 'agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js'));
+const { preflightWpCodeboxCommand } = require(path.join(root, 'wordpress/lib/wp-codebox-runtime-selection.js'));
 const readiness = path.join(root, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'agent-runtimes/wp-codebox/wp-codebox.json'), 'utf8'));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-wp-codebox-runner-readiness-'));

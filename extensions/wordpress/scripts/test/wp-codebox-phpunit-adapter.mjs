@@ -18,12 +18,7 @@ import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpu
 import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCrashDetector } from '../lib/wp-codebox-runtime-crash.mjs';
 
 const require = createRequire(import.meta.url);
-// Shared agent runtimes install beside the extensions directory, so their path
-// relative to this script differs between a checkout and an install. Resolving
-// through the helper keeps both layouts loadable and turns an incomplete
-// install into a diagnostic instead of a MODULE_NOT_FOUND stack (#12585).
-const { requireAgentRuntimeModule } = require('../lib/agent-runtime-paths.cjs');
-const { preflightWpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
+const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
