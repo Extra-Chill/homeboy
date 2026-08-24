@@ -158,9 +158,28 @@ SHA="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" || fail "failed to read resultin
 CLI="$CANDIDATE_DIR/packages/cli/dist/index.js"
 [ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
 VERSION="$($CLI --version 2>&1)" || fail "built WP Codebox CLI version probe failed: $CLI. Rebuild the requested ref with a compatible WP Codebox CLI."
-printf '%s\n' "$VERSION" | grep -Eq '(^|[^0-9])v?0\.(2[1-9]|[3-9][0-9]|[1-9][0-9]{2,})\.[0-9]+([^0-9]|$)' || fail "built WP Codebox CLI does not satisfy the required >=0.21.0 version: ${VERSION:-unavailable}. Update the requested ref and retry."
 DESCRIPTOR="$($CLI runtime descriptor --json 2>&1)" || fail "built WP Codebox CLI runtime descriptor probe failed: $CLI. Rebuild the requested ref with browser preview support."
-printf '%s' "$DESCRIPTOR" | node -e 'let descriptor; try { descriptor = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch { process.exit(1); } process.exit(descriptor?.schema === "wp-codebox/runtime-descriptor/v1" && descriptor?.readiness?.status === "available" && descriptor?.readiness?.browserRuntime?.status === "ready" && descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen === "wp-codebox/browser-contained-site-open/v1" ? 0 : 1);' || fail "built WP Codebox CLI is missing required browser preview capability wp-codebox/browser-contained-site-open/v1: ${DESCRIPTOR:-unavailable}. Update the requested ref and retry."
+PREFLIGHT_OUTPUT="$(node - "$VERSION" "$DESCRIPTOR" <<'NODE'
+const [versionOutput, descriptorOutput] = process.argv.slice(2);
+const versionMatch = versionOutput.match(/\bv?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\b/);
+const version = versionMatch ? `${versionMatch[1]}.${versionMatch[2]}.${versionMatch[3]}${versionMatch[4] ? `-${versionMatch[4]}` : ''}` : '';
+const minimum = [0, 21, 0];
+const parts = versionMatch ? versionMatch.slice(1, 4).map(Number) : [];
+const comparison = parts.reduce((result, part, index) => result || part - minimum[index], 0);
+const tooOld = !version || comparison < 0 || Boolean(versionMatch?.[4] && comparison === 0);
+if (tooOld) {
+  process.stdout.write(`WP Codebox wp_codebox_version_too_old: required >=0.21.0, observed ${version || 'unavailable'}.\n`);
+  process.exit(1);
+}
+try {
+  const descriptor = JSON.parse(descriptorOutput);
+  if (descriptor?.schema !== 'wp-codebox/runtime-descriptor/v1' || descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen !== 'wp-codebox/browser-contained-site-open/v1') throw new Error();
+} catch {
+  process.stdout.write(`WP Codebox wp_codebox_browser_preview_capability_missing: required >=0.21.0, observed ${version}.\n`);
+  process.exit(1);
+}
+NODE
+)" || fail "${PREFLIGHT_OUTPUT:-built WP Codebox CLI preflight failed}. Update the requested ref and retry."
 CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
 printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CANDIDATE_DIR/.homeboy-runtime-identity.json" || fail "failed to record staged WP Codebox runtime identity"
 
