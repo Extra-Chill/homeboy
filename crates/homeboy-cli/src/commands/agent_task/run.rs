@@ -24,9 +24,9 @@ use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::defaults;
 use homeboy::core::engine::shell::quote_args;
 use homeboy::core::worktree_providers::{
-    plan_apply_enabled_worktree_provider_from_config,
-    provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
-    WorktreeProviderCreatePlan,
+    plan_apply_enabled_worktree_provider_with_lifecycle_from_config,
+    provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCleanupPolicy,
+    WorktreeProviderCreateIntent, WorktreeProviderCreatePlan, WorktreeProviderLifecycleIntent,
 };
 
 use super::super::agent_task_dispatch::DispatchArgs;
@@ -301,6 +301,7 @@ pub(crate) fn preview_cook(
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
+    bind_cook_preview_lifecycle(&mut args);
     record_preview_phase(&mut progress, "destination_resolution");
     let (args, mut provision) = resolve_cook_preview_destination(args)?;
     project_preview_dirty_admission(&mut provision);
@@ -560,14 +561,16 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
         .any(|parts| parts == ["agent-task", "cook"])
         && process_argv.iter().any(|part| part == "--preview")
     {
-        return redact_preview_replay_argv(
-            std::iter::once("homeboy".to_string()).chain(
+        let mut replay = std::iter::once("homeboy".to_string())
+            .chain(
                 process_argv
                     .into_iter()
                     .skip(1)
                     .filter(|part| part != "--preview"),
-            ),
-        );
+            )
+            .collect::<Vec<_>>();
+        append_preview_lifecycle_replay_argv(&mut replay, args);
+        return redact_preview_replay_argv(replay);
     }
 
     redact_preview_replay_argv(cook_replay_argv(args))
@@ -603,6 +606,12 @@ fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if let Some(model) = &args.dispatch.model {
         argv.extend(["--model".to_string(), model.clone()]);
     }
+    if let Some(run_id) = &args.dispatch.run_id {
+        argv.extend(["--run-id".to_string(), run_id.clone()]);
+    }
+    if let Some(run_id) = &args.attempt_run_id {
+        argv.extend(["--attempt-run-id".to_string(), run_id.clone()]);
+    }
     if let Some(worktree) = &args.to_worktree {
         argv.extend(["--to-worktree".to_string(), worktree.clone()]);
     }
@@ -622,6 +631,35 @@ fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
         argv.push("--draft-pr".to_string());
     }
     argv
+}
+
+fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
+    let requested_cook_id = args.dispatch.run_id.clone();
+    let owner_run_ref = args.attempt_run_id.clone().unwrap_or_else(|| {
+        requested_cook_id.as_deref().map_or_else(
+            || format!("agent-task-{}", uuid::Uuid::new_v4()),
+            |cook_id| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1),
+        )
+    });
+    args.dispatch.run_id = Some(requested_cook_id.unwrap_or_else(|| owner_run_ref.clone()));
+    args.attempt_run_id = Some(owner_run_ref);
+}
+
+fn append_preview_lifecycle_replay_argv(argv: &mut Vec<String>, args: &AgentTaskCookArgs) {
+    for (flag, value) in [
+        ("--run-id", args.dispatch.run_id.as_ref()),
+        ("--attempt-run-id", args.attempt_run_id.as_ref()),
+    ] {
+        if !argv
+            .iter()
+            .any(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
+        {
+            argv.extend([
+                flag.to_string(),
+                value.expect("preview lifecycle is bound").clone(),
+            ]);
+        }
+    }
 }
 
 fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
@@ -979,11 +1017,15 @@ mod preview_tests {
         crate::test_support::with_isolated_home(|home| {
             let temp = tempfile::tempdir().expect("tempdir");
             let marker = temp.path().join("ensure-called");
+            let plan_argv = temp.path().join("plan-argv");
+            let planned_workspace = temp.path().join("planned-workspace");
             let provider = temp.path().join("provider.sh");
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$5\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) printf '%s\\n' \"$0\" \"$@\" > '{}'; printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@fix-issue-12890-repo\",\"path\":\"{}\",\"branch\":\"fix/issue-12890-repo\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nensure) touch '{}' ;;\nesac\n",
+                    plan_argv.display(),
+                    planned_workspace.display(),
                     marker.display(),
                 ),
             )
@@ -1018,6 +1060,10 @@ mod preview_tests {
                             "{base}".to_string(),
                             "{head}".to_string(),
                             "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
                         ]),
                         ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
                         ..Default::default()
@@ -1047,6 +1093,10 @@ mod preview_tests {
                     "--preview",
                     "--backend",
                     "fixture",
+                    "--run-id",
+                    "preview-cook",
+                    "--attempt-run-id",
+                    "preview-owner",
                     "--prompt",
                     "implement the issue",
                     "--repo",
@@ -1068,14 +1118,30 @@ mod preview_tests {
             );
             assert_eq!(
                 preview["resolved"]["workspace"]["path"],
-                "/provider/planned/fixture@fix-issue-12890-repo"
+                planned_workspace.display().to_string()
             );
             assert_eq!(preview["resolved"]["workspace"]["intent"]["base"], "main");
             assert_eq!(
                 preview["resolved"]["workspace"]["intent"]["head"],
                 "fix/issue-12890-repo"
             );
+            assert_eq!(
+                std::fs::read_to_string(&plan_argv).expect("captured plan argv"),
+                format!(
+                    "{}\nplan\nfixture@fix-issue-12890-repo\nfixture\nmain\nfix/issue-12890-repo\nhttps://example.test/owner/repo/issues/12890\nfixture@fix-issue-12890-repo:fixture:main:fix/issue-12890-repo\nagent_task_cook\npreview-owner\nremove_on_success\n",
+                    provider.display(),
+                )
+            );
+            assert!(preview["replay_argv"]
+                .as_array()
+                .expect("replay argv")
+                .windows(2)
+                .any(|pair| pair == ["--attempt-run-id", "preview-owner"]));
             assert!(!marker.exists(), "preview must not invoke ensure");
+            assert!(
+                !planned_workspace.exists(),
+                "preview must not create the planned workspace"
+            );
             assert_eq!(
                 std::fs::read_dir(home).expect("read isolated home").count(),
                 before
@@ -3338,7 +3404,19 @@ fn resolve_cook_preview_destination(
                 if issue_derived && error.details["worktree_provider_lookup"] == "not_found" =>
             {
                 let intent = cook_workspace_create_intent(&args)?;
-                let plan = match plan_apply_enabled_worktree_provider_from_config(&intent, &config) {
+                let lifecycle = WorktreeProviderLifecycleIntent {
+                    purpose: "agent_task_cook".to_string(),
+                    owner_run_ref: args
+                        .attempt_run_id
+                        .clone()
+                        .expect("preview lifecycle is bound before destination resolution"),
+                    cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                };
+                let plan = match plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
+                    &intent,
+                    &lifecycle,
+                    &config,
+                ) {
                     Ok(plan) => plan,
                     Err(error) => {
                         return Ok((args, unresolved_provider_preview(&handle, error)));

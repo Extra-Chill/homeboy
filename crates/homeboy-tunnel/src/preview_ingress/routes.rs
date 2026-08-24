@@ -64,7 +64,7 @@ pub fn list_routes() -> Result<Vec<PreviewIngressRoute>> {
     Ok(routes)
 }
 
-pub fn status(
+pub(crate) fn status(
     bind: Option<String>,
     domain: Option<String>,
     public_host_pattern: Option<String>,

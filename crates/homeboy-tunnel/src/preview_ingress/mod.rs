@@ -15,16 +15,26 @@ mod routes;
 mod serve;
 mod types;
 
+// `tunnel preview-ingress` names these directly.
 pub use install::{render_install_plan, render_install_status_plan};
-pub use routes::{list_routes, register_route, remove_route, status, status_for_host};
+pub use routes::{list_routes, register_route, remove_route, status_for_host};
 pub use serve::serve;
-pub(crate) use serve::{PREVIEW_WEBSOCKET_MAX_FRAME_BYTES, PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES};
+pub use types::{
+    PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
+    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
+};
+
+// Reachable through the public plan/status structs' fields.
 pub use types::{
     PreviewIngressFailure, PreviewIngressInstallCheck, PreviewIngressInstallCheckStatus,
-    PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
-    PreviewIngressRoute, PreviewIngressRouteLifecycle, PreviewIngressRouteStatus,
-    PreviewIngressServeSpec, PreviewIngressStatus, PreviewIngressWrite,
+    PreviewIngressRouteStatus, PreviewIngressWrite,
 };
+
+#[allow(unused_imports)]
+pub(crate) use routes::status;
+pub(crate) use serve::{PREVIEW_WEBSOCKET_MAX_FRAME_BYTES, PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES};
+#[allow(unused_imports)]
+pub(crate) use types::PreviewIngressRouteLifecycle;
 
 #[cfg(test)]
 pub(crate) use serve::serve_listener;

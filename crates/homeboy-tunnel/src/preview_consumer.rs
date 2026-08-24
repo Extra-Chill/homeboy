@@ -479,7 +479,7 @@ pub(crate) fn resolve_artifacts_dir(
 }
 
 /// Build a filesystem-safe artifact slug from a consumer id.
-pub fn safe_artifact_slug(value: &str) -> String {
+pub(crate) fn safe_artifact_slug(value: &str) -> String {
     let slug: String = value
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
