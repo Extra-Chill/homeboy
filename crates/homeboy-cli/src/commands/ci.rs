@@ -23,8 +23,9 @@ use failure_log_triage::{CiFailureTriageOutput, CiFailureTriageRequest};
 use gate::{DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::refactor::auto::transaction::{
-    self, CiContext, TransactionOutcome, TransactionRequest, AUTOFIX_COMMIT_PREFIX,
+use homeboy::refactor::{
+    run_autofix_transaction, CiContext, TransactionOutcome, TransactionRequest,
+    AUTOFIX_COMMIT_PREFIX,
 };
 use plan::{CiEventContext, CiPlan};
 use scope::{GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest};
@@ -495,7 +496,7 @@ fn run_autofix(args: CiAutofixArgs) -> CmdResult<CiOutput> {
         .clone()
         .unwrap_or_else(|| AUTOFIX_COMMIT_PREFIX.to_string());
 
-    let outcome = transaction::run_autofix_transaction(TransactionRequest {
+    let outcome = run_autofix_transaction(TransactionRequest {
         repo_path: &ctx.source_path,
         component: &ctx.component,
         ci,

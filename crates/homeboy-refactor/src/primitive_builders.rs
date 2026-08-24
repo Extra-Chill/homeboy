@@ -1,7 +1,7 @@
 use crate::auto::{Insertion, InsertionKind, NewFile, RefactorPrimitive};
 use homeboy_audit_contract::AuditFinding;
 
-pub fn insertion(
+pub(crate) fn insertion(
     kind: InsertionKind,
     finding: AuditFinding,
     code: String,
@@ -38,26 +38,7 @@ pub(crate) fn tagged_insertion(
     }
 }
 
-pub fn line_replacement(
-    finding: AuditFinding,
-    line: usize,
-    old_text: String,
-    new_text: String,
-    description: String,
-) -> Insertion {
-    insertion(
-        InsertionKind::LineReplacement {
-            line,
-            old_text,
-            new_text,
-        },
-        finding,
-        String::new(),
-        description,
-    )
-}
-
-pub fn tagged_line_replacement(
+pub(crate) fn tagged_line_replacement(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     line: usize,
@@ -78,7 +59,7 @@ pub fn tagged_line_replacement(
     )
 }
 
-pub fn range_removal(
+pub(crate) fn range_removal(
     finding: AuditFinding,
     start_line: usize,
     end_line: usize,
@@ -95,7 +76,7 @@ pub fn range_removal(
     )
 }
 
-pub fn tagged_range_removal(
+pub(crate) fn tagged_range_removal(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     start_line: usize,
@@ -114,11 +95,7 @@ pub fn tagged_range_removal(
     )
 }
 
-pub fn import_add(finding: AuditFinding, code: String, description: String) -> Insertion {
-    insertion(InsertionKind::ImportAdd, finding, code, description)
-}
-
-pub fn tagged_import_add(
+pub(crate) fn tagged_import_add(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     code: String,
@@ -133,22 +110,7 @@ pub fn tagged_import_add(
     )
 }
 
-pub fn visibility_change(
-    finding: AuditFinding,
-    line: usize,
-    from: String,
-    to: String,
-    description: String,
-) -> Insertion {
-    insertion(
-        InsertionKind::VisibilityChange { line, from, to },
-        finding,
-        String::new(),
-        description,
-    )
-}
-
-pub fn tagged_visibility_change(
+pub(crate) fn tagged_visibility_change(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     line: usize,
@@ -165,7 +127,7 @@ pub fn tagged_visibility_change(
     )
 }
 
-pub fn function_removal(
+pub(crate) fn function_removal(
     finding: AuditFinding,
     start_line: usize,
     end_line: usize,
@@ -183,27 +145,7 @@ pub fn function_removal(
     )
 }
 
-pub fn doc_reference_update(
-    finding: AuditFinding,
-    line: usize,
-    old_ref: String,
-    new_ref: String,
-    code: String,
-    description: String,
-) -> Insertion {
-    insertion(
-        InsertionKind::DocReferenceUpdate {
-            line,
-            old_ref,
-            new_ref,
-        },
-        finding,
-        code,
-        description,
-    )
-}
-
-pub fn tagged_doc_reference_update(
+pub(crate) fn tagged_doc_reference_update(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     line: usize,
@@ -225,7 +167,11 @@ pub fn tagged_doc_reference_update(
     )
 }
 
-pub fn doc_line_removal(finding: AuditFinding, line: usize, description: String) -> Insertion {
+pub(crate) fn doc_line_removal(
+    finding: AuditFinding,
+    line: usize,
+    description: String,
+) -> Insertion {
     insertion(
         InsertionKind::DocLineRemoval { line },
         finding,
@@ -234,7 +180,7 @@ pub fn doc_line_removal(finding: AuditFinding, line: usize, description: String)
     )
 }
 
-pub fn tagged_doc_line_removal(
+pub(crate) fn tagged_doc_line_removal(
     primitive: RefactorPrimitive,
     finding: AuditFinding,
     line: usize,
@@ -249,19 +195,19 @@ pub fn tagged_doc_line_removal(
     )
 }
 
-pub fn manual_only(mut insertion: Insertion) -> Insertion {
+pub(crate) fn manual_only(mut insertion: Insertion) -> Insertion {
     insertion.manual_only = true;
     insertion
 }
 
 /// Mark an insertion as manual-only with a specific blocked reason.
-pub fn manual_blocked(mut insertion: Insertion, reason: String) -> Insertion {
+pub(crate) fn manual_blocked(mut insertion: Insertion, reason: String) -> Insertion {
     insertion.manual_only = true;
     insertion.blocked_reason = Some(reason);
     insertion
 }
 
-pub fn new_file(
+pub(crate) fn new_file(
     finding: AuditFinding,
     file: String,
     content: String,

@@ -66,7 +66,11 @@ fn annotate_new_file_for_policy(new_file: &mut NewFile, _write: bool, policy: &F
     true
 }
 
-pub fn apply_fix_policy(result: &mut FixResult, write: bool, policy: &FixPolicy) -> PolicySummary {
+pub(crate) fn apply_fix_policy(
+    result: &mut FixResult,
+    write: bool,
+    policy: &FixPolicy,
+) -> PolicySummary {
     let mut summary = PolicySummary::default();
 
     result.fixes = result

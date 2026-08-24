@@ -38,7 +38,7 @@ pub enum GuardBlock {
 
 impl GuardBlock {
     /// Machine-readable status string for the action to consume.
-    pub fn status(&self) -> &'static str {
+    pub(crate) fn status(&self) -> &'static str {
         match self {
             Self::Reverted => "skipped-reverted",
             Self::ForcePushed => "skipped-force-pushed",
@@ -49,7 +49,7 @@ impl GuardBlock {
     }
 
     /// Human-readable explanation.
-    pub fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match self {
             Self::Reverted => "a previous autofix commit was reverted on this branch".to_string(),
             Self::ForcePushed => {
@@ -70,7 +70,7 @@ impl GuardBlock {
 
 /// Result of running autofix guards.
 #[derive(Debug)]
-pub enum GuardResult {
+pub(crate) enum GuardResult {
     /// All guards passed — safe to proceed with writes.
     Proceed,
     /// One or more guards blocked — do not write.
@@ -79,7 +79,7 @@ pub enum GuardResult {
 
 /// Configuration for autofix guards, read from environment or config.
 #[derive(Debug, Clone)]
-pub struct GuardConfig {
+pub(crate) struct GuardConfig {
     /// Maximum consecutive autofix commits before blocking (default: 2).
     pub max_commits: usize,
     /// GitHub repository (owner/repo). Read from GITHUB_REPOSITORY.
@@ -94,7 +94,7 @@ pub struct GuardConfig {
 
 impl GuardConfig {
     /// Build config from environment variables (CI context).
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let github_repo = std::env::var("GITHUB_REPOSITORY").ok();
         let github_token = std::env::var("GH_TOKEN")
             .or_else(|_| std::env::var("GITHUB_TOKEN"))
@@ -164,7 +164,7 @@ impl GuardConfig {
 /// with the reason if autofix should be skipped.
 ///
 /// Guards are checked in priority order — the first block wins.
-pub fn check_guards(path: &str, config: &GuardConfig) -> GuardResult {
+pub(crate) fn check_guards(path: &str, config: &GuardConfig) -> GuardResult {
     // Outside CI, no guards apply — local dev always proceeds.
     if !config.is_ci() {
         return GuardResult::Proceed;

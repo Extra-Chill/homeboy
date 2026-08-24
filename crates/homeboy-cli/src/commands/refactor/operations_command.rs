@@ -209,7 +209,7 @@ fn run_move_single(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
 
     if write {
         homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
@@ -275,7 +275,7 @@ fn run_move_file_single(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
 
     if write {
         homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
@@ -285,7 +285,7 @@ fn run_move_file_single(
         );
     }
 
-    let result = refactor::move_items::move_file(file, to, &root, write)?;
+    let result = refactor::move_file(file, to, &root, write)?;
     let exit_code = if result.imports_updated > 0 || result.mod_declarations_updated {
         0
     } else {
@@ -322,7 +322,7 @@ fn run_propagate_single(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
     let config = refactor::PropagateConfig {
         struct_name,
         definition_file,
@@ -386,7 +386,7 @@ fn run_collapse_defaults_single(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
 
     if write {
         // Capture an undo snapshot of the files the collapse would touch before
@@ -459,7 +459,7 @@ fn run_decompose_single(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
     let plan = refactor::build_plan(file, &root, strategy)?;
 
     if write {

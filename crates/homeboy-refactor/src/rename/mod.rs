@@ -21,12 +21,11 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// Public API re-exports — external `use crate::rename::X` paths
-// keep working unchanged.
-pub use engine::{
-    apply_renames, find_references, find_references_with_targeting, generate_renames,
-    generate_renames_with_targeting,
-};
+// `refactor rename` and `refs` call the targeting-aware entry points; the
+pub use engine::{apply_renames, find_references_with_targeting, generate_renames_with_targeting};
+// The rename targeting vocabulary is spelled directly by both command surfaces.
+// The targeting vocabulary, plus the result/reference types the rename and
+// refs entry points return and the `CaseVariant` list `RenameSpec` exposes.
 pub use types::{
     CaseVariant, FileEdit, FileRename, Reference, RenameContext, RenameResult, RenameScope,
     RenameSpec, RenameTargeting, RenameWarning,
@@ -36,6 +35,8 @@ pub use types::{
 // `super::*`). These are not part of the public API.
 #[cfg(test)]
 use casing::{capitalize, pluralize, split_words};
+#[cfg(test)]
+use engine::{find_references, generate_renames};
 #[cfg(test)]
 use homeboy_core::engine::codebase_scan::{find_boundary_matches, find_literal_matches};
 #[cfg(test)]

@@ -1,6 +1,5 @@
-use crate::auto::{
-    parse_fix_results_file, standard_outcome, summarize_optional_fix_results, AutofixMode,
-};
+use crate::auto::sidecar::parse_fix_results_file;
+use crate::auto::{standard_outcome, summarize_optional_fix_results, AutofixMode};
 
 #[test]
 fn test_standard_outcome_dry_run_preview() {

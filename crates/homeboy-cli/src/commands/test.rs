@@ -1518,7 +1518,7 @@ mod tests {
     use clap::Parser;
     use homeboy::core::component::Component;
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
-    use homeboy::refactor::plan::{build_test_refactor_request, TestSourceOptions};
+    use homeboy::refactor::{build_test_refactor_request, TestSourceOptions};
     use homeboy_extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
     use std::path::PathBuf;

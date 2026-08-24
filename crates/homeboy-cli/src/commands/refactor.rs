@@ -3,7 +3,7 @@ use homeboy::core::code_audit::AuditFinding;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::refactor::{
-    self, auto, AddResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
+    self, AddResult, FixResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -520,7 +520,7 @@ fn matches_hot_refactor_source(source: &str) -> bool {
 #[serde(tag = "command")]
 pub enum RefactorOutput {
     #[serde(rename = "refactor.sources")]
-    Sources(homeboy::refactor::plan::RefactorSourceRun),
+    Sources(homeboy::refactor::RefactorSourceRun),
 
     #[serde(rename = "refactor.rename")]
     Rename {
@@ -541,7 +541,7 @@ pub enum RefactorOutput {
     AddFromAudit {
         source_path: String,
         #[serde(flatten)]
-        fix_result: auto::FixResult,
+        fix_result: FixResult,
         dry_run: bool,
     },
 
@@ -563,7 +563,7 @@ pub enum RefactorOutput {
     #[serde(rename = "refactor.move_file")]
     MoveFile {
         #[serde(flatten)]
-        result: refactor::move_items::MoveFileResult,
+        result: refactor::MoveFileResult,
     },
 
     #[serde(rename = "refactor.propagate")]
@@ -937,8 +937,8 @@ fn run_refactor_sources_single(
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
     let source_path = ctx.source_path.clone();
-    let sources = homeboy::refactor::plan::collect_refactor_sources(
-        homeboy::refactor::plan::RefactorSourceRequest {
+    let sources =
+        homeboy::refactor::collect_refactor_sources(homeboy::refactor::RefactorSourceRequest {
             component: ctx.component,
             root: ctx.source_path,
             sources: requested_sources,
@@ -949,12 +949,11 @@ fn run_refactor_sources_single(
                 .iter()
                 .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
                 .collect(),
-            lint: homeboy::refactor::plan::LintSourceOptions::default(),
-            test: homeboy::refactor::plan::TestSourceOptions::default(),
+            lint: homeboy::refactor::LintSourceOptions::default(),
+            test: homeboy::refactor::TestSourceOptions::default(),
             write,
             force,
-        },
-    )?;
+        })?;
     let exit_code = if sources.files_modified > 0 { 1 } else { 0 };
 
     // --commit: stage all changes and create a commit with a structured message
@@ -1033,7 +1032,7 @@ fn run_rename_single(
     let scope = RenameScope::from_str(scope)?;
     let rename_context = RenameContext::from_str(context)?;
 
-    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let root = refactor::resolve_root(component_id, path)?;
 
     let explicit_variants = parse_rename_variants(variants)?;
     let mut spec = if literal {
