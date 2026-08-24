@@ -82,7 +82,7 @@ if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "inconclusive")' > /dev/null; then
     echo "::warning::One or more quality commands were inconclusive; preserving evidence without failing the PR"
   fi
-  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any((.key == "lint" or .key == "test" or .key == "review lint" or .key == "review test") and .value == "no_measurement")' > /dev/null; then
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "no_measurement" and (.key | test("^(review[[:space:]]+)?(lint|test)([[:space:]]|$)")))' > /dev/null; then
     echo "::error::Required lint or test commands produced no measurement; this is not acceptable gate evidence."
     FAILED=true
   fi

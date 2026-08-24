@@ -80,8 +80,18 @@ assert_exit 1 "no_measurement required Test results fail PR" \
   env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 assert_exit 1 "no_measurement required Lint results fail PR" \
   env RESULTS='{"review lint":"no_measurement"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "no_measurement suffixed lint results fail PR" \
+  env RESULTS='{"lint component":"no_measurement"}' COMMANDS='lint component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "no_measurement suffixed test results fail PR" \
+  env RESULTS='{"test component":"no_measurement"}' COMMANDS='test component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "no_measurement suffixed review lint results fail PR" \
+  env RESULTS='{"review lint component":"no_measurement"}' COMMANDS='review lint component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "no_measurement suffixed review test results fail PR" \
+  env RESULTS='{"review test component":"no_measurement"}' COMMANDS='review test component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 assert_exit 0 "no_measurement Audit remains candidate-only" \
   env RESULTS='{"review audit":"no_measurement"}' COMMANDS='review audit' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 0 "no_measurement suffixed Audit remains candidate-only" \
+  env RESULTS='{"review audit component":"no_measurement"}' COMMANDS='review audit component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 1 "invalid Test evidence fails final enforcement" \
   env RESULTS='{"review test":"invalid_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
