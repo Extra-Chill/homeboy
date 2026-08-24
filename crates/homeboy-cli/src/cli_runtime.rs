@@ -2051,10 +2051,25 @@ fn preflight_composed_lab_route(
     let Ok((resources, _)) = crate::commands::resources::run_preflight() else {
         return None;
     };
-    let readiness = hot_command
+    let mut readiness = hot_command
         .lab_offload_supported
         .then(|| crate::runner::lab_runner_readiness().ok())
         .flatten();
+    let observed_at_ms = unix_timestamp_ms();
+    if hot_command.lab_offload_supported
+        && options.runner.is_none()
+        && !matches!(options.placement, crate::cli_surface::Placement::Local)
+        && resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref())
+            .is_some()
+    {
+        if let Some(observed) = readiness.take() {
+            let (resolved, _) = resolve_terminal_lab_inventory(observed, observed_at_ms, || {
+                let refreshed = crate::runner::refresh_lab_runner_readiness_for_admission()?;
+                Ok((refreshed, unix_timestamp_ms()))
+            });
+            readiness = Some(resolved);
+        }
+    }
     let warning =
         resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref());
     let runner_hosted = resource_policy::is_runner_hosted_exec();

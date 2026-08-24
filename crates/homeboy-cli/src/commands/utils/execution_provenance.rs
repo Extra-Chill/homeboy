@@ -62,7 +62,7 @@ pub fn capture_composed(
             },
             "resolved_execution": { "location": execution.0, "runner_id": execution.1 },
             "resource_policy": {
-                "decision_origin": if runner.is_some() || matches!(placement, Placement::Local | Placement::Lab) { "explicit" } else { "automatic" },
+                "decision_origin": decision_origin(placement, runner.is_some(), execution.0),
                 "preflight": crate::commands::utils::resource_policy::captured_context().as_ref().map(crate::commands::utils::resource_policy::resource_policy_context_to_json),
             },
         }));
@@ -91,11 +91,7 @@ fn build_with_execution(
     let argv = redact_execution_argv(normalized_args);
     let rerun_command = homeboy::core::redaction::redact_argv_shell_display(&argv);
     let placement = placement_name(cli.placement);
-    let decision_origin = match (cli.runner.is_some(), cli.placement, location) {
-        (true, _, _) | (_, Placement::Local | Placement::Lab, _) => "explicit",
-        (_, Placement::LabOrLocal, "controller") => "fallback",
-        _ => "automatic",
-    };
+    let decision_origin = decision_origin(cli.placement, cli.runner.is_some(), location);
 
     json!({
         "schema": SCHEMA,
@@ -209,6 +205,14 @@ fn placement_name(placement: Placement) -> &'static str {
     }
 }
 
+fn decision_origin(placement: Placement, has_runner: bool, location: &str) -> &'static str {
+    match (has_runner, placement, location) {
+        (true, _, _) | (_, Placement::Local | Placement::Lab, _) => "explicit",
+        (_, Placement::LabOrLocal, "controller") => "fallback",
+        _ => "automatic",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +271,26 @@ mod tests {
             .as_str()
             .expect("rerun command")
             .contains("--placement=lab-or-local"));
+    }
+
+    #[test]
+    fn composed_decision_origin_matches_builtin_semantics() {
+        assert_eq!(
+            decision_origin(Placement::LabOrLocal, false, "controller"),
+            "fallback"
+        );
+        assert_eq!(
+            decision_origin(Placement::Lab, false, "controller"),
+            "explicit"
+        );
+        assert_eq!(
+            decision_origin(Placement::Auto, true, "controller"),
+            "explicit"
+        );
+        assert_eq!(
+            decision_origin(Placement::Auto, false, "controller"),
+            "automatic"
+        );
     }
 
     #[test]
