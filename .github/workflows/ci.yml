@@ -267,7 +267,7 @@ jobs:
     # (sharded Test result retrieval works across reruns), #424 (extension-owned
     # Cargo build and quality caches), and #425 (cache ownership assertions).
     # Refs #10997 and #11751 W1-2, W1-5, W1-6, W1-7, W1-10.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@5d7f0525567d085725ec0b66bfee3100abf1923e
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@1db8e159b381accb965125108266d4031d7f6feb
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
