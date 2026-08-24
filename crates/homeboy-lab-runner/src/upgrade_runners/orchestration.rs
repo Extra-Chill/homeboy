@@ -889,11 +889,20 @@ fn refresh_managed_immutable_runner(
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
     let recovery_commands = managed_immutable_runner_recovery_commands(&runner.id);
+    let Some(controller_commit) = homeboy_product_identity::build_identity().git_commit else {
+        return managed_immutable_runner_failure_entry(
+            &runner.id,
+            previous_homeboy_path,
+            previous_version,
+            1,
+            "managed immutable runner refresh requires the controller's immutable commit identity; no mutable version-tag recovery action was emitted".to_string(),
+        );
+    };
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
         mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(crate::homeboy_refresh::controller_refresh_ref()),
+        git_ref: Some(controller_commit),
         target_dir: None,
         reconnect: true,
         force: false,
