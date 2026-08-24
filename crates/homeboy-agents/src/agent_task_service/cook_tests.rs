@@ -8633,6 +8633,26 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
                 "base",
             ],
         );
+        let base = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .expect("resolve declared base")
+                .stdout,
+        )
+        .expect("base is UTF-8")
+        .trim()
+        .to_string();
+        git(
+            &repository,
+            &[
+                "remote",
+                "add",
+                "origin",
+                repository.to_str().expect("repository path"),
+            ],
+        );
         git(
             &repository,
             &[
@@ -8672,6 +8692,8 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             provenance: None,
         })
         .expect("register destination workspace");
+        // Model an interruption after recipe persistence and before the
+        // declared base capture can complete.
         super::super::persist_initial_recipe(&options).expect("persist durable recipe");
         assert!(super::super::load_recipe(cook_id)
             .expect("load durable recipe")
@@ -8720,6 +8742,13 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             false,
         )
         .expect("continuation repairs and dispatches recipe-bound retry");
+        assert_eq!(
+            super::super::load_recipe(cook_id)
+                .expect("resumed recipe captures declared base")
+                .finalization["task_base_sha"],
+            serde_json::json!(base)
+        );
+        git(&destination, &["remote", "remove", "origin"]);
         let repeated = run_cook_spine(
             &ambient_recipe_store,
             &ambient_lifecycle_store,
@@ -8729,7 +8758,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             None,
             false,
         )
-        .expect("repeated continuation remains idempotent");
+        .expect("captured continuation does not require origin");
 
         assert_eq!(result.value.status, "in_flight", "{result:#?}");
         assert_eq!(result.value.latest_run_id.as_deref(), Some(stranded_run_id));
