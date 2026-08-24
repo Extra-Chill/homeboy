@@ -94,16 +94,11 @@ fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
         let (bounded, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
             bounded: true,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("bounded status");
         let evidence = AgentTaskEvidenceRef {
@@ -303,30 +298,19 @@ fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
             status(StatusArgs {
                 run_id: retry_run_id.clone(),
                 exact: true,
-                bridge: false,
-                since_cursor: None,
-                full: false,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
                 interval: "5s".to_string(),
                 timeout: "30m".to_string(),
+                ..Default::default()
             })
             .expect("compact status")
             .0,
             status(StatusArgs {
                 run_id: retry_run_id.clone(),
                 exact: true,
-                bridge: false,
-                since_cursor: None,
                 full: true,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
                 interval: "5s".to_string(),
                 timeout: "30m".to_string(),
+                ..Default::default()
             })
             .expect("full status")
             .0,
@@ -372,16 +356,9 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
 
         let (value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status");
 
@@ -408,16 +385,10 @@ fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
 
         let (value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("full status");
 
@@ -911,16 +882,10 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "cook-cli-preflight-recovery".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
@@ -946,16 +911,10 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         assert_eq!(
             status(StatusArgs {
                 run_id: "cook-cli-preflight-recovery".to_string(),
-                exact: false,
-                bridge: false,
-                since_cursor: None,
                 full: true,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
                 interval: "5s".to_string(),
                 timeout: "30m".to_string(),
+                ..Default::default()
             })
             .expect("resumed Cook status")
             .0["metadata"]["worktree_provision"]["action"],
@@ -1012,16 +971,10 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status reports recipe-only Cook without mutation");
         assert_eq!(status_exit, 0);
@@ -1953,16 +1906,10 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "run-cli-controller-proxy".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
@@ -2237,30 +2184,19 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
-            exact: false,
             bridge: true,
             since_cursor: Some(0),
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("bridge status loaded");
         assert_eq!(
@@ -2300,16 +2236,9 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
@@ -2460,16 +2389,10 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 
         let (status_value, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-diagnose-evidence".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -2726,16 +2649,10 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
 
         let (status_value, status_exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
 
@@ -2825,16 +2742,10 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
         assert_eq!(
@@ -3303,16 +3214,10 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
 
         let (status_value, status_exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -3794,16 +3699,10 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_full_readers_lo
         let started = std::time::Instant::now();
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            bridge: false,
-            since_cursor: None,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("read status without a runner");
         let (diagnose_value, _) = diagnose(DiagnoseArgs {
@@ -4199,15 +4098,10 @@ fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
         let (value, exit_code) = status(StatusArgs {
             run_id: "run-cli-quarantine-diagnostic".to_string(),
             exact: true,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("exact full status");
 
@@ -4641,16 +4535,11 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
 
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
             bridge: true,
             since_cursor: Some(1),
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("bridge resume reconciles terminal projection");
 
@@ -4678,16 +4567,11 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
 
         resume(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
             bridge: true,
             since_cursor: Some(1),
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("bridge reconciliation is idempotent");
         assert_eq!(
@@ -4723,16 +4607,9 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
 
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("ordinary resume returns terminal aggregate");
 

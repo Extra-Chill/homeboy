@@ -399,16 +399,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("Cook status is bounded");
         let (review_value, _) = review::review(ReviewArgs {
@@ -470,16 +463,11 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (bridge_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
             bridge: true,
             since_cursor: Some(0),
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("Cook bridge status selects the candidate");
         assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v1");
@@ -491,16 +479,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (attempt_status, _) = status(StatusArgs {
             run_id: retry_run_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("exact attempt remains directly addressable");
         assert_eq!(attempt_status["run_id"], retry_run_id);
@@ -526,16 +507,10 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
 
         let (reserved_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("reserved parent remains readable before child submission");
         assert_eq!(reserved_status["run_id"], cook_id);
@@ -562,16 +537,10 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
 
         let (materializing_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("parent projects materializing child");
         assert_eq!(materializing_status["run_id"], child_run_id);
@@ -609,16 +578,10 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
         .expect("publish Cook index");
         let (published_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("published Cook index supersedes the materialization reservation");
         assert_eq!(published_status["run_id"], child_run_id);
@@ -630,15 +593,10 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
         let (exact_parent_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
             exact: true,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("parent remains an immutable exact read after publication");
         assert_eq!(exact_parent_status["run_id"], cook_id);
@@ -687,16 +645,10 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
 
         let (default_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("default status resolves Cook alias");
         assert_eq!(default_status["run_id"], retry_run_id);
@@ -710,15 +662,10 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
         let (exact_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
             exact: true,
-            bridge: false,
-            since_cursor: None,
             full: true,
-            bounded: false,
-            no_runner_probe: false,
-            strict_subject_exit: false,
-            watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
+            ..Default::default()
         })
         .expect("exact status reads initial Cook record");
         assert_eq!(exact_status["run_id"], cook_id);

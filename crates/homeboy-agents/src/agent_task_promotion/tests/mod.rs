@@ -246,16 +246,13 @@ pub(super) fn record_controller_projection_in_store(
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: run_id.to_string(),
             kind: "agent-task".to_string(),
-            component_id: None,
             started_at: "2026-07-16T00:00:00Z".to_string(),
             finished_at: Some("2026-07-16T00:00:01Z".to_string()),
             status: "pass".to_string(),
             command: Some("homeboy agent-task".to_string()),
-            cwd: None,
             homeboy_version: Some("test".to_string()),
-            git_sha: None,
-            rig_id: None,
             metadata_json: serde_json::json!({}),
+            ..Default::default()
         })
         .expect("record run");
     let input = tempfile::NamedTempFile::new().expect("projection input");

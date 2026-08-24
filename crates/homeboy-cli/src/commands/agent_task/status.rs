@@ -3310,16 +3310,10 @@ mod watch_tests {
     fn args() -> StatusArgs {
         StatusArgs {
             run_id: "run-1".to_string(),
-            exact: false,
-            bridge: false,
-            since_cursor: None,
-            full: false,
-            bounded: false,
-            strict_subject_exit: false,
-            no_runner_probe: false,
             watch: true,
             interval: "250ms".to_string(),
             timeout: "2m".to_string(),
+            ..Default::default()
         }
     }
 

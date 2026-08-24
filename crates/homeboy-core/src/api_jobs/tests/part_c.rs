@@ -718,16 +718,11 @@ fn remote_runner_result_observation_details_are_additive_and_validate_declared_r
     let run = RunRecord {
         id: "run-1".to_string(),
         kind: "fuzz".to_string(),
-        component_id: None,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: Some("2026-01-01T00:01:00Z".to_string()),
         status: "succeeded".to_string(),
-        command: None,
-        cwd: None,
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: json!({}),
+        ..Default::default()
     };
     let artifact = ArtifactRecord {
         id: "report".to_string(),

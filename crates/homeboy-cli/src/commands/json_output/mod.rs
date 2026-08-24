@@ -1008,16 +1008,9 @@ mod tests {
         let args = AgentTaskArgs {
             command: AgentTaskCommand::Status(StatusArgs {
                 run_id: "run-1".to_string(),
-                exact: false,
-                bridge: false,
-                since_cursor: None,
-                full: false,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
                 interval: "5s".to_string(),
                 timeout: "30m".to_string(),
+                ..Default::default()
             }),
         };
 

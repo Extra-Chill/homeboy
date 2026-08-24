@@ -486,11 +486,8 @@ fn run_list_rediscovers_lab_agent_task_lineage_from_canonical_metadata() {
                 finished_at: Some("2026-08-08T12:01:00Z".to_string()),
                 status: RunStatus::Pass.as_str().to_string(),
                 command: Some("homeboy agent-task".to_string()),
-                cwd: None,
-                homeboy_version: None,
-                git_sha: None,
-                rig_id: None,
                 metadata_json: metadata.clone(),
+                ..Default::default()
             })
             .expect("agent task observation");
         store
@@ -589,16 +586,12 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
             .import_run(&RunRecord {
                 id: "workspace-boundary-false-match".to_string(),
                 kind: "agent-task".to_string(),
-                component_id: None,
                 started_at: "2026-08-08T12:00:01Z".to_string(),
-                finished_at: None,
                 status: RunStatus::Pass.as_str().to_string(),
                 command: Some("homeboy agent-task".to_string()),
                 cwd: Some("/work/wp-build-other".to_string()),
-                homeboy_version: None,
-                git_sha: None,
-                rig_id: None,
                 metadata_json: Value::Null,
+                ..Default::default()
             })
             .expect("boundary run");
 

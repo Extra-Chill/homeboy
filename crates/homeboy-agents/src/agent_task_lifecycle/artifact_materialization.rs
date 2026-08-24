@@ -325,16 +325,10 @@ mod tests {
                 .upsert_imported_run(&homeboy_core::observation::RunRecord {
                     id: "local".to_string(),
                     kind: "agent-task".to_string(),
-                    component_id: None,
                     started_at: "2026-07-16T00:00:00Z".to_string(),
-                    finished_at: None,
                     status: "pass".to_string(),
-                    command: None,
-                    cwd: None,
-                    homeboy_version: None,
-                    git_sha: None,
-                    rig_id: None,
                     metadata_json: json!({}),
+                    ..Default::default()
                 })
                 .expect("run");
             let projected = store
