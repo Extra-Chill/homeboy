@@ -32,19 +32,20 @@ pub use artifact_envelope::{
     FuzzResultEnvelopeArtifactSummary,
 };
 pub use cohorts::{
-    compare_fuzz_hotspot_cohorts, FuzzHotspotCohortBaselineDrift, FuzzHotspotCohortComparison,
-    FuzzHotspotCohortDelta, FuzzHotspotCohortItem,
+    compare_fuzz_hotspot_cohorts, FuzzHotspotCohortComparison, FuzzHotspotCohortItem,
 };
+
 pub use contract::{
-    fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract, FuzzFindingStatus,
-    FuzzOperationFamily, FuzzSafetyClass,
+    fuzz_core_contract, FuzzCoreContract, FuzzFindingStatus, FuzzOperationFamily, FuzzSafetyClass,
 };
+pub(crate) use coverage::FuzzCoverageReconciliation;
 pub use coverage::{
-    FuzzArtifact, FuzzCoverage, FuzzCoverageGap, FuzzCoverageGroupSummary,
-    FuzzCoverageReconciliation, FuzzCoverageSkip, FuzzCoverageSummary, FuzzFinding, FuzzProvenance,
-    FuzzReplayMetadata, FuzzThreshold, FuzzThresholdOperator,
+    FuzzArtifact, FuzzCoverageGroupSummary, FuzzCoverageSkip, FuzzCoverageSummary, FuzzFinding,
+    FuzzProvenance, FuzzReplayMetadata, FuzzThresholdOperator,
 };
-pub use coverage_reconciliation_persistence::FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND;
+#[allow(unused_imports)] // consumed by `src/tests/*` via `use crate::*`
+pub(crate) use coverage::{FuzzCoverage, FuzzCoverageGap, FuzzThreshold};
+
 pub use defaults::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_gate_profile_contract,
     FuzzGateProfile,
@@ -55,32 +56,33 @@ pub use envelope::{
     FuzzTargetInventory, IsolationProof,
 };
 pub use evidence_contract::{
-    classify_fuzz_failure, FuzzEvidenceContract, FuzzEvidenceVerdict, FuzzEvidenceViolation,
-    FuzzEvidenceViolationCode, FuzzFailureClassification, FuzzFailureDomain, FuzzFailureSignals,
-    FuzzWorkloadVerdict, FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT, FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
+    classify_fuzz_failure, FuzzEvidenceContract, FuzzEvidenceViolation, FuzzEvidenceViolationCode,
+    FuzzFailureDomain, FuzzFailureSignals, FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT,
+    FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
+
 pub use hotspots::{
-    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot,
-    FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet,
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot, FuzzHotspotSet,
 };
-pub use observations::{
-    parse_fuzz_observation_set_value, FuzzObservation, FuzzObservationFamily, FuzzObservationSet,
-};
+#[allow(unused_imports)] // consumed by `src/tests/*` via `use crate::*`
+pub(crate) use hotspots::{FuzzHotspotDimension, FuzzHotspotMetric};
+
+pub use observations::parse_fuzz_observation_set_value;
+pub(crate) use observations::{FuzzObservation, FuzzObservationFamily, FuzzObservationSet};
 pub use parse::{
     merge_fuzz_target_inventory, parse_fuzz_action_model_file, parse_fuzz_case_log_file,
     parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file, parse_fuzz_results_file,
     parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
 };
+pub(crate) use payloads::FUZZ_PAYLOAD_ARTIFACT_KIND;
 pub use payloads::{
-    externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget, FuzzPayloadExternalization,
-    FUZZ_PAYLOAD_ARTIFACT_KIND, INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
+    externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget,
+    INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
 };
 pub use proof::{
     derive_fuzz_proof, fuzz_campaign_case_totals, fuzz_campaign_finding_totals, FuzzProof,
-    FuzzProofCaseTotals, FuzzProofCoverage, FuzzProofExecution, FuzzProofFailedGate,
-    FuzzProofFindingTotals, FuzzProofGateTotals, FuzzProofRevision, FuzzProofSource,
-    FuzzProofVerdict,
 };
+
 pub use result_envelope_persistence::{
     fuzz_result_envelope_evidence_ref, report_fuzz_result_envelope,
     FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
@@ -97,22 +99,24 @@ pub(crate) use coverage_reconciliation_persistence::persist_fuzz_coverage_reconc
 pub(crate) use result_envelope_persistence::persist_fuzz_run_result_envelope;
 pub use run_dir_writers::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
 pub use run_evidence_persistence::{persist_fuzz_run_evidence, FuzzRunEvidence};
+pub(crate) use schemas::FUZZ_COVERAGE_RECONCILIATION_SCHEMA;
 pub use schemas::{
-    standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,
-    FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION,
-    FUZZ_CORE_CONTRACT_SCHEMA, FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_COVERAGE_SCHEMA,
-    FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EVIDENCE_CONTRACT_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
-    FUZZ_EXPLORATION_POLICY_SCHEMA, FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA,
-    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROOF_SCHEMA, FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA,
-    FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA,
-    FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA,
-    FUZZ_SKIP_REASON_AUTH_REQUIRED, FUZZ_SKIP_REASON_CONFIG_REQUIRED, FUZZ_SKIP_REASON_DESTRUCTIVE,
-    FUZZ_SKIP_REASON_LEGACY, FUZZ_SKIP_REASON_UNAVAILABLE, FUZZ_SKIP_REASON_UNSAFE,
-    FUZZ_SKIP_REASON_UNSUPPORTED, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
-    FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA, ISOLATION_PROOF_SCHEMA,
+    FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_SCHEMA,
+    FUZZ_CONTRACT_VERSION, FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_EXPLORATION_POLICY_SCHEMA, FUZZ_FINDING_SCHEMA,
+    FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROOF_SCHEMA,
+    FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
+    FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    ISOLATION_PROOF_SCHEMA,
 };
-pub use types::{
-    FuzzAction, FuzzActionModel, FuzzCampaign, FuzzCase, FuzzCaseLogArtifactRef, FuzzCaseLogEntry,
-    FuzzCaseLogStatus, FuzzExplorationPolicy, FuzzInput, FuzzOperation, FuzzSeed, FuzzSequenceCase,
-    FuzzSequencePlan, FuzzSequenceResult, FuzzSequenceStep, FuzzSurface, FuzzTarget, FuzzWorkload,
+#[allow(unused_imports)] // consumed by `src/tests/*` via `use crate::*`
+pub(crate) use schemas::{
+    FUZZ_CASE_LOG_SCHEMA, FUZZ_CORE_CONTRACT_SCHEMA, FUZZ_COVERAGE_SCHEMA, FUZZ_GATE_SCHEMA,
+    FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SKIP_REASON_AUTH_REQUIRED, FUZZ_SURFACE_SCHEMA,
+    FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA,
 };
+pub use types::{FuzzCampaign, FuzzCase, FuzzOperation, FuzzSeed, FuzzSequencePlan, FuzzWorkload};
+#[allow(unused_imports)] // consumed by `src/tests/*` via `use crate::*`
+pub(crate) use types::{FuzzCaseLogStatus, FuzzSurface, FuzzTarget};
+pub(crate) use types::{FuzzSequenceCase, FuzzSequenceResult};
