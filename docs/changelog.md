@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.1] - 2026-08-24
+
+### Fixed
+- preserve controller agent task identity
+
 ## [0.359.0] - 2026-08-24
 
 ### Added
