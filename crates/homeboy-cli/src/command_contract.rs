@@ -26,22 +26,27 @@ mod public_variants;
 mod registry;
 mod spec;
 
+pub use crate::commands::contract_lab_routing::LabCommandRoute;
 pub use crate::core::artifact_ref::{
     validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
 };
 pub(crate) use constants::{contract_constants, ContractConstantsOutput};
+pub use lab::LabCommandRouteSupport;
 /// Only `commands::contract_lab_routing_tests` reads this; the shipped binary
 /// matches on the contract rather than the mode, so it is compiled out of the
 /// lib build instead of carrying an unused re-export.
 #[cfg(test)]
 pub(crate) use lab::LabSourcePathMode;
 pub(crate) use lab::{
-    lab_runner_support_summary, scope_lab_cli_arguments, CommandPortabilityContract,
-    LabCommandContract, LabCommandPortability, LabCommandRouteContract, LabRigWorkloadArguments,
+    lab_runner_support_summary, scope_lab_cli_arguments, scope_lab_cli_arguments_with,
     LabRigWorkloadKind, LabWorkspaceModePolicy, LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
     LAB_RUNNER_WORKLOAD_SCHEMA, LAB_TRACE_EXTRA_CAPABILITIES, RUNNER_ARTIFACT_MANIFEST_FILE,
     RUNNER_ARTIFACT_MANIFEST_REF_NAME, RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
     RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
+};
+pub use lab::{
+    CommandPortabilityContract, LabCommandContract, LabCommandPortability, LabCommandRouteContract,
+    LabRigWorkloadArguments,
 };
 pub(crate) use lab::{
     LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES,

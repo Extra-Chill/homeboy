@@ -274,7 +274,7 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
     }) = command
     {
         if !cook.gates.has_deterministic_gate() {
-            let contract = command.lab_contract()?;
+            let contract = command.lab_route().ok()?.lab_contract()?;
             let LabCommandPortability::LocalOnly(reason) = contract.portability else {
                 unreachable!("an unverified cook must retain its local-only portability contract");
             };
@@ -308,11 +308,12 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         });
     }
 
-    if !command.portability_contract().is_resource_intensive() {
+    let route = command.lab_route().ok()?;
+    if !route.portability_contract().is_resource_intensive() {
         return None;
     }
 
-    let contract = command.lab_contract()?;
+    let contract = route.lab_contract()?;
 
     match contract.portability {
         LabCommandPortability::Portable => {

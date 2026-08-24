@@ -7,6 +7,7 @@
 //! these resolvers at startup and core invokes them through the hook.
 
 use homeboy_agents::agent_task_dispatch_service::AgentTaskDispatchCommand;
+use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 
 /// Resolve a dispatched command's argv to its hot-command label (e.g. `bench`,
@@ -97,7 +98,7 @@ pub struct LabRunnerHint {
     pub unsupported_message: String,
 }
 
-type LabRunnerHintProvider = fn() -> LabRunnerHint;
+type LabRunnerHintProvider = Arc<dyn Fn() -> LabRunnerHint + Send + Sync>;
 
 fn lab_runner_hint_provider() -> &'static RwLock<Option<LabRunnerHintProvider>> {
     static PROVIDER: OnceLock<RwLock<Option<LabRunnerHintProvider>>> = OnceLock::new();
@@ -106,11 +107,11 @@ fn lab_runner_hint_provider() -> &'static RwLock<Option<LabRunnerHintProvider>> 
 
 /// Register the provider that supplies Lab-runner support hint strings. Called
 /// once during startup by the CLI layer.
-pub fn set_lab_runner_hint_provider(provider: LabRunnerHintProvider) {
+pub fn set_lab_runner_hint_provider(provider: impl Fn() -> LabRunnerHint + Send + Sync + 'static) {
     let mut guard = lab_runner_hint_provider()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+    *guard = Some(Arc::new(provider));
 }
 
 /// Resolve the Lab-runner support hints via the registered provider, falling
@@ -121,7 +122,7 @@ pub fn resolve_lab_runner_hint() -> LabRunnerHint {
         let guard = lab_runner_hint_provider()
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard
+        guard.clone()
     };
     match provider {
         Some(f) => f(),

@@ -13,6 +13,7 @@ use crate::command_capability::{
     classify as classify_command_capability, homeboy_owned_args, requires_startup_reconciliation,
     CommandCapability,
 };
+use crate::command_contract::{LabCommandRoute, LabCommandRouteSupport};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -34,6 +35,20 @@ pub trait CliCapability: Sync {
     fn name(&self) -> &'static str;
     fn command(&self) -> Command;
     fn run(&self, matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)>;
+
+    /// Resolve a descriptor-composed command through the same typed Lab route
+    /// contract as a built-in command. Absent remains fail-closed.
+    fn lab_command_route(
+        &self,
+        _matches: &ArgMatches,
+    ) -> crate::core::Result<Option<LabCommandRoute>> {
+        Ok(None)
+    }
+
+    /// Declares scoped help and runner-guidance metadata for the route.
+    fn lab_command_route_support(&self) -> Option<LabCommandRouteSupport> {
+        None
+    }
 }
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
@@ -247,6 +262,7 @@ pub(crate) fn register_startup_providers_before_reconcile() {
 /// directory.
 fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
+    capabilities: &[&dyn CliCapability],
 ) -> Result<(), crate::core::error::Error> {
     // Register the runner daemon-exec driver so the daemon's /exec endpoint
     // can prepare and run a runner job as a local child without core
@@ -365,8 +381,12 @@ fn register_startup_providers_after_reconcile(
     // Register the Lab-runner hint provider so core::runner can compose
     // `--runner`/`--placement` unsupported errors from the command-spec table
     // without depending on `command_contract`.
-    crate::runner::set_lab_runner_hint_provider(|| {
-        let summary = crate::command_contract::lab_runner_support_summary();
+    let lab_support = capabilities
+        .iter()
+        .filter_map(|capability| capability.lab_command_route_support())
+        .collect::<Vec<_>>();
+    crate::runner::set_lab_runner_hint_provider(move || {
+        let summary = crate::command_contract::lab_runner_support_summary(&lab_support);
         crate::runner::LabRunnerHint {
             hint: summary.hint,
             unsupported_message: summary.unsupported_message,
@@ -388,7 +408,7 @@ pub fn register_all_providers(
     agent_task: &crate::core::defaults::AgentTaskConfig,
 ) -> Result<(), crate::core::error::Error> {
     register_startup_providers_before_reconcile();
-    register_startup_providers_after_reconcile(agent_task)
+    register_startup_providers_after_reconcile(agent_task, &[])
 }
 
 impl CliRuntime {
@@ -414,7 +434,9 @@ impl CliRuntime {
         register_startup_providers_before_reconcile();
         if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
             let config = crate::core::defaults::load_config();
-            if register_startup_providers_after_reconcile(&config.agent_task).is_err() {
+            if register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
+                .is_err()
+            {
                 return std::process::ExitCode::from(2);
             }
             let _ =
@@ -468,7 +490,9 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
-        if let Err(error) = register_startup_providers_after_reconcile(&config.agent_task) {
+        if let Err(error) =
+            register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
+        {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
@@ -555,6 +579,15 @@ impl CliRuntime {
         crate::core::set_artifact_root_override(artifact_root_override.clone());
 
         if let Some((capability, capability_matches)) = self.capability_matches(&matches) {
+            if let Err(error) = capability.lab_command_route(capability_matches) {
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
             if let Some(path) = output_file.as_deref() {
                 if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                     return exit;
@@ -886,7 +919,12 @@ impl CliRuntime {
         for capability in self.capabilities {
             command = command.subcommand(capability.command());
         }
-        command
+        let support = self
+            .capabilities
+            .iter()
+            .filter_map(|capability| capability.lab_command_route_support())
+            .collect::<Vec<_>>();
+        crate::command_contract::scope_lab_cli_arguments_with(command, &support)
     }
 
     fn capability_matches<'a>(
