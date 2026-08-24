@@ -21,9 +21,13 @@ pub struct CoreCompatibilityReport {
 
 impl CoreCompatibilityReport {
     pub fn undeclared(source_revision: Option<String>) -> Self {
+        Self::undeclared_for_version(source_revision, installed_homeboy_version())
+    }
+
+    fn undeclared_for_version(source_revision: Option<String>, homeboy_version: String) -> Self {
         Self {
             status: "undeclared".to_string(),
-            installed_homeboy: installed_homeboy_version(),
+            installed_homeboy: homeboy_version,
             requires_homeboy: None,
             source_revision,
             remediation_command: None,
@@ -39,9 +43,27 @@ pub fn evaluate_core_compatibility(
     requires_homeboy: Option<&str>,
     source_revision: Option<String>,
 ) -> Result<CoreCompatibilityReport> {
-    let installed = installed_homeboy_version();
+    evaluate_core_compatibility_for_version(
+        requires_homeboy,
+        source_revision,
+        &installed_homeboy_version(),
+    )
+}
+
+/// Evaluate an extension declaration against an explicit controller version.
+/// Upgrade admission uses this before the selected controller replaces the
+/// running binary, while runtime callers continue using the installed version.
+pub fn evaluate_core_compatibility_for_version(
+    requires_homeboy: Option<&str>,
+    source_revision: Option<String>,
+    homeboy_version: &str,
+) -> Result<CoreCompatibilityReport> {
+    let installed = homeboy_version.to_string();
     let Some(constraint) = requires_homeboy.filter(|value| !value.trim().is_empty()) else {
-        return Ok(CoreCompatibilityReport::undeclared(source_revision));
+        return Ok(CoreCompatibilityReport::undeclared_for_version(
+            source_revision,
+            installed,
+        ));
     };
 
     let parsed_constraint = VersionConstraint::parse(constraint)?;
@@ -144,6 +166,22 @@ mod tests {
             report.requires_homeboy.as_deref(),
             Some(format!(">={current}").as_str())
         );
+    }
+
+    #[test]
+    fn explicit_candidate_version_is_evaluated_without_using_the_running_binary() {
+        let report = evaluate_core_compatibility_for_version(Some(">=2.0.0"), None, "2.1.0")
+            .expect("compat report");
+        assert_eq!(report.status, "compatible");
+        assert_eq!(report.installed_homeboy, "2.1.0");
+    }
+
+    #[test]
+    fn undeclared_candidate_version_is_reported_as_the_selected_controller() {
+        let report =
+            evaluate_core_compatibility_for_version(None, None, "2.1.0").expect("compat report");
+        assert_eq!(report.status, "undeclared");
+        assert_eq!(report.installed_homeboy, "2.1.0");
     }
 
     #[test]
