@@ -12,7 +12,6 @@ use homeboy::runner::runners::{
 
 use std::collections::BTreeMap;
 
-use super::doctor;
 use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
@@ -440,7 +439,7 @@ pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
 #[serde(untagged)]
 pub enum RunnerCommandOutput {
     Registry(Box<RunnerOutput>),
-    Doctor(Box<doctor::RunnerDoctorOutput>),
+    Doctor(Box<serde_json::Value>),
     Preflight(Box<homeboy::runner::runners::PlacementReadiness>),
     Execution(Box<RunnerExecutionCommandOutput>),
     Env(Box<RunnerEnvOutput>),

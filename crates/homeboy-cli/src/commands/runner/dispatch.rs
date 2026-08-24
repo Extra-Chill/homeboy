@@ -119,18 +119,22 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             required_tools,
             scope,
             repair,
-        } => map_doctor(doctor::run_with_options(
-            &runner_id,
-            doctor::RunnerDoctorOptions {
-                path,
-                extensions: required_extensions,
-                required_tools,
-                agent_backend: None,
-                agent_selector: None,
-                scope: scope.into(),
-                repair,
-            },
-        )),
+            full,
+        } => map_doctor(
+            doctor::run_with_options(
+                &runner_id,
+                doctor::RunnerDoctorOptions {
+                    path,
+                    extensions: required_extensions,
+                    required_tools,
+                    agent_backend: None,
+                    agent_selector: None,
+                    scope: scope.into(),
+                    repair,
+                },
+            ),
+            full,
+        ),
         RunnerCommand::Preflight { request } => Ok((
             RunnerCommandOutput::Preflight(Box::new(runner::placement_readiness(
                 &serde_json::from_str(&request).map_err(|error| {
@@ -891,8 +895,16 @@ fn runner_variant_from_command(command: &str) -> &'static str {
     }
 }
 
-fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Doctor(Box::new(output)), exit_code))
+fn map_doctor(
+    result: CmdResult<doctor::RunnerDoctorOutput>,
+    full: bool,
+) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| {
+        (
+            RunnerCommandOutput::Doctor(Box::new(doctor::output_projection(output, full))),
+            exit_code,
+        )
+    })
 }
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
