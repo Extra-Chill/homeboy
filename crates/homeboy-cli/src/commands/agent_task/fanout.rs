@@ -1841,6 +1841,21 @@ fn compile_batch_cooks(
                 invocation.dispatch,
                 &mut readiness_cache,
             )?;
+            if let Some(executor) = options
+                .initial_plan
+                .tasks
+                .first()
+                .map(|task| &task.executor)
+            {
+                let model = executor.model().map(str::to_string);
+                options.ai_tool = resolve_ai_tool_disclosure(
+                    &options.ai_tool,
+                    Some(&executor.backend),
+                    executor.selector.as_deref(),
+                    model.as_deref(),
+                );
+                options.ai_model = model;
+            }
             options.harvest_context = harvest_context.clone();
             configure(&mut options);
             Ok(options)

@@ -1900,11 +1900,16 @@ impl ProviderRoute {
             Self::Resolved {
                 backend,
                 provider_id,
+                model,
                 ..
             } => format!(
-                "homeboy agent-task providers --backend {} --selector {} --validate-readiness",
+                "homeboy agent-task providers --backend {} --selector {}{} --validate-readiness",
                 shell_arg(backend),
                 shell_arg(provider_id),
+                model
+                    .as_deref()
+                    .map(|model| format!(" --model {}", shell_arg(model)))
+                    .unwrap_or_default(),
             ),
             Self::Blocked { next_command, .. } => next_command.clone(),
             Self::SelectionRequired { choices } => choices
@@ -3051,6 +3056,21 @@ mod tests {
         assert_eq!(
             command,
             "homeboy agent-task providers --full --backend 'backend; touch /tmp/unwanted' --selector 'provider id'"
+        );
+    }
+
+    #[test]
+    fn provider_route_replay_preserves_the_selected_model() {
+        let route = ProviderRoute::Resolved {
+            backend: "opencode".to_string(),
+            provider_id: "opencode.executor".to_string(),
+            model: Some("openai/gpt-5.6-sol".to_string()),
+            dispatchable: true,
+        };
+
+        assert_eq!(
+            route.next_command(),
+            "homeboy agent-task providers --backend opencode --selector opencode.executor --model openai/gpt-5.6-sol --validate-readiness"
         );
     }
 
