@@ -739,6 +739,71 @@ def resolve_type(type_text, impl_type=None):
     return None
 
 
+# Generic constructors resolved by name rather than by declaration or import.
+# They are in the prelude or are ubiquitous std containers, so a field typed
+# `Option<T>` never carries an import that `imports_by_name` could resolve. The
+# constructor name alone is not an identity -- `Option<String>` and
+# `Option<u32>` are different field types -- so it is only ever emitted as the
+# head of a fully resolved application by `resolve_field_type`.
+std_generic_constructors = {
+    'Option', 'Result', 'Vec', 'VecDeque', 'Box', 'Arc', 'Rc', 'Cow',
+    'HashMap', 'BTreeMap', 'HashSet', 'BTreeSet', 'Mutex', 'RwLock',
+    'RefCell', 'Cell', 'OnceLock', 'OnceCell',
+}
+
+
+def resolve_field_type(type_text, impl_type=None):
+    """Resolve a declared field's type to a structural identity.
+
+    `resolve_type` deliberately drops generic arguments: its callers ask "which
+    declared aggregate is this value?", and for that `Vec<Foo>` and `Foo` are the
+    same answer. A field type is a different question. `Option<String>` and
+    `Option<u32>` are not the same field, so the arguments are part of the
+    identity and an application is resolved head-and-arguments rather than
+    stripped to its head.
+
+    Resolution is total or nothing. If any argument is unresolvable the whole
+    application is, because a partially resolved type compares equal to another
+    type that differs precisely where neither could be resolved -- which is a
+    false claim of sameness, and the thing consumers of `type_id` must never be
+    handed.
+    """
+    value = re.sub(r'\b(?:mut|const|dyn)\b', '', type_text).strip()
+    while value.startswith('&'):
+        value = re.sub(r"^&\s*(?:'[A-Za-z_]\w*\s+)?(?:mut\s+)?", '', value).strip()
+
+    application = re.fullmatch(
+        r'((?:crate|self|super|[A-Za-z_]\w*)(?:::(?:super|self|[A-Za-z_]\w*))*)(?:::)?\s*<(.*)>',
+        value,
+        re.S,
+    )
+    if not application:
+        return resolve_type(value, impl_type)
+
+    head, argument_text = application.group(1), application.group(2)
+    resolved_head = resolve_type(head, impl_type)
+    if resolved_head is None:
+        if head not in std_generic_constructors:
+            return None
+        resolved_head = head
+
+    arguments = []
+    for start, end in split_top_level_spans(argument_text):
+        argument = argument_text[start:end].strip()
+        if not argument:
+            continue
+        if re.fullmatch(r"'[A-Za-z_]\w*", argument):
+            continue
+        resolved_argument = resolve_field_type(argument, impl_type)
+        if resolved_argument is None:
+            return None
+        arguments.append(resolved_argument)
+
+    if not arguments:
+        return None
+    return '{}<{}>'.format(resolved_head, ', '.join(arguments))
+
+
 named_struct_pattern = re.compile(
     r'\b(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Z][A-Za-z0-9_]*)'
     r'(?:\s*<[^>{;]*>)?(?:\s+where\b[^{};]*)?\s*\{'
@@ -758,7 +823,7 @@ for struct_match in named_struct_pattern.finditer(aggregate_source):
         if not field_match:
             continue
         field = {'name': field_match.group(1)}
-        field_type = resolve_type(field_match.group(2).strip())
+        field_type = resolve_field_type(field_match.group(2).strip())
         if field_type:
             field['type_id'] = field_type
         fields.append(field)
