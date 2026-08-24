@@ -18,20 +18,20 @@ const run = (env) => {
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 };
-const executable = (file, version, browserPreview = true, invocationMarker = '') => {
+const executable = (file, version, browserPreview = true, invocationMarker = '', browserRuntimeReady = browserPreview) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `#!/usr/bin/env node
 ${invocationMarker ? `require('node:fs').writeFileSync(${JSON.stringify(invocationMarker)}, 'invoked');` : ''}
 if (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(version)});
-else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify(${JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: browserPreview ? 'ready' : 'unavailable' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: browserPreview ? 'wp-codebox/browser-contained-site-open/v1' : '' } } } })}));
+else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(JSON.stringify(${JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: browserRuntimeReady ? 'available' : 'unavailable', browserRuntime: { status: browserRuntimeReady ? 'ready' : 'unavailable' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: browserPreview ? 'wp-codebox/browser-contained-site-open/v1' : '' } } } })}));
 else process.exit(1);
 `);
   fs.chmodSync(file, 0o755);
 };
-const managedRuntime = (root, version, browserPreview = true) => {
+const managedRuntime = (root, version, browserPreview = true, browserRuntimeReady = browserPreview) => {
   const source = path.join(root, 'source');
   const cli = path.join(source, 'packages/cli/dist/index.js');
-  executable(cli, version, browserPreview);
+  executable(cli, version, browserPreview, '', browserRuntimeReady);
   spawnSync('git', ['init', '-q'], { cwd: source });
   spawnSync('git', ['add', '.'], { cwd: source });
   spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: source });
@@ -140,6 +140,10 @@ try {
   const missingCapability = path.join(temp, 'missing-capability');
   managedRuntime(missingCapability, '0.21.0', false);
   assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: missingCapability, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_browser_preview_capability_missing');
+
+  const browserUnavailable = path.join(temp, 'browser-unavailable');
+  managedRuntime(browserUnavailable, '0.21.0', true, false);
+  assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: browserUnavailable, PATH: `${stalePath}:${process.env.PATH}` }).ready, true);
 
   const override = path.join(temp, 'override');
   executable(override, '0.21.0');

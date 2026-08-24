@@ -79,7 +79,7 @@ function preflightWpCodeboxRuntime(options = {}) {
     return failure(selection, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
 	const descriptor = probeWpCodeboxRuntimeDescriptor(selection.selected.path, options);
-  if (!browserPreviewReady(descriptor)) {
+  if (!browserPreviewContractAvailable(descriptor)) {
     return failure(selection, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
   if (selection.selected.source === 'managed' && !managedIdentityMatches(selection.selected.path, options)) {
@@ -111,7 +111,7 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
-	if (!browserPreviewReady(probeWpCodeboxRuntimeDescriptor(binary, options, args))) {
+	if (!browserPreviewContractAvailable(probeWpCodeboxRuntimeDescriptor(binary, options, args))) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
   if (managed && !managedIdentityMatches(managed, options)) {
@@ -184,10 +184,8 @@ function probeWpCodeboxRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
   }
 }
 
-function browserPreviewReady(descriptor) {
+function browserPreviewContractAvailable(descriptor) {
   return descriptor?.schema === 'wp-codebox/runtime-descriptor/v1'
-    && descriptor?.readiness?.status === 'available'
-    && descriptor?.readiness?.browserRuntime?.status === 'ready'
     && descriptor?.contractManifest?.schemas?.runtimeBoundary?.browserContainedSiteOpen === BROWSER_PREVIEW_SCHEMA;
 }
 
