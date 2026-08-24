@@ -8945,6 +8945,53 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
 }
 
 #[test]
+fn workspace_base_capture_lock_times_out_while_another_controller_holds_it() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let cook_id = "cook-base-capture-lock-contention";
+        let (holder_ready, wait_for_holder) = std::sync::mpsc::sync_channel(0);
+        let (release_holder, holder_release) = std::sync::mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let holder_store = &store;
+            let holder = scope.spawn(move || {
+                holder_store.with_workspace_base_capture_lock_for_test(
+                    cook_id,
+                    std::time::Duration::from_secs(1),
+                    || {
+                        holder_ready.send(()).expect("report lock holder");
+                        holder_release.recv().expect("release lock holder");
+                        Ok(())
+                    },
+                )
+            });
+            wait_for_holder.recv().expect("holder acquired lock");
+
+            let started = Instant::now();
+            let error = store
+                .with_workspace_base_capture_lock_for_test(
+                    cook_id,
+                    std::time::Duration::from_millis(50),
+                    || Ok(()),
+                )
+                .expect_err("contending base capture must time out");
+            release_holder.send(()).expect("release lock holder");
+            holder
+                .join()
+                .expect("holder joins")
+                .expect("holder releases cleanly");
+
+            assert_eq!(error.details["kind"], "workspace_base_capture_lock_timeout");
+            assert_eq!(error.details["timeout_ms"], 50);
+            assert!(error.details["waited_ms"]
+                .as_u64()
+                .is_some_and(|waited| waited >= 50));
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        });
+    });
+}
+
+#[test]
 fn workspace_base_capture_repairs_controller_plan_after_recipe_write_interruption() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");
@@ -14702,6 +14749,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
         std::fs::write(root.join("candidate"), "base\n").unwrap();
         git_output(root, &["add", "."]).unwrap();
         git_output(root, &["commit", "-m", "base"]).unwrap();
+        git_output(root, &["remote", "add", "origin", "."]).unwrap();
         let base = git_output(root, &["rev-parse", "HEAD"]).unwrap();
         std::fs::write(root.join("candidate"), "provider-produced\n").unwrap();
         git_output(root, &["add", "candidate"]).unwrap();
@@ -18058,6 +18106,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         let patch = format!("{}\n", git_output(&target, &["diff", "--binary"]).unwrap());
         let patch_path = temp.path().join("candidate.patch");
         std::fs::write(&patch_path, &patch).unwrap();
+        let base_sha = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let cook_id = "cook-9703";
@@ -18070,6 +18119,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         options.initial_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
         options.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
         options.source_worktree_path = None;
+        options.task_base_sha = Some(base_sha.trim().to_string());
         options.gates.verify = vec!["true".to_string()];
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
@@ -18104,7 +18154,6 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
             target.to_str().expect("target path"),
         )
         .unwrap();
-        let base_sha = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
         let mut checkpoint = serde_json::to_value(promotion(&run_id)).unwrap();
         checkpoint["status"] = serde_json::json!("verification_pending");
         checkpoint["source"]["task_id"] = serde_json::json!(options.initial_plan.tasks[0].task_id);
@@ -18116,7 +18165,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         checkpoint["provenance"] = serde_json::json!({
             "worktree_path": target,
             "candidate": candidate,
-            "resume_inputs": {"base_ref": "main", "task_base_sha": null, "candidate_ref": null}
+            "resume_inputs": {"base_ref": "main", "task_base_sha": base_sha.trim(), "candidate_ref": null}
         });
         checkpoint["verified_base"]["sha"] = serde_json::json!(base_sha.trim());
         agent_task_lifecycle::record_promotion(&run_id, checkpoint.clone()).unwrap();

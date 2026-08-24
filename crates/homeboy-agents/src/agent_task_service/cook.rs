@@ -4507,6 +4507,18 @@ fn run_cook_spine(
         &options,
         recipe_materialization.created,
     )?;
+    // Reject a known-invalid managed workspace before base capture reaches its
+    // remote. Detached first handoffs have no local source path and remain
+    // eligible for runner-owned materialization below.
+    if cook_attempt_needs_execution_with_store(lifecycle_store, &options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+    {
+        validate_cook_workspace(&options).map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
+    }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
     pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(

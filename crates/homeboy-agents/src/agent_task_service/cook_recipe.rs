@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{Barrier, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +23,10 @@ use homeboy_core::{paths, Error, Result};
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
+// Base capture reaches the network while holding this lock. It must always
+// surface a wedged peer rather than inherit an operator-configured unbounded
+// config-lock wait.
+const WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
     LazyLock::new(|| Mutex::new((None, 0)));
@@ -93,12 +98,35 @@ impl CookRecipeStore {
     }
 
     /// Serialize the bounded base capture transaction for one durable recipe.
-    /// `flock` ownership is tied to this open file description, so the kernel
-    /// releases it if the controller process exits before completing either
-    /// persistence step.
+    /// Advisory lock ownership is tied to this open file, so the operating
+    /// system releases it if the controller process exits before completing
+    /// either persistence step.
     pub(crate) fn with_workspace_base_capture_lock<T>(
         &self,
         cook_id: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_workspace_base_capture_lock_for(
+            cook_id,
+            WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT,
+            operation,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_workspace_base_capture_lock_for_test<T>(
+        &self,
+        cook_id: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_workspace_base_capture_lock_for(cook_id, timeout, operation)
+    }
+
+    fn with_workspace_base_capture_lock_for<T>(
+        &self,
+        cook_id: &str,
+        timeout: Duration,
         operation: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let lock_path = self
@@ -120,12 +148,7 @@ impl CookRecipeStore {
                     Some("open Cook workspace base capture lock".to_string()),
                 )
             })?;
-        #[cfg(unix)]
-        homeboy_core::config::lock_exclusive_bounded(
-            &lock,
-            &lock_path,
-            "lock Cook workspace base capture",
-        )?;
+        lock_workspace_base_capture(&lock, &lock_path, timeout)?;
         let _lock = lock;
         operation()
     }
@@ -275,6 +298,49 @@ impl CookRecipeStore {
             ));
         }
         consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+    }
+}
+
+fn lock_workspace_base_capture(lock: &File, lock_path: &Path, timeout: Duration) -> Result<()> {
+    use fs4::fs_std::FileExt;
+
+    let started = Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock Cook workspace base capture".to_string()),
+                ));
+            }
+        }
+
+        let waited = started.elapsed();
+        if waited >= timeout {
+            let mut error = Error::internal_io(
+                format!(
+                    "timed out after {}ms waiting for Cook workspace base capture lock at {}",
+                    waited.as_millis(),
+                    lock_path.display()
+                ),
+                Some("lock Cook workspace base capture".to_string()),
+            );
+            error.details = serde_json::json!({
+                "kind": "workspace_base_capture_lock_timeout",
+                "path": lock_path,
+                "timeout_ms": timeout.as_millis(),
+                "waited_ms": waited.as_millis(),
+            });
+            error.retryable = Some(true);
+            return Err(error);
+        }
+
+        std::thread::sleep(backoff.min(timeout - waited));
+        backoff = (backoff * 2).min(Duration::from_millis(50));
     }
 }
 
