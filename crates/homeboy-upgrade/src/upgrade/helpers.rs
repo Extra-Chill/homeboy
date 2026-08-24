@@ -841,15 +841,12 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
             extension::DiscoveredExtension::Valid(manifest) => {
                 let extension_id = manifest.id.clone();
                 let source_path = manifest.extension_path.as_deref().map(Path::new)?;
-                if extension::is_extension_linked(&extension_id)
-                    && git::get_git_root(&source_path.to_string_lossy()).is_err()
-                {
-                    return Some(ExtensionPreflightBlocker {
-                        extension_id: extension_id.clone(),
-                        classification: "linked_source_root_unrecognized".to_string(),
-                        detail: "linked extension path is not inside a Git checkout".to_string(),
-                        recovery_command: format!("homeboy extension relink {extension_id} <path>"),
-                    });
+                if extension::is_extension_linked(&extension_id) {
+                    if let Some(blocker) =
+                        linked_extension_source_blocker(&extension_id, source_path)
+                    {
+                        return Some(blocker);
+                    }
                 }
                 let requires = manifest
                     .requires
@@ -883,6 +880,61 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
             }
         })
         .collect()
+}
+
+/// A linked extension is refreshable from either a Git checkout or Homeboy's
+/// registered durable source. Canonical paths make moved config roots and
+/// symlinked source roots deterministic while rejecting links that escape the
+/// registered extension workspace.
+fn linked_extension_source_blocker(
+    extension_id: &str,
+    extension_path: &Path,
+) -> Option<ExtensionPreflightBlocker> {
+    if git::get_git_root(&extension_path.to_string_lossy()).is_ok() {
+        return None;
+    }
+
+    let registered_root = homeboy_core::paths::extension_source_root(extension_id)
+        .ok()
+        .and_then(|root| root.canonicalize().ok());
+    let source_path = extension_path.canonicalize().ok();
+    let is_registered_source = matches!(
+        (registered_root.as_deref(), source_path.as_deref()),
+        (Some(root), Some(source)) if source.starts_with(root)
+    );
+    if is_registered_source
+        && homeboy_core::extension_update_check::read_source_revision(extension_id).is_some()
+    {
+        return None;
+    }
+
+    let (classification, detail) = if source_path.is_none() {
+        (
+            "linked_source_missing",
+            "linked extension source cannot be resolved",
+        )
+    } else if registered_root.is_none() {
+        (
+            "linked_source_root_unrecognized",
+            "linked extension source is not registered in the local extension workspace",
+        )
+    } else if !is_registered_source {
+        (
+            "linked_source_root_unrecognized",
+            "linked extension source escapes its registered local extension workspace",
+        )
+    } else {
+        (
+            "linked_source_revision_missing",
+            "registered linked extension source has no resolvable installed revision",
+        )
+    };
+    Some(ExtensionPreflightBlocker {
+        extension_id: extension_id.to_string(),
+        classification: classification.to_string(),
+        detail: format!("{detail}: {}", extension_path.display()),
+        recovery_command: format!("homeboy extension relink {extension_id} <path>"),
+    })
 }
 
 fn upgrade_outcome(
@@ -2246,6 +2298,19 @@ mod runner_source_upgrade_tests {
         std::fs::write(dir.join(format!("{id}.json")), manifest).unwrap();
     }
 
+    #[cfg(unix)]
+    fn link_registered_extension(home: &Path, id: &str, source: &Path) {
+        let extensions = home.join(".config/homeboy/extensions");
+        write_extension(source, id, r#"{"name":"linked","version":"1.0.0"}"#);
+        std::fs::create_dir_all(&extensions).expect("extensions directory");
+        std::os::unix::fs::symlink(source, extensions.join(id)).expect("linked extension");
+        std::fs::write(
+            extensions.join(format!(".{id}.source-revision")),
+            "fixture-revision",
+        )
+        .expect("registered revision");
+    }
+
     #[test]
     fn extension_preflight_returns_bounded_manifest_blocker() {
         homeboy_core::test_support::with_isolated_home(|home| {
@@ -2298,6 +2363,114 @@ mod runner_source_upgrade_tests {
             );
 
             assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_registered_linked_local_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home
+                .path()
+                .join(".config/homeboy/extension-sources/linked/linked");
+            link_registered_extension(home.path(), "linked", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_moved_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let moved_sources = home.path().join("moved-extension-sources");
+            let source = moved_sources.join("moved/moved");
+            std::fs::create_dir_all(&config).expect("config directory");
+            std::os::unix::fs::symlink(&moved_sources, config.join("extension-sources"))
+                .expect("moved source root");
+            link_registered_extension(home.path(), "moved", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_allows_symlinked_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extension-sources/symlinked");
+            let target = home.path().join("registered-source-target");
+            std::fs::create_dir_all(root.parent().expect("source parent")).expect("source parent");
+            std::os::unix::fs::symlink(&target, &root).expect("registered source link");
+            link_registered_extension(home.path(), "symlinked", &target.join("symlinked"));
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_rejects_unregistered_external_linked_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home.path().join("external/external");
+            link_registered_extension(home.path(), "external", &source);
+
+            let blockers = preflight_extensions_for_upgrade("1.0.0");
+            assert_eq!(
+                blockers[0].classification,
+                "linked_source_root_unrecognized"
+            );
+            assert!(blockers[0].detail.contains("registered"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_rejects_traversal_outside_registered_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extension-sources/traversal");
+            let source = root.join("../outside/traversal");
+            link_registered_extension(home.path(), "traversal", &source);
+
+            let blockers = preflight_extensions_for_upgrade("1.0.0");
+            assert_eq!(
+                blockers[0].classification,
+                "linked_source_root_unrecognized"
+            );
+            assert!(blockers[0].detail.contains("escapes"));
+        });
+    }
+
+    #[test]
+    fn extension_preflight_reports_missing_linked_source_without_mutation() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let path = home.path().join("missing-linked-source");
+            let blocker = linked_extension_source_blocker("missing", &path).expect("blocker");
+
+            assert_eq!(blocker.classification, "linked_source_missing");
+            assert!(!path.exists(), "preflight must not create a missing source");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_dry_run_does_not_mutate_registered_source() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home
+                .path()
+                .join(".config/homeboy/extension-sources/dry-run/dry-run");
+            link_registered_extension(home.path(), "dry-run", &source);
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+            assert!(
+                !source.join(".source-url").exists(),
+                "preflight must not write source metadata"
+            );
         });
     }
 
