@@ -266,6 +266,8 @@ pub fn generic_lab_replay_transfer_excludes(
             excludes.push(exclude.clone());
         }
     }
+    let mut excludes =
+        workspace::effective_snapshot_excludes(excludes, &runner.policy.snapshot_includes);
     excludes.sort();
     excludes.dedup();
     excludes
@@ -1780,6 +1782,42 @@ mod tests {
     use super::*;
     use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
     use homeboy_core::test_support;
+
+    #[test]
+    fn replay_policy_includes_override_and_persist_all_effective_exclusions() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::create_dir(source.path().join("source-output")).expect("source output");
+        std::fs::write(source.path().join(".gitignore"), "source-output/\n")
+            .expect("source policy");
+        for path in [".env", "source-output/generated.txt", "runner-output"] {
+            std::fs::write(source.path().join(path), path).expect("write included input");
+        }
+        let runner: Runner = serde_json::from_value(serde_json::json!({
+            "kind": "local",
+            "policy": {
+                "snapshot_excludes": ["runner-output"],
+                "snapshot_includes": [".env", "source-output/generated.txt", "runner-output"],
+            },
+        }))
+        .expect("runner policy");
+
+        let effective = generic_lab_replay_transfer_excludes(&runner, source.path());
+        for overridden in [".env", "source-output", "source-output/**", "runner-output"] {
+            assert!(!effective.contains(&overridden.to_string()));
+        }
+        let replay = workspace::immutable_replay_snapshot(source.path(), &effective)
+            .expect("replay artifact");
+        assert_eq!(
+            generic_lab_replay_identity_excludes(&replay.identity).expect("persisted policy"),
+            effective
+        );
+        for path in [".env", "source-output/generated.txt", "runner-output"] {
+            assert!(
+                replay.path().join(path).is_file(),
+                "{path} must be included"
+            );
+        }
+    }
 
     #[test]
     fn admission_snapshot_keeps_identity_and_rotation_decisions_on_one_ledger() {
