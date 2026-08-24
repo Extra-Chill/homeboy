@@ -2,6 +2,22 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.2] - 2026-08-24
+
+### Fixed
+- align CI runtime preflight fixtures
+- preflight fuzz and host smoke commands
+- preflight public cli dispatch
+- retain releases and preflight wrappers
+- atomically promote verified runtimes
+- protect cache readers during promotion
+- atomically promote managed cache
+- harden managed runtime updates
+- preflight shell recipe runtimes
+- preserve managed runtime provenance
+- harden runtime selection identity
+- verify managed preview runtime
+
 ## [3.38.1] - 2026-08-24
 
 ### Fixed
