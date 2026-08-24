@@ -827,7 +827,13 @@ pub(super) fn is_excluded(
         let directory_pattern = pattern.trim_end_matches("/**").trim_end_matches('/');
         pattern == rel
             || directory_pattern == rel
+            // A Git-style `**/directory/` rule also includes that directory at
+            // the workspace root. Tar already applies this interpretation.
+            || directory_pattern
+                .strip_prefix("**/")
+                .is_some_and(|unrooted| unrooted == rel)
             || glob_match(pattern, rel)
+            || glob_match(directory_pattern, rel)
             || (!root_anchored && (pattern == name || glob_match(pattern, name)))
     })
 }
@@ -1866,7 +1872,7 @@ pub(super) fn materialize_snapshot_piped(
     manifest
         .entries
         .retain(|entry| stage.path().join(&entry.staging_output).exists());
-    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), &[])?;
+    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), excludes)?;
     let current_manifest = snapshot_stable_manifest(local_path, excludes)?;
     validate_snapshot_stability(
         &source_manifest,
@@ -2157,11 +2163,25 @@ fn is_root_input_exclude(pattern: &str) -> bool {
 
 fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
     let mut excludes = vec![pattern.to_string()];
-    if let Some(directory) = pattern.strip_suffix("/**") {
+    let directory = if pattern.ends_with('/') {
+        Some(pattern.trim_end_matches('/'))
+    } else {
+        pattern.strip_suffix("/**")
+    };
+    if let Some(directory) = directory {
         if !directory.is_empty() {
             excludes.push(directory.to_string());
+            excludes.push(format!("{directory}/**"));
+            // Tar does not let a leading `**/` match the archive root. Add the
+            // root form so its policy agrees with the manifest traversal.
+            if let Some(root_directory) = directory.strip_prefix("**/") {
+                excludes.push(root_directory.to_string());
+                excludes.push(format!("{root_directory}/**"));
+            }
         }
     }
+    excludes.sort();
+    excludes.dedup();
     excludes
 }
 
