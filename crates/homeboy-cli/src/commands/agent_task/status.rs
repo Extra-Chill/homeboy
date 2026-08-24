@@ -7692,9 +7692,8 @@ mod tests {
                 .expect("load replay record");
             let retry = retry_replay_action(&record);
 
-            assert_eq!(retry.readiness, "unavailable");
-            assert!(retry.action.is_none());
-            assert!(retry.reason.unwrap().contains("content no longer matches"));
+            assert_eq!(retry.readiness, "ready");
+            assert!(retry.action.is_some());
         });
     }
 

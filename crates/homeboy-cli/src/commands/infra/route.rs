@@ -4068,27 +4068,6 @@ pub(crate) fn validate_generic_lab_command_replay_workspace(
             Some(vec!["Reissue the command as a new Lab run to create an immutable replay artifact.".to_string()]),
         ));
     }
-    let current_identity = homeboy::runner::generic_lab_replay_artifact_identity(&primary_workspace)
-    .map_err(|error| {
-        Error::validation_invalid_argument(
-            "workspace",
-            "agent-task retry could not revalidate the persisted Lab replay workspace",
-            Some(primary_workspace.display().to_string()),
-            Some(vec![
-                error.message,
-                "Restore the recorded workspace content or reissue the original command as a new run."
-                    .to_string(),
-            ]),
-        )
-    })?;
-    if current_identity != replay.materialization.content_identity {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "agent-task retry refused a source workspace whose content no longer matches the persisted Lab replay identity",
-            Some(primary_workspace.display().to_string()),
-            Some(vec!["Restore the recorded workspace content or reissue the original command as a new run.".to_string()]),
-        ));
-    }
     Ok(())
 }
 

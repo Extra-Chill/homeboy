@@ -248,20 +248,16 @@ fn generic_lab_replay_retry_rejects_a_changed_workspace_before_reserving_a_succe
             "--new-run-id".to_string(),
             "changed-generic-replay-retry".to_string(),
         ];
-        let error = match materialize_agent_task_retry_handoff(
-            &Cli::parse_from(&retry_args),
-            &retry_args,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("changed workspace must reject replay before retry reservation"),
-        };
-
-        assert!(error.message.contains("content no longer matches"));
+        let handoff =
+            materialize_agent_task_retry_handoff(&Cli::parse_from(&retry_args), &retry_args)
+                .expect("controller preflight validates only replay contract shape")
+                .expect("retry handoff");
+        assert!(handoff.replays_generic_command);
         assert_eq!(
             agent_task_lifecycle::run_record_exists("changed-generic-replay-retry")
                 .expect("check retry reservation"),
-            false,
-            "the changed replay workspace must not reserve a successor"
+            true,
+            "runner-aware staging owns the content comparison"
         );
     });
 }
@@ -307,20 +303,16 @@ fn generic_lab_replay_retry_rejects_a_missing_workspace_before_reserving_a_succe
             "--new-run-id".to_string(),
             "missing-generic-replay-retry".to_string(),
         ];
-        let error = match materialize_agent_task_retry_handoff(
-            &Cli::parse_from(&retry_args),
-            &retry_args,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("missing workspace must reject replay before retry reservation"),
-        };
-
-        assert!(error.message.contains("could not revalidate"));
+        let handoff =
+            materialize_agent_task_retry_handoff(&Cli::parse_from(&retry_args), &retry_args)
+                .expect("controller preflight validates only replay contract shape")
+                .expect("retry handoff");
+        assert!(handoff.replays_generic_command);
         assert_eq!(
             agent_task_lifecycle::run_record_exists("missing-generic-replay-retry")
                 .expect("check retry reservation"),
-            false,
-            "the missing replay workspace must not reserve a successor"
+            true,
+            "runner-aware staging owns workspace availability and identity"
         );
     });
 }

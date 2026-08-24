@@ -281,7 +281,11 @@ pub fn generic_lab_replay_identity_excludes(
             Some(vec!["Reissue the command as a new Lab run to create a policy-bound immutable replay artifact.".to_string()]),
         )
     })?;
-    if value["schema"] != "homeboy/lab-replay-artifact/v2" {
+    if value["schema"] != "homeboy/lab-replay-artifact/v2"
+        || !value["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    {
         return Err(homeboy_core::error::Error::validation_invalid_argument(
             "generic_lab_command_replay",
             "Lab replay uses a legacy artifact identity that does not persist its transfer exclusion policy",
@@ -289,12 +293,28 @@ pub fn generic_lab_replay_identity_excludes(
             Some(vec!["Reissue the command as a new Lab run to create a policy-bound immutable replay artifact.".to_string()]),
         ));
     }
-    serde_json::from_value(value["excludes"].clone()).map_err(|error| {
-        homeboy_core::error::Error::internal_json(
-            error.to_string(),
-            Some("parse replay artifact exclusions".to_string()),
-        )
-    })
+    let excludes: Vec<String> =
+        serde_json::from_value(value["excludes"].clone()).map_err(|error| {
+            homeboy_core::error::Error::internal_json(
+                error.to_string(),
+                Some("parse replay artifact exclusions".to_string()),
+            )
+        })?;
+    let mut canonical = excludes.clone();
+    canonical.sort();
+    canonical.dedup();
+    if excludes.is_empty()
+        || excludes != canonical
+        || excludes.iter().any(|exclude| exclude.trim().is_empty())
+    {
+        return Err(homeboy_core::error::Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "Lab replay artifact has an invalid persisted transfer exclusion policy",
+            None,
+            Some(vec!["Reissue the command as a new Lab run to create a canonical policy-bound immutable replay artifact.".to_string()]),
+        ));
+    }
+    Ok(excludes)
 }
 pub(crate) use workspace::update_workspace_resource_lifecycle;
 #[cfg(test)]

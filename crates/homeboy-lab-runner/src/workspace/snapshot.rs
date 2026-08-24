@@ -1,7 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use glob_match::glob_match;
@@ -1877,9 +1877,9 @@ fn copy_replay_snapshot_tree(
         if is_excluded(root, &source_path, excludes, &[]) {
             continue;
         }
+        let metadata = replay_regular_metadata(&source_path)?;
         #[cfg(test)]
         test_snapshot_directory_discovery_hook::run(&source_path);
-        let metadata = replay_regular_metadata(&source_path)?;
         let destination_path = destination.join(entry.file_name());
         if metadata.is_dir() {
             fs::create_dir(&destination_path).map_err(|error| {
@@ -1890,17 +1890,7 @@ fn copy_replay_snapshot_tree(
             })?;
             copy_replay_snapshot_tree(root, &source_path, &destination_path, excludes)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&source_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("read replay snapshot file".to_string()),
-                )
-            })?;
-            // A source path that changed type during the read cannot contribute
-            // to a sealed replay artifact, even if the staged output is regular.
-            if !replay_regular_metadata(&source_path)?.is_file() {
-                return Err(replay_symlink_error(&source_path));
-            }
+            let bytes = read_replay_regular_file(&source_path)?;
             fs::write(&destination_path, bytes).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -1917,6 +1907,86 @@ fn copy_replay_snapshot_tree(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn read_replay_regular_file(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(path).map_err(|error| {
+        if fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            replay_symlink_error(path)
+        } else {
+            Error::internal_io(
+                error.to_string(),
+                Some("open replay snapshot file".to_string()),
+            )
+        }
+    })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect replay snapshot file".to_string()),
+            )
+        })?
+        .is_file()
+    {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Lab replay artifact requires regular files and directories",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read replay snapshot file".to_string()),
+        )
+    })?;
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_replay_regular_file(path: &Path) -> Result<Vec<u8>> {
+    let file = fs::File::open(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("open replay snapshot file".to_string()),
+        )
+    })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect replay snapshot file".to_string()),
+            )
+        })?
+        .is_file()
+    {
+        return Err(replay_symlink_error(path));
+    }
+    let mut bytes = Vec::new();
+    std::io::BufReader::new(file)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read replay snapshot file".to_string()),
+            )
+        })?;
+    Ok(bytes)
 }
 
 fn replay_regular_metadata(path: &Path) -> Result<fs::Metadata> {
