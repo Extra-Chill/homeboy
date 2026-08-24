@@ -111,12 +111,7 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
         });
     }
     record.lifecycle.provider_runtime = provider_runtime;
-    record.lifecycle.external_runtime_ids = record
-        .lifecycle
-        .provider_runtime
-        .iter()
-        .flat_map(|runtime| runtime.external_runtime_ids.clone())
-        .collect();
+    record.lifecycle.refresh_external_runtime_ids();
     record.lifecycle.artifact_retention = ArtifactRetentionLifecycle {
         status: if record.artifact_refs.is_empty() {
             ArtifactRetentionStatus::NotApplicable
