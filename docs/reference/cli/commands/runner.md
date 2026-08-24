@@ -212,6 +212,7 @@ Diagnose a local or configured SSH runner without mutating it
 | `--require-tool` | `<REQUIRED_TOOLS>` | Required command to resolve on the runner PATH. Repeat for provider/job-specific tools |
 | `--scope` | `<SCOPE>` | Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and provider readiness checks Values: `general`, `lab-offload`, `secret-env`. |
 | `--repair` | flag | Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon. Without --scope, repairs use lab-offload |
+| `--full` | flag | Return complete, redacted probe evidence and resource maps |
 
 ## `homeboy runner preflight`
 

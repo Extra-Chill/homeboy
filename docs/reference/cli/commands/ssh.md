@@ -40,7 +40,11 @@ SSH into a project server or configured server
 ## `homeboy ssh list`
 
 ```sh
-homeboy ssh list
+homeboy ssh list [OPTIONS]
 ```
 
 List configured SSH server targets
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Return complete, redacted server configuration records |
