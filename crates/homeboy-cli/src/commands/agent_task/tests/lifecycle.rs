@@ -63,6 +63,63 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
         );
     });
 }
+
+#[test]
+fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-controller-admission-hash-io";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        let error = Error::internal_io(
+            "Permission denied (os error 13)",
+            Some("hash pinned controller executable".to_string()),
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "controller_admission",
+            &error,
+        )
+        .expect("persist controller admission hash failure");
+
+        let record = agent_task_lifecycle::status(run_id).expect("load failed run");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "controller_admission"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["error_code"],
+            "internal.io_error"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["context"],
+            "hash pinned controller executable"
+        );
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose controller admission failure");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(diagnosis["root_cause"]["class"], "internal.io_error");
+        assert_eq!(diagnosis["root_cause"]["owner"], "controller_runtime");
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["details"]["context"],
+            "hash pinned controller executable"
+        );
+        let commands = diagnosis["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions");
+        assert!(!commands.iter().any(|action| {
+            action["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("replay-provider-boundary"))
+        }));
+    });
+}
 use clap::Parser;
 use homeboy::agents::agent_task_service::{
     AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,
