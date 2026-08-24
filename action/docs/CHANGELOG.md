@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.2] - 2026-08-24
+
+### Fixed
+- reconcile audit results across PR closure
+
 ## [2.15.1] - 2026-08-23
 
 ### Changed
