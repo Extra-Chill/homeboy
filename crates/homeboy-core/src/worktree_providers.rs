@@ -1897,12 +1897,21 @@ fn run_provider_resolve_task_command(
         .iter()
         .map(|argument| argument.replace("{task_url}", task_url))
         .collect::<Vec<_>>();
+    let not_found_exit_codes = if provider
+        .commands
+        .resolve_task_not_found_exit_codes
+        .is_empty()
+    {
+        &provider.commands.resolve_not_found_exit_codes
+    } else {
+        &provider.commands.resolve_task_not_found_exit_codes
+    };
     run_provider_lookup_command(
         provider_id,
         provider,
         &command,
         "resolve_task",
-        &provider.commands.resolve_task_not_found_exit_codes,
+        not_found_exit_codes,
     )
 }
 
@@ -1940,9 +1949,14 @@ pub fn normalize_task_url(task_url: &str) -> String {
     } else {
         format!("{userinfo}@")
     };
+    let scheme = scheme.to_ascii_lowercase();
+    let port = match (scheme.as_str(), port) {
+        ("http", ":80") | ("https", ":443") => "",
+        _ => port,
+    };
     format!(
         "{}://{}{}{}{}",
-        scheme.to_ascii_lowercase(),
+        scheme,
         userinfo,
         host.to_ascii_lowercase(),
         port,
@@ -6368,20 +6382,31 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_task_urls_without_changing_path_case() {
-        assert_eq!(
-            normalize_task_url(
-                " HTTPS://Example.TEST:8443/Owner/Project/issues/42/?source=cook#details "
+    fn normalizes_task_urls_without_changing_path_or_userinfo() {
+        for (input, expected) in [
+            (
+                " HTTPS://User:Token@Example.TEST:443/Owner/Project/issues/42/?source=cook#details ",
+                "https://User:Token@example.test/Owner/Project/issues/42",
             ),
-            "https://example.test:8443/Owner/Project/issues/42"
-        );
+            (
+                "http://user@example.test:80/Owner/Project/issues/42",
+                "http://user@example.test/Owner/Project/issues/42",
+            ),
+            (
+                "https://User:Token@Example.TEST:8443/Owner/Project/issues/42",
+                "https://User:Token@example.test:8443/Owner/Project/issues/42",
+            ),
+        ] {
+            assert_eq!(normalize_task_url(input), expected);
+        }
     }
 
     #[test]
     fn task_lookup_normalizes_provider_urls_but_requires_exact_path_case() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "issue-42");
-        let requested = " HTTPS://example.test/Owner/Project/issues/42/?source=cook#details ";
+        let requested =
+            " HTTPS://User:Token@example.test:443/Owner/Project/issues/42/?source=cook#details ";
         let mapping = WorktreeProviderListResultMapping {
             items: "$.worktrees".to_string(),
             handle: "$.handle".to_string(),
@@ -6395,7 +6420,7 @@ mod tests {
         let script = fake_list_provider_script(json!({ "worktrees": [
             {
                 "handle": "project@exact-path", "path": workspace.path(), "branch": "issue-42",
-                "task_url": "HTTPS://EXAMPLE.TEST/Owner/Project/issues/42/?provider=1#result",
+                "task_url": "https://User:Token@EXAMPLE.TEST/Owner/Project/issues/42/?provider=1#result",
                 "safety": { "dirty": false, "unpushed": false, "primary": false }
             },
             {
@@ -6439,6 +6464,30 @@ mod tests {
                 &config_with_provider(provider),
             )
             .expect("task-specific not-found exit is accepted")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_task_uses_shared_not_found_exit_codes_when_task_codes_are_absent() {
+        let mut provider = list_provider(
+            fake_list_provider_script(json!({ "worktrees": [] })),
+            worktrees_mapping(),
+        );
+        provider.apply_enabled = true;
+        provider.commands.list = None;
+        provider.commands.resolve_task = Some(vec![
+            fake_provider_script_body("exit 41\n"),
+            "{task_url}".to_string(),
+        ]);
+        provider.commands.resolve_not_found_exit_codes = vec![41];
+
+        assert!(
+            find_apply_enabled_worktree_provider_by_task_url_from_config(
+                "https://example.test/issues/42",
+                &config_with_provider(provider),
+            )
+            .expect("legacy shared not-found exit is accepted")
             .is_none()
         );
     }

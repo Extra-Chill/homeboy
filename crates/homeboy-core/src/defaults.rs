@@ -1231,6 +1231,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_worktree_provider_commands_config_defaults_task_not_found_exit_codes() {
+        let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
+            "worktree_providers": {"fixture": {"commands": {
+                "resolve_task": ["provider", "resolve-task", "{task_url}"],
+                "resolve_not_found_exit_codes": [41]
+            }}}
+        }))
+        .expect("legacy config deserializes");
+        let commands = &config.worktree_providers["fixture"].commands;
+
+        assert_eq!(commands.resolve_not_found_exit_codes, vec![41]);
+        assert!(commands.resolve_task_not_found_exit_codes.is_empty());
+    }
+
+    #[test]
     fn homeboy_config_parses_lab_preferred_runner() {
         let config: HomeboyConfig = serde_json::from_str(
             r#"{
