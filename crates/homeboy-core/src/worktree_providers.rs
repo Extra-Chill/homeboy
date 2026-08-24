@@ -1950,8 +1950,12 @@ pub fn normalize_task_url(task_url: &str) -> String {
         format!("{userinfo}@")
     };
     let scheme = scheme.to_ascii_lowercase();
-    let port = match (scheme.as_str(), port) {
-        ("http", ":80") | ("https", ":443") => "",
+    let port = match (
+        scheme.as_str(),
+        port.strip_prefix(':')
+            .and_then(|value| value.parse::<u16>().ok()),
+    ) {
+        ("http", Some(80)) | ("https", Some(443)) => "",
         _ => port,
     };
     format!(
@@ -6385,16 +6389,16 @@ mod tests {
     fn normalizes_task_urls_without_changing_path_or_userinfo() {
         for (input, expected) in [
             (
-                " HTTPS://User:Token@Example.TEST:443/Owner/Project/issues/42/?source=cook#details ",
+                " HTTPS://User:Token@Example.TEST:0443/Owner/Project/issues/42/?source=cook#details ",
                 "https://User:Token@example.test/Owner/Project/issues/42",
             ),
             (
-                "http://user@example.test:80/Owner/Project/issues/42",
+                "http://user@example.test:080/Owner/Project/issues/42",
                 "http://user@example.test/Owner/Project/issues/42",
             ),
             (
-                "https://User:Token@Example.TEST:8443/Owner/Project/issues/42",
-                "https://User:Token@example.test:8443/Owner/Project/issues/42",
+                "https://User:Token@Example.TEST:08443/Owner/Project/issues/42",
+                "https://User:Token@example.test:08443/Owner/Project/issues/42",
             ),
         ] {
             assert_eq!(normalize_task_url(input), expected);
@@ -6406,7 +6410,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "issue-42");
         let requested =
-            " HTTPS://User:Token@example.test:443/Owner/Project/issues/42/?source=cook#details ";
+            " HTTPS://User:Token@example.test:0443/Owner/Project/issues/42/?source=cook#details ";
         let mapping = WorktreeProviderListResultMapping {
             items: "$.worktrees".to_string(),
             handle: "$.handle".to_string(),
@@ -6420,7 +6424,7 @@ mod tests {
         let script = fake_list_provider_script(json!({ "worktrees": [
             {
                 "handle": "project@exact-path", "path": workspace.path(), "branch": "issue-42",
-                "task_url": "https://User:Token@EXAMPLE.TEST/Owner/Project/issues/42/?provider=1#result",
+                "task_url": "https://User:Token@EXAMPLE.TEST:443/Owner/Project/issues/42/?provider=1#result",
                 "safety": { "dirty": false, "unpushed": false, "primary": false }
             },
             {
