@@ -1,6 +1,6 @@
 //! Top-level test result aggregate contract types.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use homeboy_finding::HomeboyFinding;
@@ -42,6 +42,10 @@ pub struct TestCommandOutput {
     /// diagnostic metadata; it never relaxes the evidence contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_inventory_rejection: Option<TestInventoryRejection>,
+    /// Adapter-neutral runtime identity evidence. The CLI consumes this only at
+    /// the result-artifact boundary to write the paired CI sidecars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_runtime_evidence: Option<TestRuntimeEvidence>,
     /// Duration facts for this phase. Deliberately separate from `findings`:
     /// those drive failure classification, and a slow test is not a failing
     /// test. `None` when nothing could be measured — never a zeroed block.
@@ -102,6 +106,8 @@ pub struct TestRunWorkflowResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_inventory_rejection: Option<TestInventoryRejection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_runtime_evidence: Option<TestRuntimeEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_durations: Option<TestDurations>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip)]
@@ -120,6 +126,31 @@ pub struct TestRunWorkflowResult {
     pub cargo_target: Option<homeboy_engine_primitives::cargo_target::CargoTargetEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+}
+
+/// Normalized facts from one actual Test execution.
+///
+/// This intentionally carries only planned identities and observed failures.
+/// Absence is never expanded into passed or skipped outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TestRuntimeEvidence {
+    Complete {
+        runner: String,
+        runner_fingerprint: String,
+        workspace_fingerprint: String,
+        execution_fingerprint: String,
+        tests: Vec<TestRuntimeIdentity>,
+        failed_test_ids: Vec<String>,
+    },
+    InvalidEvidence {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestRuntimeIdentity {
+    pub id: String,
 }
 
 /// Validated inventory-only test evidence from a supervised extension child.

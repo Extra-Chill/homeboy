@@ -454,7 +454,12 @@ impl<'a> OutputService<'a> {
     }
 
     pub(crate) fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
-        self.write_output_file(&run, mode);
+        let output_file_written = self.write_output_file(&run, mode);
+        let exit_code = if output_file_written || run.exit_code != 0 {
+            run.exit_code
+        } else {
+            1
+        };
         if let Some(raw_stdout) = run.raw_stdout {
             if let Some(stderr) = &run.presentation.stderr {
                 eprint!("{}", stderr);
@@ -490,7 +495,7 @@ impl<'a> OutputService<'a> {
                 eprint!("{}", stderr);
             }
 
-            return run.exit_code;
+            return exit_code;
         }
 
         if let Some(stderr) = &run.presentation.stderr {
@@ -507,12 +512,14 @@ impl<'a> OutputService<'a> {
         )
         .ok();
 
-        run.exit_code
+        exit_code
     }
 
-    pub fn write_output_file(&self, run: &CommandRun, mode: CommandOutputFileMode) {
+    pub fn write_output_file(&self, run: &CommandRun, mode: CommandOutputFileMode) -> bool {
         if !run.output_file_already_written {
-            write_output_file(run, mode, self.output_file);
+            write_output_file(run, mode, self.output_file)
+        } else {
+            true
         }
     }
 }
@@ -634,9 +641,13 @@ pub(crate) fn run_json(
     }
 }
 
-pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Option<&str>) {
+pub fn write_output_file(
+    run: &CommandRun,
+    mode: CommandOutputFileMode,
+    path: Option<&str>,
+) -> bool {
     let Some(path) = path else {
-        return;
+        return true;
     };
 
     match mode {
@@ -668,6 +679,18 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
             );
         }
     }
+    if let Err(error) = output::write_test_evidence_sidecars(
+        run.output_file_result(mode),
+        path,
+        &CommandIdentity {
+            command: run.command.clone(),
+            operation: run.operation.clone(),
+        },
+    ) {
+        eprintln!("Homeboy could not write paired Test evidence: {error}");
+        return false;
+    }
+    true
 }
 
 fn presentation_envelope(
@@ -702,6 +725,22 @@ mod tests {
             raw_completion_stderr: None,
             output_file_already_written: false,
         }
+    }
+
+    fn runtime_evidence_result() -> Value {
+        json!({
+            "passed": true,
+            "status": "passed",
+            "test_runtime_evidence": {
+                "status": "complete",
+                "runner": "nextest",
+                "runner_fingerprint": "a".repeat(64),
+                "workspace_fingerprint": "b".repeat(64),
+                "execution_fingerprint": "c".repeat(64),
+                "tests": [{"id": "stable"}, {"id": "nondeterministic"}],
+                "failed_test_ids": [],
+            }
+        })
     }
 
     #[test]
@@ -965,6 +1004,65 @@ mod tests {
         assert_eq!(json["success"], false);
         assert_eq!(json["exit_code"], 1);
         assert_eq!(json["data"]["test_counts"]["failed"], 15);
+    }
+
+    #[test]
+    fn review_test_output_writes_action_compatible_paired_runtime_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result_path = dir.path().join("review-test.json");
+        let run = CommandRun::from_stdout_result(Ok(runtime_evidence_result()), 0)
+            .with_identity(&CommandIdentity::with_operation("review", "test"));
+
+        assert!(write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(result_path.to_str().unwrap()),
+        ));
+
+        let inventory: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("review-test.test-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        let outcomes: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("review-test.test-outcomes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inventory["command"], "review test");
+        assert_eq!(outcomes["command"], "review test");
+        assert_eq!(
+            inventory["inventory_fingerprint"],
+            "33cd5e1d3228f1fec415677a63e0b6fdffb2acae8ea97ea101239117fa8de854"
+        );
+        assert_eq!(
+            outcomes["inventory_fingerprint"],
+            inventory["inventory_fingerprint"]
+        );
+        assert_eq!(
+            inventory["tests"],
+            json!([{"id": "nondeterministic"}, {"id": "stable"}])
+        );
+        assert_eq!(outcomes["failed_test_ids"], json!([]));
+    }
+
+    #[test]
+    fn paired_runtime_sidecar_failure_removes_partial_pair_and_fails_command_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result_path = dir.path().join("test.json");
+        let outcomes_path = dir.path().join("test.test-outcomes.json");
+        std::fs::create_dir(&outcomes_path).expect("block outcomes file with directory");
+        let run = CommandRun::from_stdout_result(Ok(runtime_evidence_result()), 0)
+            .with_identity(&CommandIdentity::top_level("test"));
+
+        let exit_code = OutputService::new(Some(result_path.to_str().unwrap()))
+            .emit_run(run, CommandOutputFileMode::GenericEnvelope);
+
+        assert_eq!(exit_code, 1);
+        assert!(result_path.is_file(), "primary result remains inspectable");
+        assert!(outcomes_path.is_dir(), "injected blocker remains in place");
+        assert!(
+            !dir.path().join("test.test-inventory.json").exists(),
+            "a failed pair must not leave one valid-looking sidecar"
+        );
     }
 
     #[test]

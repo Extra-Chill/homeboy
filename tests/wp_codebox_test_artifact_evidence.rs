@@ -6,6 +6,120 @@ use std::process::{Command, Output};
 use serde_json::Value;
 
 #[test]
+fn review_test_output_materializes_consumer_compatible_runtime_evidence_pair() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let extension = home.join(".config/homeboy/extensions/runtime-evidence-fixture");
+    fs::create_dir_all(&project).expect("project dir");
+    fs::create_dir_all(&extension).expect("extension dir");
+    fs::write(
+        project.join("homeboy.json"),
+        r#"{"id":"runtime-evidence-fixture"}"#,
+    )
+    .expect("project manifest");
+    fs::write(
+        extension.join("runtime-evidence-fixture.json"),
+        r#"{
+  "name": "Runtime evidence fixture",
+  "version": "1.0.0",
+  "test": { "extension_script": "test.sh" }
+}"#,
+    )
+    .expect("extension manifest");
+    write_executable(
+        &extension.join("test.sh"),
+        r##"#!/bin/sh
+printf '%s' '{"total":2,"passed":1,"failed":1}' > "$HOMEBOY_TEST_RESULTS_FILE"
+printf '%s' '[{"test_name":"suite::fails","message":"failed"}]' > "$HOMEBOY_TEST_FAILURES_FILE"
+exit 1
+"##,
+    );
+    let manifest = temp.path().join("shard.json");
+    fs::write(
+        &manifest,
+        r#"{
+  "schema": "homeboy/test-shard-manifest/v1",
+  "id": "shard-1",
+  "runner": "nextest",
+  "runner_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "workspace_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "inventory_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "tests": ["suite::passes", "suite::fails"]
+}"#,
+    )
+    .expect("shard manifest");
+    let result_path = temp.path().join("review-test.json");
+
+    let test = Command::new(homeboy_bin())
+        .args([
+            "--output",
+            result_path.to_str().expect("result path"),
+            "--placement",
+            "local",
+            "review",
+            "test",
+            "--path",
+            project.to_str().expect("project path"),
+            "--extension",
+            "runtime-evidence-fixture",
+            "--skip-lint",
+            "--json-summary",
+        ])
+        .env("HOME", &home)
+        .env_remove("XDG_DATA_HOME")
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env("HOMEBOY_TEST_SHARD_MANIFEST", &manifest)
+        .output()
+        .expect("homeboy review test");
+
+    assert_eq!(
+        test.status.code(),
+        Some(1),
+        "test stderr: {}",
+        stderr(&test)
+    );
+    assert!(result_path.is_file(), "primary command artifact");
+    let inventory: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("review-test.test-inventory.json")).expect("inventory sidecar"),
+    )
+    .expect("inventory JSON");
+    let outcomes: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("review-test.test-outcomes.json")).expect("outcomes sidecar"),
+    )
+    .expect("outcomes JSON");
+
+    assert_eq!(inventory["command"], "review test");
+    assert_eq!(inventory["runner"], "nextest");
+    assert_eq!(
+        inventory["execution_fingerprint"],
+        "b3a1e8ac386d846c0c1ae678f05eb369d0280b006820e6e4a66fb4f91f11cc24"
+    );
+    assert_eq!(
+        inventory["inventory_fingerprint"],
+        "db429d4dc3200731d03c64ce5ae5d069ed41efe1ce9cfc253a47e0c3079c9bd7"
+    );
+    assert_eq!(
+        inventory["tests"],
+        serde_json::json!([{"id": "suite::fails"}, {"id": "suite::passes"}])
+    );
+    assert_eq!(
+        outcomes["failed_test_ids"],
+        serde_json::json!(["suite::fails"])
+    );
+    for field in [
+        "command",
+        "runner",
+        "runner_fingerprint",
+        "workspace_fingerprint",
+        "execution_fingerprint",
+        "inventory_fingerprint",
+    ] {
+        assert_eq!(outcomes[field], inventory[field], "shared {field}");
+    }
+}
+
+#[test]
 fn failing_provider_test_artifacts_remain_retrievable_after_scratch_cleanup() {
     let temp = tempfile::tempdir().expect("temp dir");
     let home = temp.path().join("home");
