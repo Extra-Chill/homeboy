@@ -833,7 +833,7 @@ pub fn refresh_homeboy_binary(
                 if converged { 0 } else { 1 },
             ));
             let followup_commands = readiness.continuation.clone().into_iter().collect();
-            let next_actions = controller_continuation_actions(&plan, &identity)?;
+            let next_actions = controller_continuation_actions(&plan, &identity, Vec::new())?;
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -1028,10 +1028,11 @@ pub fn refresh_homeboy_binary(
                     reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
+                        &identity,
                         &exec_output,
                         &report,
                         daemon_identity_verification.err().as_deref(),
-                    )),
+                    )?),
                     bootstrap_provenance: Some(refresh_bootstrap_provenance(
                         diagnostic_ssh_bootstrap,
                         &plan,
@@ -1101,10 +1102,11 @@ pub fn refresh_homeboy_binary(
                         reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
+                            &identity,
                             &exec_output,
                             &report,
                             Some(readiness_error.message.as_str()),
-                        )),
+                        )?),
                         bootstrap_provenance: Some(refresh_bootstrap_provenance(
                             diagnostic_ssh_bootstrap,
                             &plan,
@@ -1142,7 +1144,7 @@ pub fn refresh_homeboy_binary(
         .and_then(|readiness| readiness.continuation.clone())
         .map(|continuation| vec![continuation])
         .unwrap_or_else(|| plan.followup_commands.clone());
-    let next_actions = controller_continuation_actions(&plan, &identity)?;
+    let next_actions = controller_continuation_actions(&plan, &identity, Vec::new())?;
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -2846,12 +2848,14 @@ fn error_context(error: &Error) -> String {
 
 fn refresh_reconnect_failure(
     plan: &HomeboyBinaryRefreshPlan,
+    identity: &Value,
     execution: &RunnerExecOutput,
     report: &super::RunnerConnectReport,
     daemon_identity_verification: Option<&str>,
-) -> HomeboyBinaryRefreshFailure {
+) -> Result<HomeboyBinaryRefreshFailure> {
     refresh_reconnect_failure_with_message(
         plan,
+        identity,
         execution,
         report
             .failure_message
@@ -2866,25 +2870,40 @@ fn refresh_reconnect_failure(
 /// retry that can rematerialize or select a different executable.
 fn refresh_reconnect_failure_with_message(
     plan: &HomeboyBinaryRefreshPlan,
+    identity: &Value,
     execution: &RunnerExecOutput,
     reconnect_error: &str,
-) -> HomeboyBinaryRefreshFailure {
+) -> Result<HomeboyBinaryRefreshFailure> {
     let mut failure = refresh_failure(plan, execution.clone(), 1);
+    let invocation = vec![
+        "runner".to_string(),
+        "connect".to_string(),
+        plan.runner_id.clone(),
+    ];
+    let recovery_command = if plan.mode == "materialize" {
+        controller_continuation_actions(plan, identity, invocation)?
+            .into_iter()
+            .next()
+            .expect("materialized candidate continuation is present")
+            .command
+    } else {
+        vec![
+            "homeboy".to_string(),
+            "runner".to_string(),
+            "connect".to_string(),
+            plan.runner_id.clone(),
+        ]
+    };
     failure.recovery_actions = vec![
         homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
             label: "reconnect_after_promotion".to_string(),
-            command: vec![
-                "homeboy".to_string(),
-                "runner".to_string(),
-                "connect".to_string(),
-                plan.runner_id.clone(),
-            ],
+            command: recovery_command,
         },
     ];
     failure.verification = Some(format!(
         "reconnect failed after selection; the promoted configured binary remains selected: {reconnect_error}"
     ));
-    failure
+    Ok(failure)
 }
 
 fn build_local_homeboy_binary(
@@ -2934,6 +2953,7 @@ fn build_local_homeboy_binary(
 fn controller_continuation_actions(
     plan: &HomeboyBinaryRefreshPlan,
     identity: &Value,
+    invocation: Vec<String>,
 ) -> Result<Vec<HomeboyControllerContinuationAction>> {
     if plan.mode != "materialize" {
         return Ok(Vec::new());
@@ -2972,7 +2992,7 @@ fn controller_continuation_actions(
                 None,
             )
         })?;
-    let command = vec![
+    let mut command = vec![
         "homeboy".to_string(),
         "runtime".to_string(),
         "materialize-controller".to_string(),
@@ -2983,13 +3003,17 @@ fn controller_continuation_actions(
         "--identity".to_string(),
         expected.to_string(),
     ];
+    if !invocation.is_empty() {
+        command.push("--".to_string());
+        command.extend(invocation.iter().cloned());
+    }
     Ok(vec![HomeboyControllerContinuationAction {
         label: "materialize_controller_candidate".to_string(),
         command,
         source: source.to_string(),
         commit: exact_commit.to_string(),
         identity: expected.to_string(),
-        invocation: Vec::new(),
+        invocation,
     }])
 }
 
