@@ -162,37 +162,17 @@ impl RefactorScriptFailure {
     }
 }
 
-/// Output from a `parse_items` refactor command.
-/// Each item has boundaries, kind, name, visibility, and source text.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ParsedItem {
-    /// Name of the item (function, struct, etc.).
-    pub name: String,
-    /// What kind of item (function, struct, enum, const, etc.).
-    pub kind: String,
-    /// Start line (1-indexed, includes doc comments and attributes).
-    pub start_line: usize,
-    /// End line (1-indexed, inclusive).
-    pub end_line: usize,
-    /// The extracted source code (including doc comments and attributes).
-    pub source: String,
-    /// Visibility: "pub", "pub(crate)", "pub(super)", or "" for private.
-    #[serde(default)]
-    pub visibility: String,
-}
-
-impl From<crate::grammar_items::GrammarItem> for ParsedItem {
-    fn from(gi: crate::grammar_items::GrammarItem) -> Self {
-        Self {
-            name: gi.name,
-            kind: gi.kind,
-            start_line: gi.start_line,
-            end_line: gi.end_line,
-            source: gi.source,
-            visibility: gi.visibility,
-        }
-    }
-}
+/// Output from a `parse_items` refactor command: the protocol name for a parsed
+/// top-level item.
+///
+/// This was a second declaration of [`crate::grammar_items::GrammarItem`] --
+/// same six fields, same order, same serde, and the same doc comment on every
+/// field -- plus a `From` impl that moved them across one at a time.
+/// `GrammarItem`'s own doc already described it as "the core equivalent of
+/// `extension::ParsedItem`", and this crate re-exports the core module as
+/// `grammar_items`, so the two names always resolved through the same crate with
+/// no dependency boundary between them to justify a copy.
+pub type ParsedItem = crate::grammar_items::GrammarItem;
 
 /// Output from a `resolve_imports` refactor command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
