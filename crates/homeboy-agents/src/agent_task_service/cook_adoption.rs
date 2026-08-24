@@ -202,6 +202,7 @@ pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     B: AgentTaskPrFinalizationBackend,
 >(
@@ -1079,6 +1080,7 @@ pub(crate) fn concrete_adoption_ai_model(value: &str) -> Result<String> {
 /// Resolve an existing run first, then recover a deterministic persisted
 /// attempt when a controller stopped after writing its recipe and before
 /// writing the run.
+#[cfg(test)]
 pub(crate) fn resolve_adoption_target(
     cook_or_run_id: &str,
 ) -> Result<(
@@ -1091,6 +1093,7 @@ pub(crate) fn resolve_adoption_target(
 /// Resolve an adoption target, optionally selecting a numbered attempt from a
 /// durable Cook recipe. The selector is needed when attempt one shares its ID
 /// with the logical Cook and later attempts have different policies.
+#[cfg(test)]
 pub(crate) fn resolve_adoption_target_with_attempt(
     cook_or_run_id: &str,
     selected_attempt: Option<u32>,

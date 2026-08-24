@@ -177,6 +177,9 @@ pub enum AuditFinding {
     /// Direct aggregate/struct literals are repeated even though a canonical
     /// construction seam exists for the same type.
     DirectAggregateConstruction,
+    /// Two aggregates are declared with the same field shape, so one type is
+    /// written twice and keeping them in step is a manual obligation.
+    TwinTypeDeclaration,
     /// Configured key has write/migration/accessor evidence but no non-test read.
     WriteOnlyConfigKey,
     /// Configured ecosystem/language/framework term appears in core-owned source.

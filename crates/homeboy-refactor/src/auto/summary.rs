@@ -1,7 +1,7 @@
 use super::outcome::{FixApplied, FixResultsSummary, PrimitiveFixCount, RuleFixCount};
 use crate::FixResult;
 
-pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
+pub(crate) fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     use std::collections::{BTreeMap, HashSet};
 
     let mut files = HashSet::new();
@@ -34,7 +34,7 @@ pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     }
 }
 
-pub fn summarize_optional_fix_results(fixes: &[FixApplied]) -> Option<FixResultsSummary> {
+pub(crate) fn summarize_optional_fix_results(fixes: &[FixApplied]) -> Option<FixResultsSummary> {
     if fixes.is_empty() {
         None
     } else {
@@ -42,7 +42,7 @@ pub fn summarize_optional_fix_results(fixes: &[FixApplied]) -> Option<FixResults
     }
 }
 
-pub fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
+pub(crate) fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
     use std::collections::{BTreeMap, HashSet};
 
     let mut files = HashSet::new();

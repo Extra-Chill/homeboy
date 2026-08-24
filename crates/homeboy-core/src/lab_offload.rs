@@ -171,6 +171,7 @@ mod tests {
                 durable_agent_task_plan: None,
                 durable_run_id: None,
                 source_path: None,
+                expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
                 reuse_compatible_snapshot: false,

@@ -21,32 +21,32 @@ use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactS
 /// deliberately have no representation here.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ComponentPayloadPreparationRequest {
-    pub component: ComponentPayloadPreparationSource,
-    pub config: PreparationConfig,
+    pub(crate) component: ComponentPayloadPreparationSource,
+    pub(crate) config: PreparationConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ComponentPayloadPreparationSource {
-    pub id: String,
-    pub local_path: String,
-    pub build_artifact: Option<String>,
-    pub build_command: Option<String>,
-    pub extensions:
+    pub(crate) id: String,
+    pub(crate) local_path: String,
+    pub(crate) build_artifact: Option<String>,
+    pub(crate) build_command: Option<String>,
+    pub(crate) extensions:
         Option<std::collections::HashMap<String, homeboy_core::component::ScopedExtensionConfig>>,
-    pub capability_extensions: std::collections::HashMap<String, String>,
-    pub scopes: Option<homeboy_core::component::ScopeConfig>,
-    pub artifact_inputs: Vec<homeboy_core::component::ArtifactInput>,
-    pub package_artifacts: Vec<homeboy_core::component::PackageArtifact>,
-    pub scripts: Option<homeboy_core::component::ComponentScriptsConfig>,
-    pub version_targets: Option<Vec<homeboy_core::component::VersionTarget>>,
-    pub env: std::collections::BTreeMap<String, String>,
-    pub remote_url: Option<String>,
-    pub github: homeboy_core::component::GithubConfig,
-    pub release: homeboy_core::component::ComponentReleaseConfig,
+    pub(crate) capability_extensions: std::collections::HashMap<String, String>,
+    pub(crate) scopes: Option<homeboy_core::component::ScopeConfig>,
+    pub(crate) artifact_inputs: Vec<homeboy_core::component::ArtifactInput>,
+    pub(crate) package_artifacts: Vec<homeboy_core::component::PackageArtifact>,
+    pub(crate) scripts: Option<homeboy_core::component::ComponentScriptsConfig>,
+    pub(crate) version_targets: Option<Vec<homeboy_core::component::VersionTarget>>,
+    pub(crate) env: std::collections::BTreeMap<String, String>,
+    pub(crate) remote_url: Option<String>,
+    pub(crate) github: homeboy_core::component::GithubConfig,
+    pub(crate) release: homeboy_core::component::ComponentReleaseConfig,
 }
 
 impl ComponentPayloadPreparationRequest {
-    pub fn new(component: &Component, config: &DeployConfig) -> Self {
+    pub(crate) fn new(component: &Component, config: &DeployConfig) -> Self {
         Self {
             component: ComponentPayloadPreparationSource {
                 id: component.id.clone(),
@@ -70,7 +70,7 @@ impl ComponentPayloadPreparationRequest {
     }
 
     /// Stable evidence and deduplication key for every source/build input.
-    pub fn identity(&self) -> String {
+    pub(crate) fn identity(&self) -> String {
         digest_json(&canonical_json(
             serde_json::to_value(self).expect("preparation request serializes"),
         ))
@@ -80,7 +80,7 @@ impl ComponentPayloadPreparationRequest {
         dead_code,
         reason = "No production caller: redacted preparation evidence is asserted by this module's tests; nothing emits it on a deploy."
     )]
-    pub fn evidence(&self) -> serde_json::Value {
+    pub(crate) fn evidence(&self) -> serde_json::Value {
         let mut evidence = serde_json::to_value(self).expect("preparation request serializes");
         let component = evidence["component"]
             .as_object_mut()
@@ -197,19 +197,19 @@ fn redact_github(value: serde_json::Value) -> serde_json::Value {
 /// Deploy configuration that can affect source selection or payload preparation.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PreparationConfig {
-    pub skip_build: bool,
-    pub keep_deps: bool,
-    pub skip_deps_hydration: bool,
-    pub expected_version: Option<String>,
-    pub no_pull: bool,
-    pub allow_stale_source: bool,
-    pub head: bool,
-    pub requested_ref: Option<String>,
-    pub tagged: bool,
-    pub prepared_artifact: Option<PreparedDeployArtifact>,
+    pub(crate) skip_build: bool,
+    pub(crate) keep_deps: bool,
+    pub(crate) skip_deps_hydration: bool,
+    pub(crate) expected_version: Option<String>,
+    pub(crate) no_pull: bool,
+    pub(crate) allow_stale_source: bool,
+    pub(crate) head: bool,
+    pub(crate) requested_ref: Option<String>,
+    pub(crate) tagged: bool,
+    pub(crate) prepared_artifact: Option<PreparedDeployArtifact>,
     /// An exact-ref checkout was materialized by the caller and is the only
     /// eligible local source for this payload.
-    pub exact_ref_materialized: bool,
+    pub(crate) exact_ref_materialized: bool,
 }
 
 impl From<&DeployConfig> for PreparationConfig {
@@ -235,9 +235,9 @@ impl From<&DeployConfig> for PreparationConfig {
 /// Orchestration invokes this after resolving project and SSH context, but before
 /// any target mutation such as transfer, install, hooks, or smoke checks.
 pub(crate) struct PreparedComponentPayload {
-    pub artifact: PreparedDeployArtifact,
+    pub(crate) artifact: PreparedDeployArtifact,
     /// Whether preparing this payload ran a fresh build in this lifecycle.
-    pub build_ran: bool,
+    pub(crate) build_ran: bool,
     _release_artifact: Option<ReleaseArtifactLease>,
     _exact_ref_checkout: Option<ExactRefCheckout>,
     _payload_artifact: PreparedArtifactCleanup,
@@ -322,7 +322,7 @@ struct PreparedPayloadEntry {
 }
 
 impl PreparedPayloadCollection {
-    pub fn insert(
+    pub(crate) fn insert(
         &mut self,
         request: ComponentPayloadPreparationRequest,
         release_artifact: Option<ReleaseArtifactLease>,
@@ -372,7 +372,7 @@ impl PreparedPayloadCollection {
 
     /// Prepare a component once and return its immutable artifact identity. This
     /// boundary intentionally has no project or remote target inputs.
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         request: ComponentPayloadPreparationRequest,
         release_artifacts: &mut ReleaseArtifactStore,
@@ -405,7 +405,7 @@ impl PreparedPayloadCollection {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -764,30 +764,7 @@ mod tests {
     fn config() -> DeployConfig {
         DeployConfig {
             component_ids: vec!["fixture".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         }
     }
 

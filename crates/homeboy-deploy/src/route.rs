@@ -14,7 +14,6 @@
 //! never silent.
 
 use homeboy_core::component::Component;
-use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
 use serde::{Deserialize, Serialize};
 
@@ -31,29 +30,10 @@ pub enum DeployTarget {
 }
 
 impl DeployTarget {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Server => "server",
             Self::Provider => "provider",
-        }
-    }
-
-    /// Parse the operator-facing `--target` value.
-    pub fn parse(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "server" => Ok(Self::Server),
-            "provider" => Ok(Self::Provider),
-            other => Err(Error::validation_invalid_argument(
-                "target",
-                format!("Unknown deployment target '{other}'"),
-                None,
-                Some(vec![
-                    "--target server deploys the build artifact to the project's remote path"
-                        .to_string(),
-                    "--target provider deploys through the component's declared deployment provider"
-                        .to_string(),
-                ]),
-            )),
         }
     }
 }
@@ -244,23 +224,5 @@ mod tests {
         );
 
         assert!(server_route_disclosure(&component, &project(None), &config(None)).is_none());
-    }
-
-    #[test]
-    fn an_unknown_target_value_is_rejected_with_the_supported_ones() {
-        let error = DeployTarget::parse("worker").expect_err("unknown target");
-
-        assert_eq!(error.details["field"], "target");
-        assert_eq!(
-            error.details["tried"],
-            serde_json::json!([
-                "--target server deploys the build artifact to the project's remote path",
-                "--target provider deploys through the component's declared deployment provider"
-            ])
-        );
-        assert_eq!(
-            DeployTarget::parse("Server").expect("case"),
-            DeployTarget::Server
-        );
     }
 }

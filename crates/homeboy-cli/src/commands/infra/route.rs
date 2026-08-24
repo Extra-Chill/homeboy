@@ -545,6 +545,9 @@ pub(crate) fn route_after_parse_with_provenance(
             // canonical plan root through the portable source channel so Lab
             // snapshots it before remapping nested plan/config paths.
             source_path: Some(&routing_source_path),
+            expected_source_snapshot_identity: retry_handoff
+                .as_ref()
+                .and_then(|handoff| handoff.expected_source_snapshot_identity.as_deref()),
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: retry_handoff.is_some(),
@@ -711,6 +714,7 @@ pub(crate) fn route_composed_lab_command(
             durable_agent_task_plan: None,
             durable_run_id: None,
             source_path: Some(&source_path),
+            expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: false,
@@ -2886,6 +2890,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
                     source_path,
+                    expected_source_snapshot_identity: None,
                     verified_cook_baseline: verified_cook_baseline.as_ref(),
                     job_overrides: self.job_overrides.clone(),
                 },
@@ -3601,8 +3606,27 @@ fn materialize_generic_detached_lab_handoff(
             Some(vec![error.to_string()]),
         )
     })?;
-    let content_identity =
-        homeboy::runner::controller_workspace_materialization_identity(&canonical_root)?;
+    let runner_id = placement_decision.runner.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "detached Lab replay requires a selected runner to bind its transfer policy",
+            None,
+            None,
+        )
+    })?;
+    let content_identity = homeboy::runner::generic_lab_replay_artifact_identity_for_runner(
+        &runner_id.runner_id,
+        &canonical_root,
+    )
+    // Plan-only controller tests may construct a placement decision without a
+    // persisted runner. A real replay still rejects that legacy/default policy
+    // if the selected runner later resolves any additional exclusion.
+    .or_else(|error| {
+        (error.message == "Runner not found")
+            .then(|| homeboy::runner::generic_lab_replay_artifact_identity(&canonical_root))
+            .transpose()?
+            .ok_or(error)
+    })?;
     let repository_remote =
         homeboy::core::git::release_download::detect_remote_url(&canonical_root);
     let revision = homeboy::core::git::head_sha(&canonical_root);
@@ -3730,6 +3754,7 @@ struct AgentTaskRetryHandoff {
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     primary_workspace: PathBuf,
     replays_generic_command: bool,
+    expected_source_snapshot_identity: Option<String>,
 }
 
 fn generic_lab_command_replay(
@@ -3954,11 +3979,12 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let retry_result = crate::agents::agent_task_service::retry(
+    let retry_result = crate::agents::agent_task_service::retry_with_preflight(
         &retry.run_id,
         retry.new_run_id.as_deref(),
         true,
         retry.force,
+        validate_generic_lab_command_replay_workspace,
     )?;
     if !retry_result.run {
         return Ok(None);
@@ -3967,29 +3993,13 @@ fn materialize_agent_task_retry_handoff(
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
-        let current_identity =
-            homeboy::runner::controller_workspace_materialization_identity(&primary_workspace)?;
-        if current_identity != replay.materialization.content_identity {
-            let error = Error::validation_invalid_argument(
-                "workspace",
-                "agent-task retry refused a source workspace whose content no longer matches the persisted Lab replay identity",
-                Some(primary_workspace.display().to_string()),
-                Some(vec!["Restore the recorded workspace content or reissue the original command as a new run.".to_string()]),
-            );
-            agent_task_lifecycle::record_pre_execution_failure(
-                &record.run_id,
-                &plan,
-                "validate_retry_workspace_identity",
-                &error,
-            )?;
-            return Err(error);
-        }
         return Ok(Some(AgentTaskRetryHandoff {
             args: replay.normalized_args,
             run_id: record.run_id,
             plan,
             primary_workspace,
             replays_generic_command: true,
+            expected_source_snapshot_identity: Some(replay.materialization.content_identity),
         }));
     }
     let primary_workspace = match retry_plan_primary_workspace(&plan) {
@@ -4035,7 +4045,30 @@ fn materialize_agent_task_retry_handoff(
         plan,
         primary_workspace,
         replays_generic_command: false,
+        expected_source_snapshot_identity: None,
     }))
+}
+
+pub(crate) fn validate_generic_lab_command_replay_workspace(
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    let Some(replay) = generic_lab_command_replay(plan)? else {
+        return Ok(());
+    };
+    let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
+    if homeboy::runner::generic_lab_replay_identity_excludes(
+        &replay.materialization.content_identity,
+    )
+    .is_err()
+    {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "agent-task retry uses a legacy Lab replay identity that cannot attest an immutable transfer artifact",
+            Some(primary_workspace.display().to_string()),
+            Some(vec!["Reissue the command as a new Lab run to create an immutable replay artifact.".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 fn retry_handoff_prefix(args: &[String]) -> Vec<String> {

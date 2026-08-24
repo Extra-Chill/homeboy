@@ -42,7 +42,6 @@ cargo run -p homeboy-cli --bin generate-cli-reference -->
 - [stack](stack.md)
 - [status](status.md)
 - [trace](trace.md)
-- [triage](triage.md)
 - [tunnel](tunnel.md)
 - [upgrade](upgrade.md)
 - [worktree](worktree.md)

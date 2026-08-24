@@ -40,11 +40,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Env var that disables verify even when a config is present.
-pub const VERIFY_ENV_VAR: &str = "HOMEBOY_AUTOFIX_VERIFY";
+pub(crate) const VERIFY_ENV_VAR: &str = "HOMEBOY_AUTOFIX_VERIFY";
 
 /// Outcome of a single verify-gate execution.
 #[derive(Debug)]
-pub struct VerifyOutcome {
+pub(crate) struct VerifyOutcome {
     /// True when verify exited 0 within the timeout.
     pub passed: bool,
     /// Exit code when the process ran to completion. `None` on timeout / spawn
@@ -81,7 +81,7 @@ impl VerifyOutcome {
 /// `files` are expected to be relative to `root` (matching the `ApplyChunkResult`
 /// shape). Non-existent files are recorded as "created" — revert will delete
 /// them on failure.
-pub fn capture_pre_apply_snapshot<I, P>(root: &Path, files: I) -> InMemoryRollback
+pub(crate) fn capture_pre_apply_snapshot<I, P>(root: &Path, files: I) -> InMemoryRollback
 where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
@@ -118,7 +118,7 @@ fn env_gate_enabled() -> bool {
 /// operator. When the gate is skipped (no config, env disabled, or no files
 /// were actually modified), the outcome is `passed=true, skipped=true` and
 /// nothing is touched on disk.
-pub fn run_verify_gate(
+pub(crate) fn run_verify_gate(
     config: Option<&AutofixVerifyConfig>,
     rollback: &InMemoryRollback,
     root: &Path,
@@ -318,7 +318,7 @@ fn mark_applied_chunks_reverted(chunks: &mut [ApplyChunkResult], outcome: &Verif
 /// Collect the unique list of applied, modified file paths (relative to
 /// `root`) from a set of chunk results. Used by callers that need the
 /// snapshot scope to line up with what actually changed on disk.
-pub fn applied_files_from_chunks(chunks: &[ApplyChunkResult]) -> Vec<PathBuf> {
+pub(crate) fn applied_files_from_chunks(chunks: &[ApplyChunkResult]) -> Vec<PathBuf> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for chunk in chunks.iter() {
         if matches!(chunk.status, ChunkStatus::Applied) {

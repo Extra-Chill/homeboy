@@ -4,6 +4,51 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.0] - 2026-08-24
+
+### Added
+- detect twin type declarations
+
+### Changed
+- ParsedItem is GrammarItem, and always said so
+- delete DeployTarget::parse and the test that outlived it
+- light up agent_task_service and clear the crate
+- seal the crate boundary and delete what rustc exposed
+- collapse DeployConfig fixtures onto a test-only Default
+
+### Fixed
+- gate persist_workspace_terminal_authority to its caller's cfg
+- seal replay archives without traversal
+- document provider evidence declarations
+- preserve evidence through clean preflight
+- defer Lab replay identity to staging
+- bind Lab replay transfer policy
+- attest immutable Lab replay artifacts
+- bind Lab replay staging identity
+- align lifecycle replay admission
+- revalidate retry replay under lineage lock
+- bind retry replay admission to reservation
+- validate retry replay before reservation
+- keep batch status checks rooted
+
+## [0.359.7] - 2026-08-24
+
+### Changed
+- one trace run record, because trace_runs assigns no column
+- key both digest caches on one file identity
+- drop trailing blank line left by probe removal in route.rs
+- seal the crate boundary the facade only looked like it had
+- light up agent_task_lifecycle for the dead-code lint
+- declare the replay/minimize argument set once instead of three times
+- seal the crate boundary so rustc can see inside it
+- delete RawComponent and its two 44-field conversions
+- light up agent_task_scheduler for the dead-code lint
+- collapse the two projection twins onto their source types
+
+### Fixed
+- preserve legacy full-scope baselines
+- route runner artifact promotion locally
+
 ## [0.359.6] - 2026-08-24
 
 ### Changed
