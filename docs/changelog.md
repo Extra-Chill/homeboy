@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.358.1] - 2026-08-24
+
+### Changed
+- include preflight result field
+- gate shell rig recovery on Unix
+- adapt rig source fixture to root contract
+- cover durable transport failure evidence
+
+### Fixed
+- bound operational inventory output
+- own remote descendants for untimed commands
+- preflight runner extension manifests
+- converge pinned source recovery
+- bound finalization output
+- preflight extension compatibility
+- report zero required gates
+- root rig source test fixtures
+- reject escaping rig source links
+- enforce rig directory authority
+- preserve file rig source authority
+- resolve relative rig sources in worktrees
+- persist initial base transport failures
+- recover Git preflight transport failures
+
 ## [0.358.0] - 2026-08-24
 
 ### Added
