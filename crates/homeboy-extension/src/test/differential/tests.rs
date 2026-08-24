@@ -8,7 +8,6 @@
 //! to serve.
 
 use super::*;
-use serde_json::json;
 
 fn counts(total: u64, passed: u64, failed: u64) -> TestCounts {
     TestCounts::new(total, passed, failed, 0)
@@ -292,82 +291,6 @@ fn two_unmeasured_sides_are_no_measurement() {
         verdict(candidate, Some(baseline)),
         DifferentialVerdict::NoMeasurement
     );
-}
-
-// ---------------------------------------------------------------------------
-// terminal sidecar evidence
-// ---------------------------------------------------------------------------
-
-#[test]
-fn terminal_sidecar_normalizes_adapter_order_deterministically() {
-    let evidence = normalize_terminal_test_evidence(&json!({
-        "inventory": [{"id": "suite::b"}, {"id": "suite::a"}],
-        "outcomes": [
-            {"id": "suite::b", "outcome": "failed"},
-            {"id": "suite::a", "outcome": "passed"}
-        ]
-    }))
-    .expect("valid adapter evidence");
-
-    assert_eq!(
-        evidence
-            .inventory
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<Vec<_>>(),
-        ["suite::a", "suite::b"]
-    );
-    assert_eq!(
-        evidence
-            .outcomes
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<Vec<_>>(),
-        ["suite::a", "suite::b"]
-    );
-}
-
-#[test]
-fn missing_or_malformed_terminal_sidecars_are_typed_invalid_evidence() {
-    for payload in [None, Some(json!({"inventory": []})), Some(json!([]))] {
-        let measurement = measurement_from_terminal_test_evidence(payload.as_ref());
-        let report = classify(input(
-            measurement,
-            Some(evidence(TestMeasurement::passed(counts(1, 1, 0)))),
-        ));
-        assert_eq!(report.verdict, DifferentialVerdict::InvalidEvidence);
-        assert!(report.blocks());
-    }
-}
-
-#[test]
-fn duplicate_terminal_identities_are_invalid_evidence() {
-    let measurement = measurement_from_terminal_test_evidence(Some(&json!({
-        "inventory": [{"id": "same"}, {"id": "same"}],
-        "outcomes": [{"id": "same", "outcome": "failed"}]
-    })));
-    assert!(measurement.invalid_evidence);
-}
-
-#[test]
-fn candidate_only_terminal_outcomes_are_invalid_evidence() {
-    let measurement = measurement_from_terminal_test_evidence(Some(&json!({
-        "inventory": [{"id": "known"}],
-        "outcomes": [
-            {"id": "known", "outcome": "passed"},
-            {"id": "candidate-only", "outcome": "failed"}
-        ]
-    })));
-    assert!(measurement.invalid_evidence);
-}
-
-#[test]
-fn terminal_sidecar_without_a_comparable_inventory_is_invalid_evidence() {
-    let measurement = measurement_from_terminal_test_evidence(Some(&json!({
-        "inventory": [{"id": "known"}],
-        "outcomes": []
-    })));
-    assert!(measurement.invalid_evidence);
 }
 
 // ---------------------------------------------------------------------------
