@@ -58,7 +58,7 @@ pub struct RigRunFailedStepRef {
 /// `ObservationStore::artifact_root` is the authority: injected roots answer
 /// directly, and an ambiently-opened store answers with the ambient root it
 /// was already using. Asking the store cannot disagree with the store (#7505).
-pub fn for_completed_rig_run(
+pub(crate) fn for_completed_rig_run(
     store: &ObservationStore,
     rig: &RigSpec,
     run_id: &str,
@@ -88,6 +88,10 @@ pub fn for_completed_rig_run(
     Some(index)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; driven by tests/core/rig/runner_observation_test.rs"
+)]
 pub fn for_run(store: &ObservationStore, run: &RunRecord) -> Option<RigRunArtifactIndex> {
     if run.rig_id.is_none() || run.kind != "rig" {
         return None;

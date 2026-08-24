@@ -468,7 +468,7 @@ pub enum LifecycleWorkloadKind {
 
 impl LifecycleWorkloadKind {
     /// Spec-facing name, used verbatim in resolution error messages.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             LifecycleWorkloadKind::Bench => "bench",
             LifecycleWorkloadKind::Fuzz => "fuzz",

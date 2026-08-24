@@ -13,7 +13,7 @@ use homeboy_core::plan::HomeboyPlan;
 use homeboy_stack::stack::{self, ConflictPolicy, StackSpec, SyncOutput};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct RigStackPlanEntry {
+pub(crate) struct RigStackPlanEntry {
     pub component_id: String,
     pub stack_id: String,
 }
@@ -53,7 +53,7 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
-pub fn plan_stack_sync(rig: &RigSpec) -> Vec<RigStackPlanEntry> {
+pub(crate) fn plan_stack_sync(rig: &RigSpec) -> Vec<RigStackPlanEntry> {
     let mut entries = rig
         .components
         .iter()
@@ -81,7 +81,7 @@ pub fn run_sync(rig: &RigSpec, dry_run: bool) -> Result<RigStackSyncReport> {
     ))
 }
 
-pub fn run_component_sync(
+pub(crate) fn run_component_sync(
     rig: &RigSpec,
     component_id: &str,
     dry_run: bool,

@@ -12,7 +12,7 @@ use super::spec::{
 use super::state::LifecycleSnapshotState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RigResourceLifecycleOptions {
+pub(crate) struct RigResourceLifecycleOptions {
     pub owner: String,
     pub run_id: String,
     pub runner_id: Option<String>,
@@ -21,7 +21,7 @@ pub struct RigResourceLifecycleOptions {
 }
 
 impl RigResourceLifecycleOptions {
-    pub fn new(run_id: impl Into<String>, status: ResourceLifecycleResourceStatus) -> Self {
+    pub(crate) fn new(run_id: impl Into<String>, status: ResourceLifecycleResourceStatus) -> Self {
         Self {
             owner: "homeboy.rig".to_string(),
             run_id: run_id.into(),
@@ -32,7 +32,7 @@ impl RigResourceLifecycleOptions {
     }
 }
 
-pub fn rig_resource_lifecycle_index(
+pub(crate) fn rig_resource_lifecycle_index(
     rig_id: &str,
     resources: &RigResourcesSpec,
     options: RigResourceLifecycleOptions,
@@ -43,7 +43,7 @@ pub fn rig_resource_lifecycle_index(
     }
 }
 
-pub fn rig_resource_lifecycle_records(
+pub(crate) fn rig_resource_lifecycle_records(
     rig_id: &str,
     resources: &RigResourcesSpec,
     options: RigResourceLifecycleOptions,
@@ -90,7 +90,7 @@ pub fn rig_resource_lifecycle_records(
 /// Add durable dependency-cache storage to the same lifecycle index as rig
 /// resources. Entries are content addressed and independent of a run workspace,
 /// so retention is TTL based rather than terminal-run cleanup.
-pub fn dependency_materialization_cache_lifecycle_record(
+pub(crate) fn dependency_materialization_cache_lifecycle_record(
     options: &RigResourceLifecycleOptions,
     root: &std::path::Path,
 ) -> ResourceLifecycleRecord {
@@ -127,7 +127,7 @@ pub fn dependency_materialization_cache_lifecycle_record(
 const LIFECYCLE_SNAPSHOT_DEFAULT_TTL: &str = "P1D";
 
 /// Resource kind recorded for a live lifecycle snapshot handle.
-pub const LIFECYCLE_SNAPSHOT_RESOURCE_KIND: &str = "lifecycle_snapshot";
+pub(crate) const LIFECYCLE_SNAPSHOT_RESOURCE_KIND: &str = "lifecycle_snapshot";
 
 /// Lifecycle records for the snapshot handles a rig currently holds.
 ///
@@ -136,7 +136,7 @@ pub const LIFECYCLE_SNAPSHOT_RESOURCE_KIND: &str = "lifecycle_snapshot";
 /// handle's own `locator` is the resource path when the runtime supplied one,
 /// otherwise a rig-scoped URI, so the record is always addressable without
 /// Homeboy inventing knowledge about the environment.
-pub fn lifecycle_snapshot_lifecycle_records<'a>(
+pub(crate) fn lifecycle_snapshot_lifecycle_records<'a>(
     rig_id: &str,
     resources: &RigResourcesSpec,
     options: &RigResourceLifecycleOptions,

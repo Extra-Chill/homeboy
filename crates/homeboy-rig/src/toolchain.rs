@@ -48,7 +48,7 @@ pub(crate) fn builtin_default_spec() -> ToolchainSpec {
 /// `toolchain` field) uses [`builtin_default_spec`]. Declared directories are
 /// prepended before the inherited PATH; missing ones are skipped so the result
 /// stays portable across hosts.
-pub fn command_step_path(rig: Option<&RigSpec>) -> Option<OsString> {
+pub(crate) fn command_step_path(rig: Option<&RigSpec>) -> Option<OsString> {
     let home = homeboy_paths::home_root().ok();
     let existing_path = std::env::var_os("PATH");
     build_command_step_path(rig, home.as_deref(), existing_path.as_deref())

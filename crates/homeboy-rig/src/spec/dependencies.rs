@@ -91,7 +91,7 @@ pub enum DependencyMaterializationOutputKind {
 }
 
 impl DependencyMaterializationOutputKind {
-    pub fn is_path(&self) -> bool {
+    pub(crate) fn is_path(&self) -> bool {
         matches!(self, Self::Path)
     }
 }
@@ -109,7 +109,7 @@ pub enum DependencyMaterializationSafety {
 }
 
 impl DependencyMaterializationSafety {
-    pub fn is_unspecified(&self) -> bool {
+    pub(crate) fn is_unspecified(&self) -> bool {
         matches!(self, Self::Unspecified)
     }
 }

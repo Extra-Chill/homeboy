@@ -35,7 +35,9 @@ pub use pipeline::{
     GitOp, HostMutationOp, LifecycleWorkloadKind, LifecycleWorkloadRef, PatchOp, PipelineStep,
     ServiceOp, SharedPathOp, StackOp, SymlinkOp,
 };
-pub use toolchain::{PathDiscoverySort, PathDiscoverySpec, ToolchainSpec};
+pub use toolchain::PathDiscoverySort;
+pub use toolchain::PathDiscoverySpec;
+pub use toolchain::ToolchainSpec;
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
@@ -250,7 +252,7 @@ pub enum RigCleanupSpec {
 }
 
 impl RigCleanupSpec {
-    pub fn resource_cleanup_intent(&self) -> ResourceCleanupIntent {
+    pub(crate) fn resource_cleanup_intent(&self) -> ResourceCleanupIntent {
         match self {
             Self::Legacy(intent) => *intent,
             Self::Object(spec) => spec
@@ -365,7 +367,7 @@ impl RigResourcesSpec {
     }
 
     /// Effective retention for one resource class.
-    pub fn retention_for_class(&self, class: &str) -> RigResourceRetentionSpec {
+    pub(crate) fn retention_for_class(&self, class: &str) -> RigResourceRetentionSpec {
         match self.lifecycle_by_class.get(class) {
             Some(override_spec) => override_spec.or(&self.lifecycle),
             None => self.lifecycle.clone(),
@@ -395,7 +397,7 @@ impl RigResourceRetentionSpec {
     }
 
     /// Fill unset fields from `fallback`.
-    pub fn or(&self, fallback: &Self) -> Self {
+    pub(crate) fn or(&self, fallback: &Self) -> Self {
         Self {
             ttl: self.ttl.clone().or_else(|| fallback.ttl.clone()),
             cleanup_policy: self.cleanup_policy.or(fallback.cleanup_policy),
@@ -534,12 +536,12 @@ pub enum FilesystemAssertionKind {
 }
 
 impl FilesystemAssertionKind {
-    pub fn is_path(&self) -> bool {
+    pub(crate) fn is_path(&self) -> bool {
         matches!(self, Self::Path)
     }
 
     /// Human-readable label for this assertion kind.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Path => "path",
             Self::File => "file",
@@ -548,7 +550,7 @@ impl FilesystemAssertionKind {
     }
 
     /// Whether the given path satisfies this assertion kind.
-    pub fn matches_path(self, path: &std::path::Path) -> bool {
+    pub(crate) fn matches_path(self, path: &std::path::Path) -> bool {
         match self {
             Self::Path => path.exists(),
             Self::File => path.is_file(),
@@ -866,7 +868,7 @@ pub struct TracePhaseTemplateSpec {
 }
 
 impl WorkloadSpec {
-    pub fn apply_defaults(&mut self, defaults: &WorkloadDefaultsSpec) {
+    pub(crate) fn apply_defaults(&mut self, defaults: &WorkloadDefaultsSpec) {
         if self.trace_phase_template.is_none() {
             self.trace_phase_template = defaults.trace_phase_template.clone();
         }
@@ -904,7 +906,7 @@ impl WorkloadSpec {
         merge_defaults_map(&mut self.trace_variants, &defaults.trace_variants);
     }
 
-    pub fn apply_phase_template(&mut self, template: &TracePhaseTemplateSpec) {
+    pub(crate) fn apply_phase_template(&mut self, template: &TracePhaseTemplateSpec) {
         if self.trace.trace_default_phase_preset.is_none() {
             self.trace.trace_default_phase_preset =
                 template.trace.trace_default_phase_preset.clone();

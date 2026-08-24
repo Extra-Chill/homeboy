@@ -9,7 +9,7 @@ use std::process::Command;
 use homeboy_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-pub const RIG_ARTIFACT_MANIFEST_ENV: &str = "HOMEBOY_RIG_ARTIFACT_MANIFEST";
+pub(crate) const RIG_ARTIFACT_MANIFEST_ENV: &str = "HOMEBOY_RIG_ARTIFACT_MANIFEST";
 const MANIFEST_SCHEMA: &str = "homeboy/rig-command-artifacts/v1";
 const MAX_REGISTRATIONS: usize = 128;
 const MAX_KIND_LEN: usize = 64;

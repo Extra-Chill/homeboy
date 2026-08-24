@@ -18,7 +18,7 @@ mod lock;
 /// becomes reclaimable on the next acquire. Unset (the default) means leases are
 /// only reclaimed when their holder process is provably gone — a live, recent
 /// holder is never reclaimed automatically.
-pub const RIG_LEASE_TTL_ENV: &str = "HOMEBOY_RIG_LEASE_TTL_SECS";
+pub(crate) const RIG_LEASE_TTL_ENV: &str = "HOMEBOY_RIG_LEASE_TTL_SECS";
 
 use super::expand::expand_resources_with_settings;
 use super::spec::{RigResourcesSpec, RigSpec};
