@@ -1,6 +1,9 @@
 use clap::{Args, Subcommand};
 
-use super::cook::{parse_provider_evidence_input, AgentTaskProviderEvidenceInput, VerifyGateArgs};
+use super::cook::{
+    parse_provider_evidence_input, AgentTaskProviderEvidenceInput, VerifyGateArgs,
+    PROVIDER_EVIDENCE_DECLARATION,
+};
 
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
@@ -83,9 +86,7 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub secret_env: Vec<String>,
     #[arg(long = "provider-config", value_name = "JSON")]
     pub provider_config: Option<String>,
-    /// Read-only external file streamed into a private, digest-addressed
-    /// projection in every child Cook workspace (64 MiB maximum per file).
-    #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
+    #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// AI tool disclosure recorded in every child PR's assistance attribution.
     /// When omitted, each child derives its disclosure from its effective provider
