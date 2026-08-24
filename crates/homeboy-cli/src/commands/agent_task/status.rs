@@ -1291,6 +1291,15 @@ fn normalized_full_status(
     let output = json!({
         "schema": "homeboy/agent-task-status-full/v2",
         "presentation": "normalized_evidence_graph",
+        "metadata": {
+            "controller_runtime": value.pointer("/metadata/controller_runtime/originating").map(|originating| json!({
+                "originating": {
+                    "build_identity": bounded_value(originating.get("build_identity").unwrap_or(&Value::Null)),
+                    "sha256": bounded_value(originating.get("sha256").unwrap_or(&Value::Null)),
+                    "source": bounded_value(originating.get("source").unwrap_or(&Value::Null)),
+                }
+            })).unwrap_or(Value::Null),
+        },
         "action_eligibility": value.get("action_eligibility").cloned().unwrap_or(Value::Null),
         "outcome": {
             "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
