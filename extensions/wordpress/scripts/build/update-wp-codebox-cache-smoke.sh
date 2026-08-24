@@ -23,18 +23,22 @@ NPM
 cat > "${FAKE_BIN}/node" <<'NODE'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = '-e' ]; then
+if [ "${1:-}" = '-e' ] || [ "${1:-}" = '-' ] || [[ "${1:-}" = *.cjs ]]; then
     exec "$REAL_NODE" "$@"
 fi
 if [[ "${1:-}" = */packages/cli/dist/index.js ]]; then
     cli="$1"
     shift
-    if [ -f "$(dirname "$(dirname "$(dirname "$(dirname "$cli")")")")/incompatible" ] && grep -q '^incompatible$' "$(dirname "$(dirname "$(dirname "$(dirname "$cli")")")")/incompatible"; then
+    source_root="$(dirname "$(dirname "$(dirname "$(dirname "$cli")")")")"
+    if [ -f "${source_root}/incompatible" ] && grep -q '^incompatible$' "${source_root}/incompatible"; then
         version='0.20.0'
         descriptor='{}'
-    else
+    elif [ -f "${source_root}/minimum-compatible" ]; then
         version='0.21.0'
-        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"available","browserRuntime":{"status":"ready"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"unavailable","browserRuntime":{"status":"unavailable"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+    else
+        version='0.23.4'
+        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"unavailable","browserRuntime":{"status":"unavailable"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
     fi
     case "${*}" in
         --version) printf '%s\n' "$version" ;;
@@ -78,7 +82,22 @@ case "${args[*]}" in
         mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
         mkdir -p "${prefix}/packages/cli/dist"
         printf '%s\n' 'built' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
-        printf '%s\n' '#!/usr/bin/env node' "// $(git -C "$prefix" rev-parse HEAD)" > "${prefix}/packages/cli/dist/index.js"
+        cat > "${prefix}/packages/cli/dist/index.js" <<'CLI'
+#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const source = path.resolve(__dirname, '../../..');
+const version = fs.existsSync(path.join(source, 'incompatible')) ? '0.20.0' : fs.existsSync(path.join(source, 'minimum-compatible')) ? '0.21.0' : '0.23.4';
+const descriptor = version === '0.20.0' ? {} : {
+  schema: 'wp-codebox/runtime-descriptor/v1',
+  readiness: { status: 'unavailable', browserRuntime: { status: 'unavailable' } },
+  contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+};
+if (process.argv.includes('--version')) process.stdout.write(`${version}\n`);
+else if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') process.stdout.write(`${JSON.stringify(descriptor)}\n`);
+else process.exit(1);
+CLI
+        printf '%s\n' "// $(git -C "$prefix" rev-parse HEAD)" >> "${prefix}/packages/cli/dist/index.js"
         chmod +x "${prefix}/packages/cli/dist/index.js"
         if [ "${WAIT_FOR_BUILD:-}" = '1' ]; then
             touch "${UPDATE_READY}"
@@ -114,12 +133,14 @@ git -C "$SOURCE_WORK" push --quiet origin HEAD:main fixture-ref
 
 git -C "$SOURCE_WORK" rm --quiet incompatible
 printf '%s\n' 'compatible' > "${SOURCE_WORK}/fixture.txt"
-git -C "$SOURCE_WORK" add fixture.txt
+printf '%s\n' 'minimum-compatible' > "${SOURCE_WORK}/minimum-compatible"
+git -C "$SOURCE_WORK" add fixture.txt minimum-compatible
 git -C "$SOURCE_WORK" commit --quiet -m 'compatible wp-codebox fixture'
 COMPATIBLE_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main
 
 printf '%s\n' 'final' > "${SOURCE_WORK}/fixture.txt"
+git -C "$SOURCE_WORK" rm --quiet minimum-compatible
 git -C "$SOURCE_WORK" add fixture.txt
 git -C "$SOURCE_WORK" commit --quiet -m 'final wp-codebox fixture'
 FINAL_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
@@ -141,7 +162,7 @@ INITIAL_RELEASE="$(readlink "$CACHE_DIR")"
 INITIAL_READER_CLI="$(cd "$INITIAL_RELEASE" && pwd -P)/packages/cli/dist/index.js"
 INITIAL_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Initial exact SHA was not selected" >&2; exit 1; }
-"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Initial managed CLI is not ready" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.23.4' || { echo "Current WP Codebox fixture was not admitted" >&2; exit 1; }
 
 IDENTITY_BEFORE_UPDATE="$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")"
 if OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" 2>&1)"; then
@@ -149,7 +170,7 @@ if OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fi
     exit 1
 fi
 case "$OUTPUT" in
-    *"does not satisfy the required >=0.21.0 version"*) ;;
+    *"wp_codebox_version_too_old: required >=0.21.0, observed 0.20.0"*) ;;
     *)
         echo "Incompatible update did not report an actionable version failure" >&2
         echo "$OUTPUT" >&2
@@ -159,7 +180,7 @@ esac
 [ "$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")" = "$IDENTITY_BEFORE_UPDATE" ] || { echo "Incompatible update replaced managed runtime identity" >&2; exit 1; }
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Incompatible update replaced managed runtime HEAD" >&2; exit 1; }
 [ "$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')" = "$INITIAL_CLI_SHA" ] || { echo "Incompatible update replaced managed CLI bytes" >&2; exit 1; }
-"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Incompatible update left managed CLI unready" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.23.4' || { echo "Incompatible update replaced the current managed CLI" >&2; exit 1; }
 
 # Hold a writer after it has acquired the update lock. Both resolver families
 # must fail as updating rather than reach the stale PATH candidate.
@@ -202,13 +223,14 @@ READER_CLI="$(cd "$(dirname "${CACHE_DIR}/packages/cli/dist/index.js")" && pwd -
 [ "$READER_CLI" = "$INITIAL_READER_CLI" ] || { echo "Reader did not resolve the old immutable release: expected $INITIAL_READER_CLI, got $READER_CLI" >&2; exit 1; }
 touch "$PROMOTION_RELEASE"
 wait "$UPDATE_PID"
-"${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.21.0' || { echo "Reader resolved before promotion could not execute afterward" >&2; exit 1; }
+"${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.23.4' || { echo "Reader resolved before promotion could not execute afterward" >&2; exit 1; }
 
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$COMPATIBLE_SHA" ] || { echo "Successful exact-SHA update did not replace managed HEAD" >&2; exit 1; }
 COMPATIBLE_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk '{print $1}')"
 [ "$COMPATIBLE_CLI_SHA" != "$INITIAL_CLI_SHA" ] || { echo "Successful exact-SHA update did not replace managed CLI bytes" >&2; exit 1; }
 grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-identity.json" || { echo "Successful exact-SHA update did not replace managed identity" >&2; exit 1; }
 [ -e "$INITIAL_RELEASE" ] || { echo "Successful update removed the release held by a pre-promotion reader" >&2; exit 1; }
+"${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Minimum compatible WP Codebox fixture was not admitted" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" runtime descriptor --json | grep -q 'browser-contained-site-open' || { echo "Successful exact-SHA update left managed CLI unready" >&2; exit 1; }
 
 # A reader may still hold A after two later atomic promotions. Retaining only
@@ -216,7 +238,7 @@ grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-id
 PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$FINAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$FINAL_SHA" ] || { echo "Final exact-SHA update did not replace managed HEAD" >&2; exit 1; }
 [ -e "$INITIAL_RELEASE" ] || { echo "A release was reclaimed after A-to-B-to-C promotion" >&2; exit 1; }
-"${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.21.0' || { echo "A reader could not execute after A-to-B-to-C promotion" >&2; exit 1; }
+"${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.23.4' || { echo "A reader could not execute after A-to-B-to-C promotion" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash
