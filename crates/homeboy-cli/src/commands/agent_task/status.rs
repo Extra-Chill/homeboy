@@ -7457,54 +7457,6 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             "persisted replay plan has no materialization identity",
         );
     }
-    if let Some(replay) = plan.metadata.get("generic_lab_command_replay") {
-        let root = replay
-            .pointer("/materialization/canonical_root")
-            .and_then(Value::as_str);
-        let expected_identity = replay
-            .pointer("/materialization/content_identity")
-            .and_then(Value::as_str);
-        let (Some(root), Some(expected_identity)) = (root, expected_identity) else {
-            return RetryReplayAction::unavailable(
-                owner,
-                "generic Lab replay is missing its materialization identity",
-            );
-        };
-        match homeboy::runner::controller_workspace_materialization_identity(std::path::Path::new(
-            root,
-        )) {
-            Ok(actual_identity) if actual_identity == expected_identity => {}
-            Ok(actual_identity) => {
-                let reason = "source workspace no longer matches the persisted Lab replay identity";
-                return RetryReplayAction {
-                    owner,
-                    readiness: "unavailable",
-                    reason: Some(reason.to_string()),
-                    admission: json!({
-                        "admitted": false,
-                        "reason": reason,
-                        "compared_values": {
-                            "canonical_root": root,
-                            "expected_content_identity": expected_identity,
-                            "actual_content_identity": actual_identity,
-                        },
-                    }),
-                    action: None,
-                    continuation: None,
-                };
-            }
-            Err(error) => {
-                return RetryReplayAction::unavailable(
-                    owner,
-                    format!(
-                        "cannot validate persisted Lab replay identity: {}",
-                        error.message
-                    ),
-                );
-            }
-        }
-    }
-
     RetryReplayAction {
         owner: owner.clone(),
         readiness: "ready",

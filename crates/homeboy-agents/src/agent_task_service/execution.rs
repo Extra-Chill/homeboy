@@ -1761,7 +1761,21 @@ pub fn retry_admission(run_id: &str) -> Result<()> {
         &lifecycle_store,
         run_id,
     )?;
-    let _ = retry_admission_in_store(&lifecycle_store, &source, true)?;
+    let retry = retry_admission_in_store(&lifecycle_store, &source, true)?;
+    if retry.as_ref().is_some_and(|attempt| {
+        attempt
+            .plan
+            .metadata
+            .get("generic_lab_command_replay")
+            .is_some()
+    }) {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "generic Lab replay requires controller workspace preflight",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
     Ok(())
 }
 
