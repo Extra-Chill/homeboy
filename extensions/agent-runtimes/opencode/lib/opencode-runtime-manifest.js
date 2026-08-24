@@ -9,9 +9,11 @@ function runtimeManifest() {
 		schema: 'homeboy/agent-runtime-manifest/v1',
 		id: 'opencode',
 		name: 'OpenCode',
-		version: '1.3.2',
+		version: '1.4.4',
 		description: 'OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.',
 		requires: {
+			// Older cores safely ignore the optional top-level retention capability.
+			// Cleanup requires a core that implements external_storage_retention.
 			homeboy: '>=0.345.0',
 		},
 		compatibility: {

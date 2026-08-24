@@ -278,6 +278,7 @@ process.exit(0);
 		AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 		AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
 		FIXTURE_MCP_TOKEN: 'fixture-token-must-not-leak',
+		XDG_STATE_HOME: path.join(root, 'private-runtime-state'),
 		UNDECLARED_SECRET: 'must-not-reach-opencode',
 	};
 	assert.equal(JSON.parse(runResult.stdout).status, 'succeeded');
@@ -791,6 +792,11 @@ process.exit(${attempt.status});
 		}, { env: fixtureEnv });
 		assert.equal(scratchResult.status, attempt.status === 0 ? 'succeeded' : 'failed');
 		assert.equal(fs.readFileSync(path.join(scratchRoot, 'provider-scratch.txt'), 'utf8'), scratchRoot);
+		const marker = JSON.parse(fs.readFileSync(path.join(scratchRoot, '.homeboy-opencode-retention.json'), 'utf8'));
+		assert.equal(marker.schema, 'homeboy/opencode-retention-marker/v1');
+		assert.equal(marker.task_id, attempt.id);
+		assert.equal(marker.active, false);
+		assert.match(marker.signature, /^[a-f0-9]{64}$/);
 	}
 	assert.equal(
 		fs.existsSync(path.join(root, 'scratch', 'run-2250-attempt-1', 'provider-scratch.txt')),

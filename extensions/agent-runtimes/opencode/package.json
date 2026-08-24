@@ -1,18 +1,20 @@
 {
   "name": "homeboy-agent-runtime-opencode",
-  "version": "1.3.2",
+  "version": "1.4.4",
   "private": true,
   "main": "index.js",
   "exports": {
     ".": "./index.js",
     "./opencode-agent-task-executor": "./lib/opencode-agent-task-executor.js",
-    "./opencode-runtime-manifest": "./lib/opencode-runtime-manifest.js"
+    "./opencode-runtime-manifest": "./lib/opencode-runtime-manifest.js",
+    "./opencode-external-storage-retention": "./lib/opencode-external-storage-retention.js"
   },
   "homeboy": {
     "agent_runtime_manifest": "opencode.json"
   },
   "bin": {
-    "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs"
+    "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs",
+    "homeboy-opencode-external-storage-retention": "./scripts/agent/homeboy-opencode-external-storage-retention.cjs"
   },
   "scripts": {
     "generate:runtime-manifest": "node scripts/agent/homeboy-opencode-runtime-manifest.cjs --write",
@@ -20,7 +22,8 @@
     "test:opencode-agent-task-executor": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:opencode-progress-events": "node tests/opencode-progress-events.test.js",
-    "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js"
+    "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js",
+    "test:opencode-external-storage-retention": "node tests/opencode-external-storage-retention.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

@@ -3,11 +3,25 @@
   "changelog_target": "CHANGELOG.md",
   "id": "homeboy-extensions",
   "remote_path": "",
+  "external_storage_retention": {
+    "providers": [
+      {
+        "id": "opencode.external-storage-retention",
+        "command": [
+          "node",
+          "{{extension_path}}/agent-runtimes/opencode/scripts/agent/homeboy-opencode-external-storage-retention.cjs"
+        ],
+        "timeout_seconds": 30
+      }
+    ]
+  },
   "self_checks": {
     "test": [
       "node tests/agent-task-provider-contract-smoke.mjs",
       "node agent-runtimes/codex/tests/declared-artifact-harvester.test.js",
       "node agent-runtimes/opencode/tests/opencode-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/opencode/tests/opencode-external-storage-retention.test.js",
+			"node tests/opencode-external-storage-retention-interoperability.test.mjs",
       "node agent-runtimes/opencode/tests/opencode-progress-relay.test.js",
       "node agent-runtimes/claude-code/tests/claude-code-agent-task-executor-boundary.test.js",
       "node agent-runtimes/pi/tests/pi-agent-task-executor-boundary.test.js",

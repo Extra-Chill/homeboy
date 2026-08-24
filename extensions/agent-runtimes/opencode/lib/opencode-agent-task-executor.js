@@ -23,6 +23,7 @@ const {
 	createOpenCodeProgressAdapter,
 } = require('./opencode-progress-events');
 const { applyOpenCodeRuntimeTools } = require('../../lib/runtime-tool-adapter');
+const { finalizeOwnershipMarker, writeOwnershipMarker } = require('./opencode-external-storage-retention');
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -1390,6 +1391,10 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
 	const progressEventPath = openCodeProgressEventPath(request, config);
 	const initialRevision = gitRevision(cwd);
+	const scratchRoot = config.runtime_env?.TMPDIR;
+	if (isAbsolutePath(scratchRoot)) {
+		try { writeOwnershipMarker(scratchRoot, { task_id: request.task_id, workspace: cwd }, options.env || process.env); } catch { /* Retention remains fail-closed when scratch cannot be marked. */ }
+	}
 	const spawnResult = await spawnOpenCodeStreaming(commandSpec.command, args, {
 		cwd,
 		env: spawnExtra.env,
@@ -1405,6 +1410,9 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 			onProgress: options.onProgress || options.on_progress,
 		}),
 	});
+	if (isAbsolutePath(scratchRoot)) {
+		try { finalizeOwnershipMarker(scratchRoot, openCodeSessionIds(spawnResult.stdout)[0], options.env || process.env); } catch { /* The active signed marker remains protected on finalization failure. */ }
+	}
 	const context = { request, config, commandSpec, cwd, initialRevision, spawnResult, spawnExtra, runtimeLogPaths, progressEventPath };
 	const runtimeLogs = collectOpenCodeRuntimeLogs(context);
 	const progressEvidence = collectOpenCodeProgressEvents(context);
