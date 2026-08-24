@@ -125,9 +125,13 @@ declared_count="$(jq 'length' <<< "${declared_contexts}")"
 execution_contexts="$(jq -c '[.[] | select(. != "homeboy / Required Gates Executed")]' <<< "${declared_contexts}")"
 
 if [ "${declared_count}" -eq 0 ]; then
-  echo "::error::required-gates policy declares no required checks, so execution cannot be verified"
-  echo "required-gates policy declares no required checks" >&2
-  exit 1
+  # No declared contexts is the versioned reporting-only policy. There is no
+  # execution claim to verify, so avoid treating its deliberate absence as a
+  # failed required-gates policy.
+  echo "::notice::required-gates-executed basis=reporting-only-policy run=${GITHUB_RUN_ID:-unknown} attempt=${GITHUB_RUN_ATTEMPT:-unknown} pr_state_active=${active} declared=0 executed=0 dependencies=${dependency_count} dependencies_skipped=${dependency_skipped} outcome=not-required"
+  echo "::notice::required-gates-executed: The policy declares no required gates; execution reporting is not required."
+  echo "required-gates-executed-status=not-required"
+  exit 0
 fi
 
 run_jobs=''

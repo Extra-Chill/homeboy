@@ -98,6 +98,16 @@ fn no_required_checks() -> String {
     .expect("live rules fixture")
 }
 
+fn reporting_only_policy() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "rules": [
+            { "type": "deletion" },
+            { "type": "non_fast_forward" }
+        ]
+    }))
+    .expect("reporting-only policy fixture")
+}
+
 fn ruleset_detail(bypass_actors: serde_json::Value, current_user_can_bypass: &str) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "id": 13680120,
@@ -637,6 +647,45 @@ fn terminal_execution_verdict_rejects_pending_skipped_cancelled_failed_and_absen
             && stdout_of(&output).contains("required-gates-executed-status=skipped"),
         "an absent terminal context must leave the PR unmergeable: {}",
         stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_reports_reporting_only_policy_without_probing_jobs() {
+    let scratch = Scratch::new("reporting-only-execution");
+    let policy = scratch.write("ruleset.json", &reporting_only_policy());
+    let output = run_execution_gate(&[
+        ("REQUIRED_GATES_CONFIG", policy.as_str()),
+        // A reporting-only policy has no execution evidence to verify.
+        (
+            "REQUIRED_GATES_EXECUTED_JOBS",
+            scratch.missing("jobs.json").as_str(),
+        ),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a zero-context policy is reporting-only: {}\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("required-gates-executed-status=not-required")
+            && stdout_of(&output).contains("basis=reporting-only-policy"),
+        "{}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn terminal_execution_verdict_rejects_a_malformed_ruleset() {
+    let scratch = Scratch::new("malformed-execution-policy");
+    let policy = scratch.write("ruleset.json", "not JSON");
+    let output = run_execution_gate(&[("REQUIRED_GATES_CONFIG", policy.as_str())]);
+
+    assert!(
+        !output.status.success(),
+        "a malformed policy must not be reported as a successful execution"
     );
 }
 
