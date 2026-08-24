@@ -2833,16 +2833,10 @@ fn list_records_skips_malformed_observation_records() {
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: "bad-run".to_string(),
             kind: "agent-task".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: None,
             status: "running".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({ "schema": "homeboy/agent-task-observation-record/v1" }),
+            ..Default::default()
         })
         .expect("bad record inserted");
 

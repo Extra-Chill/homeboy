@@ -387,16 +387,13 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: run_id.to_string(),
             kind: "agent-task".to_string(),
-            component_id: None,
             started_at: "2026-08-15T00:00:00Z".to_string(),
             finished_at: Some("2026-08-15T00:00:01Z".to_string()),
             status: "pass".to_string(),
             command: Some("homeboy agent-task".to_string()),
-            cwd: None,
             homeboy_version: Some("test".to_string()),
-            git_sha: None,
-            rig_id: None,
             metadata_json: serde_json::json!({}),
+            ..Default::default()
         })
         .expect("record explicit run");
     let aggregate: AgentTaskAggregate = serde_json::from_str(&recovered_runner_aggregate(
