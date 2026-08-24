@@ -32,6 +32,8 @@ pub struct LintBaselineMetadata {
 pub struct LintBaselineProvenance {
     pub baseline_key: String,
     pub compared: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
     pub files: Vec<String>,
     pub tools: Vec<String>,
     pub scope: String,
@@ -75,6 +77,7 @@ impl LintBaselineProvenance {
         Self {
             baseline_key: format!("{BASELINE_KEY}:{digest}"),
             compared: false,
+            base_ref: None,
             files,
             tools,
             scope,
@@ -207,6 +210,26 @@ pub fn load_baseline_for_scope(
 pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> BaselineComparison {
     let items: Vec<LintFingerprint> = findings.iter().map(LintFingerprint).collect();
     generic::compare(&items, baseline)
+}
+
+/// Compare candidate findings with findings measured from an immutable source revision.
+pub fn compare_against_findings(
+    findings: &[HomeboyFinding],
+    baseline_findings: &[HomeboyFinding],
+) -> BaselineComparison {
+    let baseline = LintBaseline {
+        created_at: String::new(),
+        context_id: "git-base".to_string(),
+        item_count: baseline_findings.len(),
+        known_fingerprints: baseline_findings
+            .iter()
+            .map(|finding| LintFingerprint(finding).fingerprint())
+            .collect(),
+        metadata: LintBaselineMetadata {
+            findings_count: baseline_findings.len(),
+        },
+    };
+    compare(findings, &baseline)
 }
 
 fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> HomeboyFinding {

@@ -196,21 +196,19 @@ fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
             home.path(),
             source.path(),
             r#"#!/bin/sh
-if [ -n "$HOMEBOY_LINT_GLOB" ]; then
+if grep -q candidate "$HOMEBOY_LINT_GLOB"; then
+  if grep -q 'candidate new' "$HOMEBOY_LINT_GLOB"; then
+    printf '[{"tool":"phpcs","message":"introduced","fingerprint":"introduced","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+    exit 1
+  fi
   printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
   printf '[{"tool":"phpcs","status":"passed","finding_count":0},{"tool":"phpstan","status":"passed","finding_count":0}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
   exit 0
-else
-  printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"untouched.php"},{"tool":"phpstan","message":"relocated","fingerprint":"relocated","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-  exit 1
 fi
+printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
 "#,
         );
-        let known = homeboy_core::finding::HomeboyFinding::builder("phpcs", "known")
-            .fingerprint("known")
-            .build();
-        crate::lint::baseline::save_baseline(source.path(), "fixture", &[known])
-            .expect("save baseline");
 
         let mut pr_args = lint_args();
         pr_args.changed_since = Some("baseline".to_string());
@@ -226,47 +224,38 @@ fi
         assert_eq!(pr_result.status, "passed");
         assert_eq!(pr_result.exit_code, 0);
         assert!(pr_result.findings.as_ref().is_some_and(Vec::is_empty));
-        assert!(pr_result.baseline_comparison.is_none());
+        assert!(pr_result
+            .baseline_comparison
+            .is_some_and(|comparison| comparison.new_items.is_empty()));
         let provenance = pr_result
             .baseline_provenance
             .as_ref()
             .expect("scoped baseline provenance");
-        assert!(!provenance.compared);
+        assert!(provenance.compared);
+        assert!(provenance.base_ref.is_some());
         assert_eq!(provenance.files, vec!["legacy.php"]);
         assert_eq!(provenance.tools, vec!["phpcs", "phpstan"]);
         assert_eq!(provenance.scope, "changed");
         assert!(provenance.baseline_key.starts_with("lint:"));
         assert_ne!(provenance.baseline_key, "lint");
 
-        let mut save_args = lint_args();
-        save_args.changed_since = Some("baseline".to_string());
-        save_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
-        save_args.baseline_flags.baseline = true;
-        run_main_lint_workflow(
+        std::fs::write(source.path().join("legacy.php"), "<?php // candidate new\n")
+            .expect("introduced candidate source");
+        let mut introduced_args = lint_args();
+        introduced_args.changed_since = Some("baseline".to_string());
+        introduced_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let introduced = run_main_lint_workflow(
             &component,
             source.path(),
-            save_args,
-            &RunDir::create().expect("scoped baseline run dir"),
+            introduced_args,
+            &RunDir::create().expect("introduced finding run dir"),
         )
-        .expect("save scoped baseline");
-
-        let mut compare_args = lint_args();
-        compare_args.changed_since = Some("baseline".to_string());
-        compare_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
-        let scoped_baseline_result = run_main_lint_workflow(
-            &component,
-            source.path(),
-            compare_args,
-            &RunDir::create().expect("scoped comparison run dir"),
-        )
-        .expect("compare scoped baseline");
-        assert!(scoped_baseline_result
-            .baseline_provenance
-            .as_ref()
-            .is_some_and(|provenance| provenance.compared));
-        assert!(scoped_baseline_result
+        .expect("introduced finding workflow result");
+        assert_eq!(introduced.status, "failed");
+        assert_eq!(introduced.exit_code, 1);
+        assert!(introduced
             .baseline_comparison
-            .is_some_and(|comparison| comparison.new_items.is_empty()));
+            .is_some_and(|comparison| comparison.new_items.len() == 1));
     });
 }
 
