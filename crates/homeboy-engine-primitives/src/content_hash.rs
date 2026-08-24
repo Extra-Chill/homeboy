@@ -73,6 +73,57 @@ pub fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// SHA-256 over `fields` joined by a NUL byte, rendered as lowercase hex.
+///
+/// This is a *composite identity* scheme, distinct from [`sha256_hex`]: it
+/// identifies an ordered tuple of strings rather than a blob of bytes. NUL is
+/// the separator because it cannot occur in any of the identifiers these
+/// callers hash (run ids, provider ids, worktree handles, filesystem paths), so
+/// `("a", "bc")` and `("ab", "c")` cannot collide the way a naive
+/// concatenation lets them.
+///
+/// Bytes hashed: `a\0b\0c` — separators go *between* fields, with none after
+/// the last. Use [`nul_terminated_digest`] when every field is followed by a
+/// separator. The two are not interchangeable and produce different digests for
+/// the same input.
+///
+/// Callers persist these digests as compatibility tokens and as filenames, so
+/// the byte sequence is a compatibility surface: changing it orphans data.
+pub fn nul_separated_digest<I, S>(fields: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<[u8]>,
+{
+    let mut hasher = Sha256::new();
+    for (index, field) in fields.into_iter().enumerate() {
+        if index > 0 {
+            hasher.update([0]);
+        }
+        hasher.update(field.as_ref());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// SHA-256 over `fields` with a NUL byte after **every** field, as lowercase hex.
+///
+/// Bytes hashed: `a\0b\0c\0`. See [`nul_separated_digest`] for why NUL and why
+/// the trailing separator is a distinct scheme rather than a variant flag: a
+/// terminated digest is unambiguous for a set of arbitrary length, whereas a
+/// separated one is only unambiguous for a fixed-arity tuple. Callers hashing a
+/// variable-length collection want this one.
+pub fn nul_terminated_digest<I, S>(fields: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<[u8]>,
+{
+    let mut hasher = Sha256::new();
+    for field in fields {
+        hasher.update(field.as_ref());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +218,62 @@ mod tests {
         assert!(!is_sha256_hex(&value));
         // Correct length, but a prefixed algorithm label is not bare hex.
         assert!(!is_sha256_hex(&format!("sha256:{}", &ABC_SHA256[7..])));
+    }
+
+    /// The exact digests the four hand-rolled implementations produced before
+    /// they were migrated onto these primitives (homeboy#13199). Two of those
+    /// callers persist their output -- one as a `compat-v1:` token, one as a
+    /// filename -- so these are compatibility assertions, not example values.
+    /// A change here orphans data on disk.
+    #[test]
+    fn field_digests_match_the_hand_rolled_implementations_they_replaced() {
+        // was: worktree::types::authority_set_fingerprint(["alpha", "beta"])
+        assert_eq!(
+            nul_terminated_digest(["alpha", "beta"]),
+            "63ed4f61f097667f9297e42c5f0e173bb382b51758b2c7772ca37ceea99f4ae0"
+        );
+        // was: agent_task_lifecycle::workspace_authority::authority_digest
+        assert_eq!(
+            nul_separated_digest(["run", "runner", "/ws"]),
+            "edb57fdec3c0765ebda93bceac4f73c7c423fe4ac4f76507f6be859199adf6b7"
+        );
+        // was: worktree_providers::compatibility_identity_token (sans prefix)
+        assert_eq!(
+            nul_separated_digest(["p", "h", "pa", "br"]),
+            "f54325cdac18afbc3abefc904101cee3e5e639868a2b805fdb4e246cf80482d4"
+        );
+        // was: agent_task_lifecycle::workspace_claims::composite_acquisition_intent_path
+        assert_eq!(
+            nul_separated_digest(["s", "k", "l"]),
+            "6f01cb2795aa0bc529fd52bf971f316ca4e36f95e62d946d2c6bbcbb4d1dfba3"
+        );
+    }
+
+    /// The separated and terminated schemes are not a flag on one function.
+    #[test]
+    fn separated_and_terminated_are_different_identity_schemes() {
+        assert_ne!(
+            nul_separated_digest(["alpha", "beta"]),
+            nul_terminated_digest(["alpha", "beta"])
+        );
+    }
+
+    /// The property that makes NUL the right separator: no field can contain
+    /// one, so a tuple boundary cannot be forged by moving characters across it.
+    #[test]
+    fn nul_separator_prevents_the_collision_a_bare_concatenation_allows() {
+        assert_ne!(
+            nul_separated_digest(["a", "bc"]),
+            nul_separated_digest(["ab", "c"])
+        );
+        assert_eq!(nul_separated_digest(["ab"]), sha256_hex(b"ab"));
+    }
+
+    /// A single field has no separator to write, so the two schemes only agree
+    /// with the blob primitive in the separated case.
+    #[test]
+    fn empty_and_single_field_inputs_are_well_defined() {
+        assert_eq!(nul_separated_digest(Vec::<&str>::new()), sha256_hex(b""));
+        assert_eq!(nul_terminated_digest(["a"]), sha256_hex(b"a\0"));
     }
 }
