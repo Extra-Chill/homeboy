@@ -1088,21 +1088,28 @@ pub fn plan_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderCreatePlan> {
-    plan_apply_enabled_worktree_provider_from_config_with_id(intent, None, config)
+    plan_apply_enabled_worktree_provider_from_config_with_id(intent, None, None, config)
 }
 
 /// Plan a purpose-owned workspace with the same creation-capable provider
 /// selection that execution uses, without running its ensure command.
 pub fn plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
     intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderCreatePlan> {
     let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
-    plan_apply_enabled_worktree_provider_from_config_with_id(intent, Some(provider_id), config)
+    plan_apply_enabled_worktree_provider_from_config_with_id(
+        intent,
+        Some(lifecycle),
+        Some(provider_id),
+        config,
+    )
 }
 
 fn plan_apply_enabled_worktree_provider_from_config_with_id(
     intent: &WorktreeProviderCreateIntent,
+    lifecycle: Option<&WorktreeProviderLifecycleIntent>,
     selected_provider_id: Option<String>,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderCreatePlan> {
@@ -1180,7 +1187,13 @@ fn plan_apply_enabled_worktree_provider_from_config_with_id(
         error.details["handle"] = Value::String(intent.handle.clone());
         return Err(error);
     };
-    let command = expand_ensure_command(command, intent, &provision_idempotency_key(intent));
+    let idempotency_key = provision_idempotency_key(intent);
+    let command = match lifecycle {
+        Some(lifecycle) => {
+            expand_lifecycle_ensure_command(command, intent, lifecycle, &idempotency_key)
+        }
+        None => expand_ensure_command(command, intent, &idempotency_key),
+    };
     let worktrees = run_provider_lookup_command(
         &provider_id,
         provider,
@@ -1676,26 +1689,6 @@ fn run_provider_mutation_command(
     command: &[String],
     operation: &str,
 ) -> Result<Vec<u8>> {
-    if let Some(argument) = command.iter().find(|argument| {
-        argument.split('{').skip(1).any(|tail| {
-            tail.chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-                && tail.contains('}')
-        })
-    }) {
-        return Err(provider_lookup_error(
-            provider_id,
-            command,
-            operation,
-            "command",
-            "worktree_providers.commands",
-            format!(
-                "worktree provider `{provider_id}` command contains an unresolved placeholder: {argument}"
-            ),
-            false,
-        ));
-    }
     let timeout = provider_mutation_timeout(provider)?;
     let output_limit = provider_lookup_output_limit(provider)?;
     let supervised = run_bounded_provider_lookup_command(
@@ -2564,6 +2557,7 @@ fn run_bounded_provider_lookup_command(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<BoundedProviderLookupCommand> {
+    validate_provider_command_argv(provider_id, command, operation)?;
     let (program, args) = command
         .split_first()
         .filter(|(program, _)| !program.trim().is_empty())
@@ -2628,6 +2622,41 @@ fn run_bounded_provider_lookup_command(
         output,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+fn validate_provider_command_argv(
+    provider_id: &str,
+    command: &[String],
+    operation: &str,
+) -> Result<()> {
+    let Some(argument) = command.iter().find(|argument| {
+        argument.split('{').skip(1).any(|tail| {
+            tail.chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+                && tail.contains('}')
+        })
+    }) else {
+        return Ok(());
+    };
+    let field = format!("worktree_providers.commands.{operation}");
+    let mut error = Error::validation_invalid_argument(
+        &field,
+        format!(
+            "worktree provider `{provider_id}` {operation} command contains an unresolved placeholder: {argument}"
+        ),
+        Some(provider_id.to_string()),
+        Some(vec![format!(
+            "Replace or remove the unresolved placeholder in {field}, then retry."
+        )]),
+    );
+    error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+    error.details["worktree_provider_operation"] = Value::String(operation.to_string());
+    error.details["worktree_provider_call_classification"] =
+        Value::String("configuration".to_string());
+    error.details["worktree_provider_phase"] =
+        Value::String(format!("worktree_provider_{operation}"));
+    Err(error)
 }
 
 fn provider_lookup_error(
@@ -4055,6 +4084,67 @@ mod tests {
             !marker.exists(),
             "unsupported planning must not invoke ensure"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_plan_rejects_unresolved_placeholders_before_process_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("plan-called");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) touch '{}'; printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@fix-placeholder\",\"path\":\"/provider/planned/fixture@fix-placeholder\",\"branch\":\"fix/placeholder\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nesac\n",
+                marker.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let config = config_with_provider(WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![script.display().to_string(), "resolve".to_string()]),
+                plan: Some(vec![
+                    script.display().to_string(),
+                    "plan".to_string(),
+                    "{unknown_lifecycle_field}".to_string(),
+                ]),
+                ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        });
+        let intent = WorktreeProviderCreateIntent {
+            handle: "fixture@fix-placeholder".to_string(),
+            repo: "fixture".to_string(),
+            base: "main".to_string(),
+            head: "fix/placeholder".to_string(),
+            task_url: "https://example.test/issues/13349".to_string(),
+        };
+
+        let error = plan_apply_enabled_worktree_provider_from_config(&intent, &config)
+            .expect_err("unresolved template placeholder must fail configuration validation");
+
+        assert_eq!(error.details["field"], "worktree_providers.commands.plan");
+        assert_eq!(
+            error.details["worktree_provider_call_classification"],
+            "configuration"
+        );
+        assert!(error
+            .details
+            .get("worktree_provider_replay_command")
+            .is_none());
+        assert!(!marker.exists(), "invalid argv must not reach the provider");
     }
 
     #[test]
