@@ -48,11 +48,6 @@ pub(super) fn provider_requires_cwd_git_checkout_with_providers(
         })
         .unwrap_or(false)
 }
-#[cfg(test)]
-pub(super) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
-    super::discovery::discover_agent_task_executor_providers()
-}
-
 pub(super) fn select_provider<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     request: &AgentTaskRequest,

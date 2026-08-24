@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -137,9 +137,6 @@ use outcome_normalization::{
     surface_provider_run_result_diagnostics,
 };
 #[cfg(test)]
-use resolution::{
-    discover_agent_task_executor_providers, provider_requires_cwd_git_checkout_with_providers,
-    select_provider_by_backend,
-};
+use resolution::{provider_requires_cwd_git_checkout_with_providers, select_provider_by_backend};
 #[cfg(test)]
 use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};
