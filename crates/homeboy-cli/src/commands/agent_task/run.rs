@@ -1382,7 +1382,7 @@ mod preview_tests {
             );
             assert_eq!(
                 slow["resolved"]["workspace"]["recovery_argv"],
-                serde_json::json!(cook_replay_argv(&args()))
+                slow["replay_argv"]
             );
 
             let provider_config = config.worktree_providers.get_mut("fixture").unwrap();
