@@ -7,11 +7,19 @@ use super::types::*;
 use super::validation::{validate_service_tunnel, validate_service_tunnel_in_root};
 use super::{load, save};
 
-pub fn native_preview_token_sha256(token: &str) -> String {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
+pub(crate) fn native_preview_token_sha256(token: &str) -> String {
     content_hash::sha256_hex(token.as_bytes())
 }
 
-pub fn native_preview_token_record(
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
+pub(crate) fn native_preview_token_record(
     id: impl Into<String>,
     token: &str,
 ) -> ServiceTunnelNativePreviewToken {

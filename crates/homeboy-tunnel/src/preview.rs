@@ -48,7 +48,11 @@ pub(crate) fn preview_artifact_for(
     })
 }
 
-pub fn validate_native_preview_claim(
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
+pub(crate) fn validate_native_preview_claim(
     tunnel: &ServiceTunnel,
     request: ServiceTunnelNativePreviewClaimRequest,
 ) -> Result<ServiceTunnelNativePreviewClaim> {
@@ -173,6 +177,10 @@ pub fn validate_native_preview_claim(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn preview_auth_error(
     field: &str,
     message: impl Into<String>,
@@ -182,6 +190,10 @@ fn preview_auth_error(
     Error::validation_invalid_argument(field, message, value, suggestions)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn validate_native_preview_local_origin(local_origin: &str, id: &str) -> Result<()> {
     let Some(rest) = local_origin.strip_prefix("http://") else {
         return Err(preview_auth_error(
@@ -195,10 +207,18 @@ fn validate_native_preview_local_origin(local_origin: &str, id: &str) -> Result<
     validate_loopback_host(host, id)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn string_claim_allowed(value: &str, allowed: &[String]) -> bool {
     allowed.is_empty() || allowed.iter().any(|candidate| candidate == value)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn host_claim_allowed(value: &str, allowed: &[String]) -> bool {
     allowed.is_empty()
         || allowed
@@ -206,6 +226,10 @@ fn host_claim_allowed(value: &str, allowed: &[String]) -> bool {
             .any(|candidate| candidate == value || glob_match::glob_match(candidate, value))
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn policy_host_suggestions(
     policy: &ServiceTunnelNativePreviewAuthPolicy,
     token: &ServiceTunnelNativePreviewToken,
@@ -213,6 +237,10 @@ fn policy_host_suggestions(
     suggestions_from_scopes(&policy.allowed_public_hosts, &token.allowed_public_hosts)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn policy_session_suggestions(
     policy: &ServiceTunnelNativePreviewAuthPolicy,
     token: &ServiceTunnelNativePreviewToken,
@@ -220,6 +248,10 @@ fn policy_session_suggestions(
     suggestions_from_scopes(&policy.allowed_session_ids, &token.allowed_session_ids)
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
 fn suggestions_from_scopes(
     policy_values: &[String],
     token_values: &[String],

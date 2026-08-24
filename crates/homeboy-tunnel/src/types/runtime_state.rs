@@ -51,7 +51,7 @@ pub struct ServiceTunnelLogPaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServiceTunnelRuntimeState {
+pub(crate) struct ServiceTunnelRuntimeState {
     #[serde(flatten)]
     pub preview_identity: ServiceTunnelPreviewIdentity,
     pub pid: u32,
@@ -84,7 +84,7 @@ pub enum ServiceTunnelTunnelBackend {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServiceTunnelBackendProcessState {
+pub(crate) struct ServiceTunnelBackendProcessState {
     pub pid: u32,
     #[serde(flatten)]
     pub process: ServiceTunnelProcessDescriptor,
@@ -176,7 +176,7 @@ pub struct ServiceTunnelBackendStatus {
     pub evidence: Option<ServiceTunnelBackendEvidence>,
 }
 
-pub type ServiceTunnelBackendEvidence = ServiceTunnelLogPaths;
+pub(crate) type ServiceTunnelBackendEvidence = ServiceTunnelLogPaths;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnelPreviewArtifact {
@@ -215,7 +215,7 @@ pub struct ServiceTunnelPreviewSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceTunnelPreviewDecisionContext {
+pub(crate) struct ServiceTunnelPreviewDecisionContext {
     pub run_failed: bool,
     pub manual_approval_required: bool,
     pub now: chrono::DateTime<chrono::Utc>,

@@ -9,9 +9,11 @@
 mod headers;
 mod types;
 
-pub use types::{
-    PreviewClientAuthDiagnostic, PreviewClientForwardError, PreviewClientReport,
-    PreviewClientStartSpec, PreviewIngressNextResponse, PreviewIngressRequest,
+// `tunnel preview-client` names these directly.
+pub use types::{PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec};
+
+pub(crate) use types::{
+    PreviewClientForwardError, PreviewIngressNextResponse, PreviewIngressRequest,
     PreviewIngressResponse, PreviewIngressResponseChunk, PreviewWebSocketFrame,
     PreviewWebSocketFrameKind, PreviewWebSocketNextResponse, PreviewWebSocketOpen,
     PreviewWebSocketOpenResult,
@@ -41,7 +43,7 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
 }
 
 /// Keep one reverse client registered until the caller requests shutdown.
-pub fn supervise(
+pub(crate) fn supervise(
     spec: PreviewClientStartSpec,
     stop: Arc<AtomicBool>,
 ) -> Result<PreviewClientReport> {

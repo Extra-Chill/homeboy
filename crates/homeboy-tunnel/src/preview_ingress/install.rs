@@ -262,8 +262,6 @@ fn install_status_plan_steps(status: &PreviewIngressInstallStatusPlan) -> Vec<Pl
                 "preview_ingress.status_check",
                 match check.status {
                     PreviewIngressInstallCheckStatus::Planned => PlanStepStatus::Ready,
-                    PreviewIngressInstallCheckStatus::Passed => PlanStepStatus::Success,
-                    PreviewIngressInstallCheckStatus::Failed => PlanStepStatus::Failed,
                 },
             )
             .label(format!("Check {}", check.name))

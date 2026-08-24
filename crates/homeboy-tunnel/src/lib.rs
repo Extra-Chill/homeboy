@@ -12,6 +12,10 @@
 mod entity;
 mod lifecycle;
 mod preview;
+// Namespaced on purpose: `preview_client::start` and `preview_ingress::status`
+// would collide with the crate-root `start`/`status` lifecycle entry points if
+// flattened. The modules stay public; their contents are narrowed instead, so
+// only the items a command names are reachable.
 pub mod preview_client;
 pub mod preview_consumer;
 pub mod preview_ingress;
@@ -20,10 +24,30 @@ mod runtime;
 mod types;
 mod validation;
 
-pub use entity::{expose, native_preview_token_record, native_preview_token_sha256};
+// ---------------------------------------------------------------------------
+// Public API. `tunnel expose` and the lifecycle verbs are the only entry points
+// the CLI calls; the type list is what those commands name in their argument
+// and report shapes. Previously this was `pub use types::*`, which republished
+// all 37 items in `types/` regardless of whether anything used them.
+// ---------------------------------------------------------------------------
+pub use entity::expose;
+// `preview_ingress_tests` reaches these through `use crate::*`; they are not
+// part of the public surface.
+#[allow(unused_imports)]
+pub(crate) use entity::{native_preview_token_record, native_preview_token_sha256};
+#[allow(unused_imports)]
+pub(crate) use preview::validate_native_preview_claim;
+// Crate-scoped glob for `tunnel_tests`, which uses `use crate::*`. This does
+// not widen the external surface — the facade below is the public API.
 pub use lifecycle::{local_url, start, status, stop};
-pub use preview::validate_native_preview_claim;
-pub use types::*;
+#[allow(unused_imports)]
+pub(crate) use types::*;
+pub use types::{
+    ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
+    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
+    ServiceTunnelPreviewPolicyMode, ServiceTunnelReadinessCheck, ServiceTunnelReadinessKind,
+    ServiceTunnelStatus, ServiceTunnelTarget, ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
+};
 
 // Re-exported for the `tunnel_tests` integration suite, which pulls these in
 // via `use crate::*`. The glob consumer is not seen by the unused-imports lint,
