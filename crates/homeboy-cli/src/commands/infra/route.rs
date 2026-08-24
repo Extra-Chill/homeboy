@@ -3606,7 +3606,27 @@ fn materialize_generic_detached_lab_handoff(
             Some(vec![error.to_string()]),
         )
     })?;
-    let content_identity = homeboy::runner::generic_lab_replay_artifact_identity(&canonical_root)?;
+    let runner_id = placement_decision.runner.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "detached Lab replay requires a selected runner to bind its transfer policy",
+            None,
+            None,
+        )
+    })?;
+    let content_identity = homeboy::runner::generic_lab_replay_artifact_identity_for_runner(
+        &runner_id.runner_id,
+        &canonical_root,
+    )
+    // Plan-only controller tests may construct a placement decision without a
+    // persisted runner. A real replay still rejects that legacy/default policy
+    // if the selected runner later resolves any additional exclusion.
+    .or_else(|error| {
+        (error.message == "Runner not found")
+            .then(|| homeboy::runner::generic_lab_replay_artifact_identity(&canonical_root))
+            .transpose()?
+            .ok_or(error)
+    })?;
     let repository_remote =
         homeboy::core::git::release_download::detect_remote_url(&canonical_root);
     let revision = homeboy::core::git::head_sha(&canonical_root);
@@ -4036,10 +4056,10 @@ pub(crate) fn validate_generic_lab_command_replay_workspace(
         return Ok(());
     };
     let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
-    if !replay
-        .materialization
-        .content_identity
-        .starts_with("replay-artifact:sha256:")
+    if homeboy::runner::generic_lab_replay_identity_excludes(
+        &replay.materialization.content_identity,
+    )
+    .is_err()
     {
         return Err(Error::validation_invalid_argument(
             "generic_lab_command_replay",

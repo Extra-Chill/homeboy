@@ -3286,26 +3286,15 @@ fn prepare_replay_snapshot(
     let Some(expected_identity) = expected_identity else {
         return Ok(None);
     };
-    if !expected_identity.starts_with("replay-artifact:sha256:") {
+    let persisted_excludes = crate::generic_lab_replay_identity_excludes(expected_identity)?;
+    let excludes = crate::generic_lab_replay_transfer_excludes(runner, source_path);
+    if persisted_excludes != excludes {
         return Err(Error::validation_invalid_argument(
             "generic_lab_command_replay",
-            "Lab replay uses a legacy workspace identity that cannot attest an immutable transfer artifact",
+            "Lab replay transfer exclusion policy no longer matches the persisted immutable artifact",
             Some(source_path.display().to_string()),
-            Some(vec!["Reissue the command as a new Lab run to create an immutable replay artifact.".to_string()]),
+            Some(vec!["Restore the recorded runner exclusion policy or reissue the command as a new Lab run.".to_string()]),
         ));
-    }
-    let mut excludes = crate::workspace::DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect::<Vec<_>>();
-    for exclude in runner.policy.snapshot_excludes.iter().chain(
-        homeboy_core::source_snapshot::policy_for_path(source_path)
-            .sync_excludes
-            .iter(),
-    ) {
-        if !excludes.contains(exclude) {
-            excludes.push(exclude.clone());
-        }
     }
     let snapshot = crate::workspace::immutable_replay_snapshot(source_path, &excludes)?;
     if snapshot.identity == expected_identity {

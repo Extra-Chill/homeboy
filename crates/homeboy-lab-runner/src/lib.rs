@@ -239,6 +239,63 @@ pub fn generic_lab_replay_artifact_identity(
     }
     workspace::replay_artifact_identity(path, &excludes)
 }
+
+pub fn generic_lab_replay_artifact_identity_for_runner(
+    runner_id: &str,
+    path: &std::path::Path,
+) -> homeboy_core::error::Result<String> {
+    let runner = load(runner_id)?;
+    workspace::replay_artifact_identity(path, &generic_lab_replay_transfer_excludes(&runner, path))
+}
+
+pub fn generic_lab_replay_transfer_excludes(
+    runner: &Runner,
+    path: &std::path::Path,
+) -> Vec<String> {
+    let mut excludes = workspace::DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    for exclude in runner.policy.snapshot_excludes.iter().chain(
+        homeboy_core::source_snapshot::policy_for_path(path)
+            .sync_excludes
+            .iter(),
+    ) {
+        if !excludes.contains(exclude) {
+            excludes.push(exclude.clone());
+        }
+    }
+    excludes.sort();
+    excludes.dedup();
+    excludes
+}
+
+pub fn generic_lab_replay_identity_excludes(
+    identity: &str,
+) -> homeboy_core::error::Result<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(identity).map_err(|_| {
+        homeboy_core::error::Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "Lab replay uses a legacy artifact identity that does not persist its transfer exclusion policy",
+            None,
+            Some(vec!["Reissue the command as a new Lab run to create a policy-bound immutable replay artifact.".to_string()]),
+        )
+    })?;
+    if value["schema"] != "homeboy/lab-replay-artifact/v2" {
+        return Err(homeboy_core::error::Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "Lab replay uses a legacy artifact identity that does not persist its transfer exclusion policy",
+            None,
+            Some(vec!["Reissue the command as a new Lab run to create a policy-bound immutable replay artifact.".to_string()]),
+        ));
+    }
+    serde_json::from_value(value["excludes"].clone()).map_err(|error| {
+        homeboy_core::error::Error::internal_json(
+            error.to_string(),
+            Some("parse replay artifact exclusions".to_string()),
+        )
+    })
+}
 pub(crate) use workspace::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;

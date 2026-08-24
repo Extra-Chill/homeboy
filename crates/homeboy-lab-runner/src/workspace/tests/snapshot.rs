@@ -1726,6 +1726,25 @@ fn immutable_replay_snapshot_identity_and_bytes_honor_exclusions() {
     assert!(!second.path().join("excluded.txt").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn immutable_replay_snapshot_rejects_regular_file_swapped_to_symlink_during_copy() {
+    use std::os::unix::fs::symlink;
+
+    let source = tempfile::tempdir().expect("source");
+    let input = source.path().join("input.txt");
+    let external = tempfile::NamedTempFile::new().expect("external");
+    fs::write(&input, "recorded").expect("write regular input");
+    let _hook = register_after_snapshot_directory_discovery_hook(input.clone(), move || {
+        fs::remove_file(&input).expect("remove regular input");
+        symlink(external.path(), &input).expect("replace input with symlink");
+    });
+
+    let error = immutable_replay_snapshot(source.path(), &[])
+        .expect_err("regular-to-symlink swap must fail closed");
+    assert!(error.message.contains("refused a symlink"));
+}
+
 #[test]
 fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots() {
     let workspace = tempfile::tempdir().expect("workspace");

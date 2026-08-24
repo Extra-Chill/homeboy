@@ -1832,11 +1832,113 @@ pub(crate) fn immutable_replay_snapshot(
     excludes: &[String],
 ) -> Result<ImmutableReplaySnapshot> {
     reject_replay_symlinks(source, source, excludes)?;
-    let manifest = snapshot_input_manifest(source, excludes)?;
-    let stage = materialize_snapshot_stage(source, excludes, &manifest, None)?;
+    let stage = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create replay snapshot stage".to_string()),
+        )
+    })?;
     let staged = stage.path().join("source");
+    fs::create_dir(&staged).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create replay snapshot source".to_string()),
+        )
+    })?;
+    copy_replay_snapshot_tree(source, source, &staged, excludes)?;
+    reject_replay_symlinks(&staged, &staged, &[])?;
     let identity = replay_artifact_identity(&staged, excludes)?;
     Ok(ImmutableReplaySnapshot { stage, identity })
+}
+
+fn copy_replay_snapshot_tree(
+    root: &Path,
+    source: &Path,
+    destination: &Path,
+    excludes: &[String],
+) -> Result<()> {
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read replay snapshot directory".to_string()),
+            )
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read replay snapshot entry".to_string()),
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let source_path = entry.path();
+        if is_excluded(root, &source_path, excludes, &[]) {
+            continue;
+        }
+        #[cfg(test)]
+        test_snapshot_directory_discovery_hook::run(&source_path);
+        let metadata = replay_regular_metadata(&source_path)?;
+        let destination_path = destination.join(entry.file_name());
+        if metadata.is_dir() {
+            fs::create_dir(&destination_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("create replay snapshot directory".to_string()),
+                )
+            })?;
+            copy_replay_snapshot_tree(root, &source_path, &destination_path, excludes)?;
+        } else if metadata.is_file() {
+            let bytes = fs::read(&source_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read replay snapshot file".to_string()),
+                )
+            })?;
+            // A source path that changed type during the read cannot contribute
+            // to a sealed replay artifact, even if the staged output is regular.
+            if !replay_regular_metadata(&source_path)?.is_file() {
+                return Err(replay_symlink_error(&source_path));
+            }
+            fs::write(&destination_path, bytes).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write replay snapshot file".to_string()),
+                )
+            })?;
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "Lab replay artifact requires regular files and directories",
+                Some(source_path.display().to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn replay_regular_metadata(path: &Path) -> Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect replay snapshot entry".to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(replay_symlink_error(path));
+    }
+    Ok(metadata)
+}
+
+fn replay_symlink_error(path: &Path) -> Error {
+    Error::validation_invalid_argument(
+        "workspace",
+        "Lab replay artifact refused a symlink; replay artifacts require materialized regular files and directories",
+        Some(path.display().to_string()),
+        Some(vec!["Replace the symlink with workspace-owned files, or reissue the command as a new Lab run.".to_string()]),
+    )
 }
 
 pub(crate) fn replay_artifact_identity(path: &Path, excludes: &[String]) -> Result<String> {
@@ -1848,11 +1950,21 @@ pub(crate) fn replay_artifact_identity(path: &Path, excludes: &[String]) -> Resu
     hasher.update(b"homeboy/lab-replay-artifact/v1\0");
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
-    for exclude in policy {
+    for exclude in &policy {
         hasher.update(exclude.as_bytes());
         hasher.update(b"\0");
     }
-    Ok(format!("replay-artifact:sha256:{:x}", hasher.finalize()))
+    serde_json::to_string(&serde_json::json!({
+        "schema": "homeboy/lab-replay-artifact/v2",
+        "digest": format!("sha256:{:x}", hasher.finalize()),
+        "excludes": policy,
+    }))
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize replay artifact identity".to_string()),
+        )
+    })
 }
 
 fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Result<()> {
@@ -1879,12 +1991,7 @@ fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Resu
             )
         })?;
         if metadata.file_type().is_symlink() {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                "Lab replay artifact refused a symlink; replay artifacts require materialized regular files and directories",
-                Some(entry_path.display().to_string()),
-                Some(vec!["Replace the symlink with workspace-owned files, or reissue the command as a new Lab run.".to_string()]),
-            ));
+            return Err(replay_symlink_error(&entry_path));
         }
         if metadata.is_dir() {
             reject_replay_symlinks(root, &entry_path, excludes)?;
