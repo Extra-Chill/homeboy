@@ -798,30 +798,8 @@ mod tests {
     fn deploy_config() -> DeployConfig {
         DeployConfig {
             component_ids: vec!["plugin".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
             dry_run: true,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         }
     }
 

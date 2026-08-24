@@ -69,6 +69,7 @@ impl DeployResult {
     }
 }
 
+#[cfg_attr(test, derive(Default))]
 #[derive(Clone)]
 pub struct DeployConfig {
     pub component_ids: Vec<String>,

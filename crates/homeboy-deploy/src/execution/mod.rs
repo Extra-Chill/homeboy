@@ -227,31 +227,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
             skip_build: true,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         let result = resolve_preflight_artifact_path(
@@ -295,31 +272,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
             head: true,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         assert!(!should_try_download_release_artifact(
@@ -336,31 +290,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
             tagged: true,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         assert!(!should_try_download_release_artifact(
@@ -388,31 +319,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         assert!(should_try_download_release_artifact(
@@ -440,31 +348,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         assert!(should_try_download_release_artifact(
@@ -483,31 +368,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         match release_artifact_plan(&component, &config, false, false) {
@@ -539,31 +401,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         assert!(should_try_download_release_artifact(
@@ -620,31 +459,8 @@ mod tests {
             ..Component::default()
         };
         let config = DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
             head: true,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            target: None,
+            ..Default::default()
         };
 
         let artifact = resolve_preflight_artifact_path(
