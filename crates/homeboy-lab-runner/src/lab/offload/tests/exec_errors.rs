@@ -654,6 +654,7 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
                 durable_agent_task_plan: None,
                 durable_run_id: None,
                 source_path: None,
+                expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
                 reuse_compatible_snapshot: false,

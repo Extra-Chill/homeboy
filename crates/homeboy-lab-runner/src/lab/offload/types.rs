@@ -41,6 +41,8 @@ pub struct LabOffloadRequest<'a> {
     /// This keeps process cwd in the runner job while retaining an exact local
     /// source for Git materialization and path remapping.
     pub source_path: Option<&'a std::path::Path>,
+    /// Immutable controller workspace identity required by a durable replay.
+    pub expected_source_snapshot_identity: Option<&'a str>,
     /// Controller-derived evidence attached to staged source metadata. This is
     /// descriptive only; it cannot relax remote snapshot validation.
     pub verified_cook_baseline: Option<&'a serde_json::Value>,
@@ -99,6 +101,7 @@ impl<'a> LabOffloadRequest<'a> {
             durable_agent_task_plan: None,
             durable_run_id: None,
             source_path: None,
+            expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: false,
@@ -136,6 +139,7 @@ mod tests {
             durable_agent_task_plan,
             durable_run_id,
             source_path,
+            expected_source_snapshot_identity,
             verified_cook_baseline,
             require_controller_git_bundle,
             reuse_compatible_snapshot,
@@ -164,6 +168,7 @@ mod tests {
         assert!(durable_agent_task_plan.is_none());
         assert!(durable_run_id.is_none());
         assert!(source_path.is_none());
+        assert!(expected_source_snapshot_identity.is_none());
         assert!(verified_cook_baseline.is_none());
         assert!(!require_controller_git_bundle);
         assert!(!reuse_compatible_snapshot);

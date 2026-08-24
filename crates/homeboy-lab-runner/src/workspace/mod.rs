@@ -52,9 +52,10 @@ pub(crate) use provenance::{
     verify_lab_workspace_from_env, verify_lab_workspace_git_root,
 };
 pub(crate) use snapshot::{
-    copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
-    materialize_snapshot, materialize_snapshot_git, snapshot_identity, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_manifest_for_policy,
+    copy_snapshot_to_directory, effective_snapshot_excludes, immutable_replay_snapshot,
+    local_snapshot_stats, materialize_snapshot, materialize_snapshot_git, replay_artifact_identity,
+    snapshot_identity, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_manifest_for_policy, ImmutableReplaySnapshot,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 pub use snapshot::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
