@@ -117,10 +117,6 @@ fn is_failure_status(status: &str) -> bool {
     )
 }
 
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

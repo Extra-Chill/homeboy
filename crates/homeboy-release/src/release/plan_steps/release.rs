@@ -11,34 +11,6 @@ use homeboy_core::plan::PlanStep;
 use homeboy_core::Result;
 use homeboy_extension::{ExtensionCapability, ExtensionManifest};
 
-/// Build all release steps: core steps (non-configurable) + publish steps (extension-derived).
-#[allow(clippy::too_many_arguments)]
-pub(in crate::release) fn build_release_steps(
-    component: &Component,
-    extensions: &[ExtensionManifest],
-    current_version: &str,
-    new_version: &str,
-    changelog_plan: &ReleaseChangelogPlan,
-    options: &ReleaseOptions,
-    release_scope: &ReleaseScope,
-    warnings: &mut Vec<String>,
-    hints: &mut Vec<String>,
-) -> Result<Vec<PlanStep>> {
-    build_release_steps_with_reconciliation(
-        component,
-        extensions,
-        current_version,
-        new_version,
-        changelog_plan,
-        options,
-        release_scope,
-        warnings,
-        hints,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(in crate::release) fn build_release_steps_with_reconciliation(
     component: &Component,
     extensions: &[ExtensionManifest],

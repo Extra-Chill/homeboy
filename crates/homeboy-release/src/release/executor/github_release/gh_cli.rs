@@ -864,6 +864,10 @@ pub(crate) fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleas
         .and_then(|line| serde_json::from_str(line).ok())
 }
 
+#[allow(
+    dead_code,
+    reason = "No production caller: release upload verification is asserted by this module's tests but is not wired into the publish path."
+)]
 pub(crate) fn verify_release_assets(
     artifact_paths: &[String],
     assets: &[GitHubReleaseAsset],

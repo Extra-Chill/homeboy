@@ -76,6 +76,10 @@ impl ComponentPayloadPreparationRequest {
         ))
     }
 
+    #[allow(
+        dead_code,
+        reason = "No production caller: redacted preparation evidence is asserted by this module's tests; nothing emits it on a deploy."
+    )]
     pub fn evidence(&self) -> serde_json::Value {
         let mut evidence = serde_json::to_value(self).expect("preparation request serializes");
         let component = evidence["component"]
@@ -232,12 +236,11 @@ impl From<&DeployConfig> for PreparationConfig {
 /// any target mutation such as transfer, install, hooks, or smoke checks.
 pub(crate) struct PreparedComponentPayload {
     pub artifact: PreparedDeployArtifact,
-    pub source_commit: String,
     /// Whether preparing this payload ran a fresh build in this lifecycle.
     pub build_ran: bool,
     _release_artifact: Option<ReleaseArtifactLease>,
     _exact_ref_checkout: Option<ExactRefCheckout>,
-    payload_artifact: PreparedArtifactCleanup,
+    _payload_artifact: PreparedArtifactCleanup,
 }
 
 /// Owns only the temporary copy made by preparation. The configured component
@@ -418,12 +421,11 @@ fn prepare_payload(
             request.config.expected_version.as_deref(),
         )?;
         return Ok(PreparedComponentPayload {
-            source_commit: artifact.source_commit.clone(),
             artifact,
             build_ran: false,
             _release_artifact: None,
             _exact_ref_checkout: None,
-            payload_artifact: PreparedArtifactCleanup(None),
+            _payload_artifact: PreparedArtifactCleanup(None),
         });
     }
 
@@ -570,7 +572,7 @@ fn prepare_payload(
             .as_ref()
             .map(|identity| identity.requested_ref.clone())
             .unwrap_or_else(|| format!("v{version}")),
-        source_commit: source_commit.clone(),
+        source_commit,
     };
     artifact.validate(&component.id, request.config.expected_version.as_deref())?;
     if let Some(cleanup) = generated_source_artifact.as_mut() {
@@ -578,11 +580,10 @@ fn prepare_payload(
     }
     Ok(PreparedComponentPayload {
         artifact,
-        source_commit,
         build_ran: release_artifact.is_none() && !request.config.skip_build,
         _release_artifact: release_artifact,
         _exact_ref_checkout: checkout,
-        payload_artifact,
+        _payload_artifact: payload_artifact,
     })
 }
 
@@ -1409,6 +1410,7 @@ mod tests {
                 .payload
                 .as_ref()
                 .unwrap()
+                .artifact
                 .source_commit,
             accepted_sha
         );
@@ -1507,7 +1509,6 @@ mod tests {
                 std::fs::read_to_string(payload.artifact.effective_path()).expect("payload bytes"),
                 "requested source\n"
             );
-            assert_eq!(payload.source_commit, requested_sha);
             assert_eq!(payload.artifact.source_commit, requested_sha);
         });
     }

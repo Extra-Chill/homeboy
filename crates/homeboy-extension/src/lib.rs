@@ -5,10 +5,6 @@ pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
 pub mod audit_manifest_provider;
-#[allow(
-    dead_code,
-    reason = "Benchmark serde compatibility helpers support optional result formats."
-)]
 pub mod bench;
 pub mod build;
 mod capability;
