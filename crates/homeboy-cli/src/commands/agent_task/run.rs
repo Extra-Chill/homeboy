@@ -3072,12 +3072,20 @@ pub(crate) fn resolve_cook_destination(
         ])
     })?;
     let config = defaults::load_config();
-    // DMC's provider mapping currently exposes safety and handle metadata but
-    // not task ownership. In that mode the canonical handle is still resolved
-    // first; its ensure operation must reject a different task-owned worktree.
-    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_from_config(task_url, &config) {
-        Ok(Some(resolution)) => resolution.worktree.handle,
-        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&derived_cook_branch(task_url)?)),
+    // Resolve the requested branch before task discovery. An explicit --head is
+    // authoritative through candidate reuse, provisioning, and finalization.
+    let head = match args.head.clone() {
+        Some(head) => head,
+        None => derived_cook_branch(task_url)?,
+    };
+    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(task_url, args.head.as_deref(), &config) {
+        Ok(Some(resolution)) => {
+            if args.head.is_none() {
+                args.head = Some(resolution.worktree.branch.clone());
+            }
+            resolution.worktree.handle
+        }
+        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&head)),
         Err(mut error) => {
             if let Some(handles) = error.message.strip_prefix(&format!("multiple active apply-enabled worktrees are owned by `{task_url}`: ")) {
                 error.details["recovery"] = serde_json::json!(handles.split(", ").map(|handle| format!("homeboy agent-task cook --to-worktree {handle}")).collect::<Vec<_>>());
@@ -3086,7 +3094,7 @@ pub(crate) fn resolve_cook_destination(
         }
     });
     if args.head.is_none() {
-        args.head = Some(derived_cook_branch(task_url)?);
+        args.head = Some(head);
     }
     resolve_cook_base(&mut args)?;
     Ok(args)

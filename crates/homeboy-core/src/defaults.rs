@@ -673,6 +673,12 @@ pub struct WorktreeProviderCommands {
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<Vec<String>>,
+    /// Targeted tracker lookup. Each `{task_url}` argument is replaced with the
+    /// canonical task URL and returns every candidate owned by that task. The
+    /// provider owns pagination so Homeboy never mistakes a partial page for an
+    /// absent destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_task: Option<Vec<String>>,
     /// Targeted canonical-path lookup. Each `{path}` argument is replaced with
     /// the requested canonical path. The result uses `list_result_mapping` and
     /// may contain one item.
@@ -731,6 +737,7 @@ impl Default for WorktreeProviderCommands {
             resolve_identity: None,
             attest_safety: None,
             resolve: None,
+            resolve_task: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
             list: None,
@@ -1199,6 +1206,7 @@ mod tests {
             resolve_identity: None,
             attest_safety: None,
             resolve: None,
+            resolve_task: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
             list: Some(vec!["provider".to_string(), "list".to_string()]),

@@ -945,6 +945,17 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_from_config(
     task_url: &str,
     config: &HomeboyConfig,
 ) -> Result<Option<WorktreeProviderResolution>> {
+    find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(task_url, None, config)
+}
+
+/// Find the sole clean apply-enabled provider worktree owned by a tracker URL
+/// that is compatible with an explicitly requested branch. Providers with a
+/// targeted task lookup own pagination; older providers retain list discovery.
+pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
+    task_url: &str,
+    head: Option<&str>,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderResolution>> {
     let mut matches = Vec::new();
     for (provider_id, provider) in &config.worktree_providers {
         if !provider.enabled
@@ -957,11 +968,17 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_from_config(
         {
             continue;
         }
-        let Some(command) = provider.commands.list.as_ref() else {
+        let worktrees = if let Some(command) = provider.commands.resolve_task.as_ref() {
+            run_provider_resolve_task_command(provider_id, provider, command, task_url)?
+        } else if let Some(command) = provider.commands.list.as_ref() {
+            run_provider_list_command(provider_id, provider, command)?
+        } else {
             continue;
         };
-        for worktree in run_provider_list_command(provider_id, provider, command)? {
-            if worktree.task_url.as_deref() == Some(task_url) {
+        for worktree in worktrees {
+            if worktree.task_url.as_deref() == Some(task_url)
+                && head.is_none_or(|head| worktree.branch == head)
+            {
                 validate_provider_handle(provider_id, &worktree, None, None)?;
                 matches.push(WorktreeProviderResolution {
                     provider_id: provider_id.clone(),
@@ -1862,6 +1879,25 @@ fn run_provider_resolve_command(
         provider,
         &command,
         "resolve",
+        &provider.commands.resolve_not_found_exit_codes,
+    )
+}
+
+fn run_provider_resolve_task_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    task_url: &str,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{task_url}", task_url))
+        .collect::<Vec<_>>();
+    run_provider_lookup_command(
+        provider_id,
+        provider,
+        &command,
+        "resolve_task",
         &provider.commands.resolve_not_found_exit_codes,
     )
 }
@@ -6275,6 +6311,46 @@ mod tests {
         )
         .expect_err("duplicate ownership must be explicit");
         assert!(error.message.contains("project@first, project@second"));
+    }
+
+    #[test]
+    fn targeted_task_lookup_reuses_a_later_compatible_candidate() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "task-216");
+        let task_url = "https://example.test/owner/project/issues/216";
+        let mapping = WorktreeProviderListResultMapping {
+            items: "$.worktrees".to_string(),
+            handle: "$.handle".to_string(),
+            path: "$.path".to_string(),
+            branch: "$.branch".to_string(),
+            dirty: "$.safety.dirty".to_string(),
+            unpushed: "$.safety.unpushed".to_string(),
+            primary: "$.safety.primary".to_string(),
+            task_url: Some("$.task_url".to_string()),
+        };
+        let script = fake_list_provider_script(json!({ "worktrees": [
+            {
+                "handle": "project@first-page", "path": workspace.path(), "branch": "fix/other",
+                "task_url": task_url, "safety": { "dirty": false, "unpushed": false, "primary": false }
+            },
+            {
+                "handle": "project@task-216", "path": workspace.path(), "branch": "task-216",
+                "task_url": task_url, "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }
+        ] }));
+        let mut provider = list_provider(script.clone(), mapping);
+        provider.apply_enabled = true;
+        provider.commands.list = None;
+        provider.commands.resolve_task = Some(vec![script, "{task_url}".to_string()]);
+
+        let found = find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
+            task_url,
+            Some("task-216"),
+            &config_with_provider(provider),
+        )
+        .expect("targeted task lookup")
+        .expect("later compatible task candidate");
+        assert_eq!(found.worktree.handle, "project@task-216");
     }
 
     #[test]
