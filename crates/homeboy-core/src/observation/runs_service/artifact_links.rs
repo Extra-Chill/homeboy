@@ -127,16 +127,10 @@ mod tests {
         RunRecord {
             id: "r".to_string(),
             kind: "runner-exec".to_string(),
-            component_id: None,
             started_at: "2026-07-23T00:00:00Z".to_string(),
-            finished_at: None,
             status: "running".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: metadata,
+            ..Default::default()
         }
     }
 

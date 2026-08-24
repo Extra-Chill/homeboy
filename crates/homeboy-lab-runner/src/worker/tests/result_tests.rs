@@ -103,16 +103,11 @@ fn reverse_worker_result_reads_persisted_observation_run_details() {
         let run = RunRecord {
             id: "durable-run".to_string(),
             kind: "fuzz".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: Some("2026-01-01T00:01:00Z".to_string()),
             status: "succeeded".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({}),
+            ..Default::default()
         };
         ObservationStore::open_initialized()
             .expect("store")
@@ -133,16 +128,11 @@ fn reverse_worker_result_transports_every_durable_file_artifact_once() {
         let run = RunRecord {
             id: "durable-multi-artifact-run".to_string(),
             kind: "test".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: Some("2026-01-01T00:01:00Z".to_string()),
             status: "pass".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({}),
+            ..Default::default()
         };
         store.import_run(&run).expect("persist run");
         for (id, bytes) in [

@@ -1636,22 +1636,10 @@ const DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF: Duration = Duration::from_millis(200
 /// Ceiling for terminal-wait backoff, so a long-running job is polled at a
 /// steady low rate instead of 5 times a second for its whole duration.
 const DAEMON_TERMINAL_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(5);
-/// Longest uninterrupted sleep while waiting, bounding cancellation latency
-/// independently of how far backoff has grown.
-const DAEMON_TERMINAL_WAIT_CANCELLATION_SLICE: Duration = Duration::from_millis(200);
 
 /// Sleep up to `interval`, returning `true` if cancellation was observed.
 fn sleep_daemon_wait_unless_cancelled(interval: Duration, cancelled: &dyn Fn() -> bool) -> bool {
-    let mut remaining = interval;
-    while !remaining.is_zero() {
-        if cancelled() {
-            return true;
-        }
-        let slice = remaining.min(DAEMON_TERMINAL_WAIT_CANCELLATION_SLICE);
-        std::thread::sleep(slice);
-        remaining = remaining.saturating_sub(slice);
-    }
-    cancelled()
+    crate::cancellable_sleep::sleep_unless_cancelled(interval, || cancelled())
 }
 
 fn daemon_terminal_wait_cancelled_error(job_id: &str) -> Error {

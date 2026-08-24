@@ -8,18 +8,18 @@ use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename};
 
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseRepairCommands {
-    pub notes_file: String,
-    pub notes_guidance: String,
-    pub generate_notes_command: String,
-    pub create_command: String,
-    pub upload_command: String,
-    pub publish_command: String,
-    pub view_command: String,
-    pub env_hint: Option<String>,
+    pub(crate) notes_file: String,
+    pub(crate) notes_guidance: String,
+    pub(crate) generate_notes_command: String,
+    pub(crate) create_command: String,
+    pub(crate) upload_command: String,
+    pub(crate) publish_command: String,
+    pub(crate) view_command: String,
+    pub(crate) env_hint: Option<String>,
     /// True when `notes_file` is the persisted exact Homeboy release body
     /// (issue #3508), so recovery reproduces the identical body rather than
     /// regenerating notes that could diverge.
-    pub exact_body_available: bool,
+    pub(crate) exact_body_available: bool,
 }
 
 pub(crate) fn github_release_repair_commands(

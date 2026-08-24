@@ -618,6 +618,8 @@ fn verify_patch_is_present(
     Ok(report)
 }
 
+#[cfg(test)]
+// Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
@@ -625,6 +627,8 @@ pub(crate) fn promote_with_provider(
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
+// Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
@@ -1200,6 +1204,8 @@ fn gate_feedback_baseline_for_artifact(
 /// Replace a runner-local baseline path with the controller artifact-store
 /// identity before a follow-up can reuse a dirty destination. Older baselines
 /// without source identity retain their existing strict path/hash contract.
+#[cfg(test)]
+// Superseded by `bind_gate_feedback_baseline_internal` in cb7c0317e; retained as the tests' entry point.
 pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
     // One call is one unit of work, so the store resolves once here rather
     // than at each projection lookup inside (#7505).

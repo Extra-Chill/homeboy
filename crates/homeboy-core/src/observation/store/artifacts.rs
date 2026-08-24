@@ -2791,16 +2791,11 @@ mod tests {
                     .import_run(&RunRecord {
                         id: id.to_string(),
                         kind: "runner-exec".to_string(),
-                        component_id: None,
                         started_at: "2026-01-01T00:00:00Z".to_string(),
-                        finished_at: None,
                         status: "running".to_string(),
-                        command: None,
                         cwd: Some(home.path().display().to_string()),
-                        homeboy_version: None,
-                        git_sha: None,
-                        rig_id: None,
                         metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+                        ..Default::default()
                     })
                     .expect("synthetic run");
             }
@@ -2824,16 +2819,11 @@ mod tests {
             let synthetic = |token: &str| RunRecord {
                 id: "synthetic-concurrent".to_string(),
                 kind: "runner-exec".to_string(),
-                component_id: None,
                 started_at: "2026-01-01T00:00:00Z".to_string(),
-                finished_at: None,
                 status: "running".to_string(),
-                command: None,
                 cwd: Some(home.path().display().to_string()),
-                homeboy_version: None,
-                git_sha: None,
-                rig_id: None,
                 metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+                ..Default::default()
             };
             let winner = synthetic("winner-token");
             let loser = synthetic("loser-token");

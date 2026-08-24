@@ -1200,10 +1200,8 @@ fn test_remote_fuzz_artifacts_become_controller_owned_before_runner_cleanup() {
         status: "pass".to_string(),
         command: Some("homeboy fuzz run component-a".to_string()),
         cwd: Some("/srv/component-a".to_string()),
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: json!({}),
+        ..Default::default()
     };
     store.import_run(&run).expect("import fuzz run");
 
@@ -1380,16 +1378,11 @@ fn test_primary_mirrored_run_prefers_fuzz_run_identity() {
     let runner_exec = RunRecord {
         id: "runner-exec-lab-job".to_string(),
         kind: "runner-exec".to_string(),
-        component_id: None,
         started_at: "2026-05-16T00:00:00Z".to_string(),
         finished_at: Some("2026-05-16T00:00:01Z".to_string()),
         status: "pass".to_string(),
-        command: None,
-        cwd: None,
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: json!({}),
+        ..Default::default()
     };
     let fuzz = RunRecord {
         id: "requested-proof".to_string(),
@@ -1842,16 +1835,11 @@ fn reverse_broker_lookup_projects_only_embedded_typed_run_details() {
         let run = RunRecord {
             id: "embedded-run".to_string(),
             kind: "bench".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: Some("2026-01-01T00:01:00Z".to_string()),
             status: "succeeded".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({}),
+            ..Default::default()
         };
         let result = json!({
             "exit_code": 0,

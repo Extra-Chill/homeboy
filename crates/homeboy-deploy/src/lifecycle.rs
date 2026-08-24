@@ -147,17 +147,17 @@ impl Drop for DeployObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeployRunIdentity {
-    pub source: String,
-    pub artifact: String,
-    pub components: Vec<String>,
-    pub targets: Vec<String>,
-    pub policy: String,
+pub(crate) struct DeployRunIdentity {
+    pub(crate) source: String,
+    pub(crate) artifact: String,
+    pub(crate) components: Vec<String>,
+    pub(crate) targets: Vec<String>,
+    pub(crate) policy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeployTargetStatus {
+pub(crate) enum DeployTargetStatus {
     Planned,
     Running,
     Succeeded,
@@ -165,25 +165,25 @@ pub enum DeployTargetStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeployTargetLifecycle {
-    pub target: String,
-    pub status: DeployTargetStatus,
+pub(crate) struct DeployTargetLifecycle {
+    pub(crate) target: String,
+    pub(crate) status: DeployTargetStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_timings: Option<PhaseTimingReport>,
+    pub(crate) phase_timings: Option<PhaseTimingReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeployLifecycleRun {
-    pub schema_version: u32,
-    pub id: String,
-    pub identity: DeployRunIdentity,
-    pub targets: Vec<DeployTargetLifecycle>,
+pub(crate) struct DeployLifecycleRun {
+    pub(crate) schema_version: u32,
+    pub(crate) id: String,
+    pub(crate) identity: DeployRunIdentity,
+    pub(crate) targets: Vec<DeployTargetLifecycle>,
 }
 
 impl DeployLifecycleRun {
-    pub fn new(id: String, identity: DeployRunIdentity) -> Self {
+    pub(crate) fn new(id: String, identity: DeployRunIdentity) -> Self {
         let targets = identity
             .targets
             .iter()
@@ -203,7 +203,7 @@ impl DeployLifecycleRun {
         }
     }
 
-    pub fn resume(&mut self, identity: &DeployRunIdentity) -> Result<()> {
+    pub(crate) fn resume(&mut self, identity: &DeployRunIdentity) -> Result<()> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(Error::validation_invalid_argument(
                 "resume",
@@ -236,13 +236,13 @@ impl DeployLifecycleRun {
         Ok(())
     }
 
-    pub fn target_is_succeeded(&self, target: &str) -> bool {
+    pub(crate) fn target_is_succeeded(&self, target: &str) -> bool {
         self.targets
             .iter()
             .any(|entry| entry.target == target && entry.status == DeployTargetStatus::Succeeded)
     }
 
-    pub fn update_target(
+    pub(crate) fn update_target(
         &mut self,
         target: &str,
         status: DeployTargetStatus,

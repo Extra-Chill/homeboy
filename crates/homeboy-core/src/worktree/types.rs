@@ -205,13 +205,9 @@ impl TerminalWorkspaceAuthorityProof {
 }
 
 pub fn authority_set_fingerprint(authorities: &[String]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for authority in authorities {
-        hasher.update(authority.as_bytes());
-        hasher.update([0]);
-    }
-    format!("{:x}", hasher.finalize())
+    // Terminated, not separated: the authority set is variable-length, so a
+    // trailing separator after every element is what keeps it unambiguous.
+    homeboy_engine_primitives::content_hash::nul_terminated_digest(authorities)
 }
 
 impl TaskWorktreeRecord {

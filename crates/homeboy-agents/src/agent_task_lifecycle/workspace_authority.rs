@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -76,11 +75,10 @@ impl WorkspaceTerminalAuthorityStore {
     }
 
     fn run_index_path(&self, run_id: &str) -> PathBuf {
-        let mut digest = Sha256::new();
-        digest.update(run_id.as_bytes());
-        self.root
-            .join("by-run")
-            .join(format!("{:x}.json", digest.finalize()))
+        // One field, so this is a plain content digest rather than a composite
+        // identity: the bytes are identical to the hand-rolled hasher it replaces.
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(run_id.as_bytes());
+        self.root.join("by-run").join(format!("{digest}.json"))
     }
 
     fn receipt_path(&self, run_id: &str, runner_id: &str, remote_workspace: &str) -> PathBuf {
@@ -339,17 +337,11 @@ impl WorkspaceTerminalAuthorityStore {
 }
 
 fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(run_id.as_bytes());
-    digest.update([0]);
-    digest.update(runner_id.as_bytes());
-    digest.update([0]);
-    digest.update(remote_workspace.as_bytes());
-    format!("{:x}", digest.finalize())
-}
-
-pub(crate) fn persist_terminal_from_record(record: &AgentTaskRunRecord) -> Result<()> {
-    WorkspaceTerminalAuthorityStore::from_environment()?.persist_terminal_from_record(record)
+    homeboy_engine_primitives::content_hash::nul_separated_digest([
+        run_id,
+        runner_id,
+        remote_workspace,
+    ])
 }
 
 fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {

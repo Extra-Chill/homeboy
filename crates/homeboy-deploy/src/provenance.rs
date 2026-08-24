@@ -95,7 +95,7 @@ fn sha256_file(path: &Path) -> Option<String> {
     content_hash::sha256_file(path).ok()
 }
 
-pub use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};
+pub(crate) use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};
 
 #[cfg(test)]
 mod provenance_tests {

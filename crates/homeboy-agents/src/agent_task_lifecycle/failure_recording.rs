@@ -4,6 +4,9 @@ use homeboy_engine_primitives::content_hash;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 
+const LAB_PRE_EXECUTION_CIRCUIT_SCHEMA: &str = "homeboy/lab-pre-execution-circuit/v1";
+const LAB_PRE_EXECUTION_REPAIR_ACTION: &str = "repair_lab_pre_execution_and_retry";
+
 pub fn record_pre_execution_failure(
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -178,6 +181,7 @@ fn record_pre_execution_failure_locked(
     apply_aggregate_to_record(&mut record, plan, &aggregate, aggregate_path);
     let mut failed_record = record;
     let runner_id = failed_record.runner_id().map(str::to_string);
+    let circuit = lab_pre_execution_circuit(&failed_record, plan, phase, error);
     let metadata = failed_record.ensure_metadata_object();
     if retryable {
         metadata.insert("retryable".to_string(), json!(true));
@@ -204,12 +208,168 @@ fn record_pre_execution_failure_locked(
             })).collect::<Vec<_>>(),
         }),
     );
+    if let Some(circuit) = circuit {
+        metadata.insert("lab_pre_execution_circuit".to_string(), circuit);
+    }
     let failed_record = lifecycle_store
         .write_aggregate_and_record_locked_without_terminal_projection(
             &failed_record,
             &aggregate,
         )?;
     Ok((failed_record, Some(aggregate)))
+}
+
+/// Refuse a Cook replacement only when its own prior Lab failure has the same
+/// bounded failure and execution identity. This is deliberately per-run
+/// lineage: unrelated workloads never share a circuit state.
+pub fn admit_lab_pre_execution_replay(
+    record: &AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
+    let Some(previous) = record.metadata.get("lab_pre_execution_circuit") else {
+        return Ok(());
+    };
+    let Some(current) = lab_pre_execution_circuit_from_failure(record, plan) else {
+        return Ok(());
+    };
+    if previous["fingerprint"] != current["fingerprint"]
+        || previous["identity"] != current["identity"]
+    {
+        return Ok(());
+    }
+    let mut error = Error::validation_invalid_argument(
+        "lab_pre_execution_circuit_breaker",
+        "identical Lab pre-provider failure is still open; repair the Lab snapshot or SSH cleanup before retrying",
+        Some(record.run_id.clone()),
+        Some(vec![format!(
+            "Repair the owning Lab failure, then retry: homeboy agent-task retry {} --run",
+            record.run_id
+        )]),
+    );
+    error.details = json!({
+        "field": "lab_pre_execution_circuit_breaker",
+        "schema": LAB_PRE_EXECUTION_CIRCUIT_SCHEMA,
+        "action": LAB_PRE_EXECUTION_REPAIR_ACTION,
+        "fingerprint": previous["fingerprint"],
+        "provider_executions_consumed": 0,
+    });
+    Err(error)
+}
+
+fn lab_pre_execution_circuit(
+    record: &AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    phase: &str,
+    error: &Error,
+) -> Option<Value> {
+    if !is_circuit_breaking_lab_failure(phase, &error.message, &error.details)
+        || error.retryable != Some(true)
+        || record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .unwrap_or_default()
+            != 0
+    {
+        return None;
+    }
+    let identity = lab_pre_execution_identity(record, plan);
+    let failure = json!({
+        "phase": bounded(phase, 128),
+        "error_code": error.code.as_str(),
+        "failure_code": error.details["field"]
+            .as_str()
+            .map(|value| bounded(value, 128))
+            .unwrap_or_else(|| error.code.as_str().to_string()),
+        "message": bounded(failure_message(&error.message, &error.details), 512),
+    });
+    let fingerprint = content_hash::sha256_hex(
+        serde_json::to_vec(&json!({ "identity": identity, "failure": failure }))
+            .expect("circuit fingerprint is serializable")
+            .as_slice(),
+    );
+    Some(json!({
+        "schema": LAB_PRE_EXECUTION_CIRCUIT_SCHEMA,
+        "state": "open",
+        "action": LAB_PRE_EXECUTION_REPAIR_ACTION,
+        "fingerprint": fingerprint,
+        "identity": identity,
+        "provider_executions_consumed": 0,
+    }))
+}
+
+fn lab_pre_execution_circuit_from_failure(
+    record: &AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+) -> Option<Value> {
+    let failure = record.metadata.get("pre_execution_failure")?;
+    let phase = failure.get("phase")?.as_str()?;
+    if !is_circuit_breaking_lab_failure(
+        phase,
+        failure["message"].as_str().unwrap_or_default(),
+        &failure["details"],
+    ) || failure["retryable"] != Value::Bool(true)
+    {
+        return None;
+    }
+    let identity = lab_pre_execution_identity(record, plan);
+    let signature = json!({
+        "phase": bounded(phase, 128),
+        "error_code": failure["error_code"].as_str().unwrap_or_default(),
+        "failure_code": failure["failure_code"].as_str().map(|value| bounded(value, 128)),
+        "message": bounded(
+            failure_message(failure["message"].as_str().unwrap_or_default(), &failure["details"]),
+            512,
+        ),
+    });
+    let fingerprint = content_hash::sha256_hex(
+        serde_json::to_vec(&json!({ "identity": identity, "failure": signature }))
+            .expect("circuit fingerprint is serializable")
+            .as_slice(),
+    );
+    Some(json!({ "fingerprint": fingerprint, "identity": identity }))
+}
+
+fn lab_pre_execution_identity(record: &AgentTaskRunRecord, plan: &AgentTaskPlan) -> Value {
+    let source = json!({
+        "source_checkout": record.metadata["source_checkout"],
+        "tasks": plan.tasks.iter().map(|task| json!({
+            "workspace": task.workspace,
+            "source_refs": task.source_refs,
+        })).collect::<Vec<_>>(),
+    });
+    let current_generation = homeboy_core::build_identity::current().display;
+    let runner_generation = record.metadata["runner_generation"]
+        .as_str()
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/runner_execution_record/generation")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(&current_generation);
+    json!({
+        "runner_id": record.runner_id().map(|value| bounded(value, 256)),
+        "runner_generation": bounded(runner_generation, 256),
+        "source_identity": content_hash::sha256_hex(
+            serde_json::to_vec(&source).expect("source identity is serializable").as_slice(),
+        ),
+    })
+}
+
+fn bounded(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn failure_message<'a>(message: &'a str, details: &'a Value) -> &'a str {
+    details["error"].as_str().unwrap_or(message)
+}
+
+fn is_circuit_breaking_lab_failure(phase: &str, message: &str, details: &Value) -> bool {
+    if phase != "lab_workspace_stage" {
+        return false;
+    }
+    let message = failure_message(message, details);
+    message.contains("snapshot manifests differ")
+        || message.contains("SSH stream drain exceeded its cleanup deadline")
 }
 
 fn record_transport_follow_up_failure_in_store(

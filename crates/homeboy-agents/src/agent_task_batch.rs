@@ -563,15 +563,17 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn status_in_store<S, P>(
+fn status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
     mut projection_readiness: P,
+    mut lifecycle_record_exists: E,
 ) -> Result<AgentTaskBatchStatusReport>
 where
     S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
     P: FnMut(&str) -> Result<Option<String>>,
+    E: FnMut(&str) -> Result<bool>,
 {
     let mut batch = store.read_batch(batch_id)?;
     if batch.metadata["terminal_failure"].is_object() {
@@ -582,9 +584,7 @@ where
         let admitted = batch
             .child_runs
             .iter()
-            .filter(|child| {
-                agent_task_lifecycle::run_record_exists_readonly(&child.run_id).unwrap_or(false)
-            })
+            .filter(|child| lifecycle_record_exists(&child.run_id).unwrap_or(false))
             .count();
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
@@ -1017,6 +1017,7 @@ fn artifacts_in_store(
                 run_id,
             )
         },
+        |run_id| agent_task_lifecycle::run_record_exists_readonly_in_store(lifecycle_store, run_id),
     )?;
     let mut unavailable_child_runs = report.unavailable_child_runs.clone();
     let child_runs = report
@@ -1347,6 +1348,7 @@ impl AgentTaskBatchStore {
             batch_id,
             agent_task_lifecycle::persisted_status,
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
+            agent_task_lifecycle::run_record_exists_readonly,
         )
     }
 
@@ -1359,17 +1361,25 @@ impl AgentTaskBatchStore {
         expire_stalled_fanout_admission_in_store(self, &lifecycle_store, batch_id)
     }
 
-    pub fn status_with<S, P>(
+    pub fn status_with<S, P, E>(
         &self,
         batch_id: &str,
         child_status: S,
         projection_readiness: P,
+        lifecycle_record_exists: E,
     ) -> Result<AgentTaskBatchStatusReport>
     where
         S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
         P: FnMut(&str) -> Result<Option<String>>,
+        E: FnMut(&str) -> Result<bool>,
     {
-        status_in_store(self, batch_id, child_status, projection_readiness)
+        status_in_store(
+            self,
+            batch_id,
+            child_status,
+            projection_readiness,
+            lifecycle_record_exists,
+        )
     }
 
     pub fn record_child_finalization(
@@ -1696,13 +1706,12 @@ pub fn record_dependency_action_receipt_in_store(
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskOutcome,
-        AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskArtifact, AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Barrier};
@@ -1756,6 +1765,7 @@ mod tests {
                 batch_id,
                 |run_id| lifecycle_store.read_record(run_id),
                 |_| Ok(None),
+                |run_id| lifecycle_store.record_exists_readonly(run_id),
             )
             .expect("batch status")
     }
@@ -1970,6 +1980,7 @@ mod tests {
                     ))
                 },
                 |_| Ok(None),
+                |run_id| lifecycle_store.record_exists_readonly(run_id),
             )
             .expect("fanout status falls back to terminal durable state");
 
@@ -2243,6 +2254,7 @@ mod tests {
                 "batch/projection",
                 |run_id| lifecycle_store.read_record(run_id),
                 |_| Ok(Some("controller projection is pending".to_string())),
+                |run_id| lifecycle_store.record_exists_readonly(run_id),
             )
             .expect("batch status");
 
@@ -2377,6 +2389,7 @@ mod tests {
                     "batch/contended-status",
                     |run_id| lifecycle_store.read_record_bounded(run_id),
                     |_| Ok(None),
+                    |run_id| lifecycle_store.record_exists_readonly(run_id),
                 )
                 .expect("fanout status remains available during writes");
             assert_eq!(report.batch.state, AgentTaskBatchState::Queued);
@@ -3329,6 +3342,70 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn terminal_status_uses_the_injected_lifecycle_store_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_batch_store = AgentTaskBatchStore::new(left_context.path_roots());
+        let right_batch_store = AgentTaskBatchStore::new(right_context.path_roots());
+        let left_lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots());
+        let plan = AgentTaskPlan::new("fanout/terminal-isolation", vec![request("child")]);
+
+        for (batch_store, lifecycle_store) in [
+            (&left_batch_store, &left_lifecycle_store),
+            (&right_batch_store, &right_lifecycle_store),
+        ] {
+            submit_batch(
+                batch_store,
+                lifecycle_store,
+                &plan,
+                "shared-terminal-isolation",
+            );
+            let mut batch = batch_store
+                .read_batch("shared-terminal-isolation")
+                .expect("terminal batch");
+            batch.metadata["terminal_failure"] = json!({ "failure": "admission failed" });
+            batch_store
+                .write_batch(&batch)
+                .expect("persist terminal batch");
+        }
+
+        let left = std::thread::spawn(move || {
+            left_batch_store.status_with(
+                "shared-terminal-isolation",
+                |run_id| left_lifecycle_store.read_record(run_id),
+                |_| Ok(None),
+                |run_id| left_lifecycle_store.record_exists_readonly(run_id),
+            )
+        });
+        let right = std::thread::spawn(move || {
+            right_batch_store.status_with(
+                "shared-terminal-isolation",
+                |run_id| right_lifecycle_store.read_record(run_id),
+                |_| Ok(None),
+                |run_id| right_lifecycle_store.record_exists_readonly(run_id),
+            )
+        });
+
+        for report in [
+            left.join()
+                .expect("left status thread")
+                .expect("left status"),
+            right
+                .join()
+                .expect("right status thread")
+                .expect("right status"),
+        ] {
+            assert_eq!(report.status, "failed");
+            assert_eq!(report.admission.expected, 1);
+            assert_eq!(report.admission.admitted, 1);
+            assert_eq!(report.admission.rejected, 0);
+        }
+    }
+
     fn request(task_id: &str) -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -3356,50 +3433,6 @@ mod tests {
             output_declarations: Vec::new(),
             runtime_tools: Vec::new(),
             metadata: Value::Null,
-        }
-    }
-
-    struct ArtifactExecutor;
-
-    impl AgentTaskExecutorAdapter for ArtifactExecutor {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: request.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: vec![AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: format!("artifact-{}", request.task_id),
-                    kind: "report".to_string(),
-                    name: Some("report.json".to_string()),
-                    label: Some("Report".to_string()),
-                    role: Some("report".to_string()),
-                    semantic_key: Some("agent_task.report".to_string()),
-                    path: Some(format!("artifacts/{}/report.json", request.task_id)),
-                    url: None,
-                    mime: Some("application/json".to_string()),
-                    size_bytes: Some(12),
-                    sha256: None,
-                    metadata: Value::Null,
-                }],
-                typed_artifacts: Vec::new(),
-                evidence_refs: vec![AgentTaskEvidenceRef {
-                    kind: "executor-log".to_string(),
-                    uri: format!("homeboy://agent-task/evidence/{}", request.task_id),
-                    label: Some("Executor log".to_string()),
-                }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
-            }
         }
     }
 }

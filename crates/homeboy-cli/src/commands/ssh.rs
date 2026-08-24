@@ -173,7 +173,30 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                     server: None,
                 }
             };
-            let result = resolve_context(&resolve_args)?;
+            let result = resolve_context(&resolve_args).map_err(|error| {
+                let declared = std::env::var("HOMEBOY_DECLARED_SSH_TARGETS").ok();
+                let requested = args.target.as_deref().unwrap_or_default();
+                match declared.as_deref().filter(|value| !value.is_empty()) {
+                    Some(declared) if declared.split(',').any(|target| target == requested) => {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "target",
+                            format!("declared SSH target `{requested}` is unavailable in this Lab job"),
+                            Some(requested.to_string()),
+                            Some(vec!["Verify the controller target configuration and rerun the Lab workload.".to_string()]),
+                        )
+                    }
+                    Some(declared) => homeboy::core::Error::validation_invalid_argument(
+                        "target",
+                        format!("SSH target `{requested}` is not declared by this Lab workload"),
+                        Some(requested.to_string()),
+                        Some(vec![
+                            format!("Declare `{requested}` in the rig requirements.broker_targets before offloading."),
+                            format!("Declared targets: {declared}"),
+                        ]),
+                    ),
+                    None => error,
+                }
+            })?;
             ssh_phase("target-resolved");
 
             let command_string: Option<String> = if args.command.is_empty() {
