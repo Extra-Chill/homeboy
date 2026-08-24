@@ -1732,6 +1732,7 @@ fn immutable_replay_snapshot_rejects_regular_file_swapped_to_symlink_during_copy
     use std::os::unix::fs::symlink;
 
     let source = tempfile::tempdir().expect("source");
+    let _lock = replay_snapshot_hook_lock();
     let input = source.path().join("input.txt");
     let external = tempfile::NamedTempFile::new().expect("external");
     fs::write(&input, "recorded").expect("write regular input");
@@ -1743,6 +1744,49 @@ fn immutable_replay_snapshot_rejects_regular_file_swapped_to_symlink_during_copy
     let error = immutable_replay_snapshot(source.path(), &[])
         .expect_err("regular-to-symlink swap must fail closed");
     assert!(error.message.contains("refused a symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_replay_snapshot_rejects_directory_swapped_to_external_symlink_during_archive() {
+    use std::os::unix::fs::symlink;
+
+    let source = tempfile::tempdir().expect("source");
+    let _lock = replay_snapshot_hook_lock();
+    let directory = source.path().join("directory");
+    let external = tempfile::tempdir().expect("external");
+    fs::create_dir(&directory).expect("create source directory");
+    fs::write(directory.join("input.txt"), "recorded").expect("write source file");
+    let _hook = register_after_snapshot_directory_discovery_hook(directory.clone(), move || {
+        fs::remove_dir_all(&directory).expect("remove source directory");
+        symlink(external.path(), &directory).expect("replace directory with external symlink");
+    });
+
+    let error = immutable_replay_snapshot(source.path(), &[])
+        .expect_err("directory-to-symlink swap must fail closed");
+    assert!(error.message.contains("refused a symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_replay_snapshot_preserves_executable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = tempfile::tempdir().expect("source");
+    let script = source.path().join("script.sh");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+        .expect("make script executable");
+
+    let snapshot = immutable_replay_snapshot(source.path(), &[]).expect("seal replay artifact");
+    assert_ne!(
+        fs::metadata(snapshot.path().join("script.sh"))
+            .expect("staged script metadata")
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
 }
 
 #[test]
@@ -2806,4 +2850,10 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
             .exists(),
         "snapshot exclusions must also apply inside dereferenced dependencies"
     );
+}
+fn replay_snapshot_hook_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("replay snapshot hook lock")
 }

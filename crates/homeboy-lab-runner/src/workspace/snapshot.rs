@@ -1,7 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use glob_match::glob_match;
@@ -1831,7 +1831,6 @@ pub(crate) fn immutable_replay_snapshot(
     source: &Path,
     excludes: &[String],
 ) -> Result<ImmutableReplaySnapshot> {
-    reject_replay_symlinks(source, source, excludes)?;
     let stage = tempfile::tempdir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1845,161 +1844,31 @@ pub(crate) fn immutable_replay_snapshot(
             Some("create replay snapshot source".to_string()),
         )
     })?;
-    copy_replay_snapshot_tree(source, source, &staged, excludes)?;
+    materialize_replay_archive(source, &staged, excludes)?;
     reject_replay_symlinks(&staged, &staged, &[])?;
     let identity = replay_artifact_identity(&staged, excludes)?;
     Ok(ImmutableReplaySnapshot { stage, identity })
 }
 
-fn copy_replay_snapshot_tree(
-    root: &Path,
-    source: &Path,
-    destination: &Path,
-    excludes: &[String],
-) -> Result<()> {
-    let mut entries = fs::read_dir(source)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read replay snapshot directory".to_string()),
-            )
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read replay snapshot entry".to_string()),
-            )
-        })?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let source_path = entry.path();
-        if is_excluded(root, &source_path, excludes, &[]) {
-            continue;
-        }
-        let metadata = replay_regular_metadata(&source_path)?;
-        #[cfg(test)]
-        test_snapshot_directory_discovery_hook::run(&source_path);
-        let destination_path = destination.join(entry.file_name());
-        if metadata.is_dir() {
-            fs::create_dir(&destination_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("create replay snapshot directory".to_string()),
-                )
-            })?;
-            copy_replay_snapshot_tree(root, &source_path, &destination_path, excludes)?;
-        } else if metadata.is_file() {
-            let bytes = read_replay_regular_file(&source_path)?;
-            fs::write(&destination_path, bytes).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("write replay snapshot file".to_string()),
-                )
-            })?;
-        } else {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                "Lab replay artifact requires regular files and directories",
-                Some(source_path.display().to_string()),
-                None,
-            ));
-        }
+fn materialize_replay_archive(source: &Path, staged: &Path, excludes: &[String]) -> Result<()> {
+    let manifest = snapshot_input_manifest(source, excludes)?;
+    #[cfg(test)]
+    for entry in &manifest.entries {
+        test_snapshot_directory_discovery_hook::run(&entry.source);
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn read_replay_regular_file(path: &Path) -> Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut file = options.open(path).map_err(|error| {
-        if fs::symlink_metadata(path)
-            .ok()
-            .is_some_and(|metadata| metadata.file_type().is_symlink())
-        {
-            replay_symlink_error(path)
-        } else {
-            Error::internal_io(
-                error.to_string(),
-                Some("open replay snapshot file".to_string()),
-            )
-        }
-    })?;
-    if !file
-        .metadata()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("inspect replay snapshot file".to_string()),
-            )
-        })?
-        .is_file()
-    {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "Lab replay artifact requires regular files and directories",
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("read replay snapshot file".to_string()),
-        )
-    })?;
-    Ok(bytes)
-}
-
-#[cfg(not(unix))]
-fn read_replay_regular_file(path: &Path) -> Result<Vec<u8>> {
-    let file = fs::File::open(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("open replay snapshot file".to_string()),
-        )
-    })?;
-    if !file
-        .metadata()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("inspect replay snapshot file".to_string()),
-            )
-        })?
-        .is_file()
-    {
-        return Err(replay_symlink_error(path));
-    }
-    let mut bytes = Vec::new();
-    std::io::BufReader::new(file)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read replay snapshot file".to_string()),
-            )
-        })?;
-    Ok(bytes)
-}
-
-fn replay_regular_metadata(path: &Path) -> Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("inspect replay snapshot entry".to_string()),
-        )
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(replay_symlink_error(path));
-    }
-    Ok(metadata)
+    let archive_excludes = excludes
+        .iter()
+        .filter(|pattern| !is_root_input_exclude(pattern))
+        .flat_map(|pattern| snapshot_archive_excludes(pattern))
+        .collect::<Vec<_>>();
+    let command = format!(
+        "({inputs}) | COPYFILE_DISABLE=1 tar --no-xattrs -C {source} {excludes} -cf - --null -T - | tar --no-xattrs -C {staged} -xf -",
+        inputs = snapshot_manifest_tar_input(&manifest),
+        source = shell::quote_arg(&source.display().to_string()),
+        excludes = tar_exclude_args(&archive_excludes),
+        staged = shell::quote_arg(&staged.display().to_string()),
+    );
+    run_shell_command(&command, "construct immutable replay artifact")
 }
 
 fn replay_symlink_error(path: &Path) -> Error {
