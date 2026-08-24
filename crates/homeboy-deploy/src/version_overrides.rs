@@ -93,7 +93,11 @@ pub(super) fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path
 }
 
 /// Fetch versions from remote server for components.
-pub fn fetch_remote_versions(
+#[allow(
+    dead_code,
+    reason = "No production caller: every deploy path calls `fetch_remote_versions_for_project` directly; this project-less wrapper is reached only by this module's tests."
+)]
+pub(crate) fn fetch_remote_versions(
     components: &[Component],
     base_path: &str,
     client: &SshClient,
