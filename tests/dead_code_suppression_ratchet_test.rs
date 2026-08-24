@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 /// homeboy-agents modules, plus two `#[path]`-shared test support modules that
 /// each test binary includes whole and uses in part. It is a ceiling, not a
 /// target: lower it whenever a crate is cleared, and never raise it.
-const MODULE_SUPPRESSION_CEILING: usize = 9;
+const MODULE_SUPPRESSION_CEILING: usize = 8;
 
 /// One module-level suppression, located precisely enough to act on.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
