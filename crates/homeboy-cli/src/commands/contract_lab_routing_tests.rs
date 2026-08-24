@@ -224,6 +224,29 @@ fn agent_task_promote_with_controller_run_id_stays_with_finalized_artifacts() {
 }
 
 #[test]
+fn agent_task_promote_with_immutable_runner_artifact_uri_stays_controller_local() {
+    let command = parsed_command(&[
+        "homeboy",
+        "--placement",
+        "local",
+        "agent-task",
+        "promote",
+        "homeboy://agent-task/run/runner-owned-run/artifacts#task=cook&artifact=patch",
+        "--to-worktree",
+        "homeboy@fix-9764",
+    ]);
+
+    let contract = command.lab_contract().expect("promote contract");
+    assert_eq!(
+        contract.portability,
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
+        )
+    );
+    assert!(!contract.routing_policy.default_lab_offload);
+}
+
+#[test]
 fn agent_task_promote_with_readable_controller_aggregate_stays_local() {
     let aggregate = tempfile::NamedTempFile::new().expect("controller aggregate");
     let command = parsed_command(&[
