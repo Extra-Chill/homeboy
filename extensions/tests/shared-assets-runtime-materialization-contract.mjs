@@ -42,6 +42,11 @@ assert.ok(
 	'homeboy-extension-root.json must declare a shared_assets array'
 );
 const declaredSharedAssets = new Set(rootManifest.shared_assets);
+const installedExtensions = new Set(
+	fs.readdirSync(repoRoot, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && fs.existsSync(path.join(repoRoot, entry.name, 'homeboy.json')))
+		.map((entry) => entry.name)
+);
 
 // The runtime packages whose require graphs must resolve on an install. These
 // are themselves declared shared assets that Homeboy core materializes.
@@ -91,9 +96,9 @@ function requireSpecifiers(file) {
 	return specifiers;
 }
 
-// Walk every runtime shared-asset package and record which OTHER top-level
-// repo directories it reaches into via relative requires. Any such directory
-// must itself be a declared shared asset so core co-materializes it.
+// Walk every runtime shared-asset package and record which OTHER top-level repo
+// directories it reaches into via relative requires. Each dependency must be a
+// shared asset or an extension that Homeboy installs under extensions/<id>.
 const referencedSharedAssets = new Set();
 for (const asset of runtimeSharedAssets) {
 	const assetDir = path.join(repoRoot, asset);
@@ -116,16 +121,15 @@ for (const asset of runtimeSharedAssets) {
 	}
 }
 
-// Every top-level directory a runtime shared asset requires must be declared as
-// a shared asset itself. This is the invariant that broke in #7736:
-// agent-runtimes and runtime-agent-ci both require agent-task-contracts, so
-// agent-task-contracts must be a declared shared asset.
+// Every top-level dependency must have an installed materialization contract.
+// Shared packages are copied beside agent-runtimes; extension dependencies are
+// copied beneath extensions and must resolve that distinct installed layout.
 for (const referenced of [...referencedSharedAssets].sort()) {
 	assert.ok(
-		declaredSharedAssets.has(referenced),
+		declaredSharedAssets.has(referenced) || installedExtensions.has(referenced),
 		`runtime shared assets require top-level "${referenced}", so it must be declared in ` +
-			'homeboy-extension-root.json shared_assets for Homeboy core to co-materialize it. ' +
-			'Dropping it recreates Extra-Chill/homeboy#7736 (MODULE_NOT_FOUND before the agent runs).'
+			'homeboy-extension-root.json shared_assets or be an installable extension with homeboy.json. ' +
+			'Otherwise the dependency is absent after extension materialization.'
 	);
 }
 

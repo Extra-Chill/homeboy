@@ -4,10 +4,9 @@
 # `agent-runtimes` is a shared asset: Homeboy installs it at
 # <homeboy>/agent-runtimes, a sibling of <homeboy>/extensions, while a monorepo
 # checkout keeps it one level closer to the extension. A linked dev install
-# hides the difference because Node and `pwd -P` resolve a symlinked extension
-# back to the checkout, so this fixture COPIES the extension scripts — that is
-# the shape a fresh CI runner has, and the shape that produced four identical
-# MODULE_NOT_FOUND shard bootstrap failures in #12585.
+# hides the difference because Node resolves symlinked modules back to the
+# checkout, so this fixture COPIES both the extension and shared runtimes. That
+# is the shape a fresh CI runner has, including the shim failure from #2690.
 set -euo pipefail
 
 WORDPRESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +20,10 @@ mkdir -p "${EXTENSION_DIR}" "${HOMEBOY_ROOT}/extensions/scripts"
 cp -R "${WORDPRESS_ROOT}/scripts" "${EXTENSION_DIR}/scripts"
 cp -R "${WORDPRESS_ROOT}/lib" "${EXTENSION_DIR}/lib"
 cp "${WORDPRESS_ROOT}/wordpress.json" "${EXTENSION_DIR}/wordpress.json"
-ln -s "${REPOSITORY_ROOT}/agent-runtimes" "${HOMEBOY_ROOT}/agent-runtimes"
+cp -R "${REPOSITORY_ROOT}/agent-runtimes" "${HOMEBOY_ROOT}/agent-runtimes"
+cp -R "${REPOSITORY_ROOT}/agent-task-contracts" "${HOMEBOY_ROOT}/agent-task-contracts"
+cp -R "${REPOSITORY_ROOT}/dependency-adapters" "${HOMEBOY_ROOT}/dependency-adapters"
+cp -R "${REPOSITORY_ROOT}/runtime-agent-ci" "${HOMEBOY_ROOT}/runtime-agent-ci"
 ln -s "${REPOSITORY_ROOT}/scripts/lib" "${HOMEBOY_ROOT}/extensions/scripts/lib"
 
 # Every step below asserts its own outcome, including exit status. Leaving
@@ -53,6 +55,19 @@ for target in \
     expected="$(cd "$(dirname "${HOMEBOY_ROOT}")" && pwd -P)/$(basename "${HOMEBOY_ROOT}")/agent-runtimes/${target}"
     [ "$resolved" = "$expected" ] || fail "Expected installed resolution of ${target} to ${expected}, got: ${resolved}"
 done
+
+# Resolving a shim filename is insufficient: execute the copied runtime shim so
+# its dependency on the copied WordPress extension is proven in the installed
+# sibling layout that failed before test inventory started in #2690.
+selection_module="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "wp-codebox/lib/wp-codebox-runtime-selection.js" 2>&1)"
+selection_output="$(fixture_node - "${selection_module}" <<'NODE' 2>&1
+const selection = require(process.argv[2]);
+if (typeof selection.preflightWpCodeboxCommand !== 'function') process.exit(1);
+process.stdout.write(selection.REQUIRED_WP_CODEBOX_VERSION);
+NODE
+)"
+expected_version="$(fixture_node -p "require(process.argv[1]).minimum_version" "${HOMEBOY_ROOT}/agent-runtimes/wp-codebox/wp-codebox.json" 2>&1)"
+[ "${selection_output}" = "${expected_version}" ] || fail "Installed WP Codebox runtime-selection shim failed to load: ${selection_output}"
 
 # The opencode wrapper's only job is to resolve and require the shared runtime,
 # so assert that it gets past resolution. What the runtime then does with an
@@ -99,7 +114,7 @@ esac
 # WordPress-owned runtime selection remains available without the experimental
 # shared runtime. Wrappers that still consume shared runtimes must name what is
 # missing instead of emitting a bare MODULE_NOT_FOUND stack.
-rm "${HOMEBOY_ROOT}/agent-runtimes"
+rm -rf "${HOMEBOY_ROOT}/agent-runtimes"
 adapter_output="$(HOMEBOY_SETTINGS_JSON='{}' fixture_node "${EXTENSION_DIR}/scripts/test/wp-codebox-phpunit-adapter.mjs" 2>&1)"
 case "$adapter_output" in
     *HOMEBOY_COMPONENT_PATH*) ;;
