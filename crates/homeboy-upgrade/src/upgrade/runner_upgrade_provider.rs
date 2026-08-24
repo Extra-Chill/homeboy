@@ -28,7 +28,6 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         explicit_source_path: bool,
         runner_targets: &[String],
         candidate_version: &str,
-        extension_ids: &[String],
     ) -> Result<Vec<RunnerUpgradeEntry>>;
 
     /// Upgrade the configured runners from an explicit source checkout,
@@ -63,7 +62,6 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _explicit_source_path: bool,
         _runner_targets: &[String],
         _candidate_version: &str,
-        _extension_ids: &[String],
     ) -> Result<Vec<RunnerUpgradeEntry>> {
         Ok(Vec::new())
     }

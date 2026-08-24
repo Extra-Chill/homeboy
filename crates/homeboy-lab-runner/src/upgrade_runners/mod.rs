@@ -46,7 +46,6 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         explicit_source_path: bool,
         runner_targets: &[String],
         candidate_version: &str,
-        extension_ids: &[String],
     ) -> Result<Vec<RunnerUpgradeEntry>> {
         preflight_configured_runners_for_upgrade(
             method_override,
@@ -54,7 +53,6 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
             explicit_source_path,
             runner_targets,
             candidate_version,
-            extension_ids,
         )
     }
 

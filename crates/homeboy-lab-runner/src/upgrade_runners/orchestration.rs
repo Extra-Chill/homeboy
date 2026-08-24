@@ -17,7 +17,6 @@ pub fn preflight_configured_runners_for_upgrade(
     _explicit_source_path: bool,
     runner_targets: &[String],
     candidate_version: &str,
-    extension_ids: &[String],
 ) -> Result<Vec<RunnerUpgradeEntry>> {
     let runners = runner_upgrade_targets(runner_targets)?;
     let mut failures = Vec::new();
@@ -31,9 +30,7 @@ pub fn preflight_configured_runners_for_upgrade(
             .homeboy_path
             .clone()
             .unwrap_or_else(|| "homeboy".to_string());
-        if let Some(detail) =
-            runner_manifest_preflight(runner, &homeboy_path, candidate_version, extension_ids)
-        {
+        if let Some(detail) = runner_manifest_preflight(runner, &homeboy_path, candidate_version) {
             failures.push(runner_upgrade_failure_entry(
                 &runner.id,
                 homeboy_path,
@@ -53,13 +50,11 @@ fn runner_manifest_preflight(
     runner: &Runner,
     homeboy_path: &str,
     candidate_version: &str,
-    extension_ids: &[String],
 ) -> Option<String> {
     runner_manifest_preflight_with_executor(
         runner,
         homeboy_path,
         candidate_version,
-        extension_ids,
         &mut runner::exec,
     )
 }
@@ -68,34 +63,63 @@ fn runner_manifest_preflight_with_executor(
     runner: &Runner,
     homeboy_path: &str,
     candidate_version: &str,
-    extension_ids: &[String],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<String> {
-    for extension_id in extension_ids {
-        if !runner_supports_extension_sync(runner, extension_id) {
-            continue;
+    let inventory_command = vec![
+        homeboy_path.to_string(),
+        "extension".to_string(),
+        "list".to_string(),
+        "--skip-ready-check".to_string(),
+    ];
+    let inventory_options = runner_manifest_query_options(runner, inventory_command);
+    let (inventory_output, inventory_exit_code) = match exec(&runner.id, inventory_options) {
+        Ok(result) => result,
+        Err(error) => {
+            return Some(format!(
+                "runner manifest preflight could not query installed extension inventory: {}",
+                error.message
+            ));
         }
-        let mut options = runner_exec_options(
+    };
+    if inventory_exit_code != 0 {
+        return Some(format!(
+            "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list --skip-ready-check"
+        ));
+    }
+    let extension_ids = match runner_extension_inventory(&inventory_output.stdout) {
+        Ok(extension_ids) => extension_ids,
+        Err(detail) => return Some(detail),
+    };
+
+    for extension_id in extension_ids {
+        let options = runner_manifest_query_options(
             runner,
             vec![
                 homeboy_path.to_string(),
                 "extension".to_string(),
                 "show".to_string(),
                 extension_id.clone(),
+                "--skip-ready-check".to_string(),
             ],
         );
-        options.print_handoff = false;
-        options.mirror_evidence = false;
-        options.read_only_artifact_access = true;
-        let Ok((output, exit_code)) = exec(&runner.id, options) else {
-            return Some(format!(
-                "runner manifest preflight could not query extension `{extension_id}`"
-            ));
+        let (output, exit_code) = match exec(&runner.id, options) {
+            Ok(result) => result,
+            Err(error) => {
+                return Some(format!(
+                    "runner manifest preflight could not query installed extension `{extension_id}`: {}",
+                    error.message
+                ));
+            }
         };
         if exit_code != 0 {
-            return Some(format!("runner manifest preflight failed for extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
+            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id} --skip-ready-check"));
         }
-        let Some(requires_homeboy) = runner_extension_requires_homeboy(&output.stdout) else {
+        let requires_homeboy =
+            match runner_extension_requires_homeboy(&output.stdout, &extension_id) {
+                Ok(requires_homeboy) => requires_homeboy,
+                Err(detail) => return Some(detail),
+            };
+        let Some(requires_homeboy) = requires_homeboy else {
             continue;
         };
         match homeboy_extension::evaluate_core_compatibility_for_version(
@@ -111,12 +135,92 @@ fn runner_manifest_preflight_with_executor(
     None
 }
 
-fn runner_extension_requires_homeboy(stdout: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    value
-        .pointer("/data/extension/core_compatibility/requires_homeboy")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+fn runner_manifest_query_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
+    let mut options = runner_exec_options(runner, command);
+    options.print_handoff = false;
+    options.mirror_evidence = false;
+    options
+}
+
+fn runner_extension_inventory(stdout: &str) -> std::result::Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("runner extension inventory was not valid JSON: {error}"))?;
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("runner extension inventory did not report success".to_string());
+    }
+    let extensions = value
+        .pointer("/data/extensions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "runner extension inventory did not contain data.extensions".to_string())?;
+
+    extensions
+        .iter()
+        .map(|extension| {
+            let id = extension
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    "runner extension inventory contained an entry without an id".to_string()
+                })?;
+            if let Some(error) = extension.get("error") {
+                let error = error.as_str().ok_or_else(|| {
+                    format!("runner extension `{id}` inventory error was not a string")
+                })?;
+                let diagnostic = extension
+                    .get("diagnostic")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|diagnostic| format!(": {diagnostic}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
+                ));
+            }
+            Ok(id.to_string())
+        })
+        .collect()
+}
+
+fn runner_extension_requires_homeboy(
+    stdout: &str,
+    expected_extension_id: &str,
+) -> std::result::Result<Option<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|error| {
+        format!("runner extension `{expected_extension_id}` manifest output was not valid JSON: {error}")
+    })?;
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!(
+            "runner extension `{expected_extension_id}` manifest query did not report success"
+        ));
+    }
+    let extension = value
+        .pointer("/data/extension")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            format!(
+                "runner extension `{expected_extension_id}` manifest query did not contain data.extension"
+            )
+        })?;
+    if extension.get("id").and_then(serde_json::Value::as_str) != Some(expected_extension_id) {
+        return Err(format!(
+            "runner extension manifest query returned the wrong extension for `{expected_extension_id}`"
+        ));
+    }
+    let compatibility = extension
+        .get("core_compatibility")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            format!(
+                "runner extension `{expected_extension_id}` manifest query omitted core_compatibility"
+            )
+        })?;
+    match compatibility.get("requires_homeboy") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(requirement)) => Ok(Some(requirement.clone())),
+        Some(_) => Err(format!(
+            "runner extension `{expected_extension_id}` compatibility requirement was not a string"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -126,24 +230,8 @@ mod manifest_preflight_tests {
     use homeboy_core::server::RunnerSettings;
     use std::collections::HashMap;
 
-    #[test]
-    fn reads_runner_manifest_compatibility_from_extension_show_json() {
-        let stdout = r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}}}}"#;
-        assert_eq!(
-            runner_extension_requires_homeboy(stdout).as_deref(),
-            Some(">=2.0.0, <3.0.0")
-        );
-    }
-
-    #[test]
-    fn ignores_extension_show_without_a_compatibility_declaration() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"example"}}}"#;
-        assert!(runner_extension_requires_homeboy(stdout).is_none());
-    }
-
-    #[test]
-    fn changed_runner_manifest_is_rejected_by_revalidation_without_source_sync() {
-        let runner = Runner {
+    fn ssh_runner() -> Runner {
+        Runner {
             id: "lab-a".to_string(),
             kind: RunnerKind::Ssh,
             server_id: Some("lab-a-server".to_string()),
@@ -153,71 +241,190 @@ mod manifest_preflight_tests {
             secret_env: HashMap::new(),
             resources: HashMap::new(),
             policy: Default::default(),
+        }
+    }
+
+    fn successful_output(
+        runner_id: &str,
+        command: Vec<String>,
+        stdout: &str,
+    ) -> (RunnerExecOutput, i32) {
+        (
+            RunnerExecOutput {
+                variant: "exec",
+                command: "runner.exec",
+                runner_id: runner_id.to_string(),
+                dry_run: false,
+                mode: RunnerExecMode::DiagnosticSsh,
+                argv: command,
+                remote_cwd: "/home/user/workspace".to_string(),
+                exit_code: 0,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                source_snapshot: None,
+                job: None,
+                runner_job: None,
+                job_id: None,
+                job_events: None,
+                mirror_run_id: None,
+                patch: None,
+                mutation_artifacts: None,
+                artifacts: Vec::new(),
+                promoted_outputs: Vec::new(),
+                structured_summaries: Vec::new(),
+                metrics: None,
+                capture: None,
+                execution_record: None,
+                runner_result: None,
+                handoff: None,
+                diagnostics: None,
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn reads_runner_manifest_compatibility_from_extension_show_json() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}}}}"#;
+        assert_eq!(
+            runner_extension_requires_homeboy(stdout, "rust")
+                .expect("valid manifest query")
+                .as_deref(),
+            Some(">=2.0.0, <3.0.0")
+        );
+    }
+
+    #[test]
+    fn ignores_extension_show_without_a_compatibility_declaration() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"example","core_compatibility":{"status":"undeclared"}}}}"#;
+        assert!(runner_extension_requires_homeboy(stdout, "example")
+            .expect("valid undeclared compatibility")
+            .is_none());
+    }
+
+    #[test]
+    fn controller_only_extension_absent_from_runner_inventory_is_not_queried() {
+        let runner = ssh_runner();
+        let mut call_count = 0;
+        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
+            call_count += 1;
+            assert_eq!(runner_id, "lab-a");
+            assert_eq!(
+                options.command,
+                ["homeboy", "extension", "list", "--skip-ready-check"]
+            );
+            assert!(!options.read_only_artifact_access);
+            Ok(successful_output(
+                runner_id,
+                options.command,
+                r#"{"success":true,"data":{"extensions":[]}}"#,
+            ))
         };
-        let extension_ids = vec!["rust".to_string()];
+
+        assert!(
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec,)
+                .is_none()
+        );
+        assert_eq!(
+            call_count, 1,
+            "an absent controller extension is never shown"
+        );
+    }
+
+    #[test]
+    fn runner_only_incompatible_extension_fails_closed() {
+        let runner = ssh_runner();
+        let mut call_count = 0;
+        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
+            let stdout = match call_count {
+                0 => {
+                    assert_eq!(
+                        options.command,
+                        ["homeboy", "extension", "list", "--skip-ready-check"]
+                    );
+                    r#"{"success":true,"data":{"extensions":[{"id":"runner-only"}]}}"#
+                }
+                1 => {
+                    assert_eq!(
+                        options.command,
+                        [
+                            "homeboy",
+                            "extension",
+                            "show",
+                            "runner-only",
+                            "--skip-ready-check"
+                        ]
+                    );
+                    r#"{"success":true,"data":{"extension":{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#
+                }
+                _ => panic!("unexpected manifest query"),
+            };
+            call_count += 1;
+            Ok(successful_output(runner_id, options.command, stdout))
+        };
+
+        let rejection =
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
+                .expect("runner-only incompatible extension blocks promotion");
+        assert!(rejection.contains("incompatible with selected controller 2.1.0"));
+        assert_eq!(call_count, 2);
+    }
+
+    #[test]
+    fn invalid_runner_inventory_manifest_fails_closed() {
+        let runner = ssh_runner();
+        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
+            Ok(successful_output(
+                runner_id,
+                options.command,
+                r#"{"success":true,"data":{"extensions":[{"id":"broken","error":"manifest_invalid","diagnostic":"invalid requires.homeboy"}]}}"#,
+            ))
+        };
+
+        let rejection =
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
+                .expect("invalid installed manifest blocks promotion");
+        assert!(rejection.contains("runner extension `broken` manifest is invalid"));
+        assert!(rejection.contains("invalid requires.homeboy"));
+    }
+
+    #[test]
+    fn changed_runner_manifest_is_rejected_by_revalidation_without_source_sync() {
+        let runner = ssh_runner();
         let manifests = [
-            r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#,
-            r#"{"success":true,"data":{"extension":{"core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#,
+            r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#,
+            r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#,
         ];
         let mut call_count = 0;
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             assert_eq!(runner_id, "lab-a");
-            assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
-            assert!(options.read_only_artifact_access);
-            let stdout = manifests[call_count].to_string();
+            let stdout = if call_count % 2 == 0 {
+                assert_eq!(
+                    options.command,
+                    ["homeboy", "extension", "list", "--skip-ready-check"]
+                );
+                r#"{"success":true,"data":{"extensions":[{"id":"rust"}]}}"#
+            } else {
+                assert_eq!(
+                    options.command,
+                    ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
+                );
+                manifests[call_count / 2]
+            };
+            assert!(!options.read_only_artifact_access);
             call_count += 1;
-            Ok((
-                RunnerExecOutput {
-                    variant: "exec",
-                    command: "runner.exec",
-                    runner_id: runner_id.to_string(),
-                    dry_run: false,
-                    mode: RunnerExecMode::DiagnosticSsh,
-                    argv: options.command,
-                    remote_cwd: "/home/user/workspace".to_string(),
-                    exit_code: 0,
-                    stdout,
-                    stderr: String::new(),
-                    source_snapshot: None,
-                    job: None,
-                    runner_job: None,
-                    job_id: None,
-                    job_events: None,
-                    mirror_run_id: None,
-                    patch: None,
-                    mutation_artifacts: None,
-                    artifacts: Vec::new(),
-                    promoted_outputs: Vec::new(),
-                    structured_summaries: Vec::new(),
-                    metrics: None,
-                    capture: None,
-                    execution_record: None,
-                    runner_result: None,
-                    handoff: None,
-                    diagnostics: None,
-                },
-                0,
-            ))
+            Ok(successful_output(runner_id, options.command, stdout))
         };
 
-        assert!(runner_manifest_preflight_with_executor(
-            &runner,
-            "homeboy",
-            "2.1.0",
-            &extension_ids,
-            &mut exec,
-        )
-        .is_none());
-        let rejection = runner_manifest_preflight_with_executor(
-            &runner,
-            "homeboy",
-            "2.1.0",
-            &extension_ids,
-            &mut exec,
-        )
-        .expect("changed manifest is rejected during revalidation");
+        assert!(
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec,)
+                .is_none()
+        );
+        let rejection =
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
+                .expect("changed manifest is rejected during revalidation");
         assert!(rejection.contains("incompatible with selected controller 2.1.0"));
-        assert_eq!(call_count, 2);
+        assert_eq!(call_count, 4);
     }
 }
 
