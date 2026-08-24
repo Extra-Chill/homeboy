@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.3] - 2026-08-24
+
+### Fixed
+- admit declared preview capability
+
 ## [3.38.2] - 2026-08-24
 
 ### Fixed
