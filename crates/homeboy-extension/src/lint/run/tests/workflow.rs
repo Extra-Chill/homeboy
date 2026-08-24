@@ -260,6 +260,62 @@ exit 1
 }
 
 #[test]
+fn unavailable_changed_since_baseline_does_not_suppress_matching_stored_findings() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+        );
+        let mut seed_args = lint_args();
+        seed_args.changed_since = Some("unreachable-base".to_string());
+        seed_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        seed_args.baseline_flags.ignore_baseline = true;
+        let seed = run_main_lint_workflow(
+            &component,
+            source.path(),
+            seed_args,
+            &RunDir::create().expect("seed run dir"),
+        )
+        .expect("seed workflow result");
+        let provenance = seed
+            .baseline_provenance
+            .as_ref()
+            .expect("stored baseline provenance");
+        crate::lint::baseline::save_baseline_for_scope(
+            source.path(),
+            "fixture",
+            seed.findings.as_deref().expect("seed findings"),
+            Some(provenance),
+        )
+        .expect("save matching baseline");
+
+        let mut args = lint_args();
+        args.changed_since = Some("unreachable-base".to_string());
+        args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            args,
+            &RunDir::create().expect("candidate run dir"),
+        )
+        .expect("candidate workflow result");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.baseline_comparison.is_none());
+        assert!(result
+            .baseline_provenance
+            .is_some_and(|provenance| !provenance.compared));
+        assert_eq!(result.findings.as_ref().map(Vec::len), Some(1));
+    });
+}
+
+#[test]
 fn runner_failure_without_findings_is_an_infrastructure_error_without_autofix() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");

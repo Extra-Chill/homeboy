@@ -228,30 +228,31 @@ pub fn run_main_lint_workflow(
 
     // Baseline lifecycle
     let baseline_context = baseline_provenance(&args, scoped_plan.as_ref(), &producer_summaries);
-    let (baseline_comparison, baseline_exit_override, baseline_provenance) =
-        if args.changed_since.is_some()
-            && !args.baseline_flags.baseline
-            && !args.baseline_flags.ignore_baseline
-        {
-            match process_changed_since_baseline(
-                component,
-                source_path,
-                &args,
-                &baseline_context,
-                &lint_findings,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    eprintln!(
+    let (baseline_comparison, baseline_exit_override, baseline_provenance) = if args
+        .changed_since
+        .is_some()
+        && !args.baseline_flags.baseline
+        && !args.baseline_flags.ignore_baseline
+    {
+        match process_changed_since_baseline(
+            component,
+            source_path,
+            &args,
+            &baseline_context,
+            &lint_findings,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!(
                     "[lint] Changed-since baseline unavailable; preserving full finding set: {}",
                     error.message
                 );
-                    process_baseline(source_path, &args, &lint_findings, baseline_context)?
-                }
+                (None, None, baseline_context)
             }
-        } else {
-            process_baseline(source_path, &args, &lint_findings, baseline_context)?
-        };
+        }
+    } else {
+        process_baseline(source_path, &args, &lint_findings, baseline_context)?
+    };
 
     let harness_error = lint_exit_code != 0
         && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
