@@ -364,6 +364,7 @@ fn cook_deadline_report(
 /// Claim exactly one recipe continuation for a terminal run that never
 /// persisted an aggregate. The claim is on the interrupted run, so concurrent
 /// controllers converge before they can append competing recipe attempts.
+#[cfg(test)]
 fn claim_pre_artifact_interruption_retry(
     cook_id: &str,
     attempt: u32,
@@ -1208,20 +1209,6 @@ pub fn authorize_cook_continue_route_with_artifact(
             "artifact_id": artifact_id,
         }),
     )
-}
-
-fn has_cook_continue_route(options: &AgentTaskCookServiceOptions) -> bool {
-    agent_task_lifecycle::exact_record(&options.initial_run_id)
-        .ok()
-        .and_then(|record| record.metadata.get("cook_continue_route").cloned())
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|context| {
-            context.get("schema").and_then(Value::as_str) == Some(COOK_CONTINUE_ROUTE_SCHEMA)
-                && context.get("cook_id").and_then(Value::as_str) == Some(options.cook_id.as_str())
-                && context.get("run_id").and_then(Value::as_str)
-                    == Some(options.initial_run_id.as_str())
-        })
 }
 
 /// Provenance supplied when Homeboy adopts a candidate prepared outside its
@@ -4209,6 +4196,7 @@ fn run_cook_reported(
 /// Convert an error that occurs after recipe materialization into the normal
 /// Cook result contract. Errors before materialization still return unchanged:
 /// they have no durable identity and therefore no legal recovery command.
+#[cfg(test)]
 fn durable_cook_error_report(
     options: &AgentTaskCookServiceOptions,
     error: Error,

@@ -43,10 +43,6 @@ pub mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
-#[allow(
-    dead_code,
-    reason = "Cook adoption helpers support recovery and explicit operator flows."
-)]
 pub mod agent_task_service;
 pub mod agent_task_timeout;
 pub mod agent_task_timeout_artifacts;
