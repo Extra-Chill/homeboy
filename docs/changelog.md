@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.359.6] - 2026-08-24
+
+### Changed
+- light up agent_task_provider for the dead-code lint
+- give external_runtime_ids one derivation
+- light up agent_task_promotion for the dead-code lint
+- collapse RunRecord and StatusArgs fixtures onto Default
+- light up agent_task_finalization for the dead-code lint
+- format isolation assertion
+
+### Fixed
+- capture missing persisted base
+- contain untimed SSH descendants
+- persist Cook output bootstrap
+- diagnose controller admission failures
+- preserve provider selection state
+- Fix explicit rig package boundaries
+- materialize declared broker targets
+- preflight provider model identity
+- isolate terminal batch status stores
+
 ## [0.359.5] - 2026-08-24
 
 ### Changed
