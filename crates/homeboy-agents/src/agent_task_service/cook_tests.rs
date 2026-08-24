@@ -8789,7 +8789,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
 }
 
 #[test]
-fn concurrent_missing_task_base_capture_recovers_a_crashed_owner_and_reuses_its_sha() {
+fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");
         let repository = temp.path().join("repository");
@@ -8874,31 +8874,12 @@ fn concurrent_missing_task_base_capture_recovers_a_crashed_owner_and_reuses_its_
             })
             .expect("make the continuation a terminal service replay");
 
-        // Simulate a controller crash after it reserved the durable operation
-        // but before it reached origin. The lifecycle claim, not a recipe-side
-        // pathname timestamp, must make the continuation recoverable.
-        assert!(matches!(
-            lifecycle_store
-                .claim_cook_operation(
-                    &options.initial_run_id,
-                    WORKSPACE_BASE_CAPTURE_OPERATION,
-                    WORKSPACE_BASE_CAPTURE_CLAIM_LEASE,
-                )
-                .expect("reserve interrupted capture"),
-            agent_task_lifecycle::ClaimOutcome::Acquired
-        ));
-        lifecycle_store
-            .mutate_record(&options.initial_run_id, |record| {
-                record.metadata["cook_operation_claims"][0]["owner_pid"] = serde_json::json!(0);
-                true
-            })
-            .expect("mark interrupted owner dead");
-
-        let capture_counter = Arc::new(WorkspaceBaseCaptureCounter {
+        let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
             workspace: repository.clone(),
             count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(false),
         });
-        *WORKSPACE_BASE_CAPTURE_COUNTER
+        *WORKSPACE_BASE_CAPTURE_HOOK
             .lock()
             .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
         let winner_options = options.clone();
@@ -8938,47 +8919,9 @@ fn concurrent_missing_task_base_capture_recovers_a_crashed_owner_and_reuses_its_
                 loser.join().expect("capture peer joins"),
             )
         });
-        assert!(
-            winner.is_ok() || loser.is_ok(),
-            "one concurrent continuation owns the capture: winner={winner:?}, loser={loser:?}"
-        );
-        if let Err(error) = winner {
-            assert_eq!(
-                error.details["problem"],
-                "workspace_base_capture_in_progress"
-            );
-            let mut side_effects =
-                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
-            run_cook_spine(
-                &store,
-                &lifecycle_store,
-                winner_options.clone(),
-                Arc::new(UnusedExecutor),
-                &mut side_effects,
-                None,
-                false,
-            )
-            .expect("later owner continuation reloads captured base");
-        }
-        if let Err(error) = loser {
-            assert_eq!(
-                error.details["problem"],
-                "workspace_base_capture_in_progress"
-            );
-            let mut side_effects =
-                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
-            run_cook_spine(
-                &store,
-                &lifecycle_store,
-                loser_options.clone(),
-                Arc::new(UnusedExecutor),
-                &mut side_effects,
-                None,
-                false,
-            )
-            .expect("later continuation reloads captured base");
-        }
-        *WORKSPACE_BASE_CAPTURE_COUNTER
+        winner.expect("first concurrent continuation reloads captured base");
+        loser.expect("second concurrent continuation reloads captured base");
+        *WORKSPACE_BASE_CAPTURE_HOOK
             .lock()
             .expect("remove workspace base capture counter") = None;
         assert_eq!(
@@ -8997,6 +8940,109 @@ fn concurrent_missing_task_base_capture_recovers_a_crashed_owner_and_reuses_its_
                 .expect("reloaded recipe")
                 .finalization["task_base_sha"],
             serde_json::json!(expected_sha)
+        );
+    });
+}
+
+#[test]
+fn workspace_base_capture_repairs_controller_plan_after_recipe_write_interruption() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let mut options = batch_cook_options(
+            "cook-base-write-interruption",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.source_worktree_path = Some(repository.clone());
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist incomplete recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+
+        let hook = Arc::new(WorkspaceBaseCaptureHook {
+            workspace: repository.clone(),
+            count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(true),
+        });
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("install workspace base capture hook") = Some(Arc::clone(&hook));
+        let error =
+            pin_and_persist_initial_cook_workspace_base(&store, &lifecycle_store, &mut options)
+                .expect_err("injected interruption follows recipe persistence");
+        assert!(error.message.contains("after Cook recipe base persistence"));
+
+        let recipe = store
+            .load_recipe(&options.cook_id)
+            .expect("recipe survives interruption");
+        assert!(recipe.finalization["task_base_sha"].is_string());
+        assert_ne!(
+            lifecycle_store
+                .read_controller_plan(&options.initial_run_id)
+                .expect("old controller plan"),
+            recipe.attempts[0].plan
+        );
+        git(&["remote", "remove", "origin"]);
+
+        let mut recovery_options = batch_cook_options(
+            "cook-base-write-interruption",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        recovery_options.source_worktree_path = Some(repository);
+        pin_and_persist_initial_cook_workspace_base(
+            &store,
+            &lifecycle_store,
+            &mut recovery_options,
+        )
+        .expect("recovery repairs the controller plan from the recipe SHA");
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("remove workspace base capture hook") = None;
+
+        assert_eq!(hook.count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            recovery_options.task_base_sha,
+            recipe.finalization["task_base_sha"]
+                .as_str()
+                .map(str::to_string)
+        );
+        assert_eq!(
+            lifecycle_store
+                .read_controller_plan(&recovery_options.initial_run_id)
+                .expect("repaired controller plan"),
+            recipe.attempts[0].plan
         );
     });
 }

@@ -76,19 +76,15 @@ use super::AgentTaskRunResult;
 /// controller's lease elapses so a resumed pass can reconcile and continue.
 const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// The base capture reaches `origin`, so retain the durable operation lease
-/// until the recipe and controller plan have both recorded its result.
-const WORKSPACE_BASE_CAPTURE_OPERATION: &str = "workspace_base_capture";
-const WORKSPACE_BASE_CAPTURE_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
-
 #[cfg(test)]
-static WORKSPACE_BASE_CAPTURE_COUNTER: LazyLock<Mutex<Option<Arc<WorkspaceBaseCaptureCounter>>>> =
+static WORKSPACE_BASE_CAPTURE_HOOK: LazyLock<Mutex<Option<Arc<WorkspaceBaseCaptureHook>>>> =
     LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
-struct WorkspaceBaseCaptureCounter {
+struct WorkspaceBaseCaptureHook {
     workspace: PathBuf,
     count: AtomicUsize,
+    fail_after_recipe_persistence: std::sync::atomic::AtomicBool,
 }
 
 /// Render the public CLI continuation route.
@@ -4513,15 +4509,13 @@ fn run_cook_spine(
     )?;
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    if options.task_base_sha.is_none() {
-        pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
-            |error| {
-                let mut error = with_pre_execution_phase(error, "workspace_base_capture");
-                error.details["cook_materialized_by_invocation"] = Value::Bool(true);
-                error
-            },
-        )?;
-    }
+    pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
+        |error| {
+            let mut error = with_pre_execution_phase(error, "workspace_base_capture");
+            error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+            error
+        },
+    )?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -6690,50 +6684,59 @@ fn pin_and_persist_initial_cook_workspace_base(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    let recipe = store.load_recipe(&options.cook_id)?;
-    if recipe.finalization["task_base_sha"].is_string() {
-        return apply_persisted_task_base(options, &recipe);
-    }
-    match lifecycle_store.claim_cook_operation(
-        &options.initial_run_id,
-        WORKSPACE_BASE_CAPTURE_OPERATION,
-        WORKSPACE_BASE_CAPTURE_CLAIM_LEASE,
-    )? {
-        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
-            return apply_persisted_task_base(options, &store.load_recipe(&options.cook_id)?);
+    let cook_id = options.cook_id.clone();
+    store.with_workspace_base_capture_lock(&cook_id, || {
+        let mut recipe = store.load_recipe(&options.cook_id)?;
+        if recipe.finalization["task_base_sha"].is_string() {
+            apply_persisted_task_base(options, &recipe)?;
+            return reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe);
         }
-        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let recipe = store.load_recipe(&options.cook_id)?;
-            if recipe.finalization["task_base_sha"].is_string() {
-                return apply_persisted_task_base(options, &recipe);
-            }
-            return Err(workspace_base_capture_in_progress(options));
-        }
-        agent_task_lifecycle::ClaimOutcome::Acquired => {}
-    }
 
-    if let Err(error) = pin_initial_cook_workspace_base(options) {
-        let _ = lifecycle_store.fail_cook_operation(
-            &options.initial_run_id,
-            WORKSPACE_BASE_CAPTURE_OPERATION,
-            serde_json::json!({ "error": error.message }),
-        );
-        return Err(error);
-    }
-    let Some(task_base_sha) = options.task_base_sha.as_ref() else {
-        // No workspace was available to capture. Leave the operation retryable
-        // rather than completing a claim with no persisted result.
-        lifecycle_store.fail_cook_operation(
-            &options.initial_run_id,
-            WORKSPACE_BASE_CAPTURE_OPERATION,
-            serde_json::json!({ "reason": "workspace_unavailable" }),
-        )?;
-        return Ok(());
-    };
-    let mut recipe = store.load_recipe(&options.cook_id)?;
+        pin_initial_cook_workspace_base(options)?;
+        let Some(task_base_sha) = options.task_base_sha.as_ref() else {
+            return Ok(());
+        };
+        let attempt = recipe
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.run_id == options.initial_run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_recipe.attempts",
+                    "initial Cook recipe is missing its materialized attempt",
+                    Some(options.initial_run_id.clone()),
+                    None,
+                )
+            })?;
+        attempt.plan = options.initial_plan.clone();
+        recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
+        store.persist_recipe(&recipe)?;
+        #[cfg(test)]
+        if WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("workspace base capture hook")
+            .as_ref()
+            .is_some_and(|hook| {
+                hook.fail_after_recipe_persistence
+                    .swap(false, Ordering::SeqCst)
+            })
+        {
+            return Err(Error::internal_unexpected(
+                "test interruption after Cook recipe base persistence",
+            ));
+        }
+        reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe)
+    })
+}
+
+fn reconcile_persisted_task_base_plan(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+) -> Result<()> {
     let attempt = recipe
         .attempts
-        .iter_mut()
+        .iter()
         .find(|attempt| attempt.run_id == options.initial_run_id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -6743,33 +6746,22 @@ fn pin_and_persist_initial_cook_workspace_base(
                 None,
             )
         })?;
-    attempt.plan = options.initial_plan.clone();
-    recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
-    store.persist_recipe(&recipe)?;
-    agent_task_lifecycle::persist_controller_plan_in_store(
-        lifecycle_store,
-        &options.initial_run_id,
-        &options.initial_plan,
-    )?;
-    lifecycle_store.complete_cook_operation(
-        &options.initial_run_id,
-        WORKSPACE_BASE_CAPTURE_OPERATION,
-        serde_json::json!({ "task_base_sha": task_base_sha }),
-    )
-}
-
-fn workspace_base_capture_in_progress(options: &AgentTaskCookServiceOptions) -> Error {
-    Error::validation_invalid_argument(
-        "task_base_sha",
-        "workspace_base_capture_in_progress",
-        Some(options.cook_id.clone()),
-        Some(vec![cook_continue_command(
-            None,
+    // The recipe write precedes the controller plan write. After an interruption,
+    // its immutable attempt plan is the only authority needed to repair that
+    // second projection without touching origin.
+    if lifecycle_store
+        .read_controller_plan(&options.initial_run_id)
+        .ok()
+        .as_ref()
+        != Some(&attempt.plan)
+    {
+        agent_task_lifecycle::persist_controller_plan_in_store(
+            lifecycle_store,
             &options.initial_run_id,
-            false,
-            None,
-        )]),
-    )
+            &attempt.plan,
+        )?;
+    }
+    Ok(())
 }
 
 fn apply_persisted_task_base(
@@ -6804,7 +6796,7 @@ fn pin_cook_workspace_base_at(
         return Ok(());
     }
     #[cfg(test)]
-    if let Some(counter) = WORKSPACE_BASE_CAPTURE_COUNTER
+    if let Some(counter) = WORKSPACE_BASE_CAPTURE_HOOK
         .lock()
         .expect("workspace base capture counter")
         .clone()

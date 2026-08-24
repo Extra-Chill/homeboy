@@ -92,6 +92,44 @@ impl CookRecipeStore {
             .join("recipe.json")
     }
 
+    /// Serialize the bounded base capture transaction for one durable recipe.
+    /// `flock` ownership is tied to this open file description, so the kernel
+    /// releases it if the controller process exits before completing either
+    /// persistence step.
+    pub(crate) fn with_workspace_base_capture_lock<T>(
+        &self,
+        cook_id: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let lock_path = self
+            .recipe_path(cook_id)
+            .with_file_name("workspace-base-capture.lock");
+        let parent = lock_path.parent().expect("recipe lock has parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+        })?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("open Cook workspace base capture lock".to_string()),
+                )
+            })?;
+        #[cfg(unix)]
+        homeboy_core::config::lock_exclusive_bounded(
+            &lock,
+            &lock_path,
+            "lock Cook workspace base capture",
+        )?;
+        let _lock = lock;
+        operation()
+    }
+
     fn supersession_path(&self, cook_id: &str) -> PathBuf {
         self.recipe_path(cook_id)
             .with_file_name("supersession.json")
