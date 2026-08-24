@@ -203,6 +203,58 @@ fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller
     assert_eq!(recovered.state, AgentTaskRunState::Running);
 }
 
+#[test]
+fn accepted_runner_binding_fails_if_terminalization_wins_before_identity_persistence() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-12926-accepted-before-binding";
+    let plan = test_plan();
+    record_lab_offload_phase_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadPhaseRecord {
+            requested_run_id: run_id,
+            runner_id: "homeboy-lab",
+            phase: "provider_dispatch",
+            remote_workspace: Some("/runner/workspace/homeboy"),
+            source_checkout: None,
+            provider_rotation: None,
+            durable_plan: Some(&plan),
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("persist planned handoff before daemon acceptance");
+    let mut terminal = lifecycle_store
+        .read_record(run_id)
+        .expect("planned handoff");
+    set_run_state(&mut terminal, AgentTaskRunState::Cancelled);
+    terminal.metadata["cancel_reason"] = json!("missing_runner_pid");
+    lifecycle_store
+        .write_record(&terminal)
+        .expect("terminalization wins before accepted identity is bound");
+    let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        run_id,
+        "homeboy-lab",
+        "00000000-0000-0000-0000-000000012926",
+    );
+
+    let error = bind_accepted_lab_runner_job_in_store(
+        &lifecycle_store,
+        &identity,
+        "/runner/workspace/homeboy",
+        &[],
+    )
+    .expect_err("accepted work cannot proceed without a durable runner identity");
+
+    assert_eq!(error.code, ErrorCode::InternalUnexpected);
+    let persisted = lifecycle_store
+        .read_record(run_id)
+        .expect("terminal record remains readable");
+    assert_eq!(persisted.state, AgentTaskRunState::Cancelled);
+    assert!(accepted_lab_runner_job_identity_from_record(&persisted).is_none());
+    assert!(persisted.runner_job_id().is_none());
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The mutable metadata is written into, and the typed-handoff read is
 /// taken out of, one store — which is the whole claim: "metadata is not
