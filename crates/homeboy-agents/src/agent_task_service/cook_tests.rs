@@ -7985,6 +7985,44 @@ fn generic_lab_replay_service_retry_is_rejected_before_reserving_a_successor() {
 }
 
 #[test]
+fn public_lifecycle_retry_rejects_generic_lab_replay_before_reserving_a_successor() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut plan = AgentTaskPlan::new("public-generic-lab-replay", Vec::new());
+        plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": "/workspace",
+                "content_identity": "snapshot:recorded",
+            },
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some("public-generic-lab-replay"))
+            .expect("persist generic replay");
+        agent_task_lifecycle::record_pre_execution_failure(
+            "public-generic-lab-replay",
+            &plan,
+            "lab_daemon_admission",
+            &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+        )
+        .expect("record retryable failure");
+
+        let error = agent_task_lifecycle::retry(
+            "public-generic-lab-replay",
+            Some("public-generic-lab-replay-retry"),
+        )
+        .expect_err("public lifecycle retry requires controller preflight");
+
+        assert!(error
+            .message
+            .contains("requires controller workspace preflight"));
+        assert!(
+            !agent_task_lifecycle::run_record_exists("public-generic-lab-replay-retry")
+                .expect("check retry reservation")
+        );
+    });
+}
+
+#[test]
 fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-generic-lab-replay-race", 2);

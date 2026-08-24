@@ -7445,7 +7445,16 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     }
-    let generic_lab_replay = plan.metadata.get("generic_lab_command_replay").is_some();
+    let has_generic_lab_replay = plan.metadata.get("generic_lab_command_replay").is_some();
+    // Cook-owned retries stay on the controller lifecycle. Lab routing makes
+    // the same Cook-first decision before it considers generic replay.
+    if record.metadata["cook_id"].is_string() && has_generic_lab_replay {
+        return RetryReplayAction::unavailable(
+            local_owner,
+            "Cook-owned generic Lab replay must continue through the controller Cook lifecycle",
+        );
+    }
+    let generic_lab_replay = has_generic_lab_replay;
     let admission = if generic_lab_replay {
         // Status advertises the exact persisted generic replay, rather than a
         // Cook-derived retry plan that may no longer carry its workspace proof.
@@ -7681,6 +7690,49 @@ mod tests {
             assert_eq!(retry.readiness, "unavailable");
             assert!(retry.action.is_none());
             assert!(retry.reason.unwrap().contains("content no longer matches"));
+        });
+    }
+
+    #[test]
+    fn cook_owned_generic_lab_replay_status_has_no_lab_action() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let mut plan = AgentTaskPlan::new("cook-owned-generic-lab-replay", Vec::new());
+            plan.metadata["generic_lab_command_replay"] = json!({
+                "schema": "homeboy/generic-lab-command-replay/v1",
+                "normalized_args": ["homeboy", "bench"],
+                "materialization": {
+                    "canonical_root": workspace.path(),
+                    "content_identity": "snapshot:recorded",
+                },
+            });
+            agent_task_lifecycle::submit_plan(&plan, Some("cook-owned-generic-lab-replay"))
+                .expect("persist generic replay");
+            agent_task_lifecycle::rewrite_record_for_test(
+                "cook-owned-generic-lab-replay",
+                |record| {
+                    record.metadata["cook_id"] = json!("cook-owned-generic-lab-replay");
+                },
+            )
+            .expect("mark replay Cook-owned");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "cook-owned-generic-lab-replay",
+                &plan,
+                "lab_daemon_admission",
+                &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+            )
+            .expect("record retryable failure");
+
+            let record = agent_task_lifecycle::status("cook-owned-generic-lab-replay")
+                .expect("load replay record");
+            let retry = retry_replay_action(&record);
+
+            assert_eq!(retry.readiness, "unavailable");
+            assert!(retry.action.is_none());
+            assert!(retry
+                .reason
+                .unwrap()
+                .contains("Cook-owned generic Lab replay"));
         });
     }
 

@@ -5579,23 +5579,25 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     retry_in_store(&lifecycle_store, run_id, requested_run_id)
 }
 
-/// Retry a run inside an explicitly rooted store, without the lineage
-/// reservation. See [`retry_with_runtime_admission_in_store`] for what follows
-/// the injected root.
+/// Retry a run inside an explicitly rooted store through the reserved lifecycle
+/// path. Generic Lab replay needs controller workspace validation, so only the
+/// caller that can provide that preflight may reserve its successor.
 pub(crate) fn retry_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner_in_store(
-        lifecycle_store,
-        run_id,
-        requested_run_id,
-        false,
-        false,
-        None,
-        None,
-    )
+    let source_run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    let plan = load_controller_plan_in_store(lifecycle_store, &source_run_id)?;
+    if plan.metadata.get("generic_lab_command_replay").is_some() {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "generic Lab replay requires controller workspace preflight",
+            Some(source_run_id),
+            None,
+        ));
+    }
+    retry_with_force_in_store(lifecycle_store, run_id, requested_run_id, false)
 }
 
 /// Whether a persisted plan contains enough source identity to offer a retry
