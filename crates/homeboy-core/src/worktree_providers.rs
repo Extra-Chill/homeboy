@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::defaults::{
     self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind,
@@ -928,15 +927,13 @@ pub fn attest_apply_enabled_worktree_provider_safety_from_config(
 }
 
 fn compatibility_identity_token(resolution: &WorktreeProviderResolution) -> String {
-    let mut digest = Sha256::new();
-    digest.update(resolution.provider_id.as_bytes());
-    digest.update([0]);
-    digest.update(resolution.worktree.handle.as_bytes());
-    digest.update([0]);
-    digest.update(resolution.worktree.path.as_bytes());
-    digest.update([0]);
-    digest.update(resolution.worktree.branch.as_bytes());
-    format!("compat-v1:{:x}", digest.finalize())
+    let digest = homeboy_engine_primitives::content_hash::nul_separated_digest([
+        resolution.provider_id.as_str(),
+        resolution.worktree.handle.as_str(),
+        resolution.worktree.path.as_str(),
+        resolution.worktree.branch.as_str(),
+    ]);
+    format!("compat-v1:{digest}")
 }
 /// Find the sole apply-enabled provider worktree owned by a tracker URL.
 /// Providers must map `task_url` to participate, preserving existing provider
