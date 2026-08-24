@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.5] - 2026-08-24
+
+### Fixed
+- use canonical failure digest result filenames
+
 ## [2.15.4] - 2026-08-24
 
 ### Fixed
