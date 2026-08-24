@@ -11,7 +11,7 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Owned command facts consumed while materializing a workspace. This keeps the
 /// durable controller path bounded by the request lifetime rather than forcing
@@ -248,8 +248,16 @@ fn prepare_lab_offload_workspace_stage_inner(
     // can observe its leftover untracked artifacts (#4393). Resolve the
     // agent-task run id (existing or freshly generated) up front and fold it
     // into the workspace identity so each run gets a clean, isolated directory.
+    let replay_snapshot = prepare_replay_snapshot(
+        &runner,
+        source_path,
+        request.expected_source_snapshot_identity,
+    )?;
+    let transfer_source_path = replay_snapshot
+        .as_ref()
+        .map_or_else(|| source_path.to_path_buf(), |snapshot| snapshot.path());
     let sync_options = RunnerWorkspaceSyncOptions {
-        path: source_path.display().to_string(),
+        path: transfer_source_path.display().to_string(),
         mode: sync_mode,
         // Retry handoffs must stage the controller checkout before the
         // runner attempts Git transport: private origins are intentionally
@@ -285,6 +293,8 @@ fn prepare_lab_offload_workspace_stage_inner(
         },
     )?
     .0;
+    // `replay_snapshot` remains alive through sync, so all snapshot transport
+    // reads the immutable staging artifact rather than the controller checkout.
     sync_mode = synced.sync_mode;
     if sync_mode == RunnerWorkspaceSyncMode::Snapshot
         && synced
@@ -1269,6 +1279,35 @@ mod tests {
     /// here is a boundary resolution (#7505).
     fn test_config_root() -> std::path::PathBuf {
         homeboy_core::paths::homeboy().expect("config root")
+    }
+
+    #[test]
+    fn replay_staging_rejects_bytes_changed_after_initial_identity_check() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("input.txt");
+        std::fs::write(&file, "recorded").expect("write recorded bytes");
+        let expected = crate::generic_lab_replay_artifact_identity(workspace.path())
+            .expect("capture replay identity");
+
+        verify_replay_artifact_identity(workspace.path(), Some(&expected))
+            .expect("initial locked preflight identity");
+        std::fs::write(&file, "changed-before-snapshot").expect("change before staging read");
+
+        let error = verify_replay_artifact_identity(workspace.path(), Some(&expected))
+            .expect_err("changed bytes cannot enter the staged replay");
+        assert!(error.message.contains("no longer matches"));
+    }
+
+    #[test]
+    fn replay_staging_accepts_unchanged_workspace_identity() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("input.txt"), "recorded")
+            .expect("write recorded bytes");
+        let expected = crate::generic_lab_replay_artifact_identity(workspace.path())
+            .expect("capture replay identity");
+
+        verify_replay_artifact_identity(workspace.path(), Some(&expected))
+            .expect("unchanged replay may stage");
     }
 
     #[test]
@@ -3265,4 +3304,55 @@ mod tests {
             validation_dependencies: Vec::new(),
         }
     }
+}
+fn prepare_replay_snapshot(
+    runner: &crate::Runner,
+    source_path: &Path,
+    expected_identity: Option<&str>,
+) -> homeboy_core::Result<Option<crate::workspace::ImmutableReplaySnapshot>> {
+    let Some(expected_identity) = expected_identity else {
+        return Ok(None);
+    };
+    let persisted_excludes = crate::generic_lab_replay_identity_excludes(expected_identity)?;
+    let excludes = crate::generic_lab_replay_transfer_excludes(runner, source_path);
+    if persisted_excludes != excludes {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "Lab replay transfer exclusion policy no longer matches the persisted immutable artifact",
+            Some(source_path.display().to_string()),
+            Some(vec!["Restore the recorded runner exclusion policy or reissue the command as a new Lab run.".to_string()]),
+        ));
+    }
+    let snapshot = crate::workspace::immutable_replay_snapshot(source_path, &excludes)?;
+    if snapshot.identity == expected_identity {
+        return Ok(Some(snapshot));
+    }
+    Err(Error::validation_invalid_argument(
+        "generic_lab_command_replay",
+        "Lab replay artifact does not match the persisted immutable replay identity",
+        Some(source_path.display().to_string()),
+        Some(vec![
+            "Restore the recorded workspace content or reissue the command as a new Lab run."
+                .to_string(),
+        ]),
+    ))
+}
+
+#[cfg(test)]
+fn verify_replay_artifact_identity(
+    source_path: &Path,
+    expected_identity: Option<&str>,
+) -> homeboy_core::Result<()> {
+    let Some(expected_identity) = expected_identity else {
+        return Ok(());
+    };
+    if crate::generic_lab_replay_artifact_identity(source_path)? == expected_identity {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "generic_lab_command_replay",
+        "Lab replay artifact no longer matches the persisted immutable replay identity",
+        Some(source_path.display().to_string()),
+        None,
+    ))
 }

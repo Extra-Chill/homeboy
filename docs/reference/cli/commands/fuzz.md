@@ -403,21 +403,21 @@ Resolve replay metadata for persisted fuzz cases
 | Argument | Required | Description |
 | --- | --- | --- |
 | `[ARTIFACT_OR_CASE]` | no | Fuzz campaign/result envelope path, or a case id when --artifact is used |
-| `[ARGS]...` | no | Additional arguments passed to the extension replay command |
+| `[ARGS]...` | no | Additional arguments passed to the extension replay/minimize command |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--component` | `<ID>` | Component ID used to resolve the extension replay_command |
-| `--path` | `<PATH>` | Override the component checkout path for replay command execution |
-| `--rig` | `<RIG_ID>` | Resolve replay through a rig's component path and extension config |
+| `--component` | `<ID>` | Component ID used to resolve the extension replay/minimize command |
+| `--path` | `<PATH>` | Override the component checkout path for command execution |
+| `--rig` | `<RIG_ID>` | Resolve the command through a rig's component path and extension config |
 | `--extension` | `<ID>` | One-shot extension override for the current invocation |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |
-| `--artifact` | `<PATH>` | Fuzz campaign or result envelope artifact to inspect for replay metadata |
-| `--case-id` | `<ID>` | Case id to replay from the campaign/envelope artifact |
+| `--artifact` | `<PATH>` | Fuzz campaign or result envelope artifact to inspect for replay/minimize metadata |
+| `--case-id` | `<ID>` | Case id to replay or minimize from the campaign/envelope artifact |
 | `--run-id` | `<ID>` | Stable Homeboy run id associated with the persisted fuzz evidence |
-| `--dry-run` | flag | Resolve replay metadata and command environment without executing replay_command |
+| `--dry-run` | flag | Resolve metadata and command environment without executing the extension command |
 
 ## `homeboy fuzz minimize`
 
@@ -430,21 +430,21 @@ Resolve minimization metadata for persisted fuzz cases
 | Argument | Required | Description |
 | --- | --- | --- |
 | `[ARTIFACT_OR_CASE]` | no | Fuzz campaign/result envelope path, or a case id when --artifact is used |
-| `[ARGS]...` | no | Additional arguments passed to the extension minimize command |
+| `[ARGS]...` | no | Additional arguments passed to the extension replay/minimize command |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--component` | `<ID>` | Component ID used to resolve the extension minimize_command |
-| `--path` | `<PATH>` | Override the component checkout path for minimize command execution |
-| `--rig` | `<RIG_ID>` | Resolve minimization through a rig's component path and extension config |
+| `--component` | `<ID>` | Component ID used to resolve the extension replay/minimize command |
+| `--path` | `<PATH>` | Override the component checkout path for command execution |
+| `--rig` | `<RIG_ID>` | Resolve the command through a rig's component path and extension config |
 | `--extension` | `<ID>` | One-shot extension override for the current invocation |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |
-| `--artifact` | `<PATH>` | Fuzz campaign or result envelope artifact to inspect for minimization metadata |
-| `--case-id` | `<ID>` | Case id to minimize from the campaign/envelope artifact |
+| `--artifact` | `<PATH>` | Fuzz campaign or result envelope artifact to inspect for replay/minimize metadata |
+| `--case-id` | `<ID>` | Case id to replay or minimize from the campaign/envelope artifact |
 | `--run-id` | `<ID>` | Stable Homeboy run id associated with the persisted fuzz evidence |
-| `--dry-run` | flag | Resolve minimization metadata and command environment without executing minimize_command |
+| `--dry-run` | flag | Resolve metadata and command environment without executing the extension command |
 
 ## `homeboy fuzz inspect`
 

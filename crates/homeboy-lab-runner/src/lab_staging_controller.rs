@@ -140,6 +140,8 @@ pub struct LabStagingRecipe {
     pub require_controller_git_bundle: bool,
     pub reuse_compatible_snapshot: bool,
     pub source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_source_snapshot_identity: Option<String>,
     pub verified_cook_baseline: Option<Value>,
     /// Public override values only. Declared secret names are removed before
     /// this recipe reaches the private attachment store.
@@ -220,6 +222,9 @@ impl LabStagingRecipe {
             require_controller_git_bundle: request.require_controller_git_bundle,
             reuse_compatible_snapshot: request.reuse_compatible_snapshot,
             source_path: request.source_path.map(PathBuf::from),
+            expected_source_snapshot_identity: request
+                .expected_source_snapshot_identity
+                .map(str::to_string),
             verified_cook_baseline: request.verified_cook_baseline.cloned(),
             job_override_env,
             secret_env_names,
@@ -3075,6 +3080,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             durable_agent_task_plan: Some(&request.durable_agent_task_plan),
             durable_run_id: Some(&request.recipe.run_id),
             source_path: Some(source_path),
+            expected_source_snapshot_identity: request
+                .recipe
+                .expected_source_snapshot_identity
+                .as_deref(),
             verified_cook_baseline: request.recipe.verified_cook_baseline.as_ref(),
             require_controller_git_bundle: request.recipe.require_controller_git_bundle,
             reuse_compatible_snapshot: request.recipe.reuse_compatible_snapshot,

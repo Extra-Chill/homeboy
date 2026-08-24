@@ -1100,6 +1100,35 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
+    retry_with_preflight(run_id, new_run_id, run, force, |plan| {
+        if plan.metadata.get("generic_lab_command_replay").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                "generic Lab replay requires controller workspace preflight",
+                Some(plan.plan_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Reserve a retry only after the caller has revalidated the persisted action.
+///
+/// Generic Lab replays need controller-owned workspace validation that this
+/// crate cannot perform. The ordinary service entry point rejects them; the
+/// Lab route supplies that validation through this boundary before any retry
+/// reservation or Cook recovery can mutate durable state.
+pub fn retry_with_preflight<F>(
+    run_id: &str,
+    new_run_id: Option<&str>,
+    run: bool,
+    force: bool,
+    preflight: F,
+) -> Result<AgentTaskRetryServiceResult>
+where
+    F: Fn(&AgentTaskPlan) -> Result<()>,
+{
     // One lifecycle store for the whole retry. Reserving the successor,
     // proving the reservation is exact, persisting the controller plan, and
     // binding the Cook attempt are one durable lineage: a successor reserved in
@@ -1111,6 +1140,9 @@ pub fn retry(
         &lifecycle_store,
         run_id,
     )?;
+    let source_plan =
+        agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
+    preflight(&source_plan)?;
     let recovered_replacement = config::with_config_lock(|| {
         let Some(cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
@@ -1125,24 +1157,33 @@ pub fn retry(
         let lifecycle_missing =
             !agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, retry_run_id)?;
         if lifecycle_missing {
-            let recipe_store = super::cook_recipe::default_store()?;
-            super::cook_pre_execution::materialize_cook_attempt_with_stores(
-                &recipe_store,
+            agent_task_lifecycle::with_retry_lineage_reservation_in_store(
                 &lifecycle_store,
-                &cook_retry.cook_id,
-                retry_run_id,
-                &cook_retry.plan,
-            )?;
-            agent_task_lifecycle::record_metadata_value_in_store(
-                &lifecycle_store,
-                retry_run_id,
-                "cook_retry_recipe_recovery",
-                json!({
-                    "schema": "homeboy/cook-retry-recipe-recovery/v1",
-                    "status": "materialized_orphaned_replacement",
-                    "source_run_id": source.run_id,
-                    "recovered_run_id": retry_run_id,
-                }),
+                &source.run_id,
+                || {
+                    // Recovery writes the missing successor directly, so it
+                    // needs the same locked revalidation as a fresh retry.
+                    preflight(&source_plan)?;
+                    let recipe_store = super::cook_recipe::default_store()?;
+                    super::cook_pre_execution::materialize_cook_attempt_with_stores(
+                        &recipe_store,
+                        &lifecycle_store,
+                        &cook_retry.cook_id,
+                        retry_run_id,
+                        &cook_retry.plan,
+                    )?;
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        &lifecycle_store,
+                        retry_run_id,
+                        "cook_retry_recipe_recovery",
+                        json!({
+                            "schema": "homeboy/cook-retry-recipe-recovery/v1",
+                            "status": "materialized_orphaned_replacement",
+                            "source_run_id": source.run_id,
+                            "recovered_run_id": retry_run_id,
+                        }),
+                    )
+                },
             )?;
         }
         Ok(Some(
@@ -1219,6 +1260,7 @@ pub fn retry(
                     &cook_retry,
                     &retry_run_id,
                     force || cook_retry.replaces_source_attempt,
+                    &preflight,
                 )?;
                 retry_run_id = reservation.run_id;
                 created = reservation.created;
@@ -1279,11 +1321,12 @@ pub fn retry(
                 created,
             });
         }
-        None => agent_task_lifecycle::retry_with_force_in_store(
+        None => agent_task_lifecycle::retry_with_force_and_preflight_in_store(
             &lifecycle_store,
             &source.run_id,
             new_run_id,
             force,
+            &preflight,
         )?,
     };
     Ok(AgentTaskRetryServiceResult {
@@ -1304,6 +1347,7 @@ fn reserve_cook_retry_lifecycle(
     retry: &CookRetryAttempt,
     retry_run_id: &str,
     force: bool,
+    preflight: &dyn Fn(&AgentTaskPlan) -> Result<()>,
 ) -> Result<CookRetryReservation> {
     let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
     match agent_task_lifecycle::claim_cook_operation_in_store(
@@ -1328,23 +1372,25 @@ fn reserve_cook_retry_lifecycle(
                             "local Cook retry launcher exited before its reservation was persisted",
                         )
                     })?;
-            let reserved = agent_task_lifecycle::retry_with_force_and_metadata_in_store(
-                lifecycle_store,
-                &source.run_id,
-                Some(retry_run_id),
-                force,
-                serde_json::Map::from_iter([(
-                    "local_cook_supervisor".to_string(),
-                    json!({
-                        "state": "pending",
-                        "pinned_run_id": retry_run_id,
-                        "lease_started_at": lease_started_at.to_rfc3339(),
-                        "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
-                        "launcher_pid": launcher_pid,
-                        "launcher_process_start_identity": launcher_start_identity,
-                    }),
-                )]),
-            )?;
+            let reserved =
+                agent_task_lifecycle::retry_with_force_and_metadata_and_preflight_in_store(
+                    lifecycle_store,
+                    &source.run_id,
+                    Some(retry_run_id),
+                    force,
+                    serde_json::Map::from_iter([(
+                        "local_cook_supervisor".to_string(),
+                        json!({
+                            "state": "pending",
+                            "pinned_run_id": retry_run_id,
+                            "lease_started_at": lease_started_at.to_rfc3339(),
+                            "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
+                            "launcher_pid": launcher_pid,
+                            "launcher_process_start_identity": launcher_start_identity,
+                        }),
+                    )]),
+                    preflight,
+                )?;
             let result = json!({ "run_id": retry_run_id });
             if let Err(error) = agent_task_lifecycle::complete_cook_operation_in_store(
                 lifecycle_store,
@@ -1756,6 +1802,24 @@ struct CookRetryAttempt {
 /// Recipe-backed Cook runs cannot fall back to generic lifecycle retry because
 /// that would lose the Cook's authenticated lineage.
 pub fn retry_admission(run_id: &str) -> Result<()> {
+    retry_admission_with_preflight(run_id, |plan| {
+        if plan.metadata.get("generic_lab_command_replay").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                "generic Lab replay requires controller workspace preflight",
+                Some(plan.plan_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Verify retry admission using the caller's execution-specific preflight.
+pub fn retry_admission_with_preflight<F>(run_id: &str, preflight: F) -> Result<()>
+where
+    F: Fn(&AgentTaskPlan) -> Result<()>,
+{
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let source = agent_task_lifecycle::normalize_local_execution_placement_in_store(
@@ -1763,19 +1827,8 @@ pub fn retry_admission(run_id: &str) -> Result<()> {
         run_id,
     )?;
     let retry = retry_admission_in_store(&lifecycle_store, &source, true)?;
-    if retry.as_ref().is_some_and(|attempt| {
-        attempt
-            .plan
-            .metadata
-            .get("generic_lab_command_replay")
-            .is_some()
-    }) {
-        return Err(Error::validation_invalid_argument(
-            "generic_lab_command_replay",
-            "generic Lab replay requires controller workspace preflight",
-            Some(source.run_id.clone()),
-            None,
-        ));
+    if let Some(retry) = retry {
+        preflight(&retry.plan)?;
     }
     Ok(())
 }

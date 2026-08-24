@@ -1717,6 +1717,22 @@ mod preview_tests {
                 .iter()
                 .any(|phase| phase["phase"] == "plan_compilation"));
 
+            let preview_status = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                    "status",
+                    "--porcelain",
+                ])
+                .output()
+                .expect("read workspace status after preview");
+            assert!(preview_status.status.success());
+            assert!(
+                preview_status.stdout.is_empty(),
+                "preview must not dirty the destination: {}",
+                String::from_utf8_lossy(&preview_status.stdout)
+            );
+
             let args = resolve_cook_destination(args).expect("resolve live destination");
             let live = compile_cook_plan(
                 &args,
@@ -1729,6 +1745,10 @@ mod preview_tests {
             assert_eq!(
                 live.tasks[0].executor.config["evidence_inputs"][0]["path"], evidence_path,
                 "preview and live Cook must project the same provider evidence path"
+            );
+            assert!(
+                Path::new(evidence_path).is_file(),
+                "live Cook materializes its declared evidence projection"
             );
         });
     }

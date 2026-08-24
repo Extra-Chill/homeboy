@@ -15,11 +15,11 @@ mod extension_integration;
 mod types;
 mod whole_file_move;
 
-pub use super::resolve_root;
 pub(crate) use extension_integration::core_parse_items;
-pub use types::{
-    ImportRewrite, ItemKind, ModuleIndexEntry, MoveFileResult, MoveOptions, MoveResult, MovedItem,
-};
+// `refactor move` reports these two result shapes in its JSON payload.
+// `MovedItem` is reachable through `MoveResult::items_moved`/`tests_moved`.
+pub(crate) use types::{ImportRewrite, ModuleIndexEntry, MoveOptions};
+pub use types::{ItemKind, MoveFileResult, MoveResult, MovedItem};
 pub use whole_file_move::move_file;
 
 use extension_integration::find_refactor_extension;
@@ -150,7 +150,7 @@ fn ext_rewrite_caller_imports(
 /// Used after decompose splits a file into submodules — the original file becomes
 /// mod.rs and needs `mod submodule;` declarations plus `pub use submodule::*;`
 /// re-exports so callers can still find the moved items.
-pub fn ext_generate_module_index(
+pub(crate) fn ext_generate_module_index(
     file_path: &str,
     submodules: &[ModuleIndexEntry],
     remaining_content: &str,
@@ -190,7 +190,7 @@ pub fn move_items(
 }
 
 /// Plan and optionally execute a move of named items with custom behavior.
-pub fn move_items_with_options(
+pub(crate) fn move_items_with_options(
     item_names: &[&str],
     from: &str,
     to: &str,

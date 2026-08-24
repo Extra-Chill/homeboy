@@ -82,7 +82,11 @@ fn scan_config_for_path_renames() -> ScanConfig {
 ///
 /// After the initial pass, discovers additional case variants that exist in the
 /// codebase but weren't generated (e.g., `WPAgent` when `WpAgent` was generated).
-pub fn find_references(spec: &RenameSpec, root: &Path) -> Vec<Reference> {
+/// Untargeted reference scan. Production goes through
+/// [`find_references_with_targeting`]; this shorthand has no production
+/// caller and exists for `rename::tests`.
+#[allow(dead_code, reason = "no production caller; used by rename::tests")]
+pub(crate) fn find_references(spec: &RenameSpec, root: &Path) -> Vec<Reference> {
     find_references_with_targeting(spec, root, &RenameTargeting::default())
 }
 
@@ -243,7 +247,11 @@ fn discover_casing_in_files(
 // ============================================================================
 
 /// Generate file edits and file renames from found references.
-pub fn generate_renames(spec: &RenameSpec, root: &Path) -> RenameResult {
+/// Untargeted rename generation. Production goes through
+/// [`generate_renames_with_targeting`]; this shorthand has no production
+/// caller and exists for `rename::tests`.
+#[allow(dead_code, reason = "no production caller; used by rename::tests")]
+pub(crate) fn generate_renames(spec: &RenameSpec, root: &Path) -> RenameResult {
     generate_renames_with_targeting(spec, root, &RenameTargeting::default())
 }
 

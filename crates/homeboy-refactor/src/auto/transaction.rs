@@ -42,7 +42,7 @@ pub const AUTOFIX_COMMIT_PREFIX: &str = "chore(ci): homeboy autofix";
 ///
 /// Distinct from [`AUTOFIX_COMMIT_PREFIX`] so drift commits do not count toward
 /// the autofix cap enforced by [`super::guard`].
-pub const DRIFT_COMMIT_PREFIX: &str = "chore(ci): update audit baseline";
+pub(crate) const DRIFT_COMMIT_PREFIX: &str = "chore(ci): update audit baseline";
 
 /// How autofix changes should be routed once committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -100,7 +100,7 @@ impl CiContext {
 }
 
 /// Build a GitHub HTTPS remote URL, embedding a token when supplied.
-pub fn build_github_remote_url(repo: &str, token: Option<&str>) -> String {
+pub(crate) fn build_github_remote_url(repo: &str, token: Option<&str>) -> String {
     match token {
         Some(token) => format!("https://x-access-token:{token}@github.com/{repo}.git"),
         None => format!("https://github.com/{repo}.git"),
@@ -234,7 +234,7 @@ fn staged_files(repo: &Path) -> Result<Vec<String>> {
 
 /// Whether every changed file is a declared drift file. An empty change set is
 /// not considered drift-only (there is nothing to push).
-pub fn changes_are_only_drift(changed_files: &[String], drift_files: &[String]) -> bool {
+pub(crate) fn changes_are_only_drift(changed_files: &[String], drift_files: &[String]) -> bool {
     if changed_files.is_empty() {
         return false;
     }

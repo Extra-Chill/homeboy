@@ -50,6 +50,7 @@ impl<'a> CookExecutionPreparation<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize_with_admission(
         &self,
         cook_id: &str,
@@ -109,6 +110,7 @@ impl<'a> CookExecutionPreparation<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn recover_with_admission(
         &self,
         cook_or_attempt_id: &str,
@@ -117,23 +119,6 @@ impl<'a> CookExecutionPreparation<'a> {
     ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
         self.recover_with_runtime(
             cook_or_attempt_id,
-            None,
-            None,
-            admit_runtime,
-            reconcile_reserved_cancellation,
-        )
-    }
-
-    pub(crate) fn recover_for_adoption_with_admission(
-        &self,
-        cook_id: &str,
-        run_id: &str,
-        admit_runtime: impl FnOnce(&str) -> Result<Value>,
-        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
-    ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-        self.recover_for_adoption_with_runtime(
-            cook_id,
-            run_id,
             None,
             None,
             admit_runtime,
@@ -232,6 +217,7 @@ impl<'a> CookExecutionPreparation<'a> {
 
 /// Persist the controller-owned initial attempt before transport preparation so
 /// runner eligibility failures remain addressable through the cook alias.
+#[cfg(test)]
 pub(crate) fn materialize_initial_cook_attempt(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
@@ -243,6 +229,7 @@ pub(crate) fn materialize_initial_cook_attempt(
 /// Persist the controller-owned initial attempt through explicit recipe and
 /// lifecycle stores so the run record and Cook index always land beside the
 /// recipe's authority instead of the ambient environment.
+#[cfg(test)]
 pub(crate) fn materialize_initial_cook_attempt_with_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -517,25 +504,6 @@ pub(crate) fn recover_recipe_attempt_with_stores(
 ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_with_runtime(
         cook_or_attempt_id,
-        Some(&store_admission_status(lifecycle_store)),
-        agent_task_lifecycle::execution_runner_id(),
-        production_runtime_admission(lifecycle_store),
-        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
-    )
-}
-
-/// Recover an adopted attempt through explicit recipe and lifecycle stores so
-/// the adoption record always lands beside the recipe's authority instead of
-/// the ambient environment.
-pub(crate) fn recover_adoption_attempt_with_stores(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    CookExecutionPreparation::new(recipe_store, lifecycle_store).recover_for_adoption_with_runtime(
-        cook_id,
-        run_id,
         Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),

@@ -7529,7 +7529,7 @@ impl RetryReplayAction {
 /// a retry exists when route materialization will reject it.
 fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
     let runner_id = record.runner_id().filter(|id| !id.trim().is_empty());
-    let owner = match runner_id {
+    let local_owner = match runner_id {
         Some(runner_id) => json!({ "placement": "runner", "runner_id": runner_id }),
         None => json!({ "placement": "local" }),
     };
@@ -7537,7 +7537,7 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
         Ok(plan) => plan,
         Err(error) => {
             return RetryReplayAction::unavailable(
-                owner,
+                local_owner,
                 format!("persisted replay plan is unavailable: {}", error.message),
             );
         }
@@ -7545,7 +7545,7 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
     match cook_continuation_action(record) {
         Ok(true) => {
             return RetryReplayAction {
-                owner,
+                owner: local_owner,
                 readiness: "unavailable",
                 reason: Some(
                     "the authenticated review-form continuation must resume through Cook"
@@ -7562,7 +7562,7 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
         Ok(false) => {}
         Err(error) => {
             return RetryReplayAction::unavailable(
-                owner,
+                local_owner,
                 format!(
                     "cannot validate whether this run requires Cook continuation: {}",
                     error.message
@@ -7570,26 +7570,84 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     }
-    if let Err(error) = agent_task_service_direct::retry_admission(&record.run_id) {
+    let has_generic_lab_replay = plan.metadata.get("generic_lab_command_replay").is_some();
+    // Cook-owned retries stay on the controller lifecycle. Lab routing makes
+    // the same Cook-first decision before it considers generic replay.
+    if record.metadata["cook_id"].is_string() && has_generic_lab_replay {
         return RetryReplayAction::unavailable(
-            owner,
+            local_owner,
+            "Cook-owned generic Lab replay must continue through the controller Cook lifecycle",
+        );
+    }
+    let generic_lab_replay = has_generic_lab_replay;
+    let admission = if generic_lab_replay {
+        // Status advertises the exact persisted generic replay, rather than a
+        // Cook-derived retry plan that may no longer carry its workspace proof.
+        crate::commands::infra::route::validate_generic_lab_command_replay_workspace(&plan)
+            .and_then(|()| {
+                agent_task_service_direct::retry_admission_with_preflight(
+                    &record.run_id,
+                    |_| Ok(()),
+                )
+            })
+    } else {
+        agent_task_service_direct::retry_admission(&record.run_id)
+    };
+    if let Err(error) = admission {
+        return RetryReplayAction::unavailable(
+            local_owner,
             format!("retry admission is unavailable: {}", error.message),
         );
     }
     if !plan_has_retry_materialization_identity(&plan) {
         return RetryReplayAction::unavailable(
-            owner,
+            local_owner,
             "persisted replay plan has no materialization identity",
         );
     }
+    let (owner, action) = if generic_lab_replay {
+        let owner = json!({ "placement": "lab" });
+        let action = lab_replay_retry_action(&record.run_id, owner.clone());
+        (owner, action)
+    } else {
+        let owner = local_owner;
+        let action = owner_bound_retry_action(&record.run_id, runner_id, owner.clone());
+        (owner, action)
+    };
     RetryReplayAction {
-        owner: owner.clone(),
+        owner,
         readiness: "ready",
         reason: None,
         admission: json!({ "admitted": true }),
-        action: Some(owner_bound_retry_action(&record.run_id, runner_id, owner)),
+        action: Some(action),
         continuation: None,
     }
+}
+
+fn lab_replay_retry_action(run_id: &str, owner: Value) -> CommandNextAction {
+    let args = vec![
+        "--placement".to_string(),
+        "lab".to_string(),
+        "agent-task".to_string(),
+        "retry".to_string(),
+        run_id.to_string(),
+        "--run".to_string(),
+    ];
+    CommandNextAction::from_action(
+        ExecutableAction::new(
+            "agent-task.retry.lab-replay.v1",
+            "retry the Lab replay from its persisted workspace",
+            "homeboy",
+            args,
+            ActionSafety::Mutating,
+        )
+        .with_evidence(json!({
+            "schema": "homeboy/agent-task-retry-replay/v1",
+            "owner": owner,
+            "replay_ready": true,
+            "materialization_identity": true,
+        })),
+    )
 }
 
 /// A promoted review-form follow-up retains the candidate through Cook's
@@ -7723,6 +7781,89 @@ fn diagnose_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::Error;
+
+    #[test]
+    fn stale_generic_lab_replay_status_has_no_executable_action() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            std::fs::write(workspace.path().join("workspace.txt"), "recorded")
+                .expect("write workspace");
+            let recorded_identity =
+                homeboy::runner::generic_lab_replay_artifact_identity(workspace.path())
+                    .expect("record replay artifact identity");
+            std::fs::write(workspace.path().join("workspace.txt"), "current")
+                .expect("change workspace");
+            let mut plan = AgentTaskPlan::new("stale-generic-lab-replay", Vec::new());
+            plan.metadata["generic_lab_command_replay"] = json!({
+                "schema": "homeboy/generic-lab-command-replay/v1",
+                "normalized_args": ["homeboy", "bench"],
+                "materialization": {
+                    "canonical_root": workspace.path(),
+                    "content_identity": recorded_identity,
+                },
+            });
+            agent_task_lifecycle::submit_plan(&plan, Some("stale-generic-lab-replay"))
+                .expect("persist generic replay");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "stale-generic-lab-replay",
+                &plan,
+                "lab_daemon_admission",
+                &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+            )
+            .expect("record retryable failure");
+
+            let record = agent_task_lifecycle::status("stale-generic-lab-replay")
+                .expect("load replay record");
+            let retry = retry_replay_action(&record);
+
+            assert_eq!(retry.readiness, "ready");
+            assert!(retry.action.is_some());
+        });
+    }
+
+    #[test]
+    fn cook_owned_generic_lab_replay_status_has_no_lab_action() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let mut plan = AgentTaskPlan::new("cook-owned-generic-lab-replay", Vec::new());
+            plan.metadata["generic_lab_command_replay"] = json!({
+                "schema": "homeboy/generic-lab-command-replay/v1",
+                "normalized_args": ["homeboy", "bench"],
+                "materialization": {
+                    "canonical_root": workspace.path(),
+                    "content_identity": "snapshot:recorded",
+                },
+            });
+            agent_task_lifecycle::submit_plan(&plan, Some("cook-owned-generic-lab-replay"))
+                .expect("persist generic replay");
+            agent_task_lifecycle::rewrite_record_for_test(
+                "cook-owned-generic-lab-replay",
+                |record| {
+                    record.metadata["cook_id"] = json!("cook-owned-generic-lab-replay");
+                },
+            )
+            .expect("mark replay Cook-owned");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "cook-owned-generic-lab-replay",
+                &plan,
+                "lab_daemon_admission",
+                &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+            )
+            .expect("record retryable failure");
+
+            let record = agent_task_lifecycle::status("cook-owned-generic-lab-replay")
+                .expect("load replay record");
+            let retry = retry_replay_action(&record);
+
+            assert_eq!(retry.readiness, "unavailable");
+            assert!(retry.action.is_none());
+            assert!(retry
+                .reason
+                .unwrap()
+                .contains("Cook-owned generic Lab replay"));
+        });
+    }
 
     #[test]
     fn placement_rewrite_threads_one_resolved_prefix_through_nested_commands() {
@@ -7967,6 +8108,24 @@ mod tests {
         assert_eq!(
             action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
             "local"
+        );
+    }
+
+    #[test]
+    fn generic_lab_replay_status_advertises_only_the_lab_retry_action() {
+        let action = lab_replay_retry_action("run-1", json!({ "placement": "lab" }));
+
+        assert_eq!(
+            action.command,
+            "homeboy --placement lab agent-task retry run-1 --run"
+        );
+        assert_eq!(
+            action.action.as_ref().unwrap().id,
+            "agent-task.retry.lab-replay.v1"
+        );
+        assert_eq!(
+            action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
+            "lab"
         );
     }
 

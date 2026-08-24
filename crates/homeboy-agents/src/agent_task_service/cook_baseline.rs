@@ -272,6 +272,7 @@ impl Drop for CookFollowUpBaseline {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_follow_up_baseline(
     promotion: &AgentTaskPromotionReport,
     source_run_id: &str,
