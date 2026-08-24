@@ -1702,65 +1702,6 @@ mod tests {
         (temp, store)
     }
 
-    fn batch_and_lifecycle_stores() -> (
-        tempfile::TempDir,
-        AgentTaskBatchStore,
-        agent_task_lifecycle::AgentTaskLifecycleStore,
-    ) {
-        let temp = tempfile::tempdir().expect("temporary agent-task data root");
-        let data_root = temp.path().to_path_buf();
-        (
-            temp,
-            AgentTaskBatchStore::from_data_root(data_root.clone()),
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(data_root),
-        )
-    }
-
-    fn submit_batch(
-        batch_store: &AgentTaskBatchStore,
-        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-        plan: &AgentTaskPlan,
-        batch_id: &str,
-    ) -> AgentTaskBatchRecord {
-        batch_store
-            .submit_plan_batch_with(
-                plan,
-                Some(batch_id),
-                |run_id| lifecycle_store.record_exists(run_id),
-                |child, run_id| {
-                    lifecycle_store
-                        .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
-                },
-            )
-            .expect("batch submitted")
-    }
-
-    fn batch_status(
-        batch_store: &AgentTaskBatchStore,
-        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-        batch_id: &str,
-    ) -> AgentTaskBatchStatusReport {
-        batch_store
-            .status_with(
-                batch_id,
-                |run_id| lifecycle_store.read_record(run_id),
-                |_| Ok(None),
-            )
-            .expect("batch status")
-    }
-
-    fn rewrite_record(
-        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-        run_id: &str,
-        rewrite: impl FnOnce(&mut agent_task_lifecycle::AgentTaskRunRecord),
-    ) {
-        let mut record = lifecycle_store.read_record(run_id).expect("child record");
-        rewrite(&mut record);
-        lifecycle_store
-            .write_record(&record)
-            .expect("rewritten child record");
-    }
-
     #[test]
     fn terminal_admission_failure_is_not_reclassified_as_unavailable() {
         let (_temp, store) = batch_store();

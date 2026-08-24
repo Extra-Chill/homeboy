@@ -120,14 +120,10 @@ pub use homeboy_lab_runner_contract::AgentTaskProviderRunnerSource;
 
 #[cfg(test)]
 use catalog::{
-    component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
-    validate_provider_runner_readiness_for_backend_with_providers,
+    component_default_backend, validate_provider_runner_readiness_for_backend_with_providers,
 };
 #[cfg(test)]
-use command_runner::{
-    immediate_provider_failure, is_transient_provider_error, provider_command_env,
-    render_provider_command_display,
-};
+use command_runner::{provider_command_env, render_provider_command_display};
 #[cfg(test)]
 use fixtures::fixture_artifact;
 #[cfg(test)]

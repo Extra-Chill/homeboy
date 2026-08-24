@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// This is the exact count as of the commit that introduced this ratchet, down
 /// from 40 before the sweep. It is a ceiling, not a target: lower it whenever
 /// a crate is cleared, and never raise it.
-const MODULE_SUPPRESSION_CEILING: usize = 16;
+const MODULE_SUPPRESSION_CEILING: usize = 13;
 
 /// One module-level suppression, located precisely enough to act on.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

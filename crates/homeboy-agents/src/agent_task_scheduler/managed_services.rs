@@ -126,7 +126,12 @@ struct RunningService {
     child: Child,
     containment: homeboy_core::process::ProcessContainment,
     record: AgentTaskManagedServiceRecord,
+    /// Held for its `Drop`: releasing the lease is what returns the port to the
+    /// allocator when the record goes away. Never read.
+    #[allow(dead_code, reason = "Held for Drop; releasing the port is the effect.")]
     port_lease: Option<PortLease>,
+    /// Held for its `Drop`: closing the listener frees the bound socket. Never read.
+    #[allow(dead_code, reason = "Held for Drop; closing the socket is the effect.")]
     listener: Option<TcpListener>,
 }
 

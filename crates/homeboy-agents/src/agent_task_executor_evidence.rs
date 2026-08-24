@@ -462,70 +462,9 @@ fn push_unique_evidence_ref(outcome: &mut AgentTaskOutcome, evidence_ref: AgentT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::{
-        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
-        AGENT_TASK_REQUEST_SCHEMA,
-    };
-    use serde_json::Map;
     use std::sync::Mutex;
 
     static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());
-
-    fn test_request() -> AgentTaskRequest {
-        AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "neutral-runtime proof".to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "example-provider".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: Some("claude-sonnet".to_string()),
-                config: json!({
-                    "runtime_component_paths": ["/runner/components/sample-runtime"],
-                    "api_key": "sk-super-secret",
-                }),
-            },
-            instructions: "prove the typed artifact handoff".to_string(),
-            inputs: Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace::default(),
-            component_contracts: vec![AgentTaskComponentContract {
-                slug: Some("sample-runtime".to_string()),
-                path: Some("/runner/components/sample-runtime".to_string()),
-                extra: Map::new(),
-            }],
-            policy: AgentTaskPolicy::default(),
-            limits: AgentTaskLimits::default(),
-            expected_artifacts: vec!["component_contracts".to_string()],
-            artifact_declarations: Vec::new(),
-            output_declarations: Vec::new(),
-            runtime_tools: Vec::new(),
-            metadata: Value::Null,
-        }
-    }
-
-    fn test_outcome() -> AgentTaskOutcome {
-        AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id: "neutral-runtime proof".to_string(),
-            status: AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("token=abc done".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
-        }
-    }
 
     /// Scopes the process-global artifact-root override to one test.
     ///
