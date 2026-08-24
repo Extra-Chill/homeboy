@@ -94,6 +94,12 @@ GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy baseline}"
 for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
   OUTPUT_STEM="$(command_output_stem "${CMD}")"
   OUTPUT_JSON="${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.json"
+  rm -f "${OUTPUT_JSON}"
+  if [ "$(quality_base_command "${CMD}")" = "test" ]; then
+    rm -f \
+      "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.test-inventory.json" \
+      "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.test-outcomes.json"
+  fi
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
 
   echo ""

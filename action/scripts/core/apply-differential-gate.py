@@ -123,6 +123,15 @@ def output_stem(command: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in command).strip("-") or "homeboy-output"
 
 
+def test_evidence_command_identity(command: str) -> str:
+    parts = command.split()
+    if len(parts) >= 2 and parts[:2] == ["review", "test"]:
+        return "review test"
+    if parts and parts[0] == "test":
+        return "test"
+    return command.strip()
+
+
 # How a metric was derived. The distinction is load-bearing for the zero guard
 # in main(): zero means opposite things depending on provenance.
 #
@@ -169,6 +178,7 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
     only failures observed by the adapter; it never invents pass or skip facts.
     """
     stem = output_stem(command)
+    evidence_command = test_evidence_command_identity(command)
     outcomes = read_json(os.path.join(directory, f"{stem}.test-outcomes.json"))
     inventory = read_json(os.path.join(directory, f"{stem}.test-inventory.json"))
     if outcomes is None or inventory is None:
@@ -181,8 +191,8 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
         or not isinstance(inventory, dict)
         or outcomes.get("schema") != "homeboy/test-outcomes/v1"
         or inventory.get("schema") != "homeboy/test-inventory/v1"
-        or outcomes.get("command") != command
-        or inventory.get("command") != command
+        or outcomes.get("command") != evidence_command
+        or inventory.get("command") != evidence_command
         or any(not isinstance(inventory.get(key), str) or not inventory[key] for key in provenance)
         or any(not isinstance(outcomes.get(key), str) or outcomes[key] != inventory[key] for key in provenance)
         or not isinstance(inventory.get("inventory_fingerprint"), str)
@@ -203,7 +213,7 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
     ):
         return "invalid", None, None
     canonical_inventory = {
-        "command": command,
+        "command": evidence_command,
         "execution_fingerprint": inventory["execution_fingerprint"],
         "runner": inventory["runner"],
         "runner_fingerprint": inventory["runner_fingerprint"],

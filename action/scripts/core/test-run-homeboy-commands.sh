@@ -205,6 +205,9 @@ while :; do sleep 1; done
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
 
+mkdir -p "${TMP_DIR}/workspace/homeboy-ci-results"
+printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-inventory.json"
+printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-outcomes.json"
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
@@ -225,6 +228,10 @@ if [ "${exit_code}" -ne 1 ] || ! grep -q '^results={"review test":"timeout"}$' "
 fi
 if ! grep -q 'TIMED OUT (exit code 124)' "${TMP_DIR}/timeout.log"; then
   printf 'FAIL: timed out review test does not report its timeout classification\n'
+  exit 1
+fi
+if [ -e "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-inventory.json" ] || [ -e "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-outcomes.json" ]; then
+  printf 'FAIL: timed out Test retained stale paired sidecars\n'
   exit 1
 fi
 printf 'PASS: timed out review test preserves actionable timeout classification\n'

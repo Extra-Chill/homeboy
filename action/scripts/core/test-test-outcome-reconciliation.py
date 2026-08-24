@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -18,9 +19,9 @@ STEM = "review-test"
 BASELINE_STATUS = {COMMAND: {"status": "fail", "exit_code": 1, "structured_output": True}}
 
 
-def gate(current: Path, baseline: Path) -> dict:
+def gate(current: Path, baseline: Path, command: str = COMMAND) -> dict:
     completed = subprocess.run(
-        ["python3", str(GATE), json.dumps({COMMAND: "fail"}), str(current), str(baseline)],
+        ["python3", str(GATE), json.dumps({command: "fail"}), str(current), str(baseline)],
         check=True,
         text=True,
         capture_output=True,
@@ -72,6 +73,41 @@ def main() -> None:
         payload["failed_test_ids"] = []
         (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "failed commands need a failed candidate identity"
+
+        install_pair(current, "13290-candidate")
+        install_pair(baseline, "13290-baseline")
+        suffixed = "review test package-a"
+        suffixed_stem = "review-test-package-a"
+        for directory in (current, baseline):
+            for kind in ("inventory", "outcomes"):
+                (directory / f"{STEM}.test-{kind}.json").rename(directory / f"{suffixed_stem}.test-{kind}.json")
+        (baseline / "baseline-status.json").write_text(
+            json.dumps({suffixed: BASELINE_STATUS[COMMAND]}), encoding="utf-8"
+        )
+        assert gate(current, baseline, suffixed) == {suffixed: "fail"}, "suffixed commands use canonical sidecar identity"
+
+        bare_suffixed = "test package-a"
+        bare_stem = "test-package-a"
+        for directory in (current, baseline):
+            inventory_path = directory / f"{suffixed_stem}.test-inventory.json"
+            outcomes_path = directory / f"{suffixed_stem}.test-outcomes.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+            inventory["command"] = "test"
+            canonical = {key: value for key, value in inventory.items() if key != "inventory_fingerprint"}
+            inventory["inventory_fingerprint"] = hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            outcomes["command"] = "test"
+            outcomes["inventory_fingerprint"] = inventory["inventory_fingerprint"]
+            inventory_path.rename(directory / f"{bare_stem}.test-inventory.json")
+            outcomes_path.rename(directory / f"{bare_stem}.test-outcomes.json")
+            (directory / f"{bare_stem}.test-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+            (directory / f"{bare_stem}.test-outcomes.json").write_text(json.dumps(outcomes), encoding="utf-8")
+        (baseline / "baseline-status.json").write_text(
+            json.dumps({bare_suffixed: BASELINE_STATUS[COMMAND]}), encoding="utf-8"
+        )
+        assert gate(current, baseline, bare_suffixed) == {bare_suffixed: "fail"}, "bare suffixed Test uses canonical sidecar identity"
 
     print("PASS: Test outcome/inventory reconciliation fixtures")
 

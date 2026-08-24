@@ -66,9 +66,14 @@ for CMD in "${CMD_ARRAY[@]}"; do
     echo "::error::homeboy ${CMD} result target must be a file: ${CI_RESULT_JSON}"
     exit 1
   fi
-  # Each command owns exactly one CI result target; remove only that target so
-  # a stale result cannot validate or be uploaded for this invocation.
+  # Test evidence is a single three-file unit. Remove the entire prior unit so
+  # a timeout or producer failure cannot leave stale sidecars beside this run.
   rm -f "${CI_RESULT_JSON}"
+  if [ "$(quality_base_command "${CMD}")" = "test" ]; then
+    rm -f \
+      "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.test-inventory.json" \
+      "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.test-outcomes.json"
+  fi
 
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
 
