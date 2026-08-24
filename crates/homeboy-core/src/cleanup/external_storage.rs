@@ -5,7 +5,7 @@
 //! selected identities back for native reclaim. It intentionally never calls
 //! `remove_dir_all` on a provider locator.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
@@ -126,6 +126,7 @@ pub fn cleanup_external_storage_with_providers(
                 None,
             ));
         }
+        validate_inventory_item_ids(&inventory)?;
         let pressured_roots = pressured_roots(&inventory, options.reserve_bytes);
         let candidates = plan(
             &inventory.items,
@@ -215,6 +216,28 @@ pub fn cleanup_external_storage_with_providers(
         output.providers.push(provider_output);
     }
     Ok(output)
+}
+
+fn validate_inventory_item_ids(inventory: &ExternalStorageInventory) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut duplicates = BTreeSet::new();
+    for item in &inventory.items {
+        if !seen.insert(item.id.as_str()) {
+            duplicates.insert(item.id.as_str());
+        }
+    }
+    if let Some(id) = duplicates.into_iter().next() {
+        return Err(Error::validation_invalid_argument(
+            "external_storage_retention provider inventory",
+            format!(
+                "provider '{}' returned duplicate item id '{id}'",
+                inventory.provider_id
+            ),
+            Some(inventory.provider_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn plan<'a>(
@@ -833,6 +856,41 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_inventory_ids_fail_before_reclaim() {
+        let receipt = tempfile::NamedTempFile::new().expect("receipt");
+        let script = r#"input=$(cat); printf '%s\n' "$input" >> "$1"; printf '%s' '{"schema":"homeboy/external-storage-retention/v1","provider_id":"duplicate","generation":"g1","items":[{"id":"duplicate","root_id":"root","class":"scratch","bytes":1,"locator":"one","reconstructable":true,"active":false,"referenced":false,"ownership_known":true,"age_days":7,"reclaim_token":"one"},{"id":"duplicate","root_id":"root","class":"scratch","bytes":1,"locator":"two","reconstructable":true,"active":false,"referenced":false,"ownership_known":true,"age_days":7,"reclaim_token":"two"}]}'"#;
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "duplicate".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                script.to_string(),
+                "fixture".to_string(),
+                receipt.path().display().to_string(),
+            ],
+            timeout_seconds: 1,
+        };
+        let error = cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: true,
+                min_age_days: 0,
+                max_bytes: 10,
+                reserve_bytes: 0,
+                limit: 10,
+                evidence_limit: 1,
+                deadline: None,
+            },
+        )
+        .expect_err("duplicate inventory id");
+        assert!(error.message.contains("duplicate item id 'duplicate'"));
+        let requests = std::fs::read_to_string(receipt.path()).expect("receipt");
+        assert!(requests.contains("inventory"));
+        assert!(!requests.contains("reclaim"));
     }
 
     #[cfg(unix)]
