@@ -6827,7 +6827,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
     let base = options.task_base_sha.as_deref().unwrap_or(&options.base);
-    match preflight_cook_workspace_base_ancestry(target, base) {
+    let ignored_evidence = explicit_cook_evidence_paths(options, target);
+    match preflight_cook_workspace_base_ancestry(target, base, &ignored_evidence) {
         Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
@@ -6851,8 +6852,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 base,
                 &config,
             )?;
-            let snapshot =
-                preflight_cook_workspace_base_ancestry(target, base).map_err(|mut error| {
+            let snapshot = preflight_cook_workspace_base_ancestry(target, base, &ignored_evidence)
+                .map_err(|mut error| {
                     error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
                         "provider_id": convergence.provider_id,
                         "handle": convergence.handle,
@@ -6883,7 +6884,11 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
 /// returned immutable base pin authorizes the scheduler's isolated attempt
 /// workspace. This keeps provider-managed destinations under their owner while
 /// ensuring provider output is based on the observed remote base.
-fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<Option<Value>> {
+fn preflight_cook_workspace_base_ancestry(
+    target: &Path,
+    base: &str,
+    ignored_evidence: &[String],
+) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
         candidate_fingerprint(target.to_string_lossy().as_ref())?
     else {
@@ -6942,10 +6947,16 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<O
     };
     let status = homeboy_core::git::run_git(
         target,
-        &["status", "--porcelain=v1", "--untracked-files=all"],
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         "verify Cook destination cleanliness before base snapshot",
     )?;
-    if !status.trim().is_empty() {
+    let dirty_paths = status
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
+        .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
+        .collect::<Vec<_>>();
+    if !dirty_paths.is_empty() {
         let mut error = Error::validation_invalid_argument(
             "workspace",
             "Cook destination has uncommitted changes; refusing provider execution",
