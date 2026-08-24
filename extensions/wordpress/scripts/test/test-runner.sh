@@ -906,10 +906,15 @@ homeboy_wordpress_is_declared_standalone_php_test_file() {
             ;;
     esac
 
-    declared_paths="$(homeboy_setting standalone_php_test_paths '.standalone_php_test_paths // [] | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end')" || {
-        echo "ERROR: standalone_php_test_paths must be an array of strings." >&2
-        return 2
-    }
+    if [ -z "${HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        declared_paths="$(homeboy_setting standalone_php_test_paths '.standalone_php_test_paths // [] | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end')" || {
+            echo "ERROR: standalone_php_test_paths must be an array of strings." >&2
+            return 2
+        }
+        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS="$declared_paths"
+        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED=1
+    fi
+    declared_paths="$HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS"
     while IFS= read -r declared_path; do
         [ -n "$declared_path" ] || continue
         case "$declared_path" in
@@ -1090,21 +1095,55 @@ homeboy_wordpress_run_php_smoke_files() {
     return "$status"
 }
 
-homeboy_wordpress_write_changed_scope_results() {
+homeboy_wordpress_write_host_php_results() {
     local total="$1"
     local passed="$2"
     local failed="$3"
+    local source="$4"
 
     if ! type homeboy_write_test_results >/dev/null 2>&1 && [ -n "${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}" ] && [ -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS" ]; then
         # shellcheck source=/dev/null
         source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
     fi
     if type homeboy_write_test_results >/dev/null 2>&1; then
-        homeboy_write_test_results "$total" "$passed" "$failed" 0 "changed-scope-host-php"
+        homeboy_write_test_results "$total" "$passed" "$failed" 0 "$source"
     elif [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-        echo "ERROR: WordPress changed-scope result normalization cannot write HOMEBOY_TEST_RESULTS_FILE." >&2
+        echo "ERROR: WordPress host-PHP result normalization cannot write HOMEBOY_TEST_RESULTS_FILE." >&2
         return 2
     fi
+}
+
+homeboy_wordpress_collect_full_suite_standalone_php_files() {
+    local test_file test_rel declared_status
+    local selected=0
+    local routed=0
+    local excluded=0
+
+    FULL_SUITE_STANDALONE_PHP_FILES=""
+    FULL_SUITE_STANDALONE_PHP_SELECTED=0
+    FULL_SUITE_STANDALONE_PHP_ROUTED=0
+    FULL_SUITE_STANDALONE_PHP_EXCLUDED=0
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        test_rel="${test_file#"${PLUGIN_PATH}/"}"
+        if homeboy_wordpress_is_declared_standalone_php_test_file "$test_rel"; then
+            selected=$((selected + 1))
+            FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
+            routed=$((routed + 1))
+            echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
+        else
+            declared_status=$?
+            [ "$declared_status" -eq 1 ] || return "$declared_status"
+            # Only declared files belong to this standalone suite. Everything
+            # else retains its existing PHPUnit/support-file classification.
+            excluded=$((excluded + 1))
+        fi
+    done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
+
+    FULL_SUITE_STANDALONE_PHP_SELECTED="$selected"
+    FULL_SUITE_STANDALONE_PHP_ROUTED="$routed"
+    FULL_SUITE_STANDALONE_PHP_EXCLUDED="$excluded"
 }
 
 homeboy_wordpress_replay_test_shard() {
@@ -1273,10 +1312,11 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         # instead of falling through to PHPUnit, whose empty changed scope means
         # a full-suite run and whose results would not describe these scripts.
         if [ "${WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES:-0}" -eq 0 ]; then
-            homeboy_wordpress_write_changed_scope_results \
+            homeboy_wordpress_write_host_php_results \
                 "$changed_routed_count" \
                 "${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0}" \
-                "${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}" || changed_scope_status=$?
+                "${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}" \
+                "changed-scope-host-php" || changed_scope_status=$?
         fi
         exit "$changed_scope_status"
     fi
@@ -1359,31 +1399,53 @@ if [ -n "$TARGET_FILE" ]; then
     esac
 fi
 
-# Full-suite run (no --file, no changed-file scope): run the canonical PHPUnit
-# backend only. Ad hoc PHP smoke scripts are intentionally not release gates;
-# rerun one explicitly with --host-smoke-file or --file when diagnosing it.
+# Full-suite run (no --file, no changed-file scope): declared standalone PHP
+# tests are part of the suite, while convention-only smoke scripts remain
+# explicit diagnostic targets. The declaration uses the same classifier and
+# bounded host-PHP runner as changed scopes.
+homeboy_wordpress_collect_full_suite_standalone_php_files || exit $?
 full_suite_phpunit_root="$(homeboy_wordpress_full_suite_phpunit_root || true)"
+full_suite_phpunit_status=0
 if [ -n "$full_suite_phpunit_root" ]; then
-    full_suite_phpunit_status=0
     homeboy_wordpress_has_phpunit_tests "$full_suite_phpunit_root" || full_suite_phpunit_status=$?
-    if [ "$full_suite_phpunit_status" -eq 1 ]; then
-        homeboy_wordpress_handle_no_phpunit_tests
-        exit $?
-    elif [ "$full_suite_phpunit_status" -ne 0 ]; then
+    if [ "$full_suite_phpunit_status" -ne 0 ] && [ "$full_suite_phpunit_status" -ne 1 ]; then
         echo "ERROR: unable to inspect PHPUnit test root: ${full_suite_phpunit_root}" >&2
         exit "$full_suite_phpunit_status"
+    fi
+fi
+
+full_suite_standalone_status=0
+if [ -n "$FULL_SUITE_STANDALONE_PHP_FILES" ]; then
+    homeboy_wordpress_run_standalone_php_smoke_files "$FULL_SUITE_STANDALONE_PHP_FILES" || full_suite_standalone_status=$?
+fi
+echo "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=$((FULL_SUITE_STANDALONE_PHP_SELECTED + FULL_SUITE_STANDALONE_PHP_EXCLUDED)) selected=${FULL_SUITE_STANDALONE_PHP_SELECTED} routed=${FULL_SUITE_STANDALONE_PHP_ROUTED} excluded=${FULL_SUITE_STANDALONE_PHP_EXCLUDED} passed=${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0} failed=${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}"
+
+if [ "$full_suite_phpunit_status" -eq 1 ]; then
+    if [ "$FULL_SUITE_STANDALONE_PHP_SELECTED" -gt 0 ]; then
+        homeboy_wordpress_write_host_php_results \
+            "$FULL_SUITE_STANDALONE_PHP_SELECTED" \
+            "${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0}" \
+            "${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}" \
+            "full-suite-host-php" || exit $?
+        exit "$full_suite_standalone_status"
+    else
+        homeboy_wordpress_handle_no_phpunit_tests
+        exit $?
     fi
 fi
 WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || exit $?
 # A host PHP smoke in this changed scope already failed. `exec` would replace
 # this process and report only the PHPUnit backend's status, erasing that
 # failure. Run the backend for its evidence, then report the worst status.
-if [ "${changed_scope_status:-0}" -ne 0 ]; then
+if [ "${changed_scope_status:-0}" -ne 0 ] || [ "$full_suite_standalone_status" -ne 0 ]; then
     wordpress_runtime_status=0
     bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}" || wordpress_runtime_status=$?
     if [ "$wordpress_runtime_status" -ne 0 ]; then
         exit "$wordpress_runtime_status"
     fi
-    exit "$changed_scope_status"
+    if [ "${changed_scope_status:-0}" -ne 0 ]; then
+        exit "$changed_scope_status"
+    fi
+    exit "$full_suite_standalone_status"
 fi
 exec bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}"
