@@ -146,17 +146,14 @@ pub struct RigSourceUpdatedRig {
     pub source_revision: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RigSourceUpdatedStack {
-    pub id: String,
-    pub source: String,
-    pub path: String,
-    pub spec_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_revision: Option<String>,
-}
+/// A stack updated by a rig source sync.
+///
+/// Identical in shape to [`RigSourceUpdatedRig`] -- same six fields, same order,
+/// same serde -- because a rig and a stack record the same thing about an
+/// update. The rig-versus-stack distinction is already carried by which field of
+/// `RigSourceUpdateResult` the value lands in (`updated` versus
+/// `updated_stacks`), so it was never in the shape.
+pub type RigSourceUpdatedStack = RigSourceUpdatedRig;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkippedRigSourceUpdate {

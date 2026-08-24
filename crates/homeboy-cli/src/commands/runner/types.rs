@@ -268,18 +268,16 @@ pub struct LabRunnerHomeboyOutput {
     pub dev_sync: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerHomeboyBinaryRole {
-    pub role: &'static str,
-    pub owner: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_identity: Option<String>,
-    pub purpose: &'static str,
-}
+/// One homeboy binary a runner resolves, as the operator status output renders it.
+///
+/// This was a second declaration of [`homeboy::runner::runners::RunnerBinarySource`]
+/// -- the same six fields with the same serde attributes -- and
+/// `runner_homeboy_binary_role` in `status.rs` copied them across one at a time
+/// in a file that already imported both. `homeboy-cli` depends on
+/// `homeboy-lab-runner` directly, so there was no boundary for the copy to
+/// bridge; the CLI name is kept as an alias because the status output is where
+/// operators read it.
+pub type RunnerHomeboyBinaryRole = homeboy::runner::runners::RunnerBinarySource;
 
 #[derive(Debug, Serialize)]
 pub struct RunnerWorkflowBinaryGuidance {

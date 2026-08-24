@@ -9,8 +9,8 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerActiveJobState, RunnerBinarySource, RunnerKind, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
+    self as runner, Runner, RunnerActiveJobState, RunnerKind, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode, RuntimeMaterializationStatus,
 };
 
 use super::super::CmdResult;
@@ -19,11 +19,11 @@ use super::types::{
     LabFollowup, LabRunnerConnectionCapability, LabRunnerHomeboyOutput, LabSelectedRunnerOutput,
     RunnerArtifactFeatureDiagnostics, RunnerConnectionOutput,
     RunnerExecutableRequirementDiagnostics, RunnerExecutionCapabilities, RunnerExecutionCapability,
-    RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary,
-    RunnerOutput, RunnerReconciliationOutcome, RunnerReconciliationStatus,
-    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerStatusInspection,
-    RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance,
-    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
+    RunnerExtra, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
+    RunnerReconciliationOutcome, RunnerReconciliationStatus, RunnerRuntimeDiagnostics,
+    RunnerRuntimePackageDiagnostics, RunnerStatusInspection, RunnerStatusUnavailable,
+    RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic,
+    RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -812,11 +812,7 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
         .stale_daemon
         .as_ref()
         .and_then(|warning| stale_daemon_output(warning, refresh_command));
-    let binary_roles: Vec<_> = materialization
-        .binary_sources
-        .iter()
-        .map(runner_homeboy_binary_role)
-        .collect();
+    let binary_roles: Vec<_> = materialization.binary_sources.iter().cloned().collect();
     let controller_cli = binary_roles[0].clone();
     let active_daemon = binary_roles[1].clone();
     let configured_job_binary = binary_roles[2].clone();
@@ -1312,17 +1308,6 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
         format!("{binary} runs evidence --help"),
         format!("{binary} extension list"),
     ]
-}
-
-fn runner_homeboy_binary_role(source: &RunnerBinarySource) -> RunnerHomeboyBinaryRole {
-    RunnerHomeboyBinaryRole {
-        role: source.role,
-        owner: source.owner,
-        path: source.path.clone(),
-        version: source.version.clone(),
-        build_identity: source.build_identity.clone(),
-        purpose: source.purpose,
-    }
 }
 
 fn runner_workflow_binary_guidance() -> RunnerWorkflowBinaryGuidance {
