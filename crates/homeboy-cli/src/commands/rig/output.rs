@@ -152,15 +152,13 @@ pub struct RigInstalledSummary {
     pub source_revision: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct RigInstalledStackSummary {
-    pub id: String,
-    pub description: String,
-    pub path: String,
-    pub spec_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_revision: Option<String>,
-}
+/// An installed stack, as `rig` renders it.
+///
+/// Identical in shape to [`RigInstalledSummary`] -- same five fields, same
+/// order, same serde -- because an installed rig and an installed stack report
+/// the same thing. Which of the two a value describes is already carried by the
+/// field it lands in, not by its shape.
+pub type RigInstalledStackSummary = RigInstalledSummary;
 
 pub type RigUpdateOutput = CommandReport<rig::RigSourceUpdateResult>;
 pub type RigSourcesOutput = CommandReport<RigSourcesReport>;

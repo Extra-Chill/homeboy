@@ -635,7 +635,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-07-27T04:11:26Z",
-      "item_count": 1130,
+      "item_count": 1135,
       "known_fingerprints": [
         "Commands::crates/homeboy-cli/src/commands/agent_task_dispatch.rs::MissingMethod",
         "Src::crates/contracts/homeboy-audit-contract/src/finding.rs::MissingMethod",
@@ -1765,8 +1765,13 @@
         "thin_command_adapter::crates/homeboy-cli/src/commands/agent_task/run.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::crates/homeboy-cli/src/commands/infra/output_runtime.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::crates/homeboy-cli/src/commands/ssh.rs::ThinCommandAdapterViolation",
+        "twin_type_declaration::crates/contracts/homeboy-lab-contract/src/path_materialization.rs::TwinTypeDeclaration",
+        "twin_type_declaration::crates/homeboy-cli/src/commands/ci.rs::TwinTypeDeclaration",
+        "twin_type_declaration::crates/homeboy-cli/src/commands/runs/refs.rs::TwinTypeDeclaration",
         "twin_type_declaration::crates/homeboy-core/src/engine/hooks.rs::TwinTypeDeclaration",
-        "twin_type_declaration::crates/homeboy-deploy/src/types.rs::TwinTypeDeclaration"
+        "twin_type_declaration::crates/homeboy-deploy/src/types.rs::TwinTypeDeclaration",
+        "twin_type_declaration::crates/homeboy-lab-runner/src/workspace/types.rs::TwinTypeDeclaration",
+        "twin_type_declaration::crates/homeboy-triage/src/report.rs::TwinTypeDeclaration"
       ],
       "metadata": {
         "alignment_score": 0.8165137767791748,

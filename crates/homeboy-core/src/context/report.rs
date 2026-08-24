@@ -135,21 +135,13 @@ pub struct VersionSnapshot {
     pub targets: Vec<VersionTargetInfo>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct GitSnapshot {
-    pub branch: String,
-    pub clean: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ahead: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub behind: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commits_since_version: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_warning: Option<String>,
-}
+/// The repository state a context report renders.
+///
+/// This was a second declaration of [`crate::git::RepoBaselineSnapshot`]
+/// -- the same seven fields with the same `skip_serializing_if` on each -- in the
+/// same crate as the original. A context report and a baseline report were
+/// describing one repository state under two names.
+pub type GitSnapshot = crate::git::RepoBaselineSnapshot;
 
 #[derive(Debug, Serialize)]
 pub struct ReleaseSnapshot {
