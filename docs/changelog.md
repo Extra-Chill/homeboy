@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.357.2] - 2026-08-24
+
+### Fixed
+- export socket-safe temp aliases
+
+## [0.357.1] - 2026-08-24
+
+### Changed
+- Preserve clean results through proc cleanup
+- Isolate and bound external resolver fixtures
+- Unify provider dispatchability verdicts
+- Make dirty Cook recovery actionable
+
+### Fixed
+- dereference Homeboy Action pin
+
 ## [0.357.0] - 2026-08-23
 
 ### Fixed

@@ -41,6 +41,12 @@ pub(crate) struct ProcessGroupCleanupGuard {
     containment: Option<crate::process::ProcessContainment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessCleanupReport {
+    pub(crate) incomplete: Option<String>,
+    pub(crate) warning: Option<String>,
+}
+
 impl ProcessGroupCleanupGuard {
     pub fn new(root_pid: u32) -> Self {
         #[cfg(unix)]
@@ -73,13 +79,17 @@ impl ProcessGroupCleanupGuard {
         }
     }
 
-    pub(crate) fn cleanup(mut self) -> Option<String> {
+    pub(crate) fn cleanup(
+        mut self,
+        context: crate::process::ProcessContainmentCleanupContext,
+    ) -> Option<ProcessCleanupReport> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             let detail = cleanup_process_group(
                 pgid,
                 #[cfg(target_os = "linux")]
                 self.containment.as_ref(),
+                context,
             );
             self.pgid = None;
             return detail;
@@ -107,6 +117,7 @@ impl Drop for ProcessGroupCleanupGuard {
                 pgid,
                 #[cfg(target_os = "linux")]
                 self.containment.as_ref(),
+                crate::process::ProcessContainmentCleanupContext::LeaderMayBeRunning,
             );
         }
     }
@@ -162,15 +173,41 @@ pub(crate) fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) 
 fn cleanup_process_group(
     pgid: libc::pid_t,
     #[cfg(target_os = "linux")] containment: Option<&crate::process::ProcessContainment>,
-) -> Option<String> {
+    context: crate::process::ProcessContainmentCleanupContext,
+) -> Option<ProcessCleanupReport> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = context;
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
-        match containment.cleanup_with_grace(Duration::from_millis(200), false) {
-            Ok(cleanup) if cleanup.complete => return cleanup.diagnostic,
-            Ok(cleanup) => return cleanup.detail,
+        match containment.cleanup_with_grace(Duration::from_millis(200), context) {
+            Ok(cleanup) if cleanup.complete => {
+                let warning = [cleanup.diagnostic, cleanup.warning]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return (!warning.is_empty()).then_some(ProcessCleanupReport {
+                    incomplete: None,
+                    warning: Some(warning),
+                });
+            }
+            Ok(cleanup) => {
+                let warning = [cleanup.diagnostic, cleanup.warning]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return cleanup.detail.map(|incomplete| ProcessCleanupReport {
+                    incomplete: Some(incomplete),
+                    warning: (!warning.is_empty()).then_some(warning),
+                });
+            }
             Err(error) => {
                 cleanup_process_group_fallback(pgid);
-                return Some(format!("process containment cleanup failed: {error}"));
+                return Some(ProcessCleanupReport {
+                    incomplete: Some(format!("process containment cleanup failed: {error}")),
+                    warning: None,
+                });
             }
         }
     }

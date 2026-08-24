@@ -3946,7 +3946,7 @@ fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materiali
         }
                 let cook_id = "e2e-unmaterialized-replay";
                 agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("lifecycle store"), 
+                .expect("lifecycle store"),
                     cook_id,
                     serde_json::json!({
                         "placement": { "requested": "auto", "local_fallback": false },

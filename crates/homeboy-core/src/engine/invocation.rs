@@ -404,7 +404,7 @@ impl Drop for InvocationGuard {
 }
 
 #[cfg(unix)]
-fn exported_runtime_tmp_dir(
+pub(crate) fn exported_runtime_tmp_dir(
     runtime_root: &Path,
     short: &str,
     runtime_tmp_dir: &Path,
@@ -425,7 +425,7 @@ fn exported_runtime_tmp_dir(
 }
 
 #[cfg(not(unix))]
-fn exported_runtime_tmp_dir(
+pub(crate) fn exported_runtime_tmp_dir(
     _runtime_root: &Path,
     _short: &str,
     runtime_tmp_dir: &Path,
