@@ -4494,7 +4494,7 @@ fn run_cook_spine(
     )?;
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    if options.task_base_sha.is_none() {
+    if recipe_materialization.created && options.task_base_sha.is_none() {
         pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
             |error| {
                 let mut error = with_pre_execution_phase(error, "workspace_base_capture");
