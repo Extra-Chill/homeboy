@@ -8722,6 +8722,26 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
                 "base",
             ],
         );
+        let base = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .expect("resolve declared base")
+                .stdout,
+        )
+        .expect("base is UTF-8")
+        .trim()
+        .to_string();
+        git(
+            &repository,
+            &[
+                "remote",
+                "add",
+                "origin",
+                repository.to_str().expect("repository path"),
+            ],
+        );
         git(
             &repository,
             &[
@@ -8761,6 +8781,8 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             provenance: None,
         })
         .expect("register destination workspace");
+        // Model an interruption after recipe persistence and before the
+        // declared base capture can complete.
         super::super::persist_initial_recipe(&options).expect("persist durable recipe");
         assert!(super::super::load_recipe(cook_id)
             .expect("load durable recipe")
@@ -8809,6 +8831,13 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             false,
         )
         .expect("continuation repairs and dispatches recipe-bound retry");
+        assert_eq!(
+            super::super::load_recipe(cook_id)
+                .expect("resumed recipe captures declared base")
+                .finalization["task_base_sha"],
+            serde_json::json!(base)
+        );
+        git(&destination, &["remote", "remove", "origin"]);
         let repeated = run_cook_spine(
             &ambient_recipe_store,
             &ambient_lifecycle_store,
@@ -8818,7 +8847,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             None,
             false,
         )
-        .expect("repeated continuation remains idempotent");
+        .expect("captured continuation does not require origin");
 
         assert_eq!(result.value.status, "in_flight", "{result:#?}");
         assert_eq!(result.value.latest_run_id.as_deref(), Some(stranded_run_id));
@@ -8844,6 +8873,312 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
                 .filter(|attempt| attempt.attempt == 2)
                 .count(),
             1
+        );
+    });
+}
+
+#[test]
+fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        let expected_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .expect("resolve base")
+                .stdout,
+        )
+        .expect("base is UTF-8")
+        .trim()
+        .to_string();
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+        let destination = temp.path().join("destination");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "fixture-candidate",
+            destination.to_str().expect("destination path"),
+            "HEAD",
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let cook_id = "cook-concurrent-task-base-capture";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.source_worktree_path = Some(repository.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.to_worktree.clone(),
+            "root": destination,
+            "branch": "fixture-candidate",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.to_worktree.clone(),
+            path: destination.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register destination workspace");
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist incomplete recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+        lifecycle_store
+            .mutate_record(&options.initial_run_id, |record| {
+                record.state = AgentTaskRunState::Succeeded;
+                true
+            })
+            .expect("make the continuation a terminal service replay");
+
+        let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
+            workspace: repository.clone(),
+            count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(false),
+        });
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
+        let winner_options = options.clone();
+        let loser_options = options.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let (winner, loser) = std::thread::scope(|scope| {
+            let winner = scope.spawn(|| {
+                barrier.wait();
+                let mut side_effects =
+                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                run_cook_spine(
+                    &store,
+                    &lifecycle_store,
+                    winner_options.clone(),
+                    Arc::new(UnusedExecutor),
+                    &mut side_effects,
+                    None,
+                    false,
+                )
+            });
+            let loser = scope.spawn(|| {
+                barrier.wait();
+                let mut side_effects =
+                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                run_cook_spine(
+                    &store,
+                    &lifecycle_store,
+                    loser_options.clone(),
+                    Arc::new(UnusedExecutor),
+                    &mut side_effects,
+                    None,
+                    false,
+                )
+            });
+            (
+                winner.join().expect("capture owner joins"),
+                loser.join().expect("capture peer joins"),
+            )
+        });
+        winner.expect("first concurrent continuation reloads captured base");
+        loser.expect("second concurrent continuation reloads captured base");
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("remove workspace base capture counter") = None;
+        assert_eq!(
+            capture_counter.count.load(Ordering::SeqCst),
+            1,
+            "only the recovered claim owner reaches origin"
+        );
+        let recipe = store.load_recipe(cook_id).expect("captured recipe");
+        assert_eq!(
+            recipe.finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
+        );
+        assert_eq!(
+            store
+                .load_recipe(cook_id)
+                .expect("reloaded recipe")
+                .finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
+        );
+    });
+}
+
+#[test]
+fn workspace_base_capture_lock_times_out_while_another_controller_holds_it() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let cook_id = "cook-base-capture-lock-contention";
+        let (holder_ready, wait_for_holder) = std::sync::mpsc::sync_channel(0);
+        let (release_holder, holder_release) = std::sync::mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let holder_store = &store;
+            let holder = scope.spawn(move || {
+                holder_store.with_workspace_base_capture_lock_for_test(
+                    cook_id,
+                    std::time::Duration::from_secs(1),
+                    || {
+                        holder_ready.send(()).expect("report lock holder");
+                        holder_release.recv().expect("release lock holder");
+                        Ok(())
+                    },
+                )
+            });
+            wait_for_holder.recv().expect("holder acquired lock");
+
+            let started = Instant::now();
+            let error = store
+                .with_workspace_base_capture_lock_for_test(
+                    cook_id,
+                    std::time::Duration::from_millis(50),
+                    || Ok(()),
+                )
+                .expect_err("contending base capture must time out");
+            release_holder.send(()).expect("release lock holder");
+            holder
+                .join()
+                .expect("holder joins")
+                .expect("holder releases cleanly");
+
+            assert_eq!(error.details["kind"], "workspace_base_capture_lock_timeout");
+            assert_eq!(error.details["timeout_ms"], 50);
+            assert!(error.details["waited_ms"]
+                .as_u64()
+                .is_some_and(|waited| waited >= 50));
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        });
+    });
+}
+
+#[test]
+fn workspace_base_capture_repairs_controller_plan_after_recipe_write_interruption() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let mut options = batch_cook_options(
+            "cook-base-write-interruption",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.source_worktree_path = Some(repository.clone());
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist incomplete recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+
+        let hook = Arc::new(WorkspaceBaseCaptureHook {
+            workspace: repository.clone(),
+            count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(true),
+        });
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("install workspace base capture hook") = Some(Arc::clone(&hook));
+        let error =
+            pin_and_persist_initial_cook_workspace_base(&store, &lifecycle_store, &mut options)
+                .expect_err("injected interruption follows recipe persistence");
+        assert!(error.message.contains("after Cook recipe base persistence"));
+
+        let recipe = store
+            .load_recipe(&options.cook_id)
+            .expect("recipe survives interruption");
+        assert!(recipe.finalization["task_base_sha"].is_string());
+        assert_ne!(
+            lifecycle_store
+                .read_controller_plan(&options.initial_run_id)
+                .expect("old controller plan"),
+            recipe.attempts[0].plan
+        );
+        git(&["remote", "remove", "origin"]);
+
+        let mut recovery_options = batch_cook_options(
+            "cook-base-write-interruption",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        recovery_options.source_worktree_path = Some(repository);
+        pin_and_persist_initial_cook_workspace_base(
+            &store,
+            &lifecycle_store,
+            &mut recovery_options,
+        )
+        .expect("recovery repairs the controller plan from the recipe SHA");
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("remove workspace base capture hook") = None;
+
+        assert_eq!(hook.count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            recovery_options.task_base_sha,
+            recipe.finalization["task_base_sha"]
+                .as_str()
+                .map(str::to_string)
+        );
+        assert_eq!(
+            lifecycle_store
+                .read_controller_plan(&recovery_options.initial_run_id)
+                .expect("repaired controller plan"),
+            recipe.attempts[0].plan
         );
     });
 }
@@ -14503,6 +14838,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
         std::fs::write(root.join("candidate"), "base\n").unwrap();
         git_output(root, &["add", "."]).unwrap();
         git_output(root, &["commit", "-m", "base"]).unwrap();
+        git_output(root, &["remote", "add", "origin", "."]).unwrap();
         let base = git_output(root, &["rev-parse", "HEAD"]).unwrap();
         std::fs::write(root.join("candidate"), "provider-produced\n").unwrap();
         git_output(root, &["add", "candidate"]).unwrap();
@@ -17859,6 +18195,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         let patch = format!("{}\n", git_output(&target, &["diff", "--binary"]).unwrap());
         let patch_path = temp.path().join("candidate.patch");
         std::fs::write(&patch_path, &patch).unwrap();
+        let base_sha = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let cook_id = "cook-9703";
@@ -17871,6 +18208,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         options.initial_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
         options.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
         options.source_worktree_path = None;
+        options.task_base_sha = Some(base_sha.trim().to_string());
         options.gates.verify = vec!["true".to_string()];
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
@@ -17905,7 +18243,6 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
             target.to_str().expect("target path"),
         )
         .unwrap();
-        let base_sha = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
         let mut checkpoint = serde_json::to_value(promotion(&run_id)).unwrap();
         checkpoint["status"] = serde_json::json!("verification_pending");
         checkpoint["source"]["task_id"] = serde_json::json!(options.initial_plan.tasks[0].task_id);
@@ -17917,7 +18254,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         checkpoint["provenance"] = serde_json::json!({
             "worktree_path": target,
             "candidate": candidate,
-            "resume_inputs": {"base_ref": "main", "task_base_sha": null, "candidate_ref": null}
+            "resume_inputs": {"base_ref": "main", "task_base_sha": base_sha.trim(), "candidate_ref": null}
         });
         checkpoint["verified_base"]["sha"] = serde_json::json!(base_sha.trim());
         agent_task_lifecycle::record_promotion(&run_id, checkpoint.clone()).unwrap();
