@@ -366,6 +366,7 @@ mod tests {
             source_revision: None,
             upgraded: true,
             outcome: None,
+            preflight: None,
             controller: None,
             extensions: None,
             runners: None,

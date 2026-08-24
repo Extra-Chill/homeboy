@@ -307,6 +307,71 @@ pub fn run_upgrade_with_method(
     let replacement_approved =
         controller_replacement_proceeds(deliberate, source_upgrade_decision, false);
 
+    // Resolve the binary candidate and validate installed extension sources
+    // before the no-op branch can refresh extensions without swapping the
+    // controller. This keeps every extension mutation behind the same gate.
+    let selected_release = if install_method == InstallMethod::Binary {
+        Some(resolve_binary_release(pinned_version)?)
+    } else {
+        None
+    };
+    let candidate_version = if let Some(release) = selected_release.as_ref() {
+        release.version.clone()
+    } else if install_method == InstallMethod::Source {
+        source_upgrade_path
+            .as_deref()
+            .and_then(source_build_identity)
+            .map(|identity| identity.version)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "source_path",
+                    "Selected source checkout has no readable package version for extension compatibility preflight",
+                    source_upgrade_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    None,
+                )
+            })?
+    } else {
+        current_version().to_string()
+    };
+    let extension_preflight = (!skip_extensions)
+        .then(|| preflight_extensions_for_upgrade(&candidate_version))
+        .unwrap_or_default();
+    if !extension_preflight.is_empty() {
+        return Ok(extension_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            &candidate_version,
+            extension_preflight,
+        ));
+    }
+    let runner_preflight = if skip_runners {
+        Vec::new()
+    } else {
+        super::with_runner_upgrade(|provider| {
+            provider.preflight_configured_runners_for_upgrade(
+                runner_method_override,
+                source_upgrade_path.as_deref(),
+                // A resolved source workspace is the controller-selected build
+                // input, even when it was inferred from the source install.
+                source_upgrade_path.is_some(),
+                runner_targets,
+                &candidate_version,
+                &extension::available_extension_ids(),
+            )
+        })?
+    };
+    if !runner_preflight.is_empty() {
+        return Ok(runner_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            runner_preflight,
+        ));
+    }
+
     // Check if a release update is available unless an explicit source target
     // has already been approved for controller replacement.
     if !replacement_approved {
@@ -369,6 +434,7 @@ pub fn run_upgrade_with_method(
                 source_revision: None,
                 upgraded: false,
                 outcome: Some("controller_unchanged".to_string()),
+                preflight: None,
                 controller: Some(component_status("unchanged", "controller already current")),
                 extensions: Some(extensions_status.clone()),
                 runners: Some(runner_component_status(
@@ -416,31 +482,6 @@ pub fn run_upgrade_with_method(
         }
     }
 
-    // Binary upgrades install a published release asset. Resolve *which*
-    // release before mutation: the newest release is not necessarily
-    // installable on this target, so this selects the newest release that is,
-    // or the operator's explicit pin. Resolving it here also lets post-swap
-    // verification prove the PATH destination runs the exact release selected.
-    let selected_release = if install_method == InstallMethod::Binary {
-        Some(resolve_binary_release(pinned_version)?)
-    } else {
-        None
-    };
-
-    let runner_preflight = if skip_runners {
-        Vec::new()
-    } else {
-        super::with_runner_upgrade(|provider| {
-            provider.preflight_configured_runners_for_upgrade(
-                runner_method_override,
-                source_upgrade_path.as_deref(),
-                // A resolved source workspace is the controller-selected build
-                // input, even when it was inferred from the source install.
-                source_upgrade_path.is_some(),
-                runner_targets,
-            )
-        })?
-    };
     // Packaged installers still own their download-and-swap command. Keep their
     // established full-operation lease until that contract is moved in-process;
     // source builds use the narrower lease at the final rename instead.
@@ -551,6 +592,7 @@ pub fn run_upgrade_with_method(
         } else {
             upgrade_outcome(success, runner_disposition).to_string()
         }),
+        preflight: None,
         controller: Some(component_status(
             if superseded {
                 "superseded"
@@ -623,6 +665,7 @@ fn source_upgrade_noop_result(
         source_revision: None,
         upgraded: false,
         outcome: Some("controller_unchanged".to_string()),
+        preflight: None,
         controller: Some(component_status("unchanged", "controller was not promoted")),
         extensions: Some(component_status("skipped", "extensions were not refreshed")),
         runners: Some(component_status(
@@ -672,6 +715,7 @@ fn runner_preflight_failure_result(
         source_revision: None,
         upgraded: false,
         outcome: Some("runner_preflight_failed".to_string()),
+        preflight: None,
         controller: Some(component_status(
             "runner_preflight_failed",
             "controller was not updated because selected runner preflight failed",
@@ -697,6 +741,117 @@ fn runner_preflight_failure_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
     }
+}
+
+fn extension_preflight_failure_result(
+    install_method: InstallMethod,
+    previous_version: String,
+    previous_build_identity: Option<String>,
+    candidate_version: &str,
+    extension_blockers: Vec<ExtensionPreflightBlocker>,
+) -> UpgradeResult {
+    UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method,
+        new_version: Some(previous_version.clone()),
+        previous_version,
+        previous_build_identity,
+        new_build_identity: None,
+        source_revision: None,
+        upgraded: false,
+        outcome: Some("extension_preflight_failed".to_string()),
+        preflight: Some(UpgradePreflight {
+            candidate_version: candidate_version.to_string(),
+            extension_blockers,
+        }),
+        controller: Some(component_status(
+            "extension_preflight_failed",
+            "controller was not updated because extension preflight failed",
+        )),
+        extensions: Some(component_status(
+            "extension_preflight_failed",
+            "one or more installed extensions cannot be safely refreshed",
+        )),
+        runners: Some(component_status(
+            "not_run",
+            "runner convergence was not attempted because extension preflight failed",
+        )),
+        partial: true,
+        runner_convergence: None,
+        message: "extension_preflight_failed: controller was not updated".to_string(),
+        restart_required: false,
+        extensions_updated: Vec::new(),
+        extensions_skipped: Vec::new(),
+        extension_skips: Vec::new(),
+        runners_updated: Vec::new(),
+        runners_skipped: Vec::new(),
+        extensions_unrefreshed: Vec::new(),
+        services_restarted: Vec::new(),
+        services_pending_restart: Vec::new(),
+    }
+}
+
+/// Check deterministic local extension conditions before the controller swap.
+/// Network refresh, setup, and runner convergence remain in their established
+/// phases; this gate only rejects failures that cannot be repaired by a retry.
+fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPreflightBlocker> {
+    extension::discover_extensions()
+        .into_iter()
+        .filter_map(|discovered| match discovered {
+            extension::DiscoveredExtension::Invalid(failure) => {
+                let extension_id = failure.id;
+                Some(ExtensionPreflightBlocker {
+                    extension_id: extension_id.clone(),
+                    classification: failure.category.to_string(),
+                    detail: failure.diagnostic.to_string(),
+                    recovery_command: format!("homeboy extension show {extension_id}"),
+                })
+            }
+            extension::DiscoveredExtension::Valid(manifest) => {
+                let extension_id = manifest.id.clone();
+                let source_path = manifest.extension_path.as_deref().map(Path::new)?;
+                if extension::is_extension_linked(&extension_id)
+                    && git::get_git_root(&source_path.to_string_lossy()).is_err()
+                {
+                    return Some(ExtensionPreflightBlocker {
+                        extension_id: extension_id.clone(),
+                        classification: "linked_source_root_unrecognized".to_string(),
+                        detail: "linked extension path is not inside a Git checkout".to_string(),
+                        recovery_command: format!("homeboy extension relink {extension_id} <path>"),
+                    });
+                }
+                let requires = manifest
+                    .requires
+                    .as_ref()
+                    .and_then(|requirements| requirements.homeboy.as_deref());
+                match homeboy_extension::evaluate_core_compatibility_for_version(
+                    requires,
+                    homeboy_core::extension_update_check::read_source_revision(&extension_id),
+                    candidate_version,
+                ) {
+                    Ok(report) if report.status != "incompatible" => None,
+                    Ok(report) => Some(ExtensionPreflightBlocker {
+                        extension_id,
+                        classification: "controller_version_incompatible".to_string(),
+                        detail: format!(
+                            "requires homeboy {} but selected controller is {}",
+                            report
+                                .requires_homeboy
+                                .unwrap_or_else(|| "<undeclared>".to_string()),
+                            candidate_version
+                        ),
+                        recovery_command: "homeboy upgrade --skip-extensions".to_string(),
+                    }),
+                    Err(error) => Some(ExtensionPreflightBlocker {
+                        extension_id,
+                        classification: "manifest_compatibility_invalid".to_string(),
+                        detail: error.message,
+                        recovery_command: "homeboy extension show <extension-id>".to_string(),
+                    }),
+                }
+            }
+        })
+        .collect()
 }
 
 fn upgrade_outcome(
@@ -944,6 +1099,7 @@ fn run_targeted_runner_upgrade(
         source_revision: None,
         upgraded: false,
         outcome: Some("runner_only".to_string()),
+        preflight: None,
         controller: Some(component_status(
             "unchanged",
             "targeted runner operation did not promote controller",
@@ -2040,6 +2196,129 @@ mod runner_source_upgrade_tests {
     fn write_extension(dir: &Path, id: &str, manifest: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), manifest).unwrap();
+    }
+
+    #[test]
+    fn extension_preflight_returns_bounded_manifest_blocker() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(&extensions.join("broken"), "broken", "{ malformed");
+
+            let blockers = preflight_extensions_for_upgrade("1.0.0");
+            assert_eq!(blockers.len(), 1);
+            assert_eq!(blockers[0].extension_id, "broken");
+            assert_eq!(blockers[0].classification, "manifest_json_malformed");
+            assert_eq!(
+                blockers[0].recovery_command,
+                "homeboy extension show broken"
+            );
+        });
+    }
+
+    #[test]
+    fn extension_preflight_blocks_a_manifest_incompatible_with_the_candidate() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(
+                &extensions.join("future"),
+                "future",
+                r#"{"name":"future","version":"1.0.0","requires":{"homeboy":">=999.0.0"}}"#,
+            );
+
+            let blockers = preflight_extensions_for_upgrade("2.0.0");
+            assert_eq!(blockers.len(), 1);
+            assert_eq!(
+                blockers[0].classification,
+                "controller_version_incompatible"
+            );
+            assert!(blockers[0].detail.contains("selected controller is 2.0.0"));
+            assert_eq!(
+                blockers[0].recovery_command,
+                "homeboy upgrade --skip-extensions"
+            );
+        });
+    }
+
+    #[test]
+    fn extension_preflight_allows_a_compatible_copied_manifest() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(
+                &extensions.join("compatible"),
+                "compatible",
+                r#"{"name":"compatible","version":"1.0.0","requires":{"homeboy":">=1.0.0"}}"#,
+            );
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_preflight_resolves_a_nested_linked_source_through_its_git_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source_root = home.path().join("extension-source");
+            let source = source_root.join("packages/nested");
+            std::fs::create_dir_all(&source).expect("nested source");
+            write_source_manifest(&source_root, "1.0.0");
+            write_extension(&source, "nested", r#"{"name":"nested","version":"1.0.0"}"#);
+            git(&source_root, &["init"]);
+            git(&source_root, &["add", "."]);
+            git(
+                &source_root,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.test",
+                    "commit",
+                    "-m",
+                    "source",
+                ],
+            );
+
+            let extensions = home.path().join(".config/homeboy/extensions");
+            std::fs::create_dir_all(&extensions).expect("extensions directory");
+            std::os::unix::fs::symlink(&source, extensions.join("nested"))
+                .expect("linked extension");
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+        });
+    }
+
+    #[test]
+    fn extension_preflight_failure_does_not_invoke_controller_mutation() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(
+                &extensions.join("incompatible"),
+                "incompatible",
+                r#"{"name":"incompatible","version":"1.0.0","requires":{"homeboy":">=3.0.0"}}"#,
+            );
+
+            let mut controller_mutated = false;
+            let blockers = preflight_extensions_for_upgrade("2.1.0");
+            let result = if blockers.is_empty() {
+                controller_mutated = true;
+                Ok(())
+            } else {
+                Err(extension_preflight_failure_result(
+                    InstallMethod::Binary,
+                    "2.0.0".to_string(),
+                    None,
+                    "2.1.0",
+                    blockers,
+                ))
+            };
+
+            assert!(!controller_mutated, "controller installation must not run");
+            let result = result.expect_err("incompatible extension blocks upgrade");
+            assert_eq!(
+                result.outcome.as_deref(),
+                Some("extension_preflight_failed")
+            );
+            assert_eq!(result.preflight.unwrap().extension_blockers.len(), 1);
+        });
     }
 
     #[test]

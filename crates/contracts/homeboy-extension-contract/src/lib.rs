@@ -152,9 +152,9 @@ pub use trace_spec::{
 };
 
 pub use core_compat::{
-    core_incompatible_error, evaluate_core_compatibility, installed_homeboy_version,
-    validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
-    CORE_INCOMPATIBLE_DIAGNOSTIC,
+    core_incompatible_error, evaluate_core_compatibility, evaluate_core_compatibility_for_version,
+    installed_homeboy_version, validate_core_compatibility, CoreCompatibilityReport,
+    CORE_COMPAT_REMEDIATION_COMMAND, CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use manifest_test_config::{TestPassthroughFilter, TestPassthroughFilterStrategy};
