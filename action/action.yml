@@ -32,6 +32,10 @@ inputs:
     description: 'Cargo profile for source builds: release for shipped binaries or dev for read-only tooling such as planning.'
     required: false
     default: 'release'
+  setup-timeout-seconds:
+    description: 'Maximum wall-clock time for an action setup subprocess, including binary download, source build, and extension installation. Retains command output and exits with timeout evidence.'
+    required: false
+    default: '900'
 
   # ── Extension ──
   extension:
@@ -357,7 +361,7 @@ runs:
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
-      run: bash ${{ github.action_path }}/scripts/setup/resolve-source-cargo-cache.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve source Cargo cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-source-cargo-cache.sh
 
     - name: Cache cargo (source build)
       if: steps.source-cargo-cache.outputs.enabled == 'true'
@@ -374,7 +378,7 @@ runs:
       env:
         SOURCE_PATH: ${{ inputs.source }}
         SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
-      run: bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'build Homeboy from source' -- bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
 
     - name: Resolve Homeboy version
       id: resolve-version
@@ -383,7 +387,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ inputs.version }}
-      run: bash ${{ github.action_path }}/scripts/setup/resolve-homeboy-version.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve Homeboy release version' -- bash ${{ github.action_path }}/scripts/setup/resolve-homeboy-version.sh
 
     - name: Cache Homeboy
       id: cache-homeboy
@@ -401,7 +405,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ steps.resolve-version.outputs.resolved-version }}
-      run: bash ${{ github.action_path }}/scripts/setup/install-homeboy-release.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'install Homeboy release' -- bash ${{ github.action_path }}/scripts/setup/install-homeboy-release.sh
 
     - name: Resolve binary source
       id: resolve-binary
@@ -414,7 +418,7 @@ runs:
 
     - name: Detect Homeboy placement support
       shell: bash
-      run: bash ${{ github.action_path }}/scripts/setup/detect-homeboy-placement.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'detect Homeboy placement support' -- bash ${{ github.action_path }}/scripts/setup/detect-homeboy-placement.sh
 
     - name: Install extension
       if: steps.read-config.outputs.portable-extension != ''
@@ -426,7 +430,7 @@ runs:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
         EXTENSION_REF: ${{ inputs.extension-ref }}
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
-      run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'install Homeboy extension' -- bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 
     - name: Capture tooling metadata
       id: tooling-metadata
@@ -435,7 +439,7 @@ runs:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPOSITORY: ${{ github.action_repository }}
-      run: bash ${{ github.action_path }}/scripts/setup/capture-tooling-metadata.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'capture tooling metadata' -- bash ${{ github.action_path }}/scripts/setup/capture-tooling-metadata.sh
 
     # ── Phase 4: Detect runtime + setup environment ──
     # Uses `homeboy component env` to detect PHP/Node versions from source
@@ -450,7 +454,7 @@ runs:
         NODE_INPUT: ${{ inputs.node-version }}
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
         PORTABLE_EXTENSION: ${{ steps.read-config.outputs.portable-extension }}
-      run: bash ${{ github.action_path }}/scripts/setup/detect-runtime-env.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'detect runtime environment' -- bash ${{ github.action_path }}/scripts/setup/detect-runtime-env.sh
 
     - name: Resolve extension CI cache
       id: extension-cache
@@ -458,7 +462,7 @@ runs:
       env:
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
         PORTABLE_EXTENSION: ${{ steps.read-config.outputs.portable-extension }}
-      run: bash ${{ github.action_path }}/scripts/setup/resolve-extension-cache.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve extension CI cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-extension-cache.sh
 
     - name: Restore extension CI cache
       if: steps.extension-cache.outputs.enabled == 'true'
@@ -500,7 +504,7 @@ runs:
     - name: Auto-setup environment
       if: inputs.auto-setup == 'true'
       shell: bash
-      run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'auto-setup environment' -- bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
 
     - name: Finish dependency/build setup timing
       if: always()

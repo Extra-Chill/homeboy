@@ -93,6 +93,10 @@ on:
         description: 'Cargo profile for action source builds: release or dev.'
         type: string
         default: 'release'
+      setup-timeout-seconds:
+        description: 'Maximum wall-clock time for each Homeboy Action setup subprocess.'
+        type: string
+        default: '900'
       auto-setup:
         description: 'Whether Homeboy Action should install detected runtime dependencies.'
         type: string
@@ -220,6 +224,9 @@ jobs:
     needs: plan
     if: '!inputs.contract-probe'
     runs-on: ubuntu-latest
+    # Caps third-party setup actions such as cache restore, which cannot be
+    # enclosed by the action's subprocess supervisor.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
         with:
@@ -281,6 +288,7 @@ jobs:
           binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
           source-build-profile: ${{ inputs.source-build-profile }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           auto-setup: 'false'
 
       - name: Restore consumer Git exclusions
@@ -456,6 +464,7 @@ jobs:
     needs: [binary, plan]
     if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
@@ -476,7 +485,8 @@ jobs:
         id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
 
       - name: Generate GitHub App token
         id: app-token
@@ -495,6 +505,7 @@ jobs:
         with:
           version: ${{ inputs.version }}
           source: ${{ inputs.source }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
@@ -579,6 +590,7 @@ jobs:
     needs: [binary, plan]
     if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
@@ -597,7 +609,8 @@ jobs:
         id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Run baseline ${{ matrix.title }}
         id: phase
         if: matrix.baseline == 'true'
@@ -608,6 +621,7 @@ jobs:
         with:
           version: ${{ inputs.version }}
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
@@ -691,7 +705,8 @@ jobs:
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Install cargo-nextest for Rust shard planning
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
@@ -742,6 +757,7 @@ jobs:
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
           extension-ref: ${{ inputs.extension-ref }}
@@ -853,7 +869,8 @@ jobs:
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Install cargo-nextest for Rust shard replay
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
@@ -894,6 +911,7 @@ jobs:
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
           extension-ref: ${{ inputs.extension-ref }}
@@ -1096,7 +1114,8 @@ jobs:
         if: steps.final-pr-state.outputs.active != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Install candidate Homeboy binary
         if: steps.final-pr-state.outputs.active != 'false'
         run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
@@ -1173,7 +1192,8 @@ jobs:
         id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Install candidate Homeboy binary
         run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
       - name: Generate GitHub App token

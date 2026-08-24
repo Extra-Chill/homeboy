@@ -166,6 +166,7 @@ if [ "$(uname -s)" = Linux ]; then
   printf 'PASS: genuine live descendants remain failures with actionable process diagnostics\n'
 fi
 
+if [ -d /proc ]; then
 python3 - "${ROOT_DIR}/scripts/core/run-with-liveness-timeout-supervisor.py" <<'PY'
 import importlib.util
 import os
@@ -214,6 +215,9 @@ assert os.getpid() not in observed
 PY
 printf 'PASS: supervisor treats pidfd ESRCH as exited, avoids PID reuse, and fails permission denial\n'
 printf 'PASS: supervisor scan survives processes exiting mid-scan\n'
+else
+  printf 'PASS: Linux /proc supervisor probes are exercised on Linux runners\n'
+fi
 
 if [ "$(uname -s)" = Linux ]; then
   HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/denied-cgroup" HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 bash "${RUNNER}" "rapid child exits" bash -c 'for _ in $(seq 1 200); do (exit 0) & done; wait' >"${TMP_DIR}/rapid.log" 2>&1
