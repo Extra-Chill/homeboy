@@ -67,7 +67,7 @@ FAILED=false
 
 # Check quality command results
 if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
-  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "fail" or .value == "invalid_evidence" or .value == "no_comparable_evidence")' > /dev/null; then
     emit_terminal_diagnostics
     echo "::error::One or more quality commands failed"
     FAILED=true

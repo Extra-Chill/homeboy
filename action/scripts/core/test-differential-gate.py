@@ -74,16 +74,16 @@ def main() -> None:
         write_json(base / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         assert_equal(
-            {"test": "baseline_red"},
+            {"test": "no_comparable_evidence"},
             run_gate({"test": "fail"}, current, base),
-            "test failure that reproduces unchanged on the baseline is baseline_red",
+            "aggregate test counts without outcome sidecars fail closed",
         )
 
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 3, "errors": 1}}})
         assert_equal(
-            {"test": "fail"},
+            {"test": "no_comparable_evidence"},
             run_gate({"test": "fail"}, current, base),
-            "test failure remains when failures increase",
+            "aggregate test regressions require identity evidence",
         )
 
         write_json(
@@ -97,9 +97,9 @@ def main() -> None:
             },
         )
         assert_equal(
-            {"test": "pass"},
+            {"test": "no_comparable_evidence"},
             run_gate({"test": "fail"}, current, base),
-            "changed-scope test failure passes when no failures were introduced",
+            "changed-scope counts do not replace per-test outcomes",
         )
 
         assert_equal(

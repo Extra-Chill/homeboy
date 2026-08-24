@@ -81,6 +81,11 @@ assert_exit 0 "inconclusive quality results do not fail PR" \
 assert_exit 0 "no_measurement quality results do not fail PR" \
   env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
+assert_exit 1 "invalid Test evidence fails final enforcement" \
+  env RESULTS='{"review test":"invalid_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 1 "incomparable Test evidence fails final enforcement" \
+  env RESULTS='{"review test":"no_comparable_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+
 # ...and it must still say so out loud. A silent non-blocking verdict is how an
 # unmeasured command reads as a clean run.
 output="$(env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}" 2>&1)"

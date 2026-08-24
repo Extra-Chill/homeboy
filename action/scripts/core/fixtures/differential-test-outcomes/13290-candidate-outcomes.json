@@ -1,0 +1,1 @@
+{"schema":"homeboy/test-outcomes/v1","command":"review test","inventory_fingerprint":"fixture-13290","outcomes":[{"id":"stable","outcome":"failed"},{"id":"nondeterministic","outcome":"failed"}]}

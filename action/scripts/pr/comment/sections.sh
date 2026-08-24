@@ -73,6 +73,7 @@ status_icon() {
     # without opening the run.
     timeout) printf '%s\n' ':hourglass_flowing_sand:' ;;
     baseline_red|inconclusive|no_measurement) printf '%s\n' ':warning:' ;;
+    invalid_evidence|no_comparable_evidence) printf '%s\n' ':x:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;
   esac
@@ -86,6 +87,8 @@ status_label() {
     baseline_red) printf '%s\n' 'baseline red' ;;
     inconclusive) printf '%s\n' 'inconclusive' ;;
     no_measurement) printf '%s\n' 'no measurement' ;;
+    invalid_evidence) printf '%s\n' 'invalid evidence' ;;
+    no_comparable_evidence) printf '%s\n' 'no comparable evidence' ;;
     skipped) printf '%s\n' 'skipped' ;;
     *) printf '%s\n' 'unknown' ;;
   esac
