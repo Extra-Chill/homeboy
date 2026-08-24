@@ -80,7 +80,7 @@ pub fn bind_accepted_lab_runner_job_in_store(
             None,
         ));
     }
-    record_detached_lab_run_in_store(
+    let record = record_detached_lab_run_in_store(
         lifecycle_store,
         DetachedLabRunRecord {
             run_id: &identity.run_id,
@@ -89,7 +89,17 @@ pub fn bind_accepted_lab_runner_job_in_store(
             remote_workspace,
             remote_command,
         },
-    )
+    )?;
+    if accepted_lab_runner_job_identity_from_record(&record)
+        .as_ref()
+        .is_some_and(|persisted| persisted.matches(identity))
+    {
+        return Ok(record);
+    }
+    Err(Error::internal_unexpected(format!(
+        "accepted Lab runner job identity was not durably persisted: {}",
+        identity.describe()
+    )))
 }
 
 #[derive(Debug, Clone)]
