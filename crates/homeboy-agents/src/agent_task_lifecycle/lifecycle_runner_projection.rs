@@ -610,12 +610,7 @@ fn merge_live_provider_handles(
             .iter()
             .map(provider_runtime_for_handle)
             .collect();
-        record.lifecycle.external_runtime_ids = record
-            .lifecycle
-            .provider_runtime
-            .iter()
-            .flat_map(|runtime| runtime.external_runtime_ids.clone())
-            .collect();
+        record.lifecycle.refresh_external_runtime_ids();
     }
 }
 
