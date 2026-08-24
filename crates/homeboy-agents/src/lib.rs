@@ -46,11 +46,6 @@ pub mod agent_task_repo_loop_compile;
 pub mod agent_task_review_dossier;
 pub mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Scheduler adapters and test fixtures support cancellation and recovery execution paths."
-)]
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
 #[allow(
