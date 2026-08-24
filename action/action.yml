@@ -529,6 +529,7 @@ runs:
       if: github.event_name == 'pull_request'
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/core/check-pr-state.sh"
 
@@ -755,6 +756,7 @@ runs:
       if: always() && github.event_name == 'pull_request'
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/core/check-pr-state.sh"
 

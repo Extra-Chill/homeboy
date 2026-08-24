@@ -265,12 +265,14 @@ settings_json_flags() {
 
 valid_command_result_output() {
   local output_file="$1" expected_command="$2" command_exit="$3"
-  # Homeboy reports the top-level command in the result envelope (`review`),
-  # never the full CI command string (`review lint`). Compare the command root
-  # so the envelope still proves ownership by this invocation without asserting
-  # a subcommand field the binary does not emit.
+  # Homeboy reports the executed top-level command in the result envelope.
+  # Legacy quality aliases (`audit`, `lint`, `test`, `build`) are executed
+  # through `review`, so validate them against the translated command root.
   local expected_root
-  expected_root="$(printf '%s' "${expected_command}" | awk '{print $1}')"
+  case "$(quality_base_command "${expected_command}")" in
+    audit|audit-baseline|lint|test|build) expected_root="review" ;;
+    *) expected_root="$(printf '%s' "${expected_command}" | awk '{print $1}')" ;;
+  esac
   jq -e \
     --arg command "${expected_root}" \
     --argjson command_exit "${command_exit}" '

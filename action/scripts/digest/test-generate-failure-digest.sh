@@ -28,6 +28,10 @@ JSON
 
 cat > "${BIN_DIR}/homeboy" <<'STUB'
 #!/usr/bin/env bash
+if [ "$1" != "runs" ] || [ "$2" != "report" ] || [ "$3" != "failure-digest" ]; then
+  printf 'unsupported Homeboy command: %s\n' "$*" >&2
+  exit 2
+fi
 printf '%s\n' "$@" > "${HOMEBOY_STUB_ARGS_FILE}"
 cat <<'MARKDOWN'
 ## Failure Digest
@@ -83,6 +87,7 @@ grep -F "homeboy review test wordpress --path . --changed-since abc123base" "${D
 grep -F "### Terminal diagnostics" "${DIGEST_FILE}" >/dev/null
 grep -F "structured sidecar \`test.failures\` must be a JSON array for schema v1" "${DIGEST_FILE}" >/dev/null
 
+grep -Fx -- "runs" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "report" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "failure-digest" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--output-dir" "${ARGS_FILE}" >/dev/null

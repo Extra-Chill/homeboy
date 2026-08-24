@@ -198,7 +198,7 @@ jq -n \
   }' > "${TOOLING_JSON}"
 
 ARGS=(
-  report failure-digest
+  runs report failure-digest
   --output-dir "${OUTPUT_DIR}"
   --results "${RESULTS_JSON}"
   --run-url "${RUN_URL}"

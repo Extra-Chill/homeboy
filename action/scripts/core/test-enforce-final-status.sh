@@ -63,6 +63,9 @@ assert_exit 0 "closed PR ignores stale failing quality results" \
 assert_exit 0 "closed PR ignores malformed stale results" \
   env RESULTS='{"review test":"fail"}}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 
+assert_exit 0 "merged PR preserves a completed passing audit" \
+  env RESULTS='{"audit":"pass"}' COMMANDS='audit' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+
 assert_exit 0 "passing quality results pass" \
   env RESULTS='{"review test":"pass"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 

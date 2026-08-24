@@ -13,7 +13,7 @@ cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 set -euo pipefail
 
 case "$*" in
-  *"report failure-digest"*)
+  *"runs report failure-digest"*)
     printf '%s\n' '## Failure Digest'
     ;;
   *"runs findings reconcile"*)

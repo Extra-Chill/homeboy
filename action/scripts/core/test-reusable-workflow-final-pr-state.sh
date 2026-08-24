@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
+ACTION="${ROOT_DIR}/action.yml"
 PROBE="${ROOT_DIR}/scripts/core/check-pr-state.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -32,6 +33,24 @@ assert_pr_state() {
 assert_pr_state CLOSED false 'closed candidate suppresses finalization'
 assert_pr_state MERGED false 'merged candidate suppresses finalization'
 assert_pr_state OPEN true 'active candidate remains eligible for finalization'
+
+python3 - "${ACTION}" <<'PY'
+import sys
+import yaml
+
+action = yaml.safe_load(open(sys.argv[1]))
+probes = [step for step in action["runs"]["steps"] if step.get("id") in ("check-pr-state", "final-pr-state")]
+problems = []
+if len(probes) != 2:
+    problems.append("composite action must have initial and final PR-state probes")
+for probe in probes:
+    if probe.get("env", {}).get("GH_TOKEN") != "${{ inputs.app-token || github.token }}":
+        problems.append(f"{probe.get('id', 'unknown')} lacks an authenticated GitHub state lookup")
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+PY
+printf 'PASS: composite PR-state probes authenticate lifecycle lookups\n'
 
 python3 - "${WORKFLOW}" <<'PY'
 import sys

@@ -69,6 +69,11 @@ FIRST_RESULTS='{"review test":"pass"}' COMMANDS='review test' GITHUB_OUTPUT="${T
 assert_equals '{"review test":"pass"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "passing current results round-trip"
 
 : > "${TMP_DIR}/output"
+FIRST_RESULTS='{"audit":"pass"}' COMMANDS='audit' GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
+assert_equals '{"audit":"pass"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "passing audit result round-trip"
+
+: > "${TMP_DIR}/output"
 FIRST_RESULTS='{"review test":"timeout"}' COMMANDS='review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
   GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
 assert_equals '{"review test":"timeout"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "timeout current results round-trip"
