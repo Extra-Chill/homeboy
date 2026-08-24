@@ -2810,6 +2810,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "action": "lookup_pending",
             "kind": "provider",
             "handle": to_worktree,
+            "worktree_provider_id": args.resolved_worktree_provider_id,
             "provision_intent": {
                 "repo": cook_provision_repository(args),
                 "base": args.base,
@@ -3082,6 +3083,7 @@ pub(crate) fn resolve_cook_destination(
     };
     args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(&task_url, args.head.as_deref(), &config) {
         Ok(Some(resolution)) => {
+            args.resolved_worktree_provider_id = Some(resolution.provider_id.clone());
             if args.head.is_none() {
                 args.head = Some(resolution.worktree.branch.clone());
             }

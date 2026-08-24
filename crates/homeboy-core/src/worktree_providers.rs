@@ -969,16 +969,25 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
             continue;
         }
         let worktrees = if let Some(command) = provider.commands.resolve_task.as_ref() {
+            validate_task_lookup_provider(provider_id, provider)?;
             run_provider_resolve_task_command(provider_id, provider, command, task_url)?
         } else if let Some(command) = provider.commands.list.as_ref() {
             run_provider_list_command(provider_id, provider, command)?
         } else {
             continue;
         };
-        for worktree in worktrees {
-            if worktree.task_url.as_deref() == Some(task_url)
+        for mut worktree in worktrees {
+            if worktree
+                .task_url
+                .as_deref()
+                .map(canonical_worktree_task_url)
+                .as_deref()
+                == Some(canonical_worktree_task_url(task_url).as_str())
                 && head.is_none_or(|head| worktree.branch == head)
             {
+                worktree.task_url = worktree
+                    .task_url
+                    .map(|url| canonical_worktree_task_url(&url));
                 validate_provider_handle(provider_id, &worktree, None, None)?;
                 matches.push(WorktreeProviderResolution {
                     provider_id: provider_id.clone(),
@@ -1005,6 +1014,38 @@ pub fn find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
             None,
         )),
     }
+}
+
+fn canonical_worktree_task_url(task_url: &str) -> String {
+    task_url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn validate_task_lookup_provider(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+) -> Result<()> {
+    let split_identity =
+        provider.commands.resolve_identity.is_some() && provider.commands.attest_safety.is_some();
+    if split_identity || provider.commands.resolve.is_some() || provider.commands.list.is_some() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "worktree_providers.commands.resolve_task",
+        format!(
+            "worktree provider `{provider_id}` configures resolve_task but cannot subsequently resolve its selected handle"
+        ),
+        Some(provider_id.to_string()),
+        Some(vec![
+            "Configure resolve_identity plus attest_safety, resolve, or list for the same provider."
+                .to_string(),
+        ]),
+    ))
 }
 
 /// A clean immutable candidate may be its own destination before Homeboy's
@@ -1898,7 +1939,7 @@ fn run_provider_resolve_task_command(
         provider,
         &command,
         "resolve_task",
-        &provider.commands.resolve_not_found_exit_codes,
+        &provider.commands.resolve_task_not_found_exit_codes,
     )
 }
 
@@ -6342,6 +6383,7 @@ mod tests {
         provider.apply_enabled = true;
         provider.commands.list = None;
         provider.commands.resolve_task = Some(vec![script, "{task_url}".to_string()]);
+        provider.commands.resolve = provider.commands.resolve_task.clone();
 
         let found = find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
             task_url,
@@ -6351,6 +6393,49 @@ mod tests {
         .expect("targeted task lookup")
         .expect("later compatible task candidate");
         assert_eq!(found.worktree.handle, "project@task-216");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn targeted_task_lookup_uses_its_own_not_found_exit_codes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = tempfile::NamedTempFile::new()
+            .expect("provider script")
+            .into_temp_path();
+        std::fs::write(&script, "#!/bin/sh\nexit 19\n").expect("write provider script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make provider executable");
+        let mut mapping = worktrees_mapping();
+        mapping.task_url = Some("$.task_url".to_string());
+        let mut provider = list_provider(script.display().to_string(), mapping);
+        provider.apply_enabled = true;
+        provider.commands.list = None;
+        provider.commands.resolve = Some(vec![script.display().to_string()]);
+        provider.commands.resolve_task =
+            Some(vec![script.display().to_string(), "{task_url}".to_string()]);
+        provider.commands.resolve_not_found_exit_codes = vec![19];
+
+        let task_url = "https://example.test/owner/project/issues/216";
+        let error = find_apply_enabled_worktree_provider_by_task_url_from_config(
+            task_url,
+            &config_with_provider(provider.clone()),
+        )
+        .expect_err("handle lookup exit codes must not authorize task lookup absence");
+        assert_eq!(error.details["worktree_provider_operation"], "resolve_task");
+
+        provider.commands.resolve_task_not_found_exit_codes = vec![19];
+        assert!(
+            find_apply_enabled_worktree_provider_by_task_url_from_config(
+                task_url,
+                &config_with_provider(provider),
+            )
+            .expect("task-specific not-found exit code")
+            .is_none()
+        );
     }
 
     #[test]

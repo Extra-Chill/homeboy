@@ -688,6 +688,11 @@ pub struct WorktreeProviderCommands {
     /// handle or path is absent. All other non-zero statuses remain failures.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolve_not_found_exit_codes: Vec<i32>,
+    /// Provider-native targeted task lookup statuses that mean the task has no
+    /// managed candidates. This is independent from handle lookup because
+    /// providers may use distinct commands and error vocabularies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve_task_not_found_exit_codes: Vec<i32>,
     /// Discovery command and compatibility fallback for providers without
     /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -740,6 +745,7 @@ impl Default for WorktreeProviderCommands {
             resolve_task: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
+            resolve_task_not_found_exit_codes: Vec::new(),
             list: None,
             ensure: None,
             converge: None,
@@ -1209,6 +1215,7 @@ mod tests {
             resolve_task: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
+            resolve_task_not_found_exit_codes: Vec::new(),
             list: Some(vec!["provider".to_string(), "list".to_string()]),
             ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
             converge: None,

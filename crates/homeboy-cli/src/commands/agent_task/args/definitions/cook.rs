@@ -971,6 +971,10 @@ pub struct AgentTaskCookArgs {
     /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
+    /// Provider selected by task-URL discovery. This is controller-derived and
+    /// persists into Cook's deferred exact-resolution lifecycle.
+    #[arg(skip)]
+    pub resolved_worktree_provider_id: Option<String>,
     #[arg(
         long,
         value_name = "COMMAND",

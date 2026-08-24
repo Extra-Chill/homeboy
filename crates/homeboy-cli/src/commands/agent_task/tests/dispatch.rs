@@ -173,7 +173,7 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"project@task-216\",\"path\":\"{}\",\"branch\":\"fix/216-persist-task\",\"task_url\":\"https://example.test/owner/project/issues/216\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"project@task-216\",\"path\":\"{}\",\"branch\":\"fix/216-persist-task\",\"task_url\":\"https://example.test/owner/project/issues/216/?legacy#fragment\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
                 workspace.path().display()
             ),
         )
@@ -199,6 +199,7 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
                         provider.display().to_string(),
                         "{task_url}".to_string(),
                     ]),
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -226,7 +227,7 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
             "--repo".to_string(),
             "project".to_string(),
             "--task-url".to_string(),
-            "https://example.test/owner/project/issues/216".to_string(),
+            "https://example.test/owner/project/issues/216/?caller#fragment".to_string(),
             "--head".to_string(),
             "fix/216-persist-task".to_string(),
             "--no-finalize".to_string(),
@@ -234,6 +235,27 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
         .expect("reuse the matching task workspace");
         assert_eq!(resolved.to_worktree.as_deref(), Some("project@task-216"));
         assert_eq!(resolved.head.as_deref(), Some("fix/216-persist-task"));
+        assert_eq!(
+            resolved.dispatch.task_url.as_deref(),
+            Some("https://example.test/owner/project/issues/216")
+        );
+        let provision = super::super::run::provision_cook_destination(&resolved)
+            .expect("persist selected provider for deferred Cook materialization");
+        assert_eq!(provision["worktree_provider_id"], "fixture");
+        assert_eq!(
+            provision["provision_intent"]["task_url"],
+            "https://example.test/owner/project/issues/216"
+        );
+        let plan = super::super::run::compile_cook_plan(&resolved, provision.clone())
+            .expect("carry task selection through the durable Cook plan");
+        assert_eq!(
+            plan.metadata["cook_provision"]["worktree_provider_id"],
+            "fixture"
+        );
+        assert_eq!(
+            plan.metadata["cook_provision"]["provision_intent"]["task_url"],
+            "https://example.test/owner/project/issues/216"
+        );
     });
 }
 
