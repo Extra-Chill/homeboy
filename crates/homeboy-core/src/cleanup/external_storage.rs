@@ -418,6 +418,7 @@ fn invoke_raw(
     reclaim_targets: Vec<ExternalStorageReclaimTarget>,
     deadline: Option<SystemTime>,
 ) -> Result<Vec<u8>> {
+    let inventory_request = matches!(&operation, ExternalStorageOperation::Inventory);
     let Some((program, args)) = provider.command.split_first() else {
         return Err(Error::validation_invalid_argument(
             "external_storage_retention.providers.command",
@@ -519,12 +520,6 @@ fn invoke_raw(
             provider.id
         ))
     })?;
-    write_result.map_err(|error| {
-        Error::internal_unexpected(format!(
-            "write external storage provider '{}': {error}",
-            provider.id
-        ))
-    })?;
     if result.termination != SupervisedCommandTermination::Completed
         || !result.output.status.success()
     {
@@ -532,6 +527,19 @@ fn invoke_raw(
             "external storage provider '{}' failed or exceeded its output budget",
             provider.id
         )));
+    }
+    if let Err(error) = write_result {
+        // Inventory is a read-only probe. A helper may emit its complete
+        // terminal response and close stdin without reading the request; once
+        // the supervised terminal status is successful, let the JSON response
+        // below decide its validity. Reclaim targets are mutations and always
+        // require complete stdin delivery.
+        if !inventory_request || error.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(Error::internal_unexpected(format!(
+                "write external storage provider '{}': {error}",
+                provider.id
+            )));
+        }
     }
     Ok(result.output.stdout)
 }
@@ -822,6 +830,46 @@ mod tests {
         assert_eq!(output.provider_count, 1);
         assert_eq!(output.providers.len(), 1);
         assert_eq!(output.providers[0].candidate_count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_inventory_early_close_uses_terminal_output() {
+        // This fixture closes stdin before emitting JSON. A successful terminal
+        // response remains authoritative for this read-only operation.
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": "early-close",
+            "generation": "g1", "items": [{
+                "id": "scratch", "root_id": "root", "class": "scratch", "bytes": 10,
+                "locator": "scratch", "reconstructable": true, "active": false,
+                "referenced": false, "ownership_known": true, "age_days": 7,
+                "reclaim_token": "token"
+            }]
+        });
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "early-close".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("exec 0<&-; sleep 0.1; printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        };
+        let output = cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 10,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: None,
+            },
+        )
+        .expect("successful inventory output");
+        assert_eq!(output.candidate_count, 1);
     }
 
     #[cfg(unix)]
