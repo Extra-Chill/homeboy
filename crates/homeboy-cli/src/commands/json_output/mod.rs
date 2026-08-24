@@ -110,6 +110,23 @@ pub(crate) fn run_command_output(
         Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
             refresh_homeboy_command_run(args, output_file)
         }
+        Commands::Ssh(args)
+            if matches!(
+                args.subcommand,
+                Some(super::ssh::SshSubcommand::List { full: false })
+            ) =>
+        {
+            command_run_with_summary(
+                dispatch(Commands::Ssh(args), spec, placement),
+                |payload, _| super::ssh::render_list_summary(payload),
+            )
+        }
+        Commands::Runner(args) if runner::is_compact_doctor_stdout(&args) => {
+            command_run_with_summary(
+                dispatch(Commands::Runner(args), spec, placement),
+                |payload, _| super::runner::doctor::render_summary(payload),
+            )
+        }
         Commands::Runner(args) => runner::run_command_output(args),
         Commands::Activity(args) => command_run_with_summary(
             dispatch(Commands::Activity(args), spec, placement),

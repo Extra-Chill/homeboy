@@ -51,6 +51,33 @@ fn doctor_output_omits_empty_repairs() {
 }
 
 #[test]
+fn compact_doctor_projection_bounds_evidence_and_renders_action() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.checks = (0..(COMPACT_CHECK_LIMIT + 5))
+        .map(|index| types::RunnerCheck {
+            id: format!("check-{index}"),
+            status: RunnerDoctorStatus::Warning,
+            message: "m".repeat(4_000),
+            remediation: Some("homeboy runner doctor local --repair".to_string()),
+            details: BTreeMap::from([("large".to_string(), "d".repeat(4_000))]),
+        })
+        .collect();
+
+    let compact = output_projection(report, false);
+    let rendered = serde_json::to_string(&compact).expect("compact JSON");
+    assert_eq!(
+        compact["checks"].as_array().expect("checks").len(),
+        COMPACT_CHECK_LIMIT
+    );
+    assert_eq!(compact["truncation"]["checks"]["omitted"], 5);
+    assert!(rendered.len() < 16 * 1024, "{rendered}");
+    assert_eq!(
+        render_summary(&compact).as_deref(),
+        Some("Runner doctor\nStatus: degraded\nChecks shown: 12\nNext: homeboy runner doctor local --full")
+    );
+}
+
+#[test]
 fn capabilities_are_runner_substrate_only() {
     let (report, _) = run("local").expect("local doctor report");
     let value = serde_json::to_value(report).expect("serialize report");

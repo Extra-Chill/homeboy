@@ -104,6 +104,108 @@ pub(crate) fn run_with_options(
     Ok((report, exit_code))
 }
 
+const COMPACT_CHECK_LIMIT: usize = 12;
+const COMPACT_PROVIDER_LIMIT: usize = 10;
+const COMPACT_TEXT_LIMIT: usize = 256;
+
+/// Keep default doctor output to the facts needed to decide whether the runner
+/// is usable. `--full` remains a lossless, redacted evidence surface.
+pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
+    let value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+    if full {
+        return homeboy::core::redaction::redact_json(&value);
+    }
+
+    let failed_checks = report
+        .checks
+        .iter()
+        .filter(|check| check.status != RunnerDoctorStatus::Ok)
+        .count();
+    let checks = report
+        .checks
+        .iter()
+        .take(COMPACT_CHECK_LIMIT)
+        .map(|check| {
+            serde_json::json!({
+                "id": bounded_text(&check.id),
+                "status": check.status,
+                "message": bounded_text(&check.message),
+                "remediation": check.remediation.as_deref().map(bounded_text),
+            })
+        })
+        .collect::<Vec<_>>();
+    let (ready_for, blocked_for) = report.provider_readiness.as_ref().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |readiness| {
+            (
+                readiness
+                    .ready_for
+                    .iter()
+                    .take(COMPACT_PROVIDER_LIMIT)
+                    .map(|value| bounded_text(value))
+                    .collect::<Vec<_>>(),
+                readiness
+                    .blocked_for
+                    .iter()
+                    .take(COMPACT_PROVIDER_LIMIT)
+                    .map(|value| bounded_text(value))
+                    .collect::<Vec<_>>(),
+            )
+        },
+    );
+    let provider_total = report.provider_readiness.as_ref().map_or(0, |readiness| {
+        readiness.ready_for.len() + readiness.blocked_for.len()
+    });
+    let runner_id = bounded_text(&report.runner_id);
+    serde_json::json!({
+        "schema": "homeboy/runner-doctor/v1",
+        "command": report.command,
+        "runner_id": runner_id,
+        "runner": report.runner,
+        "status": report.status,
+        "operator_summary": {
+            "identity": "runner doctor",
+            "state": match report.status { RunnerDoctorStatus::Ok => "ready", RunnerDoctorStatus::Warning => "degraded", RunnerDoctorStatus::Error => "blocked" },
+            "risk": if failed_checks == 0 { Vec::new() } else { vec![format!("{failed_checks} check(s) need attention")] },
+            "next_action": format!("homeboy runner doctor {} --full", report.runner_id),
+        },
+        "capabilities": report.capabilities,
+        "resources": {
+            "homeboy": { "version": bounded_text(&report.resources.homeboy.version) },
+            "system": { "os": bounded_text(&report.resources.system.os), "arch": bounded_text(&report.resources.system.arch) },
+            "cpu": { "count": report.resources.cpu.count },
+        },
+        "checks": checks,
+        "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
+        "truncation": {
+            "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {} --full", report.runner_id) },
+            "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {} --full", report.runner_id) },
+            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
+        }
+    })
+}
+
+fn bounded_text(value: &str) -> String {
+    if value.len() <= COMPACT_TEXT_LIMIT {
+        return value.to_string();
+    }
+    let end = value
+        .char_indices()
+        .find_map(|(index, _)| (index >= COMPACT_TEXT_LIMIT).then_some(index))
+        .unwrap_or(value.len());
+    format!("{}...", &value[..end])
+}
+
+pub(crate) fn render_summary(payload: &serde_json::Value) -> Option<String> {
+    let summary = payload.get("operator_summary")?;
+    let checks = payload.get("checks")?.as_array()?.len();
+    Some(format!(
+        "Runner doctor\nStatus: {}\nChecks shown: {checks}\nNext: {}",
+        summary.get("state")?.as_str()?,
+        summary.get("next_action")?.as_str()?,
+    ))
+}
+
 /// A bare `--repair` is the Lab daemon recovery request emitted by runner
 /// recovery guidance. Resolve it before probing so that command both diagnoses
 /// and applies the repair it advertises.
