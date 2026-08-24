@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.358.0] - 2026-08-24
+
+### Added
+- retain external runtime storage
+
+### Changed
+- format baseline fallback
+- cover daemon state child environment
+
+### Fixed
+- tolerate completed inventory early close
+- fail closed when base measurement fails
+- unify snapshot ignore manifests
+- pin timed-out ensure reconciliation
+- reject duplicate external storage items
+- reconcile timed-out worktree ensure
+- retain daemon state for child jobs
+- bound external storage cleanup
+- bound external storage planning
+- bound external storage provider requests
+- harden external storage retention
+- compare changed scope to git base
+
 ## [0.357.2] - 2026-08-24
 
 ### Fixed
