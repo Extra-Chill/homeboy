@@ -1703,6 +1703,51 @@ fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots(
 }
 
 #[test]
+fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let ignored = source.join("docs/superpowers/plans/ignored.md");
+    fs::create_dir_all(ignored.parent().expect("ignored parent")).expect("ignored directory");
+    fs::write(source.join("README.md"), "tracked\n").expect("tracked source");
+    fs::write(&ignored, "ignored\n").expect("ignored source");
+    let excludes = vec!["**/docs/superpowers/".to_string()];
+
+    let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let staged =
+        snapshot_stable_manifest(&stage.path().join("source"), &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+
+    validate_snapshot_stability(
+        &before,
+        &staged,
+        &after,
+        &source,
+        &stage.path().join("source"),
+    )
+    .expect("ignored paths use one manifest policy");
+
+    let provider_workspace = workspace.path().join("provider-workspace");
+    fs::create_dir_all(&provider_workspace).expect("provider workspace");
+    materialize_snapshot_piped(
+        &source,
+        &format!(
+            "tar -C {} -xf -",
+            homeboy_core::engine::shell::quote_arg(&provider_workspace.display().to_string())
+        ),
+        &excludes,
+        "test snapshot transport",
+        None,
+    )
+    .expect("snapshot reaches provider transport");
+    assert!(provider_workspace.join("README.md").is_file());
+    assert!(!provider_workspace
+        .join("docs/superpowers/plans/ignored.md")
+        .exists());
+}
+
+#[test]
 fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("source");
