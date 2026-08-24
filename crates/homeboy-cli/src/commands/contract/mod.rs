@@ -196,15 +196,14 @@ pub struct ContractListEntry {
     pub title: &'static str,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct ContractDetail {
-    pub schema_id: &'static str,
-    pub name: &'static str,
-    pub title: &'static str,
-    pub owner: &'static str,
-    pub summary: &'static str,
-    pub rust_type: &'static str,
-}
+/// The detail view of one registered contract.
+///
+/// This was a second declaration of [`ContractRegistryEntry`] -- the same six
+/// `&'static str` fields in the same order -- and the conversion between them
+/// copied all six across one at a time. A registry row and the detail rendered
+/// from that row were never different data; `ContractRegistrySummary` and
+/// `ContractListEntry` are the pair that genuinely narrows, and they still do.
+pub type ContractDetail = ContractRegistryEntry;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ContractValidateOutput {
@@ -254,19 +253,6 @@ impl From<&'static ContractRegistryEntry> for ContractListEntry {
             schema_id: entry.schema_id,
             name: entry.name,
             title: entry.title,
-        }
-    }
-}
-
-impl From<&'static ContractRegistryEntry> for ContractDetail {
-    fn from(entry: &'static ContractRegistryEntry) -> Self {
-        Self {
-            schema_id: entry.schema_id,
-            name: entry.name,
-            title: entry.title,
-            owner: entry.owner,
-            summary: entry.summary,
-            rust_type: entry.rust_type,
         }
     }
 }
@@ -421,7 +407,7 @@ pub fn run(args: ContractArgs) -> CmdResult<ContractOutput> {
             Ok((
                 ContractOutput::Show(ContractShowOutput {
                     kind: "show",
-                    contract: contract.into(),
+                    contract: *contract,
                 }),
                 0,
             ))
