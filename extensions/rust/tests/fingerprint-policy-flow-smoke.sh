@@ -368,5 +368,67 @@ assert parent_owners == {
     ("allowed", "crate::domain::Policy"),
 }
 
+
+# --- structural field type resolution -------------------------------------
+#
+# A field type's generic arguments are part of its identity. Stripping them to
+# the constructor reports `Option<Inner>` and `Option<Other>` as the same field,
+# which is how a narrowing boundary reads as a duplicated type to any consumer
+# of `type_id`.
+
+field_result = fingerprint("src/domain/shapes.rs", '''
+pub struct Inner { pub a: u32 }
+pub struct Other { pub b: u32 }
+
+pub struct Wire {
+    pub id: String,
+    pub payload: Option<Inner>,
+    pub counts: Vec<u32>,
+}
+
+pub struct Narrowed {
+    pub id: String,
+    pub payload: Option<Other>,
+    pub counts: Vec<u32>,
+}
+''')
+shapes = {
+    definition["type_id"].split("::")[-1]: {
+        field["name"]: field.get("type_id")
+        for field in definition["fields"]
+    }
+    for definition in field_result["aggregate_definitions"]
+}
+
+# Applications resolve head-and-arguments rather than stripped to the head.
+assert shapes["Wire"]["counts"] == "Vec<u32>", shapes["Wire"]
+assert shapes["Wire"]["id"] == "String", shapes["Wire"]
+assert shapes["Wire"]["payload"] == "Option<crate::domain::shapes::Inner>", shapes["Wire"]
+
+# Two applications of one constructor over different arguments are different
+# field types. This is the whole point: without it these two structs have an
+# identical shape.
+assert shapes["Wire"]["payload"] != shapes["Narrowed"]["payload"], shapes
+assert shapes["Narrowed"]["payload"] == "Option<crate::domain::shapes::Other>", shapes["Narrowed"]
+
+# Resolution is total or nothing. A partially resolved application compares
+# equal to another type that differs exactly where neither side could be
+# resolved, which is a false claim of sameness.
+opaque_result = fingerprint("src/domain/opaque.rs", '''
+pub struct Holder {
+    pub handle: Option<NotDeclaredAnywhere>,
+    pub known: Option<String>,
+    pub nested: Vec<Option<String>>,
+}
+''')
+opaque = {
+    field["name"]: field.get("type_id")
+    for definition in opaque_result["aggregate_definitions"]
+    for field in definition["fields"]
+}
+assert opaque["handle"] is None, opaque
+assert opaque["known"] == "Option<String>", opaque
+assert opaque["nested"] == "Vec<Option<String>>", opaque
+
 print("Rust policy-flow fingerprint smoke passed")
 PY
