@@ -18,7 +18,7 @@ use crate::agent_task_process_containment::{
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
@@ -1494,57 +1494,6 @@ fn execution_deadline_outcome(
             "completed_phase": completed_phase,
         }),
     )
-}
-
-#[cfg(test)]
-pub(super) fn run_provider_command(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-) -> AgentTaskOutcome {
-    let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id, 1)
-}
-
-#[cfg(test)]
-pub(super) fn run_provider_command_once(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-) -> AgentTaskOutcome {
-    let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider, None, 1)
-}
-
-#[cfg(test)]
-fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
-    let artifacts_path = std::env::temp_dir()
-        .join("homeboy-agent-task-provider-tests")
-        .join(homeboy_core::paths::sanitize_path_segment(&request.task_id))
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&artifacts_path).expect("test executor artifact root");
-    AgentTaskExecutorRequest {
-        request: request.clone(),
-        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("test artifact identity"),
-        artifacts_path,
-        artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
-            owner: "homeboy".to_string(),
-            locality: "runner".to_string(),
-            plan_id: "provider-unit-test".to_string(),
-            run_id: None,
-            task_id: request.task_id.clone(),
-            attempt: 1,
-        },
-        resolved_runtime_tools: Vec::new(),
-    }
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 fn spawn_output_reader<R>(

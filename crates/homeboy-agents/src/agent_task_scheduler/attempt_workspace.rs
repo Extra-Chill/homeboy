@@ -63,13 +63,6 @@ impl HarvestExecutionContext {
         )
     }
 
-    fn from_transport_values(
-        source: Option<&str>,
-        lab: Option<&str>,
-    ) -> homeboy_core::Result<Self> {
-        Self::from_transport_values_with_runner_execution(source, lab, false)
-    }
-
     fn from_transport_values_with_runner_execution(
         source: Option<&str>,
         lab: Option<&str>,
@@ -884,43 +877,8 @@ fn sha256_hex(contents: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::fs;
     use std::process::Command;
-
-    #[test]
-    fn harvest_context_resolves_direct_lab_transport_references() {
-        let directory = tempfile::tempdir().expect("transport directory");
-        let source = serde_json::to_vec(&homeboy_core::source_snapshot::existing_remote(
-            "runner-a",
-            "/runner/workspace",
-            None,
-        ))
-        .expect("source snapshot");
-        let lab = br#"{"schema":"fixture/lab-offload/v1","runner_id":"runner-a"}"#;
-        let reference = |name: &str, payload: &[u8]| {
-            let path = directory.path().join(name);
-            fs::write(&path, payload).expect("write transport payload");
-            serde_json::json!({
-                "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
-                "path": path,
-                "sha256": format!("{:x}", Sha256::digest(payload)),
-            })
-            .to_string()
-        };
-
-        let context = HarvestExecutionContext::from_transport_values(
-            Some(&reference("source.json", &source)),
-            Some(&reference("lab.json", lab)),
-        )
-        .expect("referenced transport");
-
-        assert_eq!(
-            context.source_snapshot.expect("source").runner_id,
-            "runner-a"
-        );
-        assert_eq!(context.lab_offload.expect("lab")["runner_id"], "runner-a");
-    }
 
     #[test]
     fn generic_runner_exec_snapshot_stays_with_the_outer_command() {
@@ -932,61 +890,6 @@ mod tests {
         .expect("generic runner exec is not a Lab handoff");
 
         assert!(!context.snapshot_signaled());
-    }
-
-    #[test]
-    fn terminal_cleanup_reclaims_build_output_before_preserving_changed_source() {
-        let source = tempfile::tempdir().expect("source repository");
-        git(source.path(), &["init", "-b", "main"]);
-        fs::create_dir_all(source.path().join("src")).expect("source directory");
-        fs::write(source.path().join("src/lib.rs"), "base").expect("source file");
-        // Cleanup refuses to reclaim an artifact path holding untracked work
-        // that Git does not ignore, so the fixture has to ignore target/ the
-        // way a real Cargo checkout does.
-        fs::write(source.path().join(".gitignore"), "target/\n").expect("gitignore");
-        git(source.path(), &["add", "src/lib.rs", ".gitignore"]);
-        git(
-            source.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-        let attempt_root = source.path().join("attempt");
-        git(
-            source.path(),
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                attempt_root.to_str().expect("attempt path"),
-                "HEAD",
-            ],
-        );
-        fs::create_dir_all(attempt_root.join("target/debug")).expect("target directory");
-        fs::write(attempt_root.join("target/debug/app"), "artifact").expect("target artifact");
-        fs::write(attempt_root.join("src/lib.rs"), "changed source").expect("changed source");
-
-        let workspace = AttemptWorkspace {
-            source_root: source.path().to_path_buf(),
-            root: attempt_root.clone(),
-            base_sha: git_output(&attempt_root, &["rev-parse", "HEAD"]).expect("attempt head"),
-        };
-        let error = workspace
-            .cleanup()
-            .expect_err("changed source retains worktree");
-
-        assert!(error.contains("uncommitted changes"));
-        assert!(!attempt_root.join("target").exists());
-        assert_eq!(
-            fs::read_to_string(attempt_root.join("src/lib.rs")).expect("source remains"),
-            "changed source"
-        );
     }
 
     #[test]

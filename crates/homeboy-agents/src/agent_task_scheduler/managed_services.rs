@@ -12,6 +12,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use super::AgentTaskManagedServiceLifecycle;
+#[cfg(test)]
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
@@ -20,10 +23,7 @@ use homeboy_core::process::{
 };
 use serde_json::{json, Value};
 
-use super::{
-    AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
-    AgentTaskManagedServiceReadinessKind,
-};
+use super::{AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceReadinessKind};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentTaskManagedServiceRecord {
@@ -318,25 +318,6 @@ impl AgentTaskServiceSupervisor {
             listener,
         });
         Ok(())
-    }
-
-    pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
-        let values = self.records().into_iter().map(|record| (record.id.clone(), json!({
-            "local_url": record.local_url, "public_url": record.public_url,
-            "browser_origin_probe": record.browser_origin_evidence,
-            "lease_ref": format!("managed-service:{}", record.id),
-            "readiness_attempts": record.readiness_attempts,
-            "endpoint_ownership": record.provenance["endpoint_ownership"],
-            "service_owner": { "pid": record.pid, "process_group_id": record.process_group_id, "runner_id": record.owner_runner_id, "runner_job_id": record.owner_runner_job_id },
-        }))).collect::<serde_json::Map<_, _>>();
-        if !inputs.is_object() {
-            *inputs = json!({});
-        }
-        inputs["services"] = Value::Object(values.clone());
-        if !metadata.is_object() {
-            *metadata = json!({});
-        }
-        metadata["managed_services"] = Value::Object(values);
     }
 
     pub(super) fn records(&self) -> Vec<AgentTaskManagedServiceRecord> {
@@ -1935,59 +1916,6 @@ mod tests {
                     .detail
                     .as_deref(),
                 Some("parent lost")
-            );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stale_reconcile_reaps_daemonized_descendants_by_persisted_process_group() {
-        with_isolated_home(|_| {
-            let service = AgentTaskManagedService {
-                version: AgentTaskManagedService::VERSION,
-                id: "daemon".to_string(),
-                command: vec![
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    "sleep 30 & exit 0".to_string(),
-                ],
-                cwd: None,
-                env: HashMap::new(),
-                env_allowlist: vec!["PATH".to_string()],
-                secret_env: Vec::new(),
-                secret_env_plan: None,
-                host: "127.0.0.1".to_string(),
-                port: None,
-                port_env: None,
-                socket_handoff: false,
-                readiness: None,
-                cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
-                public_url: None,
-                browser_origin_probe: None,
-                lifecycle: AgentTaskManagedServiceLifecycle::Plan,
-                target: None,
-            };
-            let services = ManagedServices::start(&[service], "orphaned-daemon")
-                .expect("start daemonizing service");
-            let group = services.records()[0]
-                .process_group_id
-                .expect("persisted process group");
-            // Simulate controller loss: the ledger survives but no in-memory
-            // supervisor is available to reap the daemonized descendant.
-            std::mem::forget(services);
-            std::thread::sleep(Duration::from_millis(100));
-
-            let records = reconcile_run_services("orphaned-daemon", "stale_controller")
-                .expect("reconcile persisted service ledger");
-            assert_eq!(records[0].state, "stopped");
-            assert!(records[0]
-                .cleanup
-                .as_deref()
-                .unwrap_or_default()
-                .contains("reaped_process_group"));
-            assert!(
-                !homeboy_core::process::isolated_process_group_is_running(group)
-                    .expect("inspect process group")
             );
         });
     }

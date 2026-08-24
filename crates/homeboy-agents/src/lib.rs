@@ -9,10 +9,6 @@
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_artifacts;
-#[allow(
-    dead_code,
-    reason = "Batch test fixtures cover alternative artifact execution paths."
-)]
 pub mod agent_task_batch;
 pub mod agent_task_candidate_baseline;
 pub mod agent_task_config_materialization;
@@ -54,21 +50,11 @@ mod agent_task_process_containment;
 )]
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Provider discovery and test fixtures support configured optional executors."
-)]
 pub mod agent_task_provider;
 pub mod agent_task_repo_loop_compile;
 pub mod agent_task_review_dossier;
 pub mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Scheduler adapters and test fixtures support cancellation and recovery execution paths."
-)]
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
 #[allow(

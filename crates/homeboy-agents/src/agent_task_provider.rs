@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -126,8 +126,7 @@ use catalog::{
 #[cfg(test)]
 use command_runner::{
     immediate_provider_failure, is_transient_provider_error, provider_command_env,
-    render_provider_command_display, run_provider_command, run_provider_command_once,
-    PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    render_provider_command_display,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;
@@ -137,9 +136,6 @@ use outcome_normalization::{
     surface_provider_run_result_diagnostics,
 };
 #[cfg(test)]
-use resolution::{
-    discover_agent_task_executor_providers, provider_requires_cwd_git_checkout_with_providers,
-    select_provider_by_backend,
-};
+use resolution::select_provider_by_backend;
 #[cfg(test)]
 use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};

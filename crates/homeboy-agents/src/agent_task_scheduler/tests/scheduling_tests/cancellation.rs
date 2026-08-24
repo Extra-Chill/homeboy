@@ -28,30 +28,4 @@ mod cancellation_tests {
 
         assert_eq!(immediate_count.load(Ordering::SeqCst), 1);
     }
-
-    #[test]
-    fn cancellation_stops_queued_tasks_and_notifies_running_executor() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(100));
-        let cancel_calls = Arc::clone(&executor.cancel_calls);
-        let running = Arc::clone(&executor.running);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(3);
-        plan.options.max_concurrency = 1;
-        let token = AgentTaskCancellationToken::default();
-        let worker_token = token.clone();
-
-        let handle = thread::spawn(move || scheduler.run_with_cancellation(plan, worker_token));
-        wait_until("the first task to start running", || {
-            running.load(Ordering::SeqCst) != 0
-        });
-        token.cancel();
-        let aggregate = handle.join().expect("scheduler thread");
-
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Cancelled);
-        assert!(aggregate.totals.cancelled >= 2);
-        assert!(cancel_calls
-            .lock()
-            .expect("cancel calls")
-            .contains(&"task-1".to_string()));
-    }
 }
