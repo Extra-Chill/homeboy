@@ -819,9 +819,7 @@ fn the_ambient_reach_check_catches_the_pre_fix_record_aggregate_in_store() {
         findings[0].reaches
     );
     assert!(
-        findings[0].reaches[0].starts_with(
-            "`update_cook_candidate_after_completion(`"
-        ),
+        findings[0].reaches[0].starts_with("`update_cook_candidate_after_completion(`"),
         "the reach must name the ambient call, not something incidental: {}",
         findings[0].reaches[0]
     );
