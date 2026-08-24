@@ -41,11 +41,6 @@ pub mod agent_task_notify;
 mod agent_task_process_containment;
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "Provider discovery and test fixtures support configured optional executors."
-)]
 pub mod agent_task_provider;
 pub mod agent_task_repo_loop_compile;
 pub mod agent_task_review_dossier;
