@@ -412,6 +412,15 @@ pub fn submit_plan_in_store(
 ///
 /// An empty plan is intentional: this record owns only the handoff lifecycle,
 /// while the detached Cook persists the immutable execution plan and attempt.
+/// An unmaterialized admission has no executable task plan. It can progress
+/// only through its fenced admission reconciler.
+pub fn is_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
+    record
+        .metadata
+        .get("unmaterialized_cook_admission")
+        .is_some_and(Value::is_object)
+}
+
 pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     record_detached_cook_handoff_parent_in_store(&lifecycle_store, cook_id)
