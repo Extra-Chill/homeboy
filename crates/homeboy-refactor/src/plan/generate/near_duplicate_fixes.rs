@@ -363,7 +363,7 @@ fn build_visibility_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InsertionKind;
+    use crate::auto::InsertionKind;
     use std::collections::{HashMap, HashSet};
 
     #[test]
