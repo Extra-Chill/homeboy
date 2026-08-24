@@ -49,7 +49,7 @@ pub use args::{
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
-pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
     + Send
     + Sync
     + 'a;
@@ -65,16 +65,19 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     let announced_identity = std::sync::atomic::AtomicBool::new(false);
     let no_progress = matches!(&args.command, AgentTaskCommand::Cook(cook) if cook.no_progress);
     let reporter = CookProgressReporter::new(no_progress);
-    let progress =
-        |phase: &str, cook_id: Option<&str>, run_id: Option<&str>, activity: Option<&str>| {
-            if let Some(run_id) = run_id {
-                if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    run::announce_durable_cook_identity(cook_id, run_id);
-                }
+    let progress = |phase: &str,
+                    cook_id: Option<&str>,
+                    run_id: Option<&str>,
+                    activity: Option<&str>,
+                    terminal_retry_command: Option<&str>| {
+        if let Some(run_id) = run_id {
+            if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                run::announce_durable_cook_identity(cook_id, run_id);
             }
-            reporter.report(phase, cook_id, run_id, activity);
-            Ok(())
-        };
+        }
+        reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);
+        Ok(())
+    };
     run_with_cook_progress(args, Some(&progress))
 }
 
@@ -104,15 +107,22 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     }
 }
 
-fn cook_terminal_progress_message(run_id: &str, outcome: Option<&str>) -> String {
+fn cook_terminal_progress_message(
+    run_id: &str,
+    outcome: Option<&str>,
+    retry_command: Option<&str>,
+) -> String {
     let mut message = format!(
         "Cook terminal: durable run `{run_id}`. Phase: terminal. Outcome: {}. Next: `homeboy agent-task status {run_id}`.",
         outcome.unwrap_or("terminal")
     );
     if outcome == Some("failed") {
         message.push_str(&format!(
-            " Diagnose: `homeboy agent-task diagnose {run_id} --full`. Retry: `homeboy agent-task retry {run_id} --run`."
+            " Diagnose: `homeboy agent-task diagnose {run_id} --full`."
         ));
+        if let Some(retry_command) = retry_command {
+            message.push_str(&format!(" Retry: `{retry_command}`."));
+        }
     }
     message
 }
@@ -154,6 +164,7 @@ impl CookProgressReporter {
         cook_id: Option<&str>,
         run_id: Option<&str>,
         activity: Option<&str>,
+        terminal_retry_command: Option<&str>,
     ) {
         if self.no_progress {
             return;
@@ -162,7 +173,9 @@ impl CookProgressReporter {
             if phase == "terminal" {
                 if let Some(run_id) = run_id {
                     crate::commands::utils::tty::status(&cook_terminal_progress_message(
-                        run_id, activity,
+                        run_id,
+                        activity,
+                        terminal_retry_command,
                     ));
                     return;
                 }
@@ -181,9 +194,14 @@ impl CookProgressReporter {
         }
 
         let mut state = self.state.lock().expect("cook progress state");
-        if let Some(message) =
-            next_machine_progress_message(&mut state, phase, cook_id, run_id, activity)
-        {
+        if let Some(message) = next_machine_progress_message(
+            &mut state,
+            phase,
+            cook_id,
+            run_id,
+            activity,
+            terminal_retry_command,
+        ) {
             eprintln!("{message}");
         }
     }
@@ -195,6 +213,7 @@ fn next_machine_progress_message(
     cook_id: Option<&str>,
     run_id: Option<&str>,
     activity: Option<&str>,
+    terminal_retry_command: Option<&str>,
 ) -> Option<String> {
     // Preserve one final bounded outcome line even when heartbeat sampling has
     // consumed the progress budget. The initial pointer remains the stable
@@ -236,7 +255,9 @@ fn next_machine_progress_message(
     }
     state.heartbeat_count = 0;
     let message = if terminal {
-        run_id.map(|run_id| cook_terminal_progress_message(run_id, activity))?
+        run_id.map(|run_id| {
+            cook_terminal_progress_message(run_id, activity, terminal_retry_command)
+        })?
     } else if !state.pointer_emitted && run_id.is_some() {
         state.pointer_emitted = true;
         cook_progress_message(phase, cook_id, run_id)
@@ -403,8 +424,8 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 #[cfg(test)]
 mod progress_tests {
     use super::{
-        cook_progress_message, next_machine_progress_message, CookProgressState,
-        MAX_MACHINE_PROGRESS_LINES,
+        cook_progress_message, cook_terminal_progress_message, next_machine_progress_message,
+        CookProgressState, MAX_MACHINE_PROGRESS_LINES,
     };
 
     #[test]
@@ -422,9 +443,14 @@ mod progress_tests {
         let mut state = CookProgressState::default();
         let mut messages = Vec::new();
         for _ in 0..100 {
-            if let Some(message) =
-                next_machine_progress_message(&mut state, "heartbeat", None, Some("run-123"), None)
-            {
+            if let Some(message) = next_machine_progress_message(
+                &mut state,
+                "heartbeat",
+                None,
+                Some("run-123"),
+                None,
+                None,
+            ) {
                 messages.push(message);
             }
         }
@@ -447,6 +473,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("no files written yet, 6m12s in `cargo test -p homeboy-agents`"),
+            None,
         )
         .expect("first heartbeat is emitted");
 
@@ -467,6 +494,7 @@ mod progress_tests {
                 None,
                 Some("run-123"),
                 Some("no files written yet"),
+                None,
             ) {
                 messages.push(message);
             }
@@ -493,6 +521,7 @@ mod progress_tests {
                 None,
                 Some("run-123"),
                 Some(&activity),
+                None,
             ) {
                 messages.push(message);
             }
@@ -516,6 +545,7 @@ mod progress_tests {
                 None,
                 Some("run-123"),
                 Some(&activity),
+                None,
             )
             .is_some());
         }
@@ -526,6 +556,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
+            Some("homeboy agent-task retry run-123 --run"),
         )
         .expect("terminal outcome remains visible");
 
@@ -540,6 +571,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
+            Some("homeboy agent-task retry run-123 --run"),
         )
         .is_none());
         assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
@@ -555,6 +587,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
+            Some("homeboy agent-task retry run-123 --run"),
         )
         .is_some());
         assert!(next_machine_progress_message(
@@ -563,6 +596,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
+            Some("homeboy agent-task retry run-123 --run"),
         )
         .is_none());
         assert_eq!(state.emitted_lines, 1);
@@ -577,6 +611,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("succeeded"),
+            None,
         )
         .expect("terminal outcome remains visible");
 
@@ -584,6 +619,47 @@ mod progress_tests {
             terminal,
             "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: succeeded. Next: `homeboy agent-task status run-123`."
         );
+    }
+
+    #[test]
+    fn terminal_progress_only_advertises_durably_legal_retries_on_tty_and_non_tty() {
+        // Both output modes render this same terminal sentence. The durable
+        // recovery action, not the process exit code, is its retry authority.
+        let cases = [
+            (
+                "pre-execution",
+                Some("homeboy agent-task retry run-123 --run"),
+                true,
+            ),
+            ("provider", None, false),
+            ("gate", None, false),
+            ("finalization", None, false),
+            ("policy/nonretryable", None, false),
+            ("success", None, false),
+        ];
+
+        for (path, retry_command, expects_retry) in cases {
+            let outcome = (path != "success")
+                .then_some("failed")
+                .or(Some("succeeded"));
+            let tty = cook_terminal_progress_message("run-123", outcome, retry_command);
+            let non_tty = next_machine_progress_message(
+                &mut CookProgressState::default(),
+                "terminal",
+                None,
+                Some("run-123"),
+                outcome,
+                retry_command,
+            )
+            .expect("terminal progress is emitted once");
+
+            assert_eq!(tty, non_tty, "{path} uses one terminal contract");
+            assert_eq!(
+                tty.contains("agent-task retry run-123 --run"),
+                expects_retry,
+                "{path} retry guidance follows durable legal_actions"
+            );
+        }
     }
 }
 

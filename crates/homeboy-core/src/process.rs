@@ -172,6 +172,21 @@ pub struct ProcessContainmentCleanup {
     /// run-owned scope cleanup into a producer failure.
     pub diagnostic: Option<String>,
     pub detail: Option<String>,
+    /// Discovery evidence that did not prevent cleanup from proving the owned
+    /// scope empty. Callers retain this for operator diagnosis without turning
+    /// an otherwise clean producer result into a failure.
+    pub warning: Option<String>,
+}
+
+/// Lifecycle evidence available when a containment boundary is finalized.
+///
+/// Only a caller that has reaped a successful direct leader may treat an empty
+/// marker scan as a complete scope. Every interruption path remains
+/// fail-closed because it can still have owned work in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessContainmentCleanupContext {
+    LeaderMayBeRunning,
+    LeaderReapedAfterSuccess,
 }
 
 impl ProcessContainment {
@@ -279,6 +294,7 @@ impl ProcessContainment {
                     complete: true,
                     diagnostic: None,
                     detail: None,
+                    warning: None,
                 })
             } else {
                 Err(Error::internal_unexpected(format!(
@@ -294,12 +310,11 @@ impl ProcessContainment {
     pub fn cleanup_with_grace(
         &self,
         grace: Duration,
-        leader_has_exited: bool,
+        context: ProcessContainmentCleanupContext,
     ) -> Result<ProcessContainmentCleanup> {
         #[cfg(target_os = "linux")]
         {
-            let _ = leader_has_exited;
-            let cleanup = terminate_linux_scope_members_with_grace(&self.scope, grace)?;
+            let cleanup = terminate_linux_scope_members_with_grace(&self.scope, grace, context)?;
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
@@ -309,11 +324,12 @@ impl ProcessContainment {
                 complete: cleanup.complete,
                 diagnostic: cleanup.diagnostic,
                 detail: cleanup.detail,
+                warning: cleanup.warning,
             });
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if !leader_has_exited {
+            if context == ProcessContainmentCleanupContext::LeaderMayBeRunning {
                 let pid = self.leader_pid.ok_or_else(|| {
                     Error::internal_unexpected("process containment was not attached to a child")
                 })?;
@@ -323,6 +339,7 @@ impl ProcessContainment {
                         complete: true,
                         diagnostic: None,
                         detail: None,
+                        warning: None,
                     }
                 });
             }
@@ -335,6 +352,7 @@ impl ProcessContainment {
                     complete: true,
                     diagnostic: None,
                     detail: None,
+                    warning: None,
                 }
             })
         }
@@ -1207,7 +1225,12 @@ fn terminate_linux_scope_members(
         signal_pids(&targets.pids, libc::SIGKILL)?;
         let survivors = linux_scope_pids(scope)?;
         if survivors.pids.is_empty() {
-            return Ok(scope_cleanup_report(targets, survivors, true));
+            return Ok(scope_cleanup_report(
+                targets,
+                survivors,
+                true,
+                ProcessContainmentCleanupContext::LeaderMayBeRunning,
+            ));
         }
         if Instant::now() >= deadline {
             let owner = owner_pid
@@ -1227,6 +1250,7 @@ fn terminate_linux_scope_members(
 fn terminate_linux_scope_members_with_grace(
     scope: &str,
     grace: Duration,
+    context: ProcessContainmentCleanupContext,
 ) -> Result<ProcessContainmentCleanup> {
     let targets = linux_scope_pids(scope)?;
     signal_pids(&targets.pids, libc::SIGTERM)?;
@@ -1235,6 +1259,7 @@ fn terminate_linux_scope_members_with_grace(
             targets,
             linux_scope_pids(scope)?,
             false,
+            context,
         ));
     }
     let survivors = linux_scope_pids(scope)?;
@@ -1250,6 +1275,7 @@ fn terminate_linux_scope_members_with_grace(
         targets,
         linux_scope_pids(scope)?,
         true,
+        context,
     ))
 }
 
@@ -1273,28 +1299,34 @@ fn scope_cleanup_report(
     targets: LinuxScopeDiscovery,
     survivors: LinuxScopeDiscovery,
     forced: bool,
+    context: ProcessContainmentCleanupContext,
 ) -> ProcessContainmentCleanup {
     let unreadable = targets
         .unreadable_environments
         .max(survivors.unreadable_environments);
-    // An empty scope is the state cleanup exists to produce, so it cannot also
-    // be cleanup's failure signal. Every command whose processes exited leaves
-    // discovery with nothing to find, and that is indistinguishable from a
-    // descendant that escaped by unsetting HOMEBOY_PROCESS_SCOPE. Treating the
-    // two alike reported "an escaped descendant may have removed
-    // HOMEBOY_PROCESS_SCOPE" on every clean short-lived command (#13128).
-    //
-    // A marker-dropping escapee is caught where it leaves real evidence
-    // instead: it inherits this command's stdout/stderr, so `run_local_command`
-    // sees the pipes stay open after teardown and fails the command there.
-    // Marker discovery cannot see it at all, and claiming otherwise only
-    // produced noise.
-    let complete = survivors.pids.is_empty();
+    // A marker-owned target gives this cleanup an explicit run scope. Once the
+    // follow-up scan proves that scope empty, unreadable environments elsewhere
+    // in /proc are diagnostic host noise, not evidence that this run survived.
+    // Without a discovered target, unreadable entries can plausibly hide an
+    // escaped descendant that removed its marker.
+    let marker_scope_was_observed = !targets.pids.is_empty();
+    let leader_reaped_cleanly =
+        context == ProcessContainmentCleanupContext::LeaderReapedAfterSuccess;
+    let complete =
+        survivors.pids.is_empty() && (marker_scope_was_observed || leader_reaped_cleanly);
     let detail = (!complete).then(|| {
-        format!(
-            "process-scope cleanup confirmed run-owned survivors: {}",
-            join_pids(&survivors.pids)
-        )
+        if !survivors.pids.is_empty() {
+            format!(
+                "run-owned process scope still has surviving pids: {}",
+                join_pids(&survivors.pids)
+            )
+        } else if unreadable > 0 {
+            format!(
+                "process-scope discovery could not exclude run-owned escaped processes: {unreadable} /proc environment entries could not be read"
+            )
+        } else {
+            "process-scope discovery found no marker-owned process; an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".to_string()
+        }
     });
     ProcessContainmentCleanup {
         forced,
@@ -1307,6 +1339,11 @@ fn scope_cleanup_report(
             )
         }),
         detail,
+        warning: (complete && unreadable > 0).then(|| {
+            format!(
+                "process-scope discovery could not read {unreadable} same-owner /proc environment entries after the run-owned scope was reaped"
+            )
+        }),
     }
 }
 
@@ -1833,12 +1870,15 @@ mod tests {
                 unreadable_environments: 0,
             },
             false,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
         );
         assert!(drained.complete);
         assert_eq!(drained.detail, None);
         assert_eq!(drained.diagnostic, None);
 
-        let unreadable = scope_cleanup_report(
+        // A producer that exited cleanly after a marker-owned process was
+        // observed remains clean when unrelated host environments are unreadable.
+        let clean_with_unrelated_unreadables = scope_cleanup_report(
             LinuxScopeDiscovery {
                 pids: vec![42],
                 unreadable_environments: 1,
@@ -1848,14 +1888,72 @@ mod tests {
                 unreadable_environments: 1,
             },
             true,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
         );
-        assert!(unreadable.complete);
-        assert!(unreadable.forced);
-        assert_eq!(unreadable.detail, None);
-        assert!(unreadable
-            .diagnostic
+        assert!(clean_with_unrelated_unreadables.complete);
+        assert!(clean_with_unrelated_unreadables.forced);
+        assert!(clean_with_unrelated_unreadables.detail.is_none());
+        assert!(clean_with_unrelated_unreadables
+            .warning
             .as_deref()
-            .is_some_and(|detail| detail.contains("same-owner /proc environment entries")));
+            .is_some_and(|warning| warning.contains("unrelated /proc")));
+
+        // A known run-owned survivor remains fail-closed even after a clean
+        // leader exit.
+        let known_survivor = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 0,
+            },
+            LinuxScopeDiscovery {
+                pids: vec![42],
+                unreadable_environments: 0,
+            },
+            true,
+            ProcessContainmentCleanupContext::LeaderReapedAfterSuccess,
+        );
+        assert!(!known_survivor.complete);
+        assert!(known_survivor
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("surviving pids: 42")));
+
+        // With no observed run-owned marker, unreadable environments can hide
+        // an escaped process and must retain the prior fail-closed contract.
+        let ambiguous_discovery = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            false,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
+        );
+        assert!(!ambiguous_discovery.complete);
+        assert!(
+            ambiguous_discovery.detail.as_deref().is_some_and(
+                |detail| detail.contains("could not exclude run-owned escaped processes")
+            )
+        );
+
+        let clean_reaped_leader = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            false,
+            ProcessContainmentCleanupContext::LeaderReapedAfterSuccess,
+        );
+        assert!(clean_reaped_leader.complete);
+        assert!(clean_reaped_leader.detail.is_none());
+        assert!(clean_reaped_leader.warning.is_some());
     }
 
     #[test]
@@ -1913,6 +2011,7 @@ mod tests {
                 unreadable_environments: 1,
             },
             true,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
         );
 
         assert!(!cleanup.complete);

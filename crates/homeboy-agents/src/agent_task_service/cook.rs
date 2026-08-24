@@ -11,7 +11,7 @@ use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
     AgentTaskIntentionalNoChange,
 };
-use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_prompt_source};
+use crate::agent_task_dispatch_plan::validate_single_cook_prompt_source;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
@@ -505,6 +505,9 @@ pub struct CookProgressEvent<'a> {
     /// This remains separate from `detail`, which is persisted as the Cook's
     /// status string for durable readers.
     pub terminal_success: Option<bool>,
+    /// Exact retry command from the durable result's legal actions. A failed
+    /// exit alone is not authority to advertise a retry.
+    pub terminal_retry_command: Option<&'a str>,
     /// What the provider is doing right now, when it is observable.
     pub activity: Option<&'a CookProviderActivity>,
 }
@@ -537,6 +540,7 @@ fn report_cook_progress(
         detail,
         None,
         None,
+        None,
     )
 }
 
@@ -550,6 +554,7 @@ fn report_cook_progress_with_activity(
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
     terminal_success: Option<bool>,
+    terminal_retry_command: Option<&str>,
 ) -> Result<()> {
     lifecycle_store.record_cook_progress_with_activity(
         run_id,
@@ -565,6 +570,7 @@ fn report_cook_progress_with_activity(
         attempt,
         detail,
         terminal_success,
+        terminal_retry_command,
         activity,
     };
     if let Some(observer) = observer {
@@ -2541,8 +2547,25 @@ pub fn compile_cook_attempt(
 /// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
 /// share this cache so identical provider/runtime/model verdicts probe once.
 pub fn compile_cook_attempt_with_readiness_cache(
+    options: AgentTaskCookServiceOptions,
+    dispatch: AgentTaskDispatchCommand,
+    readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
+) -> Result<AgentTaskCookServiceOptions> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    compile_cook_attempt_with_catalog_and_readiness_cache(
+        options,
+        dispatch,
+        &catalog,
+        readiness_cache,
+    )
+}
+
+/// Compile a Cook against one caller-supplied provider catalog. This keeps the
+/// preflight and plan construction on the same provider snapshot.
+pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
     mut options: AgentTaskCookServiceOptions,
     dispatch: AgentTaskDispatchCommand,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
     readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
 ) -> Result<AgentTaskCookServiceOptions> {
     validate_single_cook_prompt_source(
@@ -2551,12 +2574,32 @@ pub fn compile_cook_attempt_with_readiness_cache(
         dispatch.core.tasks_json.as_deref(),
     )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
-    options.initial_plan = build_dispatch_plan(&request)?;
-    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    // Route/model/credential/immediate-failure failures are knowable before
+    // workspace preparation. The plan pass below rechecks with its effective
+    // executor config and reuses this caller-owned cache.
+    crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
+        catalog,
+        &request.backend,
+        request.selector.as_deref(),
+        request.model.as_deref(),
+        &serde_json::Value::Object(Default::default()),
+        readiness_cache,
+    )?;
+    options.initial_plan =
+        crate::agent_task_dispatch_plan::build_dispatch_plan_with_provider_requirements(
+            &request,
+            |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
+        )?;
     catalog.validate_explicit_models(&options.initial_plan)?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.initial_plan,
         catalog.providers(),
+    )?;
+    // The shared verdict uses the plan's effective executor configuration and
+    // caller-owned cache before Cook can consume a provider execution budget.
+    crate::agent_task_provider::preflight_plan_provider_dispatchability_with_providers(
+        &options.initial_plan,
+        catalog,
         readiness_cache,
     )?;
     // Finalization disclosure is derived from the compiled provider invocation,
@@ -4106,6 +4149,17 @@ fn run_cook_reported(
             Some(&result.value.status),
             None,
             (phase == "terminal").then_some(result.exit_code == 0),
+            (phase == "terminal")
+                .then(|| {
+                    result.value.failure_context.as_ref().and_then(|context| {
+                        context
+                            .legal_actions
+                            .iter()
+                            .find(|action| action.action == "retry")
+                            .map(|action| action.command.as_str())
+                    })
+                })
+                .flatten(),
         ) {
             return durable_cook_error_report_with_store(
                 store,
@@ -5156,6 +5210,7 @@ fn run_cook_spine(
                                             .unwrap_or("provider execution is still running"),
                                     ),
                                     (!activity.is_empty()).then_some(&activity),
+                                    None,
                                     None,
                                 );
                                 // Supervision evidence is written even when the
@@ -6804,6 +6859,10 @@ fn preflight_cook_workspace_base_ancestry(target: &Path, base: &str) -> Result<O
             "candidate_only_commits": ahead,
             "next_action": "clean_destination_before_provider",
         });
+        error.details["dirty_candidate_adoption"] = serde_json::json!({
+            "workspace": target,
+            "reason": "first_provider_admission",
+        });
         return Err(error);
     }
     if behind == 0 {
@@ -7054,12 +7113,17 @@ fn admit_explicit_cook_workspace_before_provider(
         .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
         .collect::<Vec<_>>();
     if !dirty_paths.is_empty() {
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "to_worktree",
             "explicit Cook checkout must be clean before its first provider execution",
             Some(options.to_worktree.clone()),
             None,
-        ));
+        );
+        error.details["dirty_candidate_adoption"] = serde_json::json!({
+            "workspace": source,
+            "reason": "first_provider_admission",
+        });
+        return Err(error);
     }
     if agent_task_lifecycle::run_record_exists(run_id)? {
         agent_task_lifecycle::record_metadata_value(

@@ -354,6 +354,14 @@ explains a stop. `agent-task status` projects both under
 Use `promote` for patch-artifact candidates; it remains the controller-owned
 patch-artifact ingestion and gate path.
 
+If a first Cook admission finds an already-implemented dirty candidate, it
+fails before provider execution and returns the durable Cook/run plus this
+recovery sequence: commit the candidate in the named worktree, run `agent-task
+review <run-id>`, then run the emitted `agent-task adopt <cook-id>
+--candidate-ref HEAD --model <model>` command. Adoption verifies the immutable
+commit through the recorded gates and finalization policy; it does not create or
+apply provider patch content.
+
 `finalize-pr` is the core-owned publication boundary for external runtimes. Its
 `homeboy/agent-task-pr-finalization/v1` report keeps the legacy top-level
 `status`, `pr_action`, `pr_number`, and `pr_url` fields, and also emits explicit

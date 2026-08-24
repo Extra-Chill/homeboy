@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::engine::invocation;
+use crate::process::ProcessContainmentCleanupContext;
 
 #[cfg(not(target_os = "linux"))]
 use super::super::process_cleanup::configure_process_group_cleanup;
@@ -211,7 +212,8 @@ fn run_local_command(
             let containment_error = containment
                 .terminate_on_failure_bounded(Duration::from_secs(2), false)
                 .err();
-            ProcessGroupCleanupGuard::new(child.id()).cleanup();
+            ProcessGroupCleanupGuard::new(child.id())
+                .cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning);
             let _ = child.wait();
             return CommandOutput {
                 stdout: String::new(),
@@ -270,7 +272,7 @@ fn run_local_command(
         )
     });
 
-    let (status, delegated_failure, timed_out, interrupted_signal) =
+    let (status, delegated_failure, timed_out, interrupted_signal, cleanup_report) =
         wait_for_child_or_delegated_failure(
             &mut child,
             env,
@@ -283,9 +285,16 @@ fn run_local_command(
     let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
-    let cleanup_detail = cleanup_guard
-        .take()
-        .and_then(ProcessGroupCleanupGuard::cleanup);
+    let cleanup_context = if matches!(&status, Ok(status) if status.success()) {
+        ProcessContainmentCleanupContext::LeaderReapedAfterSuccess
+    } else {
+        ProcessContainmentCleanupContext::LeaderMayBeRunning
+    };
+    let cleanup_report = cleanup_report.or_else(|| {
+        cleanup_guard
+            .take()
+            .and_then(|guard| guard.cleanup(cleanup_context))
+    });
     let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
 
     let stdin_failed = stdin_handle
@@ -295,18 +304,11 @@ fn run_local_command(
     let (stdout, stdout_stalled) = collect_output_reader(stdout_reader, reader_deadline);
     let (mut stderr, stderr_stalled) = collect_output_reader(stderr_reader, reader_deadline);
     let streams_stalled = stdout_stalled || stderr_stalled;
-    if streams_stalled || cleanup_detail.is_some() {
+    if streams_stalled {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
-        if let Some(detail) = cleanup_detail {
-            stderr.push_str(&format!(
-                "Homeboy containment cleanup diagnostic: {detail}.\n"
-            ));
-        }
-        if streams_stalled {
-            stderr.push_str("Homeboy command output pipes remained open after cleanup; returning partial output instead of waiting for an unverified descendant.");
-        }
+        stderr.push_str("Homeboy command output pipes remained open after cleanup; returning partial output instead of waiting for an unverified descendant.");
     }
     let timed_out = timed_out || streams_stalled;
 
@@ -368,8 +370,39 @@ fn run_local_command(
             child_resource: Some(monitor.finish()),
         },
     };
+    let output = finalize_cleanup_report(output, cleanup_report);
     if let Some(supervision) = supervision.as_mut() {
         supervision.finish(&output, interrupted_signal, timed_out, timeout);
+    }
+    output
+}
+
+/// Preserve process containment evidence on every terminal result. An
+/// incomplete cleanup overrides only a clean producer: a producer failure,
+/// timeout, cancellation, or delegated terminal failure remains authoritative.
+fn finalize_cleanup_report(
+    mut output: CommandOutput,
+    cleanup_report: Option<crate::server::process_cleanup::ProcessCleanupReport>,
+) -> CommandOutput {
+    let Some(report) = cleanup_report else {
+        return output;
+    };
+    if !output.stderr.is_empty() && !output.stderr.ends_with('\n') {
+        output.stderr.push('\n');
+    }
+    if let Some(warning) = report.warning {
+        output.stderr.push_str(&format!(
+            "Homeboy containment cleanup warning: {warning}.\n"
+        ));
+    }
+    if let Some(incomplete) = report.incomplete {
+        output.stderr.push_str(&format!(
+            "Homeboy containment cleanup was incomplete: {incomplete}.\n"
+        ));
+        if output.success {
+            output.success = false;
+            output.exit_code = 1;
+        }
     }
     output
 }
@@ -870,6 +903,7 @@ fn wait_for_child_or_delegated_failure(
     Option<DelegatedRunTerminalFailure>,
     bool,
     Option<i32>,
+    Option<crate::server::process_cleanup::ProcessCleanupReport>,
 ) {
     let monitor = DelegatedRunFailureMonitor::from_env(env);
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -879,36 +913,38 @@ fn wait_for_child_or_delegated_failure(
             supervision.heartbeat();
         }
         if let Some(signal) = active_cleanup_signal() {
-            if let Some(cleanup_guard) = cleanup_guard.take() {
-                cleanup_guard.cleanup();
+            let cleanup_report = if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
             } else {
                 let _ = child.kill();
-            }
-            return (child.wait(), None, false, Some(signal));
+                None
+            };
+            return (child.wait(), None, false, Some(signal), cleanup_report);
         }
         match child.try_wait() {
-            Ok(Some(status)) => return (Ok(status), None, false, None),
+            Ok(Some(status)) => return (Ok(status), None, false, None, None),
             Ok(None) => {}
-            Err(error) => return (Err(error), None, false, None),
+            Err(error) => return (Err(error), None, false, None, None),
         }
 
         if let Some(failure) = monitor
             .as_ref()
             .and_then(|monitor| monitor.terminal_failure())
         {
-            if let Some(cleanup_guard) = cleanup_guard.take() {
-                cleanup_guard.cleanup();
-            }
-            return (child.wait(), Some(failure), false, None);
+            let cleanup_report = cleanup_guard.take().and_then(|guard| {
+                guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
+            });
+            return (child.wait(), Some(failure), false, None, cleanup_report);
         }
 
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            if let Some(cleanup_guard) = cleanup_guard.take() {
-                cleanup_guard.cleanup();
+            let cleanup_report = if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup(ProcessContainmentCleanupContext::LeaderMayBeRunning)
             } else {
                 let _ = child.kill();
-            }
-            return (child.wait(), None, true, None);
+                None
+            };
+            return (child.wait(), None, true, None, cleanup_report);
         }
 
         let poll_interval = monitor
@@ -1143,6 +1179,105 @@ fn bounded_redacted_tail(output: &str, redaction_values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::process_cleanup::ProcessCleanupReport;
+
+    fn command_output(success: bool, exit_code: i32, timed_out: bool) -> CommandOutput {
+        CommandOutput {
+            stdout: String::new(),
+            stderr: "producer evidence".to_string(),
+            success,
+            exit_code,
+            timed_out,
+            observation: super::super::CommandObservation::Complete,
+            child_resource: None,
+        }
+    }
+
+    fn cleanup_report(incomplete: Option<&str>, warning: Option<&str>) -> ProcessCleanupReport {
+        ProcessCleanupReport {
+            incomplete: incomplete.map(str::to_string),
+            warning: warning.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cleanup_warning_preserves_a_clean_producer_result() {
+        let output = finalize_cleanup_report(
+            command_output(true, 0, false),
+            Some(cleanup_report(
+                None,
+                Some("unreadable unrelated proc entry"),
+            )),
+        );
+
+        assert!(output.success);
+        assert_eq!(output.exit_code, 0);
+        assert!(output.stderr.contains("containment cleanup warning"));
+    }
+
+    #[test]
+    fn incomplete_cleanup_fails_a_clean_producer_result() {
+        let output = finalize_cleanup_report(
+            command_output(true, 0, false),
+            Some(cleanup_report(Some("run-owned process survived"), None)),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("containment cleanup was incomplete"));
+    }
+
+    #[test]
+    fn incomplete_cleanup_preserves_a_producer_failure() {
+        let output = finalize_cleanup_report(
+            command_output(false, 42, false),
+            Some(cleanup_report(Some("ambiguous process scope"), None)),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 42);
+        assert!(output.stderr.contains("ambiguous process scope"));
+    }
+
+    #[test]
+    fn incomplete_cleanup_preserves_timeout_failure_evidence() {
+        let output = finalize_cleanup_report(
+            command_output(false, 124, true),
+            Some(cleanup_report(Some("cleanup after timeout"), None)),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 124);
+        assert!(output.timed_out);
+        assert!(output.stderr.contains("cleanup after timeout"));
+    }
+
+    #[test]
+    fn incomplete_cleanup_preserves_cancellation_failure_evidence() {
+        let output = finalize_cleanup_report(
+            command_output(false, 143, false),
+            Some(cleanup_report(Some("cleanup after cancellation"), None)),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 143);
+        assert!(output.stderr.contains("cleanup after cancellation"));
+    }
+
+    #[test]
+    fn incomplete_cleanup_preserves_delegated_failure_evidence() {
+        let output = finalize_cleanup_report(
+            command_output(false, 1, false),
+            Some(cleanup_report(
+                Some("cleanup after delegated failure"),
+                None,
+            )),
+        );
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("cleanup after delegated failure"));
+    }
 
     #[cfg(unix)]
     fn assert_pid_reaped(pid: libc::pid_t) {
@@ -1367,6 +1502,26 @@ mod tests {
             .stdout
             .parse::<libc::pid_t>()
             .expect("descendant pid");
+        assert_pid_reaped(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clean_completion_with_a_reaped_leader_does_not_fail_marker_discovery() {
+        let output = execute_local_command("printf clean");
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.exit_code, 0);
+        assert!(!output.stderr.contains("cleanup was incomplete"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clean_completion_reaps_an_owned_scope_survivor() {
+        let output = execute_local_command("sleep 30 & printf '%s' \"$!\"");
+
+        assert!(output.success, "{}", output.stderr);
+        let pid = output.stdout.parse::<libc::pid_t>().expect("survivor pid");
         assert_pid_reaped(pid);
     }
 }

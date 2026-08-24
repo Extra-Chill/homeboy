@@ -263,10 +263,11 @@ jobs:
     # candidate no longer reruns its baseline), #380 (the differential audit is
     # changed-scoped instead of scanning the whole repository), #381 (shard
     # partitioning coverage), #402 (immutable extension revisions), #405
-    # (downloaded Test archives stay out of consumer Git state), and #416
-    # (sharded Test result retrieval works across reruns). Refs
-    # #10997 and #11751 W1-2, W1-7, W1-10.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@66765097113913bc66c7a05fa0a827723715763c
+    # (downloaded Test archives stay out of consumer Git state), #416
+    # (sharded Test result retrieval works across reruns), #424 (extension-owned
+    # Cargo build and quality caches), and #425 (cache ownership assertions).
+    # Refs #10997 and #11751 W1-2, W1-5, W1-6, W1-7, W1-10.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@1db8e159b381accb965125108266d4031d7f6feb
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which

@@ -302,7 +302,8 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     record_preview_phase(&mut progress, "destination_resolution");
-    let (args, provision) = resolve_cook_preview_destination(args)?;
+    let (args, mut provision) = resolve_cook_preview_destination(args)?;
+    project_preview_dirty_admission(&mut provision);
     let replay = cook_preview_replay_argv(&args);
     record_preview_phase(&mut progress, "placement_projection");
     let placement = preview_placement_policy_with_admission(&replay.argv);
@@ -3358,6 +3359,45 @@ fn resolve_cook_preview_destination(
     ))
 }
 
+/// Preview must report the same fail-closed first-provider admission when the
+/// resolved local checkout can be inspected without mutating it.
+fn project_preview_dirty_admission(provision: &mut Value) {
+    let Some(path) = provision.get("path").and_then(Value::as_str) else {
+        return;
+    };
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(path)
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let mut tracked = 0;
+    let mut staged = 0;
+    let mut untracked = 0;
+    for entry in output.stdout.split(|byte| *byte == b'\0') {
+        if entry.len() < 2 {
+            continue;
+        }
+        if entry.starts_with(b"??") {
+            untracked += 1;
+        } else {
+            staged += usize::from(entry[0] != b' ');
+            tracked += usize::from(entry[1] != b' ');
+        }
+    }
+    if tracked + staged + untracked > 0 {
+        provision["admission"] = serde_json::json!({
+            "status": "would_refuse_dirty_candidate",
+            "reason": "Cook requires a clean destination before its first provider execution",
+            "changes": { "tracked": tracked, "staged": staged, "untracked": untracked },
+        });
+    }
+}
+
 fn unresolved_provider_preview(handle: &str, error: homeboy::core::Error) -> Value {
     serde_json::json!({
         "action": "unresolved_provider",
@@ -4138,7 +4178,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None, None)?;
+            progress("preparing", None, None, None, None)?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -4240,6 +4280,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
                     Some(event.cook_id),
                     Some(event.run_id),
                     terminal_outcome.or(activity.as_deref()),
+                    event.terminal_retry_command,
                 )
             })
             .unwrap_or(Ok(()))
@@ -6942,9 +6983,46 @@ mod tests {
         cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
         cook_resolved_policy_disclosure, detached_cook_route_less_warning,
-        durable_cook_identity_lines, preflight_continue_cook,
+        durable_cook_identity_lines, preflight_continue_cook, project_preview_dirty_admission,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
+
+    #[test]
+    fn preview_projects_each_dirty_admission_state() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(workspace.path().join("tracked.txt"), "base\n").expect("write base");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+
+        std::fs::write(workspace.path().join("tracked.txt"), "modified\n")
+            .expect("modify tracked file");
+        std::fs::write(workspace.path().join("staged.txt"), "staged\n").expect("write staged file");
+        git(&["add", "staged.txt"]);
+        std::fs::write(workspace.path().join("untracked.txt"), "untracked\n")
+            .expect("write untracked file");
+
+        let mut provision = serde_json::json!({ "path": workspace.path() });
+        project_preview_dirty_admission(&mut provision);
+
+        assert_eq!(
+            provision["admission"]["status"],
+            "would_refuse_dirty_candidate"
+        );
+        assert_eq!(provision["admission"]["changes"]["tracked"], 1);
+        assert_eq!(provision["admission"]["changes"]["staged"], 1);
+        assert_eq!(provision["admission"]["changes"]["untracked"], 1);
+    }
 
     #[test]
     fn durable_cook_identity_block_leads_with_the_run_id_and_follow_up_commands() {

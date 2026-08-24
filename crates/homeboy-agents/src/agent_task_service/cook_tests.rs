@@ -3966,6 +3966,126 @@ fn batch_cook_options(
     }
 }
 
+fn compile_options(cook_id: &str) -> AgentTaskCookServiceOptions {
+    batch_cook_options(
+        cook_id,
+        Arc::new(BatchAttemptDispatcher {
+            barrier: Arc::new(Barrier::new(1)),
+            entered: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }),
+    )
+}
+
+fn compile_command(
+    backend: &str,
+    model: Option<&str>,
+    workspace: Option<&str>,
+) -> AgentTaskDispatchCommand {
+    AgentTaskDispatchCommand {
+        prompt: Some("compile this Cook".to_string()),
+        backend: Some(backend.to_string()),
+        model: model.map(str::to_string),
+        workspace: workspace.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn compile_provider(
+    id: &str,
+    backend: &str,
+) -> crate::agent_task_provider::AgentTaskExecutorProvider {
+    serde_json::from_value(serde_json::json!({ "id": id, "backend": backend }))
+        .expect("provider fixture")
+}
+
+#[test]
+fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_workspace_materialization(
+) {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let missing_workspace = "/definitely-not-a-workspace";
+        let cases = vec![
+            (
+                "route",
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+                compile_command("missing", None, Some(missing_workspace)),
+                "route did not resolve",
+            ),
+            (
+                "model",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "model.provider",
+                        "backend": "model",
+                        "cli": { "profiles": [{ "name": "supported", "model": "supported" }] }
+                    })).expect("model provider")],
+                    ..Default::default()
+                },
+                compile_command("model", Some("unsupported"), Some(missing_workspace)),
+                "selected model",
+            ),
+            (
+                "credentials",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "credential.provider",
+                        "backend": "credential",
+                        "provider_defaults": { "credential": { "required_secret_env": ["HOMEBOY_TEST_MISSING_CREDENTIAL"] } }
+                    })).expect("credential provider")],
+                    ..Default::default()
+                },
+                compile_command("credential", None, Some(missing_workspace)),
+                "credentials are not configured",
+            ),
+            (
+                "runtime",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "runtime.provider",
+                        "backend": "runtime",
+                        "readiness_invocation": { "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"repair runtime\",\"reason\":\"runtime unavailable\",\"cache_key\":\"test\",\"identity\":{}}'"] }
+                    })).expect("runtime provider")],
+                    ..Default::default()
+                },
+                compile_command("runtime", None, None),
+                "runtime readiness validation failed",
+            ),
+        ];
+
+        for (dimension, catalog, command, reason) in cases {
+            let error = compile_cook_attempt_with_catalog_and_readiness_cache(
+                compile_options(&format!("{dimension}-cook")),
+                command,
+                &catalog,
+                &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            )
+            .expect_err("unavailable dimension must reject before workspace validation");
+            assert_eq!(error.details["field"], "provider_dispatchability");
+            assert!(error.message.contains(reason), "{dimension}: {error}");
+        }
+    });
+}
+
+#[test]
+fn compile_cook_with_injected_catalog_proceeds_only_when_every_check_is_ready() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider = compile_provider("ready.provider", "ready");
+        let options = compile_cook_attempt_with_catalog_and_readiness_cache(
+            compile_options("ready-cook"),
+            compile_command("ready", None, None),
+            &crate::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            },
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("all-ready provider compiles a Cook without spending an execution");
+
+        assert_eq!(options.initial_plan.tasks.len(), 1);
+        assert_eq!(options.initial_plan.tasks[0].executor.backend, "ready");
+    });
+}
+
 #[test]
 fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinned_moving_main() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -4600,6 +4720,15 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
                 "HEAD",
             ],
         );
+        git(
+            primary.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                primary.path().to_str().expect("UTF-8 primary path"),
+            ],
+        );
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
@@ -4614,11 +4743,43 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
         options.initial_plan.tasks[0].metadata["worktree_provision"] =
             serde_json::json!({ "kind": "explicit_cwd" });
         std::fs::write(target.join("untracked.txt"), "user drift\n").expect("write drift");
+        options.ai_model = Some("openai/gpt-5.6-terra".to_string());
 
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("Cook reports admission failure");
         assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let context = result
+            .value
+            .failure_context
+            .expect("durable recovery context");
+        assert_eq!(context.cook_id, "cwd-detached-dirty");
+        assert_eq!(context.latest_run_id, "cwd-detached-dirty-run");
+        assert_eq!(
+            context
+                .next_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["commit_candidate", "review_candidate", "adopt_candidate"]
+        );
+        assert_eq!(
+            context.next_actions[0].command,
+            format!(
+                "git -C {} add -A && git -C {} commit -m {}",
+                quote_arg(target.to_str().expect("UTF-8 target path")),
+                quote_arg(target.to_str().expect("UTF-8 target path")),
+                quote_arg("test")
+            )
+        );
+        assert_eq!(
+            context.next_actions[1].command,
+            "homeboy agent-task review cwd-detached-dirty-run"
+        );
+        assert_eq!(
+            context.next_actions[2].command,
+            "homeboy agent-task adopt cwd-detached-dirty --candidate-ref HEAD --model openai/gpt-5.6-terra"
+        );
     });
 }
 
@@ -15125,6 +15286,7 @@ fn cook_observer_failures_write_only_to_the_explicit_lifecycle_store() {
         None,
         None,
         None,
+        None,
     )
     .expect("observer failure remains non-authoritative");
 
@@ -18356,6 +18518,7 @@ fn a_progress_event_carries_provider_activity_to_the_observer() {
         attempt: 1,
         detail: Some("provider execution is still running"),
         terminal_success: None,
+        terminal_retry_command: None,
         activity: Some(&activity),
     };
 
@@ -18377,6 +18540,7 @@ fn a_progress_event_without_a_sample_renders_no_activity() {
         attempt: 1,
         detail: None,
         terminal_success: None,
+        terminal_retry_command: None,
         activity: None,
     };
 
