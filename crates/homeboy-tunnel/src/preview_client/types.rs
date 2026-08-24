@@ -38,7 +38,7 @@ pub struct PreviewClientAuthDiagnostic {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewIngressRequest {
+pub(crate) struct PreviewIngressRequest {
     pub request_id: String,
     pub method: String,
     pub path: String,
@@ -49,7 +49,7 @@ pub struct PreviewIngressRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewIngressNextResponse {
+pub(crate) struct PreviewIngressNextResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<PreviewIngressRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +57,7 @@ pub struct PreviewIngressNextResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewWebSocketOpen {
+pub(crate) struct PreviewWebSocketOpen {
     pub websocket_id: String,
     pub path: String,
     #[serde(default)]
@@ -65,7 +65,7 @@ pub struct PreviewWebSocketOpen {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewWebSocketOpenResult {
+pub(crate) struct PreviewWebSocketOpenResult {
     pub websocket_id: String,
     pub accepted: bool,
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct PreviewWebSocketOpenResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PreviewWebSocketFrameKind {
+pub(crate) enum PreviewWebSocketFrameKind {
     Text,
     Binary,
     Ping,
@@ -87,7 +87,7 @@ pub enum PreviewWebSocketFrameKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewWebSocketFrame {
+pub(crate) struct PreviewWebSocketFrame {
     pub websocket_id: String,
     pub sequence: u64,
     pub kind: PreviewWebSocketFrameKind,
@@ -100,7 +100,7 @@ pub struct PreviewWebSocketFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewWebSocketNextResponse {
+pub(crate) struct PreviewWebSocketNextResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<PreviewWebSocketFrame>,
     #[serde(default)]
@@ -108,7 +108,7 @@ pub struct PreviewWebSocketNextResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewIngressResponse {
+pub(crate) struct PreviewIngressResponse {
     pub request_id: String,
     pub status: u16,
     #[serde(default, deserialize_with = "deserialize_response_headers")]
@@ -122,7 +122,7 @@ pub struct PreviewIngressResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewIngressResponseChunk {
+pub(crate) struct PreviewIngressResponseChunk {
     pub request_id: String,
     pub sequence: u64,
     pub body_base64: String,
@@ -131,7 +131,7 @@ pub struct PreviewIngressResponseChunk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewClientForwardError {
+pub(crate) struct PreviewClientForwardError {
     pub kind: String,
     pub message: String,
 }

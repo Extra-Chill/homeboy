@@ -160,8 +160,6 @@ pub struct PreviewIngressInstallCheck {
 #[serde(rename_all = "snake_case")]
 pub enum PreviewIngressInstallCheckStatus {
     Planned,
-    Passed,
-    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

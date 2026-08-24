@@ -11,10 +11,10 @@ use super::runtime_state::{
 /// separate `server` declaration: in a runner-local context the runner itself
 /// is the server, so demanding a duplicate server declaration is redundant
 /// (see #4606).
-pub const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
+pub(crate) const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
 
 /// Returns true when the given server id refers to the runner-local sentinel.
-pub fn is_runner_local_server_id(server_id: &str) -> bool {
+pub(crate) fn is_runner_local_server_id(server_id: &str) -> bool {
     server_id == RUNNER_LOCAL_SERVICE_SERVER_ID
 }
 
@@ -124,7 +124,11 @@ pub struct ServiceTunnelNativePreviewToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceTunnelNativePreviewClaimRequest {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
+pub(crate) struct ServiceTunnelNativePreviewClaimRequest {
     pub client_id: String,
     pub token: String,
     pub public_host: String,
@@ -135,7 +139,11 @@ pub struct ServiceTunnelNativePreviewClaimRequest {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ServiceTunnelNativePreviewClaim {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by tunnel_tests / preview_ingress_tests"
+)]
+pub(crate) struct ServiceTunnelNativePreviewClaim {
     pub service_id: String,
     pub client_id: String,
     pub token_id: String,

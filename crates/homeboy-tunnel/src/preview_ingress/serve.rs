@@ -42,15 +42,15 @@ use websocket::{
     websocket_close_expired,
 };
 
-pub const PREVIEW_WEBSOCKET_MAX_FRAME_BYTES: usize = 1024 * 1024;
-pub const PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
-pub const PREVIEW_WEBSOCKET_MAX_SESSIONS_PER_ROUTE: usize = 16;
-pub const PREVIEW_WEBSOCKET_QUEUE_DEPTH: usize = 64;
-pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION: usize = 4 * 1024 * 1024;
-pub const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE: usize = 16 * 1024 * 1024;
-pub const PREVIEW_WEBSOCKET_IDLE_SECS: u64 = 60;
-pub const PREVIEW_WEBSOCKET_HANDSHAKE_SECS: u64 = 10;
-pub const PREVIEW_WEBSOCKET_CLOSE_SECS: u64 = 5;
+pub(crate) const PREVIEW_WEBSOCKET_MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub(crate) const PREVIEW_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub(crate) const PREVIEW_WEBSOCKET_MAX_SESSIONS_PER_ROUTE: usize = 16;
+pub(crate) const PREVIEW_WEBSOCKET_QUEUE_DEPTH: usize = 64;
+pub(crate) const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_CONNECTION: usize = 4 * 1024 * 1024;
+pub(crate) const PREVIEW_WEBSOCKET_QUEUE_BYTES_PER_ROUTE: usize = 16 * 1024 * 1024;
+pub(crate) const PREVIEW_WEBSOCKET_IDLE_SECS: u64 = 60;
+pub(crate) const PREVIEW_WEBSOCKET_HANDSHAKE_SECS: u64 = 10;
+pub(crate) const PREVIEW_WEBSOCKET_CLOSE_SECS: u64 = 5;
 const PREVIEW_WEBSOCKET_WRITE_SECS: u64 = 5;
 
 pub fn serve(spec: PreviewIngressServeSpec) -> Result<super::types::PreviewIngressStatus> {
