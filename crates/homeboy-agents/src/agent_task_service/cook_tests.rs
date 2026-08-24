@@ -8673,6 +8673,10 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
         })
         .expect("register destination workspace");
         super::super::persist_initial_recipe(&options).expect("persist durable recipe");
+        assert!(super::super::load_recipe(cook_id)
+            .expect("load durable recipe")
+            .finalization["task_base_sha"]
+            .is_null());
         super::super::materialize_initial_cook_attempt(&options)
             .expect("materialize initial attempt");
         agent_task_lifecycle::record_pre_execution_failure(
