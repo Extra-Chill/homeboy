@@ -5594,6 +5594,7 @@ pub(crate) fn retry_in_store(
         false,
         false,
         None,
+        None,
     )
 }
 
@@ -5667,7 +5668,15 @@ pub(crate) fn retry_with_force_in_store(
     requested_run_id: Option<&str>,
     force: bool,
 ) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, force, true, None)
+    retry_with_force_inner_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        true,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn retry_with_force_and_metadata_in_store(
@@ -5684,6 +5693,45 @@ pub(crate) fn retry_with_force_and_metadata_in_store(
         force,
         true,
         Some(metadata),
+        None,
+    )
+}
+
+/// Reserve a retry after revalidating the action while the lineage lock is held.
+pub(crate) fn retry_with_force_and_metadata_and_preflight_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    metadata: serde_json::Map<String, Value>,
+    preflight: &dyn Fn(&AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        true,
+        Some(metadata),
+        Some(preflight),
+    )
+}
+
+pub(crate) fn retry_with_force_and_preflight_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    preflight: &dyn Fn(&AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        true,
+        None,
+        Some(preflight),
     )
 }
 
@@ -5694,6 +5742,7 @@ fn retry_with_force_inner_in_store(
     force: bool,
     enforce_lineage_reservation: bool,
     reservation_metadata: Option<serde_json::Map<String, Value>>,
+    preflight: Option<&dyn Fn(&AgentTaskPlan) -> Result<()>>,
 ) -> Result<AgentTaskRunRecord> {
     let runtime_root =
         homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
@@ -5704,6 +5753,7 @@ fn retry_with_force_inner_in_store(
         force,
         enforce_lineage_reservation,
         reservation_metadata,
+        preflight,
         Some(&|run_id| {
             homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
         }),
@@ -5758,6 +5808,7 @@ where
         force,
         enforce_lineage_reservation,
         None,
+        None,
         admission_status,
         admit_runtime,
     )
@@ -5770,6 +5821,7 @@ fn retry_with_runtime_admission_with_metadata_in_store<F, A>(
     force: bool,
     enforce_lineage_reservation: bool,
     reservation_metadata: Option<serde_json::Map<String, Value>>,
+    preflight: Option<&dyn Fn(&AgentTaskPlan) -> Result<()>>,
     admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
@@ -5864,6 +5916,11 @@ where
                 });
             }
         }
+    }
+    if let Some(preflight) = preflight {
+        // The first check may have raced with workspace mutation. Revalidate
+        // while this lineage is locked, immediately before the successor write.
+        preflight(&plan)?;
     }
     let mut metadata = serde_json::Map::new();
     if let Some(route) =

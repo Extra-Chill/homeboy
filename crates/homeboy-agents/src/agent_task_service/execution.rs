@@ -1787,6 +1787,24 @@ struct CookRetryAttempt {
 /// Recipe-backed Cook runs cannot fall back to generic lifecycle retry because
 /// that would lose the Cook's authenticated lineage.
 pub fn retry_admission(run_id: &str) -> Result<()> {
+    retry_admission_with_preflight(run_id, |plan| {
+        if plan.metadata.get("generic_lab_command_replay").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                "generic Lab replay requires controller workspace preflight",
+                Some(plan.plan_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Verify retry admission using the caller's execution-specific preflight.
+pub fn retry_admission_with_preflight<F>(run_id: &str, preflight: F) -> Result<()>
+where
+    F: Fn(&AgentTaskPlan) -> Result<()>,
+{
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let source = agent_task_lifecycle::normalize_local_execution_placement_in_store(
@@ -1794,19 +1812,8 @@ pub fn retry_admission(run_id: &str) -> Result<()> {
         run_id,
     )?;
     let retry = retry_admission_in_store(&lifecycle_store, &source, true)?;
-    if retry.as_ref().is_some_and(|attempt| {
-        attempt
-            .plan
-            .metadata
-            .get("generic_lab_command_replay")
-            .is_some()
-    }) {
-        return Err(Error::validation_invalid_argument(
-            "generic_lab_command_replay",
-            "generic Lab replay requires controller workspace preflight",
-            Some(source.run_id.clone()),
-            None,
-        ));
+    if let Some(retry) = retry {
+        preflight(&retry.plan)?;
     }
     Ok(())
 }

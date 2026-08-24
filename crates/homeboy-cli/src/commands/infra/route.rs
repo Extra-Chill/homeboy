@@ -4022,7 +4022,7 @@ fn materialize_agent_task_retry_handoff(
     }))
 }
 
-fn validate_generic_lab_command_replay_workspace(
+pub(crate) fn validate_generic_lab_command_replay_workspace(
     plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     let Some(replay) = generic_lab_command_replay(plan)? else {
