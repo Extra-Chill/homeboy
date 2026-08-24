@@ -64,7 +64,7 @@ use super::cook_promotion::{
     refreshed_moving_base_recovery, retryable_provider_discovery_failure,
     retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
-use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization, TaskBaseCaptureClaim};
+use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
@@ -75,6 +75,11 @@ use super::AgentTaskRunResult;
 /// controller finishes promoting and records the result within it; a crashed
 /// controller's lease elapses so a resumed pass can reconcile and continue.
 const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The base capture reaches `origin`, so retain the durable operation lease
+/// until the recipe and controller plan have both recorded its result.
+const WORKSPACE_BASE_CAPTURE_OPERATION: &str = "workspace_base_capture";
+const WORKSPACE_BASE_CAPTURE_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
 
 #[cfg(test)]
 static WORKSPACE_BASE_CAPTURE_COUNTER: LazyLock<Mutex<Option<Arc<WorkspaceBaseCaptureCounter>>>> =
@@ -6685,41 +6690,47 @@ fn pin_and_persist_initial_cook_workspace_base(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    let claim = store.claim_missing_task_base(&options.cook_id)?;
-    let mut recipe = match claim {
-        TaskBaseCaptureClaim::Observed(recipe) => {
-            apply_persisted_task_base(options, &recipe)?;
-            return Ok(());
+    let recipe = store.load_recipe(&options.cook_id)?;
+    if recipe.finalization["task_base_sha"].is_string() {
+        return apply_persisted_task_base(options, &recipe);
+    }
+    match lifecycle_store.claim_cook_operation(
+        &options.initial_run_id,
+        WORKSPACE_BASE_CAPTURE_OPERATION,
+        WORKSPACE_BASE_CAPTURE_CLAIM_LEASE,
+    )? {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
+            return apply_persisted_task_base(options, &store.load_recipe(&options.cook_id)?);
         }
-        TaskBaseCaptureClaim::InProgress => {
-            return Err(Error::validation_invalid_argument(
-                "task_base_sha",
-                "workspace_base_capture_in_progress",
-                Some(options.cook_id.clone()),
-                Some(vec![cook_continue_command(
-                    None,
-                    &options.initial_run_id,
-                    false,
-                    None,
-                )]),
-            ));
-        }
-        // The lease stays live across the origin lookup, but it is scoped to
-        // this one recipe field rather than a broad recipe mutation lock.
-        TaskBaseCaptureClaim::Acquired(_lease) => {
-            pin_initial_cook_workspace_base(options)?;
-            let Some(_) = options.task_base_sha.as_ref() else {
-                return Ok(());
-            };
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
             let recipe = store.load_recipe(&options.cook_id)?;
             if recipe.finalization["task_base_sha"].is_string() {
-                apply_persisted_task_base(options, &recipe)?;
-                return Ok(());
+                return apply_persisted_task_base(options, &recipe);
             }
-            recipe
+            return Err(workspace_base_capture_in_progress(options));
         }
+        agent_task_lifecycle::ClaimOutcome::Acquired => {}
+    }
+
+    if let Err(error) = pin_initial_cook_workspace_base(options) {
+        let _ = lifecycle_store.fail_cook_operation(
+            &options.initial_run_id,
+            WORKSPACE_BASE_CAPTURE_OPERATION,
+            serde_json::json!({ "error": error.message }),
+        );
+        return Err(error);
+    }
+    let Some(task_base_sha) = options.task_base_sha.as_ref() else {
+        // No workspace was available to capture. Leave the operation retryable
+        // rather than completing a claim with no persisted result.
+        lifecycle_store.fail_cook_operation(
+            &options.initial_run_id,
+            WORKSPACE_BASE_CAPTURE_OPERATION,
+            serde_json::json!({ "reason": "workspace_unavailable" }),
+        )?;
+        return Ok(());
     };
-    let task_base_sha = options.task_base_sha.as_ref().expect("captured task base");
+    let mut recipe = store.load_recipe(&options.cook_id)?;
     let attempt = recipe
         .attempts
         .iter_mut()
@@ -6739,6 +6750,25 @@ fn pin_and_persist_initial_cook_workspace_base(
         lifecycle_store,
         &options.initial_run_id,
         &options.initial_plan,
+    )?;
+    lifecycle_store.complete_cook_operation(
+        &options.initial_run_id,
+        WORKSPACE_BASE_CAPTURE_OPERATION,
+        serde_json::json!({ "task_base_sha": task_base_sha }),
+    )
+}
+
+fn workspace_base_capture_in_progress(options: &AgentTaskCookServiceOptions) -> Error {
+    Error::validation_invalid_argument(
+        "task_base_sha",
+        "workspace_base_capture_in_progress",
+        Some(options.cook_id.clone()),
+        Some(vec![cook_continue_command(
+            None,
+            &options.initial_run_id,
+            false,
+            None,
+        )]),
     )
 }
 

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{Barrier, LazyLock, Mutex};
-use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,32 +22,6 @@ use homeboy_core::{paths, Error, Result};
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
-const TASK_BASE_CAPTURE_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
-
-/// Exclusive authority for the one external base capture that may fill an
-/// otherwise incomplete recipe. The claim is a lease, not a lock: its owner
-/// may perform the slow origin lookup without serializing other recipe work.
-pub(crate) enum TaskBaseCaptureClaim {
-    Acquired(TaskBaseCaptureLease),
-    Observed(AgentTaskCookRecipe),
-    InProgress,
-}
-
-pub(crate) struct TaskBaseCaptureLease {
-    path: PathBuf,
-    token: String,
-}
-
-impl Drop for TaskBaseCaptureLease {
-    fn drop(&mut self) {
-        // A stale owner can outlive its lease. Never let its cleanup remove a
-        // successor's claim after the successor atomically took the path over.
-        if fs::read_to_string(&self.path).ok().as_deref() == Some(&self.token) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 #[cfg(test)]
 static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
     LazyLock::new(|| Mutex::new((None, 0)));
@@ -122,82 +95,6 @@ impl CookRecipeStore {
     fn supersession_path(&self, cook_id: &str) -> PathBuf {
         self.recipe_path(cook_id)
             .with_file_name("supersession.json")
-    }
-
-    fn task_base_capture_claim_path(&self, cook_id: &str) -> PathBuf {
-        self.recipe_path(cook_id)
-            .with_file_name("task-base-capture.claim")
-    }
-
-    /// Elect one capture owner before it reaches `origin`. A completed owner
-    /// is observed from the recipe; a live owner is reported deterministically
-    /// so continuations can retry rather than repeat the external lookup.
-    pub(crate) fn claim_missing_task_base(&self, cook_id: &str) -> Result<TaskBaseCaptureClaim> {
-        loop {
-            let recipe = self.load_recipe(cook_id)?;
-            if recipe.finalization["task_base_sha"].is_string() {
-                return Ok(TaskBaseCaptureClaim::Observed(recipe));
-            }
-            let path = self.task_base_capture_claim_path(cook_id);
-            let directory = path.parent().expect("claim path has parent");
-            fs::create_dir_all(directory).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
-            })?;
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(&path) {
-                Ok(mut file) => {
-                    let token = Uuid::new_v4().to_string();
-                    if let Err(error) = file
-                        .write_all(token.as_bytes())
-                        .and_then(|_| file.sync_all())
-                    {
-                        let _ = fs::remove_file(&path);
-                        return Err(Error::internal_io(
-                            error.to_string(),
-                            Some(path.display().to_string()),
-                        ));
-                    }
-                    return Ok(TaskBaseCaptureClaim::Acquired(TaskBaseCaptureLease {
-                        path,
-                        token,
-                    }));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Reload before declaring the lease live: its owner may have
-                    // persisted the SHA immediately before releasing the claim.
-                    let recipe = self.load_recipe(cook_id)?;
-                    if recipe.finalization["task_base_sha"].is_string() {
-                        return Ok(TaskBaseCaptureClaim::Observed(recipe));
-                    }
-                    let stale = fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                        .is_some_and(|age| age >= TASK_BASE_CAPTURE_CLAIM_LEASE);
-                    if stale {
-                        let retired =
-                            path.with_extension(format!("claim.stale.{}", Uuid::new_v4()));
-                        if fs::rename(&path, &retired).is_ok() {
-                            let _ = fs::remove_file(retired);
-                        }
-                        continue;
-                    }
-                    return Ok(TaskBaseCaptureClaim::InProgress);
-                }
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some(path.display().to_string()),
-                    ));
-                }
-            }
-        }
     }
 
     fn queue_root(&self) -> PathBuf {

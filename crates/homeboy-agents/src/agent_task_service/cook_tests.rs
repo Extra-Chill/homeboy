@@ -8789,7 +8789,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
 }
 
 #[test]
-fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha() {
+fn concurrent_missing_task_base_capture_recovers_a_crashed_owner_and_reuses_its_sha() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");
         let repository = temp.path().join("repository");
@@ -8831,6 +8831,15 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
             "origin",
             repository.to_str().expect("repository path"),
         ]);
+        let destination = temp.path().join("destination");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "fixture-candidate",
+            destination.to_str().expect("destination path"),
+            "HEAD",
+        ]);
 
         let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
         let store = CookRecipeStore::new(roots.clone());
@@ -8838,12 +8847,52 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
         let cook_id = "cook-concurrent-task-base-capture";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.source_worktree_path = Some(repository.clone());
-        options.initial_plan.tasks[0].workspace.root = Some(repository.display().to_string());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.to_worktree.clone(),
+            "root": destination,
+            "branch": "fixture-candidate",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.to_worktree.clone(),
+            path: destination.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register destination workspace");
         store
             .persist_initial_recipe(&options)
             .expect("persist incomplete recipe");
         materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
             .expect("materialize initial attempt");
+        lifecycle_store
+            .mutate_record(&options.initial_run_id, |record| {
+                record.state = AgentTaskRunState::Succeeded;
+                true
+            })
+            .expect("make the continuation a terminal service replay");
+
+        // Simulate a controller crash after it reserved the durable operation
+        // but before it reached origin. The lifecycle claim, not a recipe-side
+        // pathname timestamp, must make the continuation recoverable.
+        assert!(matches!(
+            lifecycle_store
+                .claim_cook_operation(
+                    &options.initial_run_id,
+                    WORKSPACE_BASE_CAPTURE_OPERATION,
+                    WORKSPACE_BASE_CAPTURE_CLAIM_LEASE,
+                )
+                .expect("reserve interrupted capture"),
+            agent_task_lifecycle::ClaimOutcome::Acquired
+        ));
+        lifecycle_store
+            .mutate_record(&options.initial_run_id, |record| {
+                record.metadata["cook_operation_claims"][0]["owner_pid"] = serde_json::json!(0);
+                true
+            })
+            .expect("mark interrupted owner dead");
 
         let capture_counter = Arc::new(WorkspaceBaseCaptureCounter {
             workspace: repository.clone(),
@@ -8852,24 +8901,36 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
         *WORKSPACE_BASE_CAPTURE_COUNTER
             .lock()
             .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
-        let mut winner_options = options.clone();
-        let mut loser_options = options.clone();
+        let winner_options = options.clone();
+        let loser_options = options.clone();
         let barrier = Arc::new(Barrier::new(2));
         let (winner, loser) = std::thread::scope(|scope| {
             let winner = scope.spawn(|| {
                 barrier.wait();
-                pin_and_persist_initial_cook_workspace_base(
+                let mut side_effects =
+                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                run_cook_spine(
                     &store,
                     &lifecycle_store,
-                    &mut winner_options,
+                    winner_options.clone(),
+                    Arc::new(UnusedExecutor),
+                    &mut side_effects,
+                    None,
+                    false,
                 )
             });
             let loser = scope.spawn(|| {
                 barrier.wait();
-                pin_and_persist_initial_cook_workspace_base(
+                let mut side_effects =
+                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                run_cook_spine(
                     &store,
                     &lifecycle_store,
-                    &mut loser_options,
+                    loser_options.clone(),
+                    Arc::new(UnusedExecutor),
+                    &mut side_effects,
+                    None,
+                    false,
                 )
             });
             (
@@ -8886,10 +8947,16 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
                 error.details["problem"],
                 "workspace_base_capture_in_progress"
             );
-            pin_and_persist_initial_cook_workspace_base(
+            let mut side_effects =
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+            run_cook_spine(
                 &store,
                 &lifecycle_store,
-                &mut winner_options,
+                winner_options.clone(),
+                Arc::new(UnusedExecutor),
+                &mut side_effects,
+                None,
+                false,
             )
             .expect("later owner continuation reloads captured base");
         }
@@ -8898,10 +8965,16 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
                 error.details["problem"],
                 "workspace_base_capture_in_progress"
             );
-            pin_and_persist_initial_cook_workspace_base(
+            let mut side_effects =
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+            run_cook_spine(
                 &store,
                 &lifecycle_store,
-                &mut loser_options,
+                loser_options.clone(),
+                Arc::new(UnusedExecutor),
+                &mut side_effects,
+                None,
+                false,
             )
             .expect("later continuation reloads captured base");
         }
@@ -8911,17 +8984,19 @@ fn concurrent_missing_task_base_capture_has_one_origin_owner_and_reuses_its_sha(
         assert_eq!(
             capture_counter.count.load(Ordering::SeqCst),
             1,
-            "only the claim owner reaches origin"
+            "only the recovered claim owner reaches origin"
         );
         let recipe = store.load_recipe(cook_id).expect("captured recipe");
         assert_eq!(
             recipe.finalization["task_base_sha"],
             serde_json::json!(expected_sha)
         );
-        assert_eq!(winner_options.task_base_sha, loser_options.task_base_sha);
         assert_eq!(
-            winner_options.task_base_sha.as_deref(),
-            Some(expected_sha.as_str())
+            store
+                .load_recipe(cook_id)
+                .expect("reloaded recipe")
+                .finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
         );
     });
 }
