@@ -156,18 +156,6 @@ pub fn runner_controller_session_file(id: &str, controller_id: &str) -> Result<P
     ))
 }
 
-/// Controller-owned lease evidence below an already-resolved config root.
-pub(crate) fn runner_lease_evidence_file_in_root(
-    config_root: &Path,
-    runner_id: &str,
-    lease_id: &str,
-) -> PathBuf {
-    config_root
-        .join("runner-lease-evidence")
-        .join(sanitize_path_segment(runner_id))
-        .join(format!("{}.json", sanitize_path_segment(lease_id)))
-}
-
 /// Runner-owned durable reverse-execution evidence below an already-resolved
 /// config root.
 pub fn runner_job_execution_context_evidence_file_in_root(

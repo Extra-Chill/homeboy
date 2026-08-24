@@ -15,10 +15,6 @@
 //! Core still reaches release/deploy behavior only through the
 //! `homeboy_core::release_provider` hook, implemented here in `provider_impl`.
 
-#[allow(
-    dead_code,
-    reason = "Release upload verification supports recovery and optional publication paths."
-)]
 pub mod release;
 
 pub use release::provider_impl;

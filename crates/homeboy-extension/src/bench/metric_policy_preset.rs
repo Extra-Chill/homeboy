@@ -6,10 +6,6 @@ pub use homeboy_extension_contract::bench_metric_preset::{
 use super::gate::{BenchGate, BenchGateOp};
 use super::parsing::{BenchMetricDirection, BenchResults};
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result<()> {
     for (metric, preset) in results.metric_policy_presets.clone() {
         match preset.preset {

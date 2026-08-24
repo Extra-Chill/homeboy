@@ -22,6 +22,10 @@ pub(crate) struct ProjectPayloadBinding {
     pub install_dir: String,
 }
 
+#[allow(
+    dead_code,
+    reason = "Constructed only by the test-only `evidence()` projection above."
+)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct ProjectPayloadBindingEvidence {
     pub project_id: String,
@@ -32,6 +36,10 @@ pub(crate) struct ProjectPayloadBindingEvidence {
     pub artifact: PayloadIdentityEvidence,
 }
 
+#[allow(
+    dead_code,
+    reason = "Constructed only by the test-only `evidence()` projection above."
+)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct InstallInstructions {
     pub extract_command: Option<String>,
@@ -40,6 +48,10 @@ pub(crate) struct InstallInstructions {
     pub hooks: std::collections::HashMap<String, Vec<String>>,
 }
 
+#[allow(
+    dead_code,
+    reason = "Constructed only by the test-only `evidence()` projection above."
+)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct PayloadIdentityEvidence {
     pub component_id: String,
@@ -51,6 +63,10 @@ pub(crate) struct PayloadIdentityEvidence {
 }
 
 impl ProjectPayloadBinding {
+    #[allow(
+        dead_code,
+        reason = "No production caller: binding evidence is asserted by this module's tests; nothing emits it on a deploy."
+    )]
     pub fn evidence(&self, project_id: &str) -> ProjectPayloadBindingEvidence {
         ProjectPayloadBindingEvidence {
             project_id: project_id.to_string(),

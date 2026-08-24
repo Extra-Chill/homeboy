@@ -36,10 +36,13 @@ use std::path::{Path, PathBuf};
 
 /// Maximum permitted number of module-level `dead_code` suppressions.
 ///
-/// This is the exact count as of the commit that introduced this ratchet, down
-/// from 40 before the sweep. It is a ceiling, not a target: lower it whenever
-/// a crate is cleared, and never raise it.
-const MODULE_SUPPRESSION_CEILING: usize = 16;
+/// Down from 40 before the 2026-08 sweep and 16 when this ratchet landed.
+/// Clearing homeboy-release, homeboy-extension, homeboy-deploy,
+/// homeboy-engine-primitives and homeboy-paths took it to 9: the seven
+/// homeboy-agents modules, plus two `#[path]`-shared test support modules that
+/// each test binary includes whole and uses in part. It is a ceiling, not a
+/// target: lower it whenever a crate is cleared, and never raise it.
+const MODULE_SUPPRESSION_CEILING: usize = 9;
 
 /// One module-level suppression, located precisely enough to act on.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

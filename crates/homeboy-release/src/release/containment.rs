@@ -148,6 +148,10 @@ pub enum ContainmentStatus {
 
 impl ContainmentStatus {
     /// True when some release provably contains the commit.
+    #[allow(
+        dead_code,
+        reason = "No production caller: the released/not-released partition is asserted by this module's tests."
+    )]
     pub(crate) fn is_released(self) -> bool {
         !matches!(self, Self::NotYetReleased)
     }

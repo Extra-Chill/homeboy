@@ -1,7 +1,3 @@
-#[allow(
-    dead_code,
-    reason = "Deployment binding evidence supports optional planning paths."
-)]
 pub(crate) mod binding;
 mod content_manifest;
 mod effect;
@@ -13,16 +9,8 @@ mod orchestration_ref_checkout;
 mod orchestration_tag_checkout;
 mod path_roots;
 pub(crate) mod permissions;
-#[allow(
-    dead_code,
-    reason = "Component loading supports optional deployment planning."
-)]
 mod planning;
 mod policy;
-#[allow(
-    dead_code,
-    reason = "Payload preparation evidence supports optional deployment execution."
-)]
 pub(crate) mod preparation;
 pub(crate) mod provenance;
 mod provider;

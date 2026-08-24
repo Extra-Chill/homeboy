@@ -730,6 +730,10 @@ pub(super) struct LoadedComponents {
 ///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
+#[allow(
+    dead_code,
+    reason = "No production caller: exercised by orchestration tests that assert component loading in isolation."
+)]
 pub(super) fn load_project_components(
     project: &Project,
     requested_ids: &[String],

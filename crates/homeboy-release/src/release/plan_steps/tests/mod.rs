@@ -1,15 +1,45 @@
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
 use super::preflight::build_preflight_steps;
-use super::release::build_release_steps;
+use super::release::build_release_steps_with_reconciliation;
 use crate::release::scope::ReleaseScope;
 use crate::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
     ReleaseSemverRecommendation,
 };
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
-use homeboy_core::plan::PlanStepStatus;
+use homeboy_core::plan::{PlanStep, PlanStepStatus};
+use homeboy_core::Result;
 use homeboy_extension::ExtensionManifest;
 
+/// Test-local shim: production callers pass their own reconciliation input,
+/// so the no-reconciliation default only ever existed for these assertions.
+#[allow(clippy::too_many_arguments)]
+fn build_release_steps(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    current_version: &str,
+    new_version: &str,
+    changelog_plan: &ReleaseChangelogPlan,
+    options: &ReleaseOptions,
+    release_scope: &ReleaseScope,
+    warnings: &mut Vec<String>,
+    hints: &mut Vec<String>,
+) -> Result<Vec<PlanStep>> {
+    build_release_steps_with_reconciliation(
+        component,
+        extensions,
+        current_version,
+        new_version,
+        changelog_plan,
+        options,
+        release_scope,
+        warnings,
+        hints,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 #[test]
 fn test_build_preflight_steps() {
     let options = ReleaseOptions {
