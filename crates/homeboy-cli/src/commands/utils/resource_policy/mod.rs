@@ -1,7 +1,7 @@
 mod classification;
 mod messages;
 
-use crate::cli_surface::Commands;
+use crate::cli_surface::{Cli, Commands, Placement};
 use crate::command_contract::LabCommandPortability;
 use crate::command_contract::LabCommandRoute;
 use crate::commands::agent_task;
@@ -31,6 +31,133 @@ pub use crate::core::resource_policy_context::{
     is_runner_hosted_exec, ResourcePolicyContext, ResourcePolicyHostSnapshot,
     ResourcePolicyRunnerSelection,
 };
+
+/// Translate the static parsed command tree into the parser-independent
+/// preflight contract. This is intentionally an adapter: command-family
+/// predicates remain above core, while capability-provided parsers can produce
+/// the same input without depending on `Cli` or `Commands`.
+pub(crate) fn parsed_command_preflight_input(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> crate::core::parsed_command_preflight::ParsedCommandPreflightInput {
+    use crate::core::parsed_command_preflight::{
+        ControllerExecution, DeferredWorkloadPolicy, LabRouteIntent, ParsedCommandPreflightInput,
+        PlacementIntent, ProvenanceRequirement, ResourceAdmissionRequirement, ResourceHeat,
+        RunnerIntent, RunnerNormalization,
+    };
+
+    let resource_admission =
+        hot_command(&cli.command).map_or(ResourceAdmissionRequirement::Exempt, |command| {
+            ResourceAdmissionRequirement::Required {
+                label: command.label.to_string(),
+                engages_at: if command.offload_only_when_hot {
+                    ResourceHeat::Hot
+                } else {
+                    ResourceHeat::Warm
+                },
+            }
+        });
+    let controller_execution = if is_controller_owned_fanout_coordination(&cli.command)
+        || is_plan_only_command(&cli.command)
+        || is_bounded_agent_task_metadata_read(&cli.command)
+        || is_local_registry_management(&cli.command)
+    {
+        ControllerExecution::ControllerOnly
+    } else if hot_command(&cli.command)
+        .is_some_and(|command| command.allows_warm_runner_coordination)
+    {
+        ControllerExecution::SplitPlacementCoordinator
+    } else {
+        ControllerExecution::Ordinary
+    };
+    let placement = match cli.placement {
+        Placement::Auto => PlacementIntent::Auto,
+        Placement::Local => PlacementIntent::Local,
+        Placement::Lab => PlacementIntent::Lab,
+        Placement::LabOrLocal => PlacementIntent::LabOrLocal,
+    };
+    let runner = if let Some(runner) = &cli.runner {
+        RunnerIntent::Explicit(runner.clone())
+    } else if matches!(&cli.command, Commands::Runs(_))
+        && normalized_args
+            .iter()
+            .any(|arg| arg == "--runner" || arg.starts_with("--runner="))
+    {
+        RunnerIntent::CommandLocal
+    } else {
+        RunnerIntent::Default
+    };
+    let runner_normalization = if matches!(
+        &cli.command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(_),
+        })
+    ) && normalized_args
+        .iter()
+        .any(|arg| arg == "--runner" || arg.starts_with("--runner="))
+    {
+        RunnerNormalization::PinnedCookArgv
+    } else if matches!(&cli.command, Commands::Runs(_)) {
+        RunnerNormalization::RunsCommandOption
+    } else {
+        RunnerNormalization::None
+    };
+    let lab_route = cli
+        .command
+        .lab_contract()
+        .map_or(LabRouteIntent::Unsupported, |contract| {
+            LabRouteIntent::Supported {
+                automatic: matches!(contract.portability, LabCommandPortability::Portable),
+            }
+        });
+    let deferred_workload = if matches!(
+        &cli.command,
+        Commands::Review(review)
+            if matches!(review.command, Some(crate::commands::review::ReviewCommand::Test(_)))
+                && review.lab_contract().is_some_and(|contract| contract.is_portable())
+    ) {
+        DeferredWorkloadPolicy::Eligible
+    } else {
+        DeferredWorkloadPolicy::Forbidden
+    };
+    let contract_label = cli
+        .command
+        .lab_contract()
+        .map(|contract| contract.hot_label);
+    ParsedCommandPreflightInput {
+        // This is parsed-command metadata, never an argv position: globals may
+        // precede the command. #13241 supplies the equivalent metadata for
+        // dynamic capabilities; this branch intentionally leaves their runtime
+        // integration unchanged.
+        identity: parsed_command_identity(&cli.command),
+        resource_admission,
+        controller_execution,
+        deferred_workload,
+        placement,
+        runner,
+        runner_normalization,
+        lab_route,
+        provenance: contract_label
+            .is_some()
+            .then_some(ProvenanceRequirement::CaptureExecution)
+            .unwrap_or(ProvenanceRequirement::None),
+    }
+}
+
+fn parsed_command_identity(
+    command: &Commands,
+) -> crate::core::parsed_command_preflight::ParsedCommandIdentity {
+    let label = command
+        .lab_contract()
+        .map(|contract| contract.hot_label)
+        .or_else(|| hot_command(command).map(|command| command.label))
+        .unwrap_or("controller command");
+    let mut segments = label.split_whitespace();
+    crate::core::parsed_command_preflight::ParsedCommandIdentity {
+        family: segments.next().unwrap_or("controller").to_string(),
+        operation: segments.map(str::to_string).collect(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HotCommand {
@@ -72,10 +199,25 @@ impl HotCommand {
     /// Cheap commands only engage at `hot`; everything else engages once the
     /// machine leaves `ok` (i.e. at `warm`).
     fn engages_resource_admission(&self, recommendation: ResourceRecommendation) -> bool {
-        match recommendation {
-            ResourceRecommendation::Ok => false,
-            ResourceRecommendation::Warm => !self.offload_only_when_hot,
-            ResourceRecommendation::Hot => true,
+        matches!(
+            crate::core::parsed_command_preflight::evaluate_resource_admission(
+                &self.resource_admission_requirement(),
+                resource_admission_evidence_for_recommendation(recommendation),
+            ),
+            crate::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+        )
+    }
+
+    fn resource_admission_requirement(
+        &self,
+    ) -> crate::core::parsed_command_preflight::ResourceAdmissionRequirement {
+        crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Required {
+            label: self.label.to_string(),
+            engages_at: if self.offload_only_when_hot {
+                crate::core::parsed_command_preflight::ResourceHeat::Hot
+            } else {
+                crate::core::parsed_command_preflight::ResourceHeat::Warm
+            },
         }
     }
 }
@@ -174,6 +316,42 @@ pub(crate) fn resource_policy_context_to_json(
     context: &ResourcePolicyContext,
 ) -> serde_json::Value {
     serde_json::to_value(context).unwrap_or(serde_json::Value::Null)
+}
+
+/// Copy runner-owned readiness evidence into the parser-independent preflight
+/// result. Route consumers must not reopen the runner inventory.
+pub(crate) fn lab_readiness_snapshot(
+    readiness: &LabRunnerReadiness,
+) -> crate::core::parsed_command_preflight::LabReadinessSnapshot {
+    crate::core::parsed_command_preflight::LabReadinessSnapshot {
+        state: readiness.state.as_str().to_string(),
+        selected_runner_id: readiness.selected_runner_id.clone(),
+        available_runner_ids: readiness.available_runner_ids.clone(),
+        reasons: readiness.reasons.clone(),
+        remediation_commands: readiness.remediation_commands.clone(),
+    }
+}
+
+/// Preserve the built-in resource evaluator's pressure observation while
+/// delegating the requirement threshold and verdict to core.
+pub(crate) fn resource_admission_evidence(
+    resources: &DoctorOutput,
+) -> crate::core::parsed_command_preflight::ResourceAdmissionEvidence {
+    resource_admission_evidence_for_recommendation(resources.recommendation)
+}
+
+fn resource_admission_evidence_for_recommendation(
+    recommendation: ResourceRecommendation,
+) -> crate::core::parsed_command_preflight::ResourceAdmissionEvidence {
+    use crate::core::parsed_command_preflight::{ResourceAdmissionEvidence, ResourceHeat};
+
+    ResourceAdmissionEvidence::Observed {
+        pressure: match recommendation {
+            ResourceRecommendation::Ok => ResourceHeat::None,
+            ResourceRecommendation::Warm => ResourceHeat::Warm,
+            ResourceRecommendation::Hot => ResourceHeat::Hot,
+        },
+    }
 }
 
 fn runner_selection_context(
@@ -718,6 +896,258 @@ mod tests {
             allows_warm_runner_coordination: false,
             offload_only_when_hot: false,
         }
+    }
+
+    #[test]
+    fn generic_and_builtin_preflight_resolve_the_same_policy_matrix() {
+        use crate::core::parsed_command_preflight::{
+            ControllerExecution, DeferredWorkloadDecision, DeferredWorkloadPolicy,
+            GenericRoutePolicySnapshot, LabReadinessSnapshot, LabRouteIntent,
+            ParsedCommandIdentity, ParsedCommandPolicySnapshot, ParsedCommandPreflightInput,
+            PlacementIntent, ProvenanceRequirement, ResourceAdmissionEvidence,
+            ResourceAdmissionRequirement, ResourceHeat, RunnerIntent, RunnerNormalization,
+        };
+
+        let input = |placement, runner, controller_execution, identity, deferred_workload| {
+            ParsedCommandPreflightInput {
+                identity,
+                resource_admission: ResourceAdmissionRequirement::Required {
+                    label: "review test".to_string(),
+                    engages_at: ResourceHeat::Warm,
+                },
+                controller_execution,
+                deferred_workload,
+                placement,
+                runner,
+                runner_normalization: RunnerNormalization::None,
+                lab_route: LabRouteIntent::Supported { automatic: true },
+                provenance: ProvenanceRequirement::CaptureExecution,
+            }
+        };
+        let snapshot =
+            |selected_runner_id: Option<&str>, deferred_workload, fallback, state: &str| {
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::None,
+                    },
+                    resource_policy: None,
+                    lab_readiness: Some(LabReadinessSnapshot {
+                        state: state.to_string(),
+                        selected_runner_id: selected_runner_id.map(str::to_string),
+                        available_runner_ids: selected_runner_id
+                            .map(str::to_string)
+                            .into_iter()
+                            .collect(),
+                        reasons: Vec::new(),
+                        remediation_commands: Vec::new(),
+                    }),
+                    selected_runner_id: selected_runner_id.map(str::to_string),
+                    generic_route: GenericRoutePolicySnapshot {
+                        command_supports_lab: true,
+                        automatic_authorized: selected_runner_id.is_some(),
+                        selected_runner_id: selected_runner_id.map(str::to_string),
+                    },
+                    deferred_pressure_refusal: deferred_workload == DeferredWorkloadDecision::Defer,
+                    runner_admitted: selected_runner_id.is_some(),
+                    runner_incompatible: deferred_workload
+                        == DeferredWorkloadDecision::RunnerIncompatible,
+                    auto_local_capacity_fallback: fallback,
+                }
+            };
+        let cases = [
+            (
+                "cold",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "connected_ready",
+            ),
+            (
+                "hot pressure rejection",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::Defer,
+                false,
+                None,
+                "disconnected",
+            ),
+            (
+                "controller-only",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::ControllerOnly,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "connected_ready",
+            ),
+            (
+                "deferred",
+                vec!["homeboy", "--placement", "lab-or-local", "review", "test"],
+                PlacementIntent::LabOrLocal,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::Defer,
+                false,
+                None,
+                "disconnected",
+            ),
+            (
+                "explicit local",
+                vec!["homeboy", "--placement", "local", "review", "test"],
+                PlacementIntent::Local,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "connected_ready",
+            ),
+            (
+                "explicit Lab",
+                vec!["homeboy", "--placement", "lab", "review", "test"],
+                PlacementIntent::Lab,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                Some("lab-a"),
+                "connected_ready",
+            ),
+            (
+                "explicit runner",
+                vec!["homeboy", "--runner", "lab-a", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Explicit("lab-a".to_string()),
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                Some("lab-a"),
+                "connected_ready",
+            ),
+            (
+                "stale",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "stale",
+            ),
+            (
+                "unavailable",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "disconnected",
+            ),
+            (
+                "capacity blocked",
+                vec!["homeboy", "review", "test"],
+                PlacementIntent::Auto,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                false,
+                None,
+                "capacity_blocked",
+            ),
+            (
+                "fallback",
+                vec!["homeboy", "--placement", "lab-or-local", "review", "test"],
+                PlacementIntent::LabOrLocal,
+                RunnerIntent::Default,
+                ControllerExecution::Ordinary,
+                DeferredWorkloadDecision::NotApplicable,
+                true,
+                None,
+                "disconnected",
+            ),
+        ];
+        for (
+            name,
+            argv,
+            placement,
+            runner,
+            controller_execution,
+            deferred,
+            fallback,
+            selected,
+            state,
+        ) in cases
+        {
+            let normalized = argv
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&normalized);
+            let generic = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+                normalized.clone(),
+                input(
+                    placement,
+                    runner,
+                    controller_execution,
+                    ParsedCommandIdentity {
+                        family: "review".to_string(),
+                        operation: vec!["test".to_string()],
+                    },
+                    DeferredWorkloadPolicy::Eligible,
+                ),
+                snapshot(selected, deferred.clone(), fallback, state),
+            )
+            .expect("generic fixture is internally consistent");
+            let builtin = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+                normalized.clone(),
+                parsed_command_preflight_input(&cli, &normalized),
+                snapshot(selected, deferred, fallback, state),
+            )
+            .expect("builtin fixture is internally consistent");
+            assert_eq!(generic.placement, builtin.placement, "{name}");
+            assert_eq!(
+                generic.deferred_workload, builtin.deferred_workload,
+                "{name}"
+            );
+            assert_eq!(generic.fallback, builtin.fallback, "{name}");
+            assert_eq!(
+                generic.generic_route_runner_id, builtin.generic_route_runner_id,
+                "{name}"
+            );
+        }
+
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+        let builtin = parsed_command_preflight_input(&cli, &normalized);
+        assert_eq!(
+            builtin.identity,
+            ParsedCommandIdentity {
+                family: "review".to_string(),
+                operation: vec!["test".to_string()]
+            }
+        );
+        assert_eq!(builtin.provenance, ProvenanceRequirement::CaptureExecution);
+        assert_eq!(
+            normalized,
+            vec!["homeboy", "--placement", "lab", "review", "test"]
+        );
     }
 
     #[test]

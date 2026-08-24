@@ -31,7 +31,7 @@ fn durable_agent_task_handoff_targets_its_lifecycle_record() {
 fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
     crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source workspace");
-        let decision = placement_decision(
+        let decision = fixture_preflight_decision(
             &Cli::parse_from(["homeboy", "status"]),
             Some("homeboy-lab"),
             "bench",
@@ -76,7 +76,7 @@ fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
             "--run-id=ssi-fixture-37-20260727-runtime-fixed".to_string(),
         ];
         let source = tempfile::tempdir().expect("source workspace");
-        let decision = placement_decision(
+        let decision = fixture_preflight_decision(
             &Cli::parse_from(["homeboy", "status"]),
             Some("homeboy-lab"),
             "bench",
@@ -132,8 +132,9 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
         let command = lab_offload_command(&cli.command)
             .expect("bench contract")
             .expect("portable bench");
-        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
-            .expect("placement decision");
+        let decision =
+            fixture_preflight_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+                .expect("placement decision");
         let handoff =
             materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
                 .expect("persist detached bench handoff");
@@ -529,7 +530,7 @@ fn deferred_workload_command_is_portable_and_omits_controller_placement() {
 fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: "homeboy-lab".to_string(),
-        placement_decision: placement_decision(
+        placement_decision: fixture_preflight_decision(
             &Cli::parse_from(["homeboy", "status"]),
             Some("homeboy-lab"),
             "test-cook-dispatch",
@@ -577,11 +578,12 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
 fn unchanged_attempt_inputs_preserve_the_canonical_decision() {
     let cli = Cli::parse_from(["homeboy", "--runner", "homeboy-lab", "status"]);
     let first = tempdir().expect("first child workspace");
-    let initial = placement_decision(&cli, Some("homeboy-lab"), "child-a", Some(first.path()))
-        .expect("initial child decision");
+    let initial =
+        fixture_preflight_decision(&cli, Some("homeboy-lab"), "child-a", Some(first.path()))
+            .expect("initial child decision");
 
     let preserved =
-        placement_decision_for_attempt(&initial, "homeboy-lab", "child-a", Some(first.path()));
+        finalize_replacement_attempt(&initial, "homeboy-lab", "child-a", Some(first.path()));
 
     assert_eq!(initial.decision_id, preserved.decision_id);
     assert_eq!(
@@ -608,9 +610,13 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
         std::fs::create_dir(&workspace).expect("workspace");
         std::fs::create_dir(&replacement_workspace).expect("replacement workspace");
         let cli = Cli::parse_from(["homeboy", "--runner", "homeboy-lab", "status"]);
-        let initial =
-            placement_decision(&cli, Some("homeboy-lab"), "provider-task", Some(&workspace))
-                .expect("initial placement decision");
+        let initial = fixture_preflight_decision(
+            &cli,
+            Some("homeboy-lab"),
+            "provider-task",
+            Some(&workspace),
+        )
+        .expect("initial placement decision");
         let template = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "placement-e2e",
             vec![serde_json::from_value(serde_json::json!({
@@ -676,8 +682,13 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
         let replacement = resolve_cook_attempt_placement_decision(
             &mut replacement_plan,
             "workspace-replacement",
-            &placement_decision(&cli, Some("homeboy-lab"), "provider-task", Some(&workspace))
-                .expect("initial decision"),
+            &fixture_preflight_decision(
+                &cli,
+                Some("homeboy-lab"),
+                "provider-task",
+                Some(&workspace),
+            )
+            .expect("initial decision"),
             "homeboy-lab",
             "provider-task",
             Some(&replacement_workspace),
@@ -723,35 +734,6 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
 }
 
 #[test]
-fn direct_controller_dispatch_creates_an_authoritative_placement_decision() {
-    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
-        "controller-dispatch-plan",
-        vec![serde_json::from_value(serde_json::json!({
-            "task_id": "controller-task",
-            "executor": { "backend": "fixture" },
-            "instructions": "dispatch directly to Lab"
-        }))
-        .expect("task")],
-    );
-
-    let decision = controller_dispatch_placement_decision(&plan, "homeboy-lab", None);
-
-    assert_eq!(decision.identity.task, "controller-task");
-    assert_eq!(
-        decision.requested,
-        homeboy_lab_runner_contract::Placement::Lab
-    );
-    assert_eq!(
-        decision.required,
-        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab
-    );
-    assert_eq!(
-        decision.runner.expect("selected runner").runner_id,
-        "homeboy-lab"
-    );
-}
-
-#[test]
 fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
     let source = tempdir().expect("source workspace");
     let cases = [
@@ -794,7 +776,7 @@ fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
 
     for (args, runner, placement, required, local_fallback) in cases {
         let cli = Cli::parse_from(&args);
-        let decision = placement_decision(&cli, runner, "matrix", Some(source.path()))
+        let decision = fixture_preflight_decision(&cli, runner, "matrix", Some(source.path()))
             .expect("placement decision");
 
         assert_eq!(cli.placement, placement);
@@ -854,7 +836,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
         );
         let dispatcher = LabCookAttemptDispatcher {
             runner_id: "missing-homeboy-lab".to_string(),
-            placement_decision: placement_decision(
+            placement_decision: fixture_preflight_decision(
                 &Cli::parse_from(["homeboy", "status"]),
                 Some("missing-homeboy-lab"),
                 "task",
@@ -1350,14 +1332,26 @@ fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_ident
         assert_eq!(overrides.env["DB_SERVICE_HOST"], "db.fixture");
         assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
         assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+        ];
+        let preflight = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+            normalized.clone(),
+            resource_policy::parsed_command_preflight_input(&cli, &normalized),
+            None,
+            None,
+            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer,
+            homeboy::core::parsed_command_preflight::FallbackDirective::None,
+            crate::cli_runtime::placement_directive(&cli, None, false),
+            None,
+        );
         let deferred = homeboy::deferred_workload::defer(
             deferred_workload_input(
                 &cli,
-                &[
-                    "homeboy".to_string(),
-                    "review".to_string(),
-                    "test".to_string(),
-                ],
+                &normalized,
+                &preflight,
                 review_test_deferred_requirements(&cli).expect("review test requirements"),
             )
             .expect("deferred input"),
@@ -1553,6 +1547,19 @@ fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
         "lint".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
+    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+    homeboy::core::parsed_command_preflight::capture_result(
+        homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+            normalized.clone(),
+            resource_policy::parsed_command_preflight_input(&cli, &normalized),
+            None,
+            None,
+            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+            homeboy::core::parsed_command_preflight::FallbackDirective::RequiredLabUnavailable,
+            crate::cli_runtime::placement_directive(&cli, None, false),
+            None,
+        ),
+    );
 
     let err = crate::test_support::with_isolated_home(|_| {
         route_after_parse_with_provenance(&cli, &normalized, None, None)
@@ -2610,11 +2617,16 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
         "keep this local",
     ]);
 
-    assert!(
-        run_split_placement_cook(&cli, &[], None, Some("homeboy-lab"), None)
-            .expect("local placement bypasses Lab cook dispatch")
-            .is_none()
-    );
+    assert!(run_split_placement_cook(
+        &cli,
+        &[],
+        None,
+        Some("homeboy-lab"),
+        &crate::cli_runtime::placement_directive(&cli, Some("homeboy-lab"), false),
+        None,
+    )
+    .expect("local placement bypasses Lab cook dispatch")
+    .is_none());
 }
 
 #[test]
@@ -2632,8 +2644,15 @@ fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
         "queue this remotely",
     ]);
 
-    let error = run_split_placement_cook(&cli, &[], None, None, None)
-        .expect_err("detached Cook must require a remote runner");
+    let error = run_split_placement_cook(
+        &cli,
+        &[],
+        None,
+        None,
+        &crate::cli_runtime::placement_directive(&cli, None, false),
+        None,
+    )
+    .expect_err("detached Cook must require a remote runner");
     assert!(error
         .message
         .contains("controller-local execution was not authorized"));
@@ -3330,8 +3349,8 @@ fn local_fanout_warning_carries_lab_readiness_reasons_and_remediation() {
         "cargo test",
         "--run-plan",
     ]);
-    let readiness = runners::LabRunnerReadiness {
-        state: runners::LabRunnerReadinessState::Stale,
+    let readiness = homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+        state: "stale".to_string(),
         selected_runner_id: None,
         available_runner_ids: vec!["lab-a".to_string()],
         reasons: vec!["lab-a daemon is stale".to_string()],
@@ -3439,27 +3458,23 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
 
 #[test]
 fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct() {
-    let readiness = |state| runners::LabRunnerReadiness {
-        state,
+    let readiness = |state: &str| homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+        state: state.to_string(),
         selected_runner_id: None,
         available_runner_ids: Vec::new(),
         reasons: Vec::new(),
         remediation_commands: Vec::new(),
     };
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness(runners::LabRunnerReadinessState::Stale))),
+        unmaterialized_admission_state(Some(&readiness("stale"))),
         "blocked_runner_stale"
     );
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness(
-            runners::LabRunnerReadinessState::Disconnected
-        ))),
+        unmaterialized_admission_state(Some(&readiness("disconnected"))),
         "blocked_runner_unavailable"
     );
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness(
-            runners::LabRunnerReadinessState::CapacityBlocked
-        ))),
+        unmaterialized_admission_state(Some(&readiness("capacity_blocked"))),
         "queued"
     );
 }
@@ -3470,14 +3485,18 @@ fn admission_capability_contract_accepts_runtime_or_capability_and_rejects_missi
         runtime_ids: ["runtime-a".to_string()].into_iter().collect(),
         capabilities: ["capability-a".to_string()].into_iter().collect(),
     };
-    assert!(runner_inventory_satisfies_admission_capabilities(
-        &inventory,
-        &["runtime-a", "capability-a"].into_iter().collect(),
-    ));
-    assert!(!runner_inventory_satisfies_admission_capabilities(
-        &inventory,
-        &["missing"].into_iter().collect(),
-    ));
+    assert!(
+        crate::cli_runtime::runner_inventory_satisfies_admission_capabilities(
+            &inventory,
+            &["runtime-a", "capability-a"].into_iter().collect(),
+        )
+    );
+    assert!(
+        !crate::cli_runtime::runner_inventory_satisfies_admission_capabilities(
+            &inventory,
+            &["missing"].into_iter().collect(),
+        )
+    );
 }
 
 #[test]
@@ -3527,7 +3546,10 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
             .argv
             .iter()
             .any(|arg| arg == "--detach-after-handoff"));
-        assert!(!intent.argv.iter().any(|arg| arg == "--placement"));
+        assert!(intent
+            .argv
+            .windows(2)
+            .any(|pair| pair[0] == "--placement" && pair[1] == "auto"));
         assert!(intent.argv.iter().any(|arg| arg == "--prompt"));
         assert!(intent.argv.iter().any(|arg| arg == "--private-verify-file"));
         assert_eq!(intent.input_refs.len(), 3);
@@ -3544,7 +3566,7 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
             .windows(2)
             .any(|pair| pair[0] == "--prompt" && pair[1].starts_with("homeboy-replay-ref:")));
         let mut replay = intent.argv.clone();
-        replay.splice(1..1, ["--runner".to_string(), "lab".to_string()]);
+        replay.extend(["--runner".to_string(), "lab".to_string()]);
         let replay =
             Cli::try_parse_from(replay).expect("intent reconstructs normal Cook CLI inputs");
         assert_eq!(replay.runner.as_deref(), Some("lab"));
@@ -4160,6 +4182,11 @@ fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materiali
                         &cli,
                         None,
                         Some("fake-reconnected-runner"),
+                        &crate::cli_runtime::placement_directive(
+                            &cli,
+                            Some("fake-reconnected-runner"),
+                            false,
+                        ),
                         None,
                         Some(dispatcher.clone()),
                         Some(Arc::clone(&local_executor)),
@@ -4284,8 +4311,8 @@ fn split_placement_cook_without_a_runner_reports_readiness_not_a_placement_contr
         "--prompt",
         "route this attempt to Lab",
     ]);
-    let readiness = runners::LabRunnerReadiness {
-        state: runners::LabRunnerReadinessState::Disconnected,
+    let readiness = homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+        state: "disconnected".to_string(),
         selected_runner_id: None,
         available_runner_ids: vec!["homeboy-lab".to_string()],
         reasons: vec!["homeboy-lab is disconnected".to_string()],
@@ -4371,8 +4398,9 @@ fn cold_lab_or_local_records_an_admitted_local_fallback() {
         "fall back locally when admitted",
     ]);
 
-    let decision = placement_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
-        .expect("cold controller may select local fallback");
+    let decision =
+        fixture_preflight_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
+            .expect("cold controller may select local fallback");
 
     assert!(decision.permits_local_execution());
     assert!(decision.fallback.local_allowed);
@@ -4396,8 +4424,9 @@ fn explicit_local_placement_records_audited_override_authorization() {
         "run locally with operator authorization",
     ]);
 
-    let decision = placement_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
-        .expect("explicit local placement resolves");
+    let decision =
+        fixture_preflight_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
+            .expect("explicit local placement resolves");
 
     assert!(decision.permits_local_execution());
     assert!(decision.override_authorization.authorized);
