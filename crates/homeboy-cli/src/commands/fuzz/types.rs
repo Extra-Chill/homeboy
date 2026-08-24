@@ -189,9 +189,9 @@ pub(crate) enum FuzzCommand {
     /// Compare two persisted fuzz result envelopes
     Compare(FuzzCompareArgs),
     /// Resolve replay metadata for persisted fuzz cases
-    Replay(FuzzReplayArgs),
+    Replay(FuzzReplayLikeArgs),
     /// Resolve minimization metadata for persisted fuzz cases
-    Minimize(FuzzMinimizeArgs),
+    Minimize(FuzzReplayLikeArgs),
     /// Print a compact fuzz failure diagnosis or the complete runner result
     Inspect(FuzzInspectArgs),
 }
@@ -686,17 +686,28 @@ impl FuzzCompareHotspotPolicy {
     }
 }
 
+/// Arguments shared by `fuzz replay` and `fuzz minimize`.
+///
+/// The two subcommands take an identical argument set and differ only in which
+/// extension manifest command they resolve (`replay_command` vs
+/// `minimize_command`) -- a distinction the private `ReplayLikeMode` enum in
+/// `replay.rs` already carries.
+///
+/// They used to be two field-for-field clap structs, plus a third private
+/// `ReplayLikeArgs` copy in `replay.rs` that both were rebuilt into
+/// field-by-field before use. The same eleven arguments were declared three
+/// times, and the only thing that ever differed between them was help text.
 #[derive(Args, Clone)]
-pub(crate) struct FuzzReplayArgs {
-    /// Component ID used to resolve the extension replay_command.
+pub(crate) struct FuzzReplayLikeArgs {
+    /// Component ID used to resolve the extension replay/minimize command.
     #[arg(long = "component", value_name = "ID")]
     pub(crate) component: Option<String>,
 
-    /// Override the component checkout path for replay command execution.
+    /// Override the component checkout path for command execution.
     #[arg(long)]
     pub(crate) path: Option<String>,
 
-    /// Resolve replay through a rig's component path and extension config.
+    /// Resolve the command through a rig's component path and extension config.
     #[arg(long, value_name = "RIG_ID")]
     pub(crate) rig: Option<String>,
 
@@ -710,11 +721,11 @@ pub(crate) struct FuzzReplayArgs {
     #[arg(value_name = "ARTIFACT_OR_CASE")]
     pub(crate) artifact_or_case: Option<String>,
 
-    /// Fuzz campaign or result envelope artifact to inspect for replay metadata.
+    /// Fuzz campaign or result envelope artifact to inspect for replay/minimize metadata.
     #[arg(long = "artifact", value_name = "PATH")]
     pub(crate) artifact: Option<PathBuf>,
 
-    /// Case id to replay from the campaign/envelope artifact.
+    /// Case id to replay or minimize from the campaign/envelope artifact.
     #[arg(long = "case-id", value_name = "ID")]
     pub(crate) case_id: Option<String>,
 
@@ -722,56 +733,11 @@ pub(crate) struct FuzzReplayArgs {
     #[arg(long = "run-id", value_name = "ID")]
     pub(crate) run_id: Option<String>,
 
-    /// Resolve replay metadata and command environment without executing replay_command.
+    /// Resolve metadata and command environment without executing the extension command.
     #[arg(long = "dry-run")]
     pub(crate) dry_run: bool,
 
-    /// Additional arguments passed to the extension replay command.
-    #[arg(last = true)]
-    pub(crate) args: Vec<String>,
-}
-
-#[derive(Args, Clone)]
-pub(crate) struct FuzzMinimizeArgs {
-    /// Component ID used to resolve the extension minimize_command.
-    #[arg(long = "component", value_name = "ID")]
-    pub(crate) component: Option<String>,
-
-    /// Override the component checkout path for minimize command execution.
-    #[arg(long)]
-    pub(crate) path: Option<String>,
-
-    /// Resolve minimization through a rig's component path and extension config.
-    #[arg(long, value_name = "RIG_ID")]
-    pub(crate) rig: Option<String>,
-
-    #[command(flatten)]
-    pub(crate) extension_override: ExtensionOverrideArgs,
-
-    #[command(flatten)]
-    pub(crate) setting_args: SettingArgs,
-
-    /// Fuzz campaign/result envelope path, or a case id when --artifact is used.
-    #[arg(value_name = "ARTIFACT_OR_CASE")]
-    pub(crate) artifact_or_case: Option<String>,
-
-    /// Fuzz campaign or result envelope artifact to inspect for minimization metadata.
-    #[arg(long = "artifact", value_name = "PATH")]
-    pub(crate) artifact: Option<PathBuf>,
-
-    /// Case id to minimize from the campaign/envelope artifact.
-    #[arg(long = "case-id", value_name = "ID")]
-    pub(crate) case_id: Option<String>,
-
-    /// Stable Homeboy run id associated with the persisted fuzz evidence.
-    #[arg(long = "run-id", value_name = "ID")]
-    pub(crate) run_id: Option<String>,
-
-    /// Resolve minimization metadata and command environment without executing minimize_command.
-    #[arg(long = "dry-run")]
-    pub(crate) dry_run: bool,
-
-    /// Additional arguments passed to the extension minimize command.
+    /// Additional arguments passed to the extension replay/minimize command.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
 }

@@ -529,7 +529,8 @@ impl SshClient {
             Err(error) => return ssh_process_error(error),
         };
 
-        let args = self.build_ssh_args(Some(&effective), false);
+        let remote_command = wrap_owned_remote_command(&effective);
+        let args = self.build_ssh_args(Some(&remote_command), false);
         let mut cmd = Command::new("ssh");
         cmd.args(&args)
             .stdin(Stdio::piped())
@@ -695,61 +696,10 @@ pub(super) fn run_command_with_stdin_source(
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let status = child.wait();
-    let cleanup_deadline = status.as_ref().err().map(|_| {
-        let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
-        let _ = terminate_process_group_with_deadline(&mut child, pid, deadline);
-        deadline
-    });
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result: std::io::Result<()>| result.is_err());
-    let (stdout, mut stderr, streams_stalled) = match cleanup_deadline {
-        Some(deadline) => collect_streams_before(stdout, stderr, deadline),
-        None => (collect_stream(stdout), collect_stream(stderr), false),
-    };
-    if streams_stalled {
-        if !stderr.is_empty() && !stderr.ends_with('\n') {
-            stderr.push('\n');
-        }
-        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline after a transport observation failure.");
-    }
-    if stdin_failed {
-        if !stderr.is_empty() && !stderr.ends_with('\n') {
-            stderr.push('\n');
-        }
-        stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
-    }
-    match status {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(-1);
-            CommandOutput {
-                stdout,
-                stderr,
-                success: status.success() && !stdin_failed,
-                exit_code: if stdin_failed && exit_code == 0 {
-                    1
-                } else {
-                    exit_code
-                },
-                timed_out: false,
-                observation: if stdin_failed {
-                    super::CommandObservation::StdinDeliveryFailed
-                } else {
-                    super::CommandObservation::Complete
-                },
-                child_resource: None,
-            }
-        }
-        Err(error) => CommandOutput {
-            stdout,
-            stderr: format!("{stderr}\nSSH error: {error}"),
-            success: false,
-            exit_code: -1,
-            timed_out: false,
-            observation: super::CommandObservation::TransportObservationFailed,
-            child_resource: None,
-        },
-    }
+    collect_ssh_child_output(&mut child, pid, Some(status), stdin_failed, stdout, stderr)
 }
 
 fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
@@ -760,12 +710,6 @@ fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
         let _ = sender.send(String::from_utf8_lossy(&bytes).to_string());
     });
     receiver
-}
-
-fn collect_stream(receiver: Option<Receiver<String>>) -> String {
-    receiver
-        .and_then(|receiver| receiver.recv().ok())
-        .unwrap_or_default()
 }
 
 fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) -> (String, bool) {
@@ -1481,8 +1425,10 @@ const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 /// restoring the original stdin stream.
 pub(super) fn wrap_owned_remote_command(command: &str) -> String {
     format!(
-        "command -v setsid >/dev/null 2>&1 || {{ printf '%s\\n' 'Homeboy SSH execution requires remote setsid process authority.' >&2; exit 127; }}; exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; setsid sh -c {} <&3 & __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
-        shell::quote_arg(command)
+        "exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; if command -v setsid >/dev/null 2>&1; then setsid sh -c {} <&3 & elif command -v perl >/dev/null 2>&1; then perl -MPOSIX -e {} sh -c {} <&3 & else printf '%s\\n' 'Homeboy SSH execution requires remote session authority (setsid or Perl POSIX).' >&2; exec 3<&-; exit 127; fi; __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
+        shell::quote_arg(command),
+        shell::quote_arg("POSIX::setsid() >= 0 or die \"setsid: $!\\n\"; exec @ARGV or die \"exec: $!\\n\";"),
+        shell::quote_arg(command),
     )
 }
 

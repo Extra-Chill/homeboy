@@ -2,43 +2,28 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    preflight_configured_workspace_provider_with_config, run_provider_command,
-    run_provider_command_with_timeout, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
+    run_provider_command, run_provider_command_with_timeout, AgentTaskPromotionApplyRequest,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider,
-    promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
+    normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
+    resume_promoted_patch, select_patch_artifact, validate_artifact_content,
 };
-use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::agent_task_gate::{
-    AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy, AgentTaskGateReport,
-    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy, AgentTaskGateRevealPolicy,
+    AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::{
-    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
-    WorktreeProviderListResultMapping,
-};
-use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
-use homeboy_core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 #[test]

@@ -2002,6 +2002,8 @@ pub(crate) fn run_lab_offload_inner(
         mut remote_command,
         remote_output_file,
         rig_component_path_overrides,
+        broker_target_home,
+        broker_target_ids,
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
@@ -2212,6 +2214,13 @@ pub(crate) fn run_lab_offload_inner(
     let declared_dependency_paths_env =
         forward_declared_dependency_paths_env(&mut env_delta, &workspace_mapping);
     apply_rig_component_path_overrides(&mut env_delta, &rig_component_path_overrides);
+    if let Some(home) = broker_target_home.as_deref() {
+        env_delta.insert("HOME".to_string(), home.to_string());
+        env_delta.insert(
+            "HOMEBOY_DECLARED_SSH_TARGETS".to_string(),
+            broker_target_ids.join(","),
+        );
+    }
     // Surface synced runtime-overlay remote paths into the command env so a hot
     // command (e.g. a CLI-runner env entry) points at the real remote runtime
     // directory rather than a controller-local path (#3831).
@@ -2274,6 +2283,10 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["declared_dependency_paths_env"] = declared_dependency_paths_env;
     lab_metadata["rig_component_path_overrides"] =
         rig_component_path_overrides_metadata(&rig_component_path_overrides);
+    lab_metadata["rig_broker_targets"] = serde_json::json!({
+        "configured": broker_target_home.is_some(),
+        "credential_scope": "runner_owned_only",
+    });
     lab_metadata["settings_env"] =
         settings_env_diagnostics(&remapped_args, &secret_env_handoff.env_delta);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();

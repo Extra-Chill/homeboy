@@ -31,13 +31,13 @@ pub(super) fn release_execution_plan(input: &ReleaseCommandInput) -> ReleaseExec
         .unwrap_or_else(|| ReleaseExecutionPlan::default_for_command_input(input))
 }
 
-pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+pub(crate) fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     run_command_with_recovery_owner(input, None)
 }
 
 /// Additive recovery entry point for callers that have a durable provider
 /// owner reference. `ReleaseCommandInput` remains source-compatible.
-pub fn run_command_with_recovery_owner(
+pub(crate) fn run_command_with_recovery_owner(
     input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseCommandResult, i32)> {
@@ -1132,7 +1132,7 @@ mod tests {
         )
     }
 
-    use crate::release::{
+    use crate::release::types::{
         ReleasePreflightPlacement, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
         ReleaseReadinessGateResult, ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult,
         ReleaseStepStatus,

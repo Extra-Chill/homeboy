@@ -21,12 +21,23 @@ pub struct AuditBaselineArgs {
 
 #[derive(Subcommand)]
 enum AuditBaselineCommand {
+    /// Verify every persisted fingerprint still references a live source path
+    Validate(AuditBaselineValidateArgs),
     /// Refresh only persisted audit baseline data for changed files
     Refresh(AuditBaselineRefreshArgs),
     /// Auto-merge a baseline-only `homeboy.json` merge/rebase conflict
     Merge(AuditBaselineMergeArgs),
     /// Safely remove specific fingerprints from the baseline (no hand-editing)
     Prune(AuditBaselinePruneArgs),
+}
+
+#[derive(Args)]
+pub struct AuditBaselineValidateArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
 }
 
 #[derive(Args)]
@@ -82,10 +93,53 @@ pub struct AuditBaselineRefreshOutput {
 
 pub fn run(args: AuditBaselineArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     match args.command {
+        AuditBaselineCommand::Validate(args) => validate(args),
         AuditBaselineCommand::Refresh(args) => refresh(args),
         AuditBaselineCommand::Merge(args) => merge(args),
         AuditBaselineCommand::Prune(args) => prune(args),
     }
+}
+
+fn validate(args: AuditBaselineValidateArgs) -> CmdResult<AuditBaselineRefreshOutput> {
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &SettingArgs::default(),
+        &args.extension_override,
+        None,
+    )?;
+    let source_path = source_ctx.source_path.to_string_lossy().to_string();
+    let source = Path::new(&source_path);
+    let baseline_path = source.join("homeboy.json").to_string_lossy().to_string();
+    let baseline = baseline::load_baseline(source).ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "baselines.audit.known_fingerprints",
+            format!("{baseline_path} has no audit baseline to validate."),
+            None,
+            None,
+        )
+    })?;
+
+    baseline::validate_fingerprint_paths(source, &baseline)?;
+    let count = baseline.known_fingerprints.len();
+    eprintln!("[audit-baseline] validated {baseline_path}: {count} live fingerprint(s)");
+
+    Ok((
+        AuditBaselineRefreshOutput {
+            command: "audit-baseline.validate".to_string(),
+            component_id: source_ctx.component_id,
+            source_path,
+            baseline_path,
+            changed_since: "validate".to_string(),
+            previous_source: "current baseline".to_string(),
+            previous_count: count,
+            current_count: count,
+            added_count: 0,
+            resolved_count: 0,
+            added_fingerprints: Vec::new(),
+            resolved_fingerprints: Vec::new(),
+        },
+        0,
+    ))
 }
 
 fn prune(args: AuditBaselinePruneArgs) -> CmdResult<AuditBaselineRefreshOutput> {
@@ -437,6 +491,8 @@ fn fail_if_homeboy_json_has_conflict_markers(source: &Path) -> homeboy::core::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
 
     fn set(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -463,5 +519,20 @@ mod tests {
             .expect_err("conflict markers should fail preflight");
 
         assert!(error.to_string().contains("merge conflict markers"));
+    }
+
+    #[test]
+    fn validate_command_uses_the_public_baseline_contract() {
+        let args = crate::commands::utils::args::normalize(vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "audit".to_string(),
+            "baseline".to_string(),
+            "validate".to_string(),
+            "--path".to_string(),
+            ".".to_string(),
+        ]);
+
+        assert!(Cli::try_parse_from(args).is_ok());
     }
 }

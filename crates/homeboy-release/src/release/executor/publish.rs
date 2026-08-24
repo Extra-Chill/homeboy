@@ -428,7 +428,7 @@ fn publish_failure_message(target: &str, response: &serde_json::Value) -> String
 mod tests {
     use super::{publish_step_result, run_publish};
     use crate::release::types::ReleaseState;
-    use crate::release::ReleaseStepStatus;
+    use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::{GithubConfig, GithubHostConfig};
     use homeboy_extension::ExtensionManifest;
     use std::collections::HashMap;

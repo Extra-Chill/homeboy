@@ -1278,19 +1278,8 @@ mod tests {
 
     fn default_status_args() -> StatusArgs {
         StatusArgs {
-            target: None,
             scope: crate::commands::utils::args::ScopeArgs::default(),
-            full: false,
-            uncommitted: false,
-            needs_release: false,
-            ready: false,
-            docs_only: false,
-            all: false,
-            global: false,
-            outdated: false,
-            unreleased: false,
-            timings: false,
-            refresh: false,
+            ..Default::default()
         }
     }
 

@@ -746,10 +746,9 @@ mod install_flows {
     }
 
     #[test]
-    fn local_direct_rig_json_check_resolves_package_root() {
+    fn local_direct_rig_json_check_resolves_rig_package_root() {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
-        fs::write(package.path().join("marker.txt"), "ok\n").expect("marker");
         let rig_path = write_rig(
             package.path(),
             "direct-alpha",
@@ -762,6 +761,11 @@ mod install_flows {
             }
         }"#,
         );
+        fs::write(
+            rig_path.parent().expect("rig directory").join("marker.txt"),
+            "ok\n",
+        )
+        .expect("marker");
 
         let rig =
             load_local_source(rig_path.to_str().unwrap(), None).expect("load direct rig json");
@@ -770,7 +774,11 @@ mod install_flows {
         assert!(report.success, "direct rig.json check should pass");
         assert_eq!(
             crate::expand::expand_vars(&rig, "${package.root}/marker.txt"),
-            package.path().join("marker.txt").to_string_lossy()
+            rig_path
+                .parent()
+                .expect("rig directory")
+                .join("marker.txt")
+                .to_string_lossy()
         );
         assert!(read_source_metadata_in_root(&test_config_root(), "direct-alpha").is_none());
     }

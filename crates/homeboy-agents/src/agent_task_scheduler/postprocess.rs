@@ -1,6 +1,7 @@
 //! Plan-native execution of generic artifact postprocess actions.
 
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(test))]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -252,6 +253,7 @@ fn start_or_reconcile_worker_with_retry(
     Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
 }
 
+#[cfg(not(test))]
 fn postprocess_worker_executable() -> PathBuf {
     let configured = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER").map(PathBuf::from);
     // Archive-replayed integration tests execute from a rooted helper copy while
@@ -974,7 +976,6 @@ const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
 const COMPLETION_SCHEMA: &str = "homeboy/agent-task-postprocess-completion/v1";
 const WORKER_REQUEST_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-request/v1";
 const WORKER_SPAWN_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-spawn/v1";
-const CLAIM_STALE_AFTER_SECS: u64 = 300;
 const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
 struct PostprocessClaimGuard {

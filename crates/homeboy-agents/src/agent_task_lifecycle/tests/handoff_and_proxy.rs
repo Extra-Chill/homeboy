@@ -3,20 +3,19 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle,
     AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -2833,16 +2832,10 @@ fn list_records_skips_malformed_observation_records() {
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: "bad-run".to_string(),
             kind: "agent-task".to_string(),
-            component_id: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: None,
             status: "running".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
             metadata_json: json!({ "schema": "homeboy/agent-task-observation-record/v1" }),
+            ..Default::default()
         })
         .expect("bad record inserted");
 

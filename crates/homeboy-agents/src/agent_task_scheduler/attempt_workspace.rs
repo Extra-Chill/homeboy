@@ -63,6 +63,7 @@ impl HarvestExecutionContext {
         )
     }
 
+    #[cfg(test)]
     fn from_transport_values(
         source: Option<&str>,
         lab: Option<&str>,

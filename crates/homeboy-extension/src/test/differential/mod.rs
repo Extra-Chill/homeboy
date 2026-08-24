@@ -68,6 +68,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use homeboy_extension_contract::test_result::TestCounts;
 use homeboy_extension_contract::test_results::TestCommandOutput;
@@ -125,6 +126,11 @@ pub struct TestMeasurement {
     /// its results sidecar is unstructured, and its absent counts must not be
     /// read as a clean sweep.
     pub structured_output: bool,
+    /// A declared terminal sidecar was missing or violated its contract.
+    /// This must remain distinct from an unmeasured legacy result: declared
+    /// evidence has a producer promise and cannot be downgraded to a warning.
+    #[serde(default)]
+    pub invalid_evidence: bool,
 }
 
 impl TestMeasurement {
@@ -137,6 +143,7 @@ impl TestMeasurement {
             failed_tests: Vec::new(),
             metric_kind: MetricKind::Total,
             structured_output: true,
+            invalid_evidence: false,
         }
     }
 
@@ -149,6 +156,7 @@ impl TestMeasurement {
             failed_tests,
             metric_kind: MetricKind::Total,
             structured_output: true,
+            invalid_evidence: false,
         }
     }
 
@@ -162,12 +170,23 @@ impl TestMeasurement {
             failed_tests: Vec::new(),
             metric_kind: MetricKind::Total,
             structured_output: false,
+            invalid_evidence: false,
         }
     }
 
     /// A run killed by its execution budget.
     pub fn timed_out() -> Self {
         Self::unmeasured(RunOutcome::TimedOut, TIMEOUT_EXIT_CODE)
+    }
+
+    /// A typed evidence-contract failure. `counts` intentionally stays absent:
+    /// aggregate counts must not launder invalid per-test output into a
+    /// comparable measurement.
+    pub fn invalid_evidence(outcome: RunOutcome, exit_code: i32) -> Self {
+        Self {
+            invalid_evidence: true,
+            ..Self::unmeasured(outcome, exit_code)
+        }
     }
 
     pub fn with_metric_kind(mut self, kind: MetricKind) -> Self {
@@ -216,6 +235,45 @@ impl TestMeasurement {
 
     fn is_green(&self) -> bool {
         self.outcome == RunOutcome::Passed
+    }
+}
+
+/// Project a declared terminal sidecar into a measurement.
+///
+/// Missing and malformed declarations are both `invalid_evidence`; callers that
+/// do not declare this sidecar continue using `measurement_from_test_output`.
+pub fn measurement_from_terminal_test_evidence(payload: Option<&Value>) -> TestMeasurement {
+    let Some(payload) = payload else {
+        return TestMeasurement::invalid_evidence(RunOutcome::Failed, 1);
+    };
+    let Ok(evidence) = normalize_terminal_test_evidence(payload) else {
+        return TestMeasurement::invalid_evidence(RunOutcome::Failed, 1);
+    };
+    let total = evidence.outcomes.len() as u64;
+    let failed_tests = evidence
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == TerminalTestOutcomeKind::Failed)
+        .map(|outcome| outcome.id.clone())
+        .collect::<Vec<_>>();
+    let failed = failed_tests.len() as u64;
+    let passed = evidence
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == TerminalTestOutcomeKind::Passed)
+        .count() as u64;
+    let skipped = evidence
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == TerminalTestOutcomeKind::Skipped)
+        .count() as u64;
+    if failed == 0 {
+        TestMeasurement::passed(TestCounts::new(total, passed, 0, skipped))
+    } else {
+        TestMeasurement::failed(
+            TestCounts::new(total, passed, failed, skipped),
+            failed_tests,
+        )
     }
 }
 
@@ -281,6 +339,10 @@ pub enum DifferentialVerdict {
     /// Local-only: no cached baseline exists for this revision and scope, and
     /// none was built. An absent measurement must never render as a pass.
     NoBaseline,
+    /// The runner declared terminal per-test evidence but did not produce a
+    /// complete, schema-valid payload. This is an evidence-contract failure,
+    /// not an aggregate-only test result.
+    InvalidEvidence,
 }
 
 impl DifferentialVerdict {
@@ -293,6 +355,7 @@ impl DifferentialVerdict {
             Self::Inconclusive => "inconclusive",
             Self::NoMeasurement => "no_measurement",
             Self::NoBaseline => "no_baseline",
+            Self::InvalidEvidence => "invalid_evidence",
         }
     }
 
@@ -304,8 +367,141 @@ impl DifferentialVerdict {
     /// only with a red candidate and no evidence of inheritance whatsoever —
     /// clearing it would be laundering absence into approval.
     pub fn blocks(self) -> bool {
-        matches!(self, Self::Fail | Self::Timeout | Self::NoBaseline)
+        matches!(
+            self,
+            Self::Fail | Self::Timeout | Self::NoBaseline | Self::InvalidEvidence
+        )
     }
+}
+
+/// Canonical terminal evidence for a review-test invocation.
+///
+/// Test adapters own the framework-specific parsing that supplies `inventory`
+/// and `outcomes`; this boundary owns only generic identity and completeness
+/// rules so Cargo, PHPUnit, Jest, and future adapters share one contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalTestEvidence {
+    pub schema: &'static str,
+    pub inventory: Vec<TerminalTestInventoryItem>,
+    pub outcomes: Vec<TerminalTestOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalTestInventoryItem {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalTestOutcome {
+    pub id: String,
+    pub outcome: TerminalTestOutcomeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTestOutcomeKind {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+const TERMINAL_TEST_EVIDENCE_SCHEMA: &str = "homeboy/test-terminal-evidence/v1";
+
+/// Normalize adapter output into the deterministic terminal sidecar shape.
+///
+/// The input is deliberately JSON rather than a framework result type: adapters
+/// already translate their native output before this seam, and core must not
+/// acquire a test-framework dependency merely to validate terminal evidence.
+pub fn normalize_terminal_test_evidence(payload: &Value) -> Result<TerminalTestEvidence, String> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "terminal test evidence must be a JSON object".to_string())?;
+    let inventory = terminal_items(object.get("inventory"), "inventory")?;
+    let outcomes = terminal_outcomes(object.get("outcomes"))?;
+
+    let inventory_ids = inventory
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if inventory_ids.len() != inventory.len() {
+        return Err("terminal test evidence contains duplicate inventory identities".to_string());
+    }
+    let outcome_ids = outcomes
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if outcome_ids.len() != outcomes.len() {
+        return Err("terminal test evidence contains duplicate outcome identities".to_string());
+    }
+    if inventory_ids != outcome_ids {
+        return Err("terminal test evidence inventory and outcomes are not comparable".to_string());
+    }
+
+    Ok(TerminalTestEvidence {
+        schema: TERMINAL_TEST_EVIDENCE_SCHEMA,
+        inventory,
+        outcomes,
+    })
+}
+
+fn terminal_items(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Vec<TerminalTestInventoryItem>, String> {
+    let items = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("terminal test evidence `{field}` must be an array"))?;
+    let mut normalized = items
+        .iter()
+        .map(|item| {
+            let id = item
+                .as_object()
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    format!("terminal test evidence `{field}` item is missing a stable id")
+                })?;
+            Ok(TerminalTestInventoryItem { id: id.to_string() })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    normalized.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(normalized)
+}
+
+fn terminal_outcomes(value: Option<&Value>) -> Result<Vec<TerminalTestOutcome>, String> {
+    let items = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| "terminal test evidence `outcomes` must be an array".to_string())?;
+    let mut normalized = items
+        .iter()
+        .map(|item| {
+            let object = item
+                .as_object()
+                .ok_or_else(|| "terminal test evidence outcome must be an object".to_string())?;
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    "terminal test evidence outcome is missing a stable id".to_string()
+                })?;
+            let outcome = match object.get("outcome").and_then(Value::as_str) {
+                Some("passed") => TerminalTestOutcomeKind::Passed,
+                Some("failed") => TerminalTestOutcomeKind::Failed,
+                Some("skipped") => TerminalTestOutcomeKind::Skipped,
+                _ => return Err("terminal test evidence outcome is invalid".to_string()),
+            };
+            Ok(TerminalTestOutcome {
+                id: id.to_string(),
+                outcome,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    normalized.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(normalized)
 }
 
 /// Which evidence the verdict actually rests on.
@@ -482,6 +678,14 @@ fn decide(
     new_failures: &[String],
     reference: &str,
 ) -> (DifferentialVerdict, String) {
+    if candidate.invalid_evidence || baseline.is_some_and(|item| item.measurement.invalid_evidence)
+    {
+        return (
+            DifferentialVerdict::InvalidEvidence,
+            "declared terminal per-test evidence was missing or invalid; aggregate counts are not comparable".to_string(),
+        );
+    }
+
     // Mirrors `if status not in {"fail", "timeout"}: continue` — a green
     // candidate never enters the gate.
     if candidate.is_green() {
@@ -669,6 +873,7 @@ pub fn measurement_from_test_output(output: &TestCommandOutput) -> TestMeasureme
         failed_tests,
         metric_kind,
         structured_output: output.test_counts.is_some() || output.summary.is_some(),
+        invalid_evidence: false,
     }
     .normalized()
 }

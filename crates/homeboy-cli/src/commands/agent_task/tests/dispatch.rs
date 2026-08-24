@@ -155,6 +155,90 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
 
 #[cfg(unix)]
 #[test]
+fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        assert!(Command::new("git")
+            .args(["checkout", "-b", "fix/216-persist-task"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create fixture branch")
+            .success());
+        let provider = tempfile::NamedTempFile::new()
+            .expect("provider file")
+            .into_temp_path();
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"project@task-216\",\"path\":\"{}\",\"branch\":\"fix/216-persist-task\",\"task_url\":\"HTTPS://EXAMPLE.TEST/owner/Project/issues/216/?provider=1#result\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                workspace.path().display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve_task: Some(vec![
+                        provider.display().to_string(),
+                        "{task_url}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: Some("$.task_url".to_string()),
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reuse task workspace".to_string(),
+            "--repo".to_string(),
+            "project".to_string(),
+            "--task-url".to_string(),
+            " HTTPS://example.test/owner/Project/issues/216/?source=cook#details ".to_string(),
+            "--head".to_string(),
+            "fix/216-persist-task".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("reuse the matching task workspace");
+        assert_eq!(resolved.to_worktree.as_deref(), Some("project@task-216"));
+        assert_eq!(resolved.head.as_deref(), Some("fix/216-persist-task"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
     use std::os::unix::fs::PermissionsExt;
 

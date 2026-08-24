@@ -1,6 +1,7 @@
 //! User-facing summaries of commands that support Lab runners.
 
-use crate::command_contract::spec::{CommandLabSupportSummary, COMMAND_SPECS};
+use super::LabCommandRouteSupport;
+use crate::command_contract::spec::COMMAND_SPECS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -9,15 +10,23 @@ pub struct LabRunnerSupportSummary {
     pub hint: String,
 }
 
-pub(crate) fn lab_runner_supported_labels() -> Vec<&'static str> {
-    lab_support_summaries()
+pub(crate) fn lab_runner_supported_labels(
+    composed_support: &[LabCommandRouteSupport],
+) -> Vec<&'static str> {
+    let mut labels = COMMAND_SPECS
+        .iter()
+        .flat_map(|spec| spec.lab_support_summary.iter())
         .map(|summary| summary.message_label)
-        .collect()
+        .collect::<Vec<_>>();
+    labels.extend(composed_support.iter().map(|support| support.message_label));
+    labels
 }
 
-pub(crate) fn lab_runner_support_summary() -> LabRunnerSupportSummary {
-    let supported_labels = lab_runner_supported_labels();
-    let hint_labels = lab_runner_supported_hint_labels();
+pub(crate) fn lab_runner_support_summary(
+    composed_support: &[LabCommandRouteSupport],
+) -> LabRunnerSupportSummary {
+    let supported_labels = lab_runner_supported_labels(composed_support);
+    let hint_labels = lab_runner_supported_hint_labels(composed_support);
 
     LabRunnerSupportSummary {
         unsupported_message: format!(
@@ -29,16 +38,16 @@ pub(crate) fn lab_runner_support_summary() -> LabRunnerSupportSummary {
     }
 }
 
-fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
-    lab_support_summaries()
-        .map(|summary| summary.hint_label)
-        .collect()
-}
-
-fn lab_support_summaries() -> impl Iterator<Item = &'static CommandLabSupportSummary> {
-    COMMAND_SPECS
+fn lab_runner_supported_hint_labels(
+    composed_support: &[LabCommandRouteSupport],
+) -> Vec<&'static str> {
+    let mut labels = COMMAND_SPECS
         .iter()
         .flat_map(|spec| spec.lab_support_summary.iter())
+        .map(|summary| summary.hint_label)
+        .collect::<Vec<_>>();
+    labels.extend(composed_support.iter().map(|support| support.hint_label));
+    labels
 }
 
 fn human_join(labels: &[&str]) -> String {

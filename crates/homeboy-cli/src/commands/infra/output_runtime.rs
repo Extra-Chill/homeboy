@@ -39,7 +39,6 @@ impl CookOutputLease {
             token,
             lock,
         };
-        lease.write_in_flight("preparing", None, None, None)?;
         Ok(lease)
     }
 
@@ -88,6 +87,13 @@ impl CookOutputLease {
             "success": false,
             "exit_code": null,
             "status": if run_id.is_some() { "in_flight" } else { "preparing" },
+            "submission_state": if matches!(phase, "submission_bootstrap" | "preparing") {
+                "preparing"
+            } else if run_id.is_some() {
+                "submitted"
+            } else {
+                "preparing"
+            },
             "invocation_id": self.token,
             "updated_at": chrono::Utc::now().to_rfc3339(),
             "phase": phase,
@@ -1020,18 +1026,30 @@ mod tests {
     }
 
     #[test]
-    fn preparing_output_has_no_durable_recovery_identity_before_recipe_persists() {
+    fn claimed_output_is_not_published_until_its_durable_submission_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cook.json");
         let lease = CookOutputLease::claim(path.to_str().unwrap()).expect("claim output");
 
-        let preparing: Value =
+        assert!(!path.exists());
+
+        lease
+            .progress(
+                "submission_bootstrap",
+                Some("cook-durable"),
+                Some("cook-durable"),
+                Some("durable Cook submission is preparing"),
+            )
+            .unwrap();
+        let bootstrap: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(preparing["phase"], "preparing");
-        assert_eq!(preparing["status"], "preparing");
-        assert!(preparing.get("run").is_none());
-        assert!(preparing.get("cook_id").is_none());
-        assert!(preparing.get("recovery").is_none());
+        assert_eq!(bootstrap["submission_state"], "preparing");
+        assert_eq!(bootstrap["cook_id"], "cook-durable");
+        assert_eq!(bootstrap["run"]["id"], "cook-durable");
+        assert!(bootstrap["recovery"]["status"]
+            .as_str()
+            .unwrap()
+            .contains("cook-durable"));
 
         lease
             .progress("in_flight", Some("cook-durable"), Some("run-durable"), None)
@@ -1039,6 +1057,7 @@ mod tests {
         let durable: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(durable["status"], "in_flight");
+        assert_eq!(durable["submission_state"], "submitted");
         assert_eq!(durable["run"]["id"], "run-durable");
     }
 
@@ -1055,6 +1074,65 @@ mod tests {
 
         CookOutputLease::claim(path.to_str().expect("utf8 path"))
             .expect("released output can be claimed by a later invocation");
+    }
+
+    #[test]
+    fn interrupted_bootstrap_keeps_its_recovery_identity_after_the_lease_owner_exits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lease = CookOutputLease::claim(path.to_str().unwrap()).expect("claim output");
+        lease
+            .progress(
+                "submission_bootstrap",
+                Some("cook-interrupted"),
+                Some("cook-interrupted"),
+                None,
+            )
+            .expect("publish durable bootstrap");
+        drop(lease);
+
+        let output: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(output["submission_state"], "preparing");
+        assert_eq!(output["cook_id"], "cook-interrupted");
+        assert_eq!(output["run"]["id"], "cook-interrupted");
+    }
+
+    #[test]
+    fn startup_failure_atomically_replaces_bootstrap_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lease = CookOutputLease::claim(path.to_str().unwrap()).expect("claim output");
+        lease
+            .progress(
+                "submission_bootstrap",
+                Some("cook-startup-failure"),
+                Some("cook-startup-failure"),
+                None,
+            )
+            .expect("publish bootstrap");
+        let failure = Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "startup validation failed",
+            None,
+            None,
+        ));
+        lease
+            .finish(
+                &failure,
+                2,
+                &CommandIdentity::with_operation("agent-task", "cook"),
+                None,
+            )
+            .expect("replace bootstrap atomically");
+
+        let output: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(output["schema"], "homeboy/command-result/v3");
+        assert_eq!(output["success"], false);
+        assert!(output["diagnostics"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("startup validation failed"));
+        assert!(output.get("submission_state").is_none());
     }
 
     #[test]
@@ -1140,8 +1218,7 @@ mod tests {
 
         let lease = CookOutputLease::claim(path.to_str().expect("utf8 path"))
             .expect("reclaim dead owner lock");
-        let output: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(output["status"], "preparing");
+        assert!(!path.exists());
         drop(lease);
         assert!(!lock.exists());
     }

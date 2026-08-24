@@ -43,6 +43,13 @@ fn managed_immutable_runner_slots_route_to_one_exact_refresh_action() {
 }
 
 #[test]
+fn managed_immutable_runner_slots_withhold_recovery_without_a_commit_identity() {
+    let commands = managed_immutable_runner_recovery_commands_with_commit("homeboy-lab", None);
+
+    assert!(commands.is_empty());
+}
+
+#[test]
 fn managed_immutable_runner_uses_reconciled_admission_postcondition() {
     let mut before_reconcile = stale_runner_status("homeboy-lab").expect("runner status");
     before_reconcile.active_job_state = RunnerActiveJobState::Available;
