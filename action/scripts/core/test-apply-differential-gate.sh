@@ -212,7 +212,7 @@ outcome_case() {
   for phase in current base; do
     values="${candidate}"; [ "${phase}" = base ] && values="${baseline}"
     if [ "${mode}" != missing ]; then
-      printf '%s' "${values}" | jq -Rc --arg command 'review test' --arg fingerprint fixture 'split(",") | map(select(length > 0) | capture("(?<id>[^:]+):(?<outcome>.*)")) | {schema:"homeboy/test-outcomes/v1",command:$command,inventory_fingerprint:$fingerprint,outcomes:.}' > "${tmp_dir}/${phase}-outcomes.json"
+      printf '%s' "${values}" | jq -Rc --arg command 'review test' --arg fingerprint fixture 'split(",") | map(select(length > 0) | capture("(?<id>[^:]+):(?<outcome>.*)")) | {schema:"homeboy/test-outcomes/v1",command:$command,inventory_fingerprint:$fingerprint,failed_test_ids:[.[] | select(.outcome == "failed") | .id]}' > "${tmp_dir}/${phase}-outcomes.json"
       printf '%s' "${values}" | jq -Rc --arg command 'review test' --arg fingerprint fixture 'split(",") | map(select(length > 0) | capture("(?<id>[^:]+):")) | {schema:"homeboy/test-inventory/v1",command:$command,inventory_fingerprint:$fingerprint,tests:.}' > "${tmp_dir}/${phase}-inventory.json"
       target="${current_dir}"; [ "${phase}" = base ] && target="${base_dir}"
       cp "${tmp_dir}/${phase}-outcomes.json" "${target}/review-test.test-outcomes.json"

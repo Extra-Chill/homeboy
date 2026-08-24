@@ -162,19 +162,19 @@ def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | None]:
+def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, set[str] | None]:
     """Read Homeboy-owned per-test outcome and inventory sidecars.
 
-    The inventory makes an empty failure set meaningful and prevents an omitted
-    or duplicated test from being treated as a passing observation.
+    The inventory makes an empty failure set meaningful. Outcome evidence names
+    only failures observed by the adapter; it never invents pass or skip facts.
     """
     stem = output_stem(command)
     outcomes = read_json(os.path.join(directory, f"{stem}.test-outcomes.json"))
     inventory = read_json(os.path.join(directory, f"{stem}.test-inventory.json"))
     if outcomes is None or inventory is None:
-        return "missing", None
+        return "missing", None, None
     tests = inventory.get("tests") if isinstance(inventory, dict) else None
-    records = outcomes.get("outcomes") if isinstance(outcomes, dict) else None
+    failed_ids = outcomes.get("failed_test_ids") if isinstance(outcomes, dict) else None
     provenance = ("runner", "runner_fingerprint", "workspace_fingerprint", "execution_fingerprint")
     if (
         not isinstance(outcomes, dict)
@@ -189,22 +189,19 @@ def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | N
         or not isinstance(outcomes.get("inventory_fingerprint"), str)
         or outcomes["inventory_fingerprint"] != inventory["inventory_fingerprint"]
         or not isinstance(tests, list)
-        or not isinstance(records, list)
+        or not isinstance(failed_ids, list)
     ):
-        return "invalid", None
+        return "invalid", None, None
     inventory_ids = [item.get("id") for item in tests if isinstance(item, dict)]
-    outcome_ids = [item.get("id") for item in records if isinstance(item, dict)]
     if (
         len(inventory_ids) != len(tests)
         or not inventory_ids
-        or len(outcome_ids) != len(records)
-        or any(not isinstance(value, str) or not value for value in inventory_ids + outcome_ids)
+        or any(not isinstance(value, str) or not value for value in inventory_ids + failed_ids)
         or len(set(inventory_ids)) != len(inventory_ids)
-        or len(set(outcome_ids)) != len(outcome_ids)
-        or set(inventory_ids) != set(outcome_ids)
-        or any(item.get("outcome") not in {"passed", "failed", "skipped"} for item in records)
+        or len(set(failed_ids)) != len(failed_ids)
+        or not set(failed_ids).issubset(inventory_ids)
     ):
-        return "invalid", None
+        return "invalid", None, None
     canonical_inventory = {
         "command": command,
         "execution_fingerprint": inventory["execution_fingerprint"],
@@ -221,8 +218,8 @@ def test_outcomes(command: str, directory: str) -> tuple[str, dict[str, str] | N
         any(len(inventory[key]) != 64 or any(char not in "0123456789abcdef" for char in inventory[key]) for key in ("runner_fingerprint", "workspace_fingerprint", "execution_fingerprint", "inventory_fingerprint"))
         or inventory["inventory_fingerprint"] != expected_fingerprint
     ):
-        return "invalid", None
-    return "complete", {item["id"]: item["outcome"] for item in records}
+        return "invalid", None, None
+    return "complete", set(inventory_ids), set(failed_ids)
 
 
 def command_label(command: str, metadata: dict[str, Any]) -> str:
@@ -276,8 +273,8 @@ def main() -> int:
         base_structured = base_metadata.get("structured_output") is True
 
         if base_command == "test":
-            current_evidence, current_outcomes = test_outcomes(command, current_dir)
-            base_evidence, base_outcomes = test_outcomes(command, base_dir)
+            current_evidence, current_inventory, current_failed = test_outcomes(command, current_dir)
+            base_evidence, base_inventory, base_failed = test_outcomes(command, base_dir)
             if "invalid" in {current_evidence, base_evidence}:
                 adjusted[command] = "invalid_evidence"
                 print(
@@ -294,9 +291,9 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            assert current_outcomes is not None and base_outcomes is not None
-            candidate_failed = {identity for identity, outcome in current_outcomes.items() if outcome == "failed"}
-            if not candidate_failed:
+            assert current_inventory is not None and current_failed is not None
+            assert base_inventory is not None and base_failed is not None
+            if not current_failed:
                 adjusted[command] = "invalid_evidence"
                 print(
                     f"::error::Differential gate rejected {command}: type=invalid_evidence; "
@@ -304,10 +301,8 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            candidate_ids = set(current_outcomes)
-            baseline_ids = set(base_outcomes)
-            candidate_only_inventory = candidate_ids - baseline_ids
-            baseline_only_inventory = baseline_ids - candidate_ids
+            candidate_only_inventory = current_inventory - base_inventory
+            baseline_only_inventory = base_inventory - current_inventory
             if candidate_only_inventory:
                 adjusted[command] = "no_comparable_evidence"
                 print(
@@ -316,7 +311,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            introduced = {identity for identity in candidate_failed if base_outcomes[identity] != "failed"}
+            introduced = current_failed - base_failed
             if introduced:
                 print(
                     f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only failed test identity(s).",

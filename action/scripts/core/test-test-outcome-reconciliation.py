@@ -57,7 +57,7 @@ def main() -> None:
         install_pair(current, "13290-candidate")
         install_pair(baseline, "13290-baseline")
         payload = json.loads((current / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
-        payload["outcomes"].append(payload["outcomes"][0])
+        payload["failed_test_ids"].append(payload["failed_test_ids"][0])
         (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "duplicate identities must fail closed"
 
@@ -69,8 +69,7 @@ def main() -> None:
 
         install_pair(current, "13290-candidate")
         payload = json.loads((current / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
-        for outcome in payload["outcomes"]:
-            outcome["outcome"] = "passed"
+        payload["failed_test_ids"] = []
         (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "failed commands need a failed candidate identity"
 
