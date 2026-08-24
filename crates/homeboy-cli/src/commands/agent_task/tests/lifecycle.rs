@@ -1012,6 +1012,123 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
 }
 
 #[test]
+fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_provenance() {
+    with_temp_home(|| {
+        let cook_id = "cook-legacy-null-model";
+        let run_id = "cook-legacy-null-model-attempt-1";
+        let plan = AgentTaskPlan::new(
+            "cook-legacy-null-model-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture" },
+                "instructions": "legacy candidate"
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@legacy-null-model".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Legacy candidate".to_string(),
+            commit_message: "Legacy candidate".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist legacy recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit legacy attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind attempt to recipe");
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "provider".to_string(),
+                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    summary: Some("legacy candidate".to_string()),
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("persist terminal legacy candidate");
+        let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
+
+        let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
+            cook_or_attempt_id: cook_id.to_string(),
+            preflight: true,
+            rearm: false,
+            artifact_id: None,
+            full: false,
+        })
+        .expect("preflight reports provenance rejection");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(report["admitted"], false);
+        assert_eq!(
+            report["phases"]
+                .as_array()
+                .expect("phases")
+                .last()
+                .expect("blocked")["phase"],
+            "model_provenance"
+        );
+        assert!(report["phases"]
+            .as_array()
+            .expect("phases")
+            .last()
+            .expect("blocked")["message"]
+            .as_str()
+            .expect("message")
+            .contains("no concrete executed model"));
+        assert_eq!(
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
+            before
+        );
+    });
+}
+
+#[test]
 fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_recipe_once() {
     with_temp_home(|| {
         let workspace = tempfile::tempdir().expect("workspace");

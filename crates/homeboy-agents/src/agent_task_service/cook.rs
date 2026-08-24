@@ -2590,7 +2590,7 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             &request,
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
-    catalog.validate_explicit_models(&options.initial_plan)?;
+    catalog.validate_selected_models(&options.initial_plan)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.initial_plan,
         catalog.providers(),
@@ -3828,6 +3828,10 @@ pub fn terminal_review_form_continuation_is_eligible(
 /// This deliberately stops before recipe/lifecycle materialization, transport
 /// preparation, provider dispatch, and finalization.
 pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    // Continuation can lead directly to promotion/finalization. Apply the same
+    // durable model-provenance boundary here so it cannot admit a legacy null
+    // model candidate that publication will deterministically reject.
+    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
     let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())

@@ -129,7 +129,7 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     for (kind, result) in [
         (
             AgentTaskPlanValidationKind::UnavailableCapability,
-            catalog.validate_explicit_models(&plan),
+            catalog.validate_selected_models(&plan),
         ),
         (
             AgentTaskPlanValidationKind::MissingReadiness,
@@ -1991,7 +1991,7 @@ fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()
     let mut plan = plan.clone();
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_explicit_models(&plan)?;
+    catalog.validate_selected_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_plan_secret_env(&plan)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
