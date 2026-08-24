@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.4] - 2026-08-24
+
+### Changed
+- cover installed runtime ownership
+- own WP Codebox runtime selection
+
 ## [3.38.3] - 2026-08-24
 
 ### Fixed
