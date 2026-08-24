@@ -1127,7 +1127,7 @@ pub fn retry_with_preflight<F>(
     preflight: F,
 ) -> Result<AgentTaskRetryServiceResult>
 where
-    F: FnOnce(&AgentTaskPlan) -> Result<()>,
+    F: Fn(&AgentTaskPlan) -> Result<()>,
 {
     // One lifecycle store for the whole retry. Reserving the successor,
     // proving the reservation is exact, persisting the controller plan, and
@@ -1157,24 +1157,33 @@ where
         let lifecycle_missing =
             !agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, retry_run_id)?;
         if lifecycle_missing {
-            let recipe_store = super::cook_recipe::default_store()?;
-            super::cook_pre_execution::materialize_cook_attempt_with_stores(
-                &recipe_store,
+            agent_task_lifecycle::with_retry_lineage_reservation_in_store(
                 &lifecycle_store,
-                &cook_retry.cook_id,
-                retry_run_id,
-                &cook_retry.plan,
-            )?;
-            agent_task_lifecycle::record_metadata_value_in_store(
-                &lifecycle_store,
-                retry_run_id,
-                "cook_retry_recipe_recovery",
-                json!({
-                    "schema": "homeboy/cook-retry-recipe-recovery/v1",
-                    "status": "materialized_orphaned_replacement",
-                    "source_run_id": source.run_id,
-                    "recovered_run_id": retry_run_id,
-                }),
+                &source.run_id,
+                || {
+                    // Recovery writes the missing successor directly, so it
+                    // needs the same locked revalidation as a fresh retry.
+                    preflight(&source_plan)?;
+                    let recipe_store = super::cook_recipe::default_store()?;
+                    super::cook_pre_execution::materialize_cook_attempt_with_stores(
+                        &recipe_store,
+                        &lifecycle_store,
+                        &cook_retry.cook_id,
+                        retry_run_id,
+                        &cook_retry.plan,
+                    )?;
+                    agent_task_lifecycle::record_metadata_value_in_store(
+                        &lifecycle_store,
+                        retry_run_id,
+                        "cook_retry_recipe_recovery",
+                        json!({
+                            "schema": "homeboy/cook-retry-recipe-recovery/v1",
+                            "status": "materialized_orphaned_replacement",
+                            "source_run_id": source.run_id,
+                            "recovered_run_id": retry_run_id,
+                        }),
+                    )
+                },
             )?;
         }
         Ok(Some(
@@ -1251,6 +1260,7 @@ where
                     &cook_retry,
                     &retry_run_id,
                     force || cook_retry.replaces_source_attempt,
+                    &preflight,
                 )?;
                 retry_run_id = reservation.run_id;
                 created = reservation.created;
@@ -1311,11 +1321,12 @@ where
                 created,
             });
         }
-        None => agent_task_lifecycle::retry_with_force_in_store(
+        None => agent_task_lifecycle::retry_with_force_and_preflight_in_store(
             &lifecycle_store,
             &source.run_id,
             new_run_id,
             force,
+            &preflight,
         )?,
     };
     Ok(AgentTaskRetryServiceResult {
@@ -1336,6 +1347,7 @@ fn reserve_cook_retry_lifecycle(
     retry: &CookRetryAttempt,
     retry_run_id: &str,
     force: bool,
+    preflight: &dyn Fn(&AgentTaskPlan) -> Result<()>,
 ) -> Result<CookRetryReservation> {
     let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
     match agent_task_lifecycle::claim_cook_operation_in_store(
@@ -1360,23 +1372,25 @@ fn reserve_cook_retry_lifecycle(
                             "local Cook retry launcher exited before its reservation was persisted",
                         )
                     })?;
-            let reserved = agent_task_lifecycle::retry_with_force_and_metadata_in_store(
-                lifecycle_store,
-                &source.run_id,
-                Some(retry_run_id),
-                force,
-                serde_json::Map::from_iter([(
-                    "local_cook_supervisor".to_string(),
-                    json!({
-                        "state": "pending",
-                        "pinned_run_id": retry_run_id,
-                        "lease_started_at": lease_started_at.to_rfc3339(),
-                        "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
-                        "launcher_pid": launcher_pid,
-                        "launcher_process_start_identity": launcher_start_identity,
-                    }),
-                )]),
-            )?;
+            let reserved =
+                agent_task_lifecycle::retry_with_force_and_metadata_and_preflight_in_store(
+                    lifecycle_store,
+                    &source.run_id,
+                    Some(retry_run_id),
+                    force,
+                    serde_json::Map::from_iter([(
+                        "local_cook_supervisor".to_string(),
+                        json!({
+                            "state": "pending",
+                            "pinned_run_id": retry_run_id,
+                            "lease_started_at": lease_started_at.to_rfc3339(),
+                            "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
+                            "launcher_pid": launcher_pid,
+                            "launcher_process_start_identity": launcher_start_identity,
+                        }),
+                    )]),
+                    preflight,
+                )?;
             let result = json!({ "run_id": retry_run_id });
             if let Err(error) = agent_task_lifecycle::complete_cook_operation_in_store(
                 lifecycle_store,

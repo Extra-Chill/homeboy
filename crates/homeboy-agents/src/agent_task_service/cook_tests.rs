@@ -8024,11 +8024,15 @@ fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
             false,
             |plan| {
                 assert!(plan.metadata["generic_lab_command_replay"].is_object());
-                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let identity = std::fs::read_to_string(&marker).expect("read workspace");
+                if call == 0 {
+                    assert_eq!(identity, "recorded", "initial preflight succeeds");
                     change_started_tx.send(()).expect("start workspace change");
                     change_done_rx.recv().expect("wait for workspace change");
+                    return Ok(());
                 }
-                if std::fs::read_to_string(&marker).expect("read workspace") != "recorded" {
+                if identity != "recorded" {
                     return Err(Error::validation_invalid_argument(
                         "workspace",
                         "generic Lab replay workspace changed during retry admission",
@@ -8042,11 +8046,83 @@ fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
         .expect_err("locked retry revalidation rejects the concurrent workspace change");
         changer.join().expect("workspace changer");
 
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert!(error.message.contains("changed during retry admission"));
         assert!(
             !agent_task_lifecycle::run_record_exists("cook-generic-lab-replay-race-attempt-2")
                 .expect("check retry reservation"),
             "the revalidation failure must leave no successor"
+        );
+    });
+}
+
+#[test]
+fn generic_retry_revalidates_workspace_inside_the_reservation_boundary() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let marker = workspace.path().join("workspace.txt");
+        std::fs::write(&marker, "recorded").expect("write recorded workspace");
+        let mut plan = AgentTaskPlan::new("generic-lab-replay-race", Vec::new());
+        plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": workspace.path(),
+                "content_identity": "recorded",
+            },
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some("generic-lab-replay-race"))
+            .expect("persist generic replay");
+        agent_task_lifecycle::record_pre_execution_failure(
+            "generic-lab-replay-race",
+            &plan,
+            "lab_daemon_admission",
+            &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+        )
+        .expect("record retryable failure");
+        let (change_started_tx, change_started_rx) = mpsc::sync_channel(0);
+        let (change_done_tx, change_done_rx) = mpsc::sync_channel(0);
+        let changed_marker = marker.clone();
+        let changer = std::thread::spawn(move || {
+            change_started_rx
+                .recv()
+                .expect("wait for initial preflight");
+            std::fs::write(changed_marker, "changed").expect("change workspace concurrently");
+            change_done_tx.send(()).expect("report workspace change");
+        });
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let error = crate::agent_task_service::retry_with_preflight(
+            "generic-lab-replay-race",
+            Some("generic-lab-replay-race-retry"),
+            false,
+            false,
+            |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let identity = std::fs::read_to_string(&marker).expect("read workspace");
+                if call == 0 {
+                    assert_eq!(identity, "recorded", "initial preflight succeeds");
+                    change_started_tx.send(()).expect("start workspace change");
+                    change_done_rx.recv().expect("wait for workspace change");
+                    return Ok(());
+                }
+                (identity == "recorded").then_some(()).ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "workspace",
+                        "generic Lab replay workspace changed during retry admission",
+                        None,
+                        None,
+                    )
+                })
+            },
+        )
+        .expect_err("locked generic retry revalidation rejects the workspace change");
+        changer.join().expect("workspace changer");
+
+        assert!(error.message.contains("changed during retry admission"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            !agent_task_lifecycle::run_record_exists("generic-lab-replay-race-retry")
+                .expect("check retry reservation")
         );
     });
 }

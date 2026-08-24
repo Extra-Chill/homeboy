@@ -7447,10 +7447,15 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
     }
     let generic_lab_replay = plan.metadata.get("generic_lab_command_replay").is_some();
     let admission = if generic_lab_replay {
-        agent_task_service_direct::retry_admission_with_preflight(
-            &record.run_id,
-            crate::commands::infra::route::validate_generic_lab_command_replay_workspace,
-        )
+        // Status advertises the exact persisted generic replay, rather than a
+        // Cook-derived retry plan that may no longer carry its workspace proof.
+        crate::commands::infra::route::validate_generic_lab_command_replay_workspace(&plan)
+            .and_then(|()| {
+                agent_task_service_direct::retry_admission_with_preflight(
+                    &record.run_id,
+                    |_| Ok(()),
+                )
+            })
     } else {
         agent_task_service_direct::retry_admission(&record.run_id)
     };
@@ -7642,6 +7647,42 @@ fn diagnose_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::Error;
+
+    #[test]
+    fn stale_generic_lab_replay_status_has_no_executable_action() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            std::fs::write(workspace.path().join("workspace.txt"), "current")
+                .expect("write workspace");
+            let mut plan = AgentTaskPlan::new("stale-generic-lab-replay", Vec::new());
+            plan.metadata["generic_lab_command_replay"] = json!({
+                "schema": "homeboy/generic-lab-command-replay/v1",
+                "normalized_args": ["homeboy", "bench"],
+                "materialization": {
+                    "canonical_root": workspace.path(),
+                    "content_identity": "snapshot:stale",
+                },
+            });
+            agent_task_lifecycle::submit_plan(&plan, Some("stale-generic-lab-replay"))
+                .expect("persist generic replay");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "stale-generic-lab-replay",
+                &plan,
+                "lab_daemon_admission",
+                &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+            )
+            .expect("record retryable failure");
+
+            let record = agent_task_lifecycle::status("stale-generic-lab-replay")
+                .expect("load replay record");
+            let retry = retry_replay_action(&record);
+
+            assert_eq!(retry.readiness, "unavailable");
+            assert!(retry.action.is_none());
+            assert!(retry.reason.unwrap().contains("content no longer matches"));
+        });
+    }
 
     #[test]
     fn placement_rewrite_threads_one_resolved_prefix_through_nested_commands() {

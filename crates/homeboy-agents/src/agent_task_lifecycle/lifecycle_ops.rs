@@ -6012,6 +6012,18 @@ where
 
 const RETRY_LINEAGE_LIMIT: usize = 16;
 
+/// Run a successor-creating recovery while its retry lineage is reserved.
+pub(crate) fn with_retry_lineage_reservation_in_store<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let source = lifecycle_store.read_record(&resolve_run_id_in_store(lifecycle_store, run_id)?)?;
+    let root_run_id = retry_root_run_id_in_store(lifecycle_store, &source)?;
+    let _reservation = RetryLineageLock::lock_in_store(lifecycle_store, &root_run_id)?;
+    action()
+}
+
 struct RetryLineageLock {
     #[allow(dead_code)]
     file: File,
