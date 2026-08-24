@@ -90,7 +90,7 @@ pub fn cleanup_external_storage_with_providers(
 ) -> Result<ExternalStorageCleanupOutput> {
     let mut seen = HashSet::new();
     let mut output = ExternalStorageCleanupOutput {
-        provider_count: providers.len(),
+        provider_count: providers.len().min(options.limit),
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 0,
@@ -101,7 +101,8 @@ pub fn cleanup_external_storage_with_providers(
     };
     let mut remaining_count = options.limit;
     let mut remaining_bytes = options.max_bytes;
-    for provider in providers {
+    let mut remaining_evidence = options.evidence_limit;
+    for provider in providers.iter().take(options.limit) {
         if !seen.insert(&provider.id) {
             return Err(Error::validation_invalid_argument(
                 "external_storage_retention.providers",
@@ -134,9 +135,18 @@ pub fn cleanup_external_storage_with_providers(
             remaining_count,
             &inventory.generation,
         );
-        let estimated_bytes = candidates.iter().map(|item| item.bytes).sum();
+        let estimated_bytes = checked_sum(
+            candidates.iter().map(|item| item.bytes),
+            "planned external storage bytes",
+        )?;
         remaining_count = remaining_count.saturating_sub(candidates.len());
-        remaining_bytes = remaining_bytes.saturating_sub(estimated_bytes);
+        remaining_bytes = remaining_bytes
+            .checked_sub(estimated_bytes)
+            .ok_or_else(|| {
+                Error::internal_unexpected(
+                    "external storage plan exceeded its aggregate byte ceiling",
+                )
+            })?;
         let targets = candidates
             .iter()
             .map(|item| ExternalStorageReclaimTarget {
@@ -163,9 +173,16 @@ pub fn cleanup_external_storage_with_providers(
         };
         let candidate_evidence = candidates
             .iter()
-            .take(options.evidence_limit)
+            .take(remaining_evidence)
             .map(|item| evidence(item))
-            .collect();
+            .collect::<Vec<_>>();
+        remaining_evidence = remaining_evidence.saturating_sub(candidate_evidence.len());
+        let applied_evidence = applied
+            .iter()
+            .take(remaining_evidence)
+            .map(|item| evidence(item))
+            .collect::<Vec<_>>();
+        remaining_evidence = remaining_evidence.saturating_sub(applied_evidence.len());
         let provider_output = ExternalStorageProviderOutput {
             provider_id: provider.id.clone(),
             candidate_count: candidates.len(),
@@ -175,18 +192,26 @@ pub fn cleanup_external_storage_with_providers(
             reclaimed_bytes,
             unknown_bytes: inventory.unknown_bytes,
             candidates: candidate_evidence,
-            applied: applied
-                .iter()
-                .take(options.evidence_limit)
-                .map(|item| evidence(item))
-                .collect(),
+            applied: applied_evidence,
         };
         output.candidate_count += provider_output.candidate_count;
         output.applied_count += provider_output.applied_count;
         output.skipped_count += provider_output.skipped_count;
-        output.estimated_bytes += provider_output.estimated_bytes;
-        output.reclaimed_bytes += provider_output.reclaimed_bytes;
-        output.unknown_bytes += provider_output.unknown_bytes;
+        output.estimated_bytes = checked_add(
+            output.estimated_bytes,
+            provider_output.estimated_bytes,
+            "external storage estimated bytes",
+        )?;
+        output.reclaimed_bytes = checked_add(
+            output.reclaimed_bytes,
+            provider_output.reclaimed_bytes,
+            "external storage reclaimed bytes",
+        )?;
+        output.unknown_bytes = checked_add(
+            output.unknown_bytes,
+            provider_output.unknown_bytes,
+            "external storage unknown bytes",
+        )?;
         output.providers.push(provider_output);
     }
     Ok(output)
@@ -216,10 +241,14 @@ fn plan<'a>(
         {
             continue;
         }
-        if selected.len() >= limit.min(MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS)
-            || selected_bytes.saturating_add(item.bytes) > max_bytes
-        {
+        if selected.len() >= limit.min(MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS) {
             break;
+        }
+        let Some(next_bytes) = selected_bytes.checked_add(item.bytes) else {
+            continue;
+        };
+        if next_bytes > max_bytes {
+            continue;
         }
         if !reclaim_request_fits(
             generation,
@@ -232,12 +261,21 @@ fn plan<'a>(
                     reclaim_token: item.reclaim_token.clone(),
                 }),
         ) {
-            break;
+            continue;
         }
-        selected_bytes = selected_bytes.saturating_add(item.bytes);
+        selected_bytes = next_bytes;
         selected.push(item);
     }
     selected
+}
+
+fn checked_add(left: u64, right: u64, subject: &str) -> Result<u64> {
+    left.checked_add(right)
+        .ok_or_else(|| Error::internal_unexpected(format!("{subject} overflow")))
+}
+
+fn checked_sum(mut values: impl Iterator<Item = u64>, subject: &str) -> Result<u64> {
+    values.try_fold(0_u64, |total, value| checked_add(total, value, subject))
 }
 
 fn reclaim_request_fits(
@@ -309,7 +347,12 @@ fn validate_reclaim_receipt<'a>(
         };
         applied.push(*item);
     }
-    if receipt.reclaimed_bytes > applied.iter().map(|item| item.bytes).sum() {
+    if receipt.reclaimed_bytes
+        > checked_sum(
+            applied.iter().map(|item| item.bytes),
+            "confirmed external storage bytes",
+        )?
+    {
         return Err(Error::validation_invalid_argument(
             "external_storage_retention provider reclaim response",
             "receipt bytes exceed confirmed item bytes",
@@ -621,6 +664,45 @@ mod tests {
     }
 
     #[test]
+    fn plan_skips_oversized_candidates_and_keeps_later_fitting_order() {
+        let mut oversized = item("oversized", ExternalStorageResourceClass::Scratch);
+        oversized.bytes = 100;
+        let mut first = item("first-fitting", ExternalStorageResourceClass::Scratch);
+        first.bytes = 4;
+        let mut second = item("second-fitting", ExternalStorageResourceClass::Scratch);
+        second.bytes = 5;
+        let inventory = [oversized, first, second];
+        let planned = plan(&inventory, &HashSet::new(), 0, 9, 10, "generation");
+        assert_eq!(
+            planned
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first-fitting", "second-fitting"],
+        );
+    }
+
+    #[test]
+    fn checked_accounting_rejects_u64_overflow() {
+        assert!(checked_sum([u64::MAX, 1].into_iter(), "fixture").is_err());
+        let first = item("first", ExternalStorageResourceClass::Scratch);
+        let mut second = item("second", ExternalStorageResourceClass::Scratch);
+        second.bytes = u64::MAX;
+        assert_eq!(
+            plan(
+                &[first, second],
+                &HashSet::new(),
+                0,
+                u64::MAX,
+                10,
+                "generation"
+            )
+            .len(),
+            1,
+        );
+    }
+
+    #[test]
     fn policy_applies_age_byte_ceiling_and_pressure_without_widening_liveness() {
         let old = item("old", ExternalStorageResourceClass::Scratch);
         let mut young = item("young", ExternalStorageResourceClass::Scratch);
@@ -714,8 +796,43 @@ mod tests {
         .expect("plan");
         assert_eq!(output.candidate_count, 1);
         assert_eq!(output.estimated_bytes, 10);
+        assert_eq!(output.provider_count, 1);
+        assert_eq!(output.providers.len(), 1);
         assert_eq!(output.providers[0].candidate_count, 1);
-        assert_eq!(output.providers[1].candidate_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_unknown_byte_overflow_fails_closed() {
+        let provider = |id: &str| {
+            let inventory = serde_json::json!({
+                "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": id,
+                "generation": "g1", "unknown_bytes": u64::MAX,
+            });
+            ExternalStorageRetentionProviderConfig {
+                id: id.to_string(),
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("printf '%s' '{}'", inventory),
+                    "fixture".to_string(),
+                ],
+                timeout_seconds: 1,
+            }
+        };
+        let result = cleanup_external_storage_with_providers(
+            &[provider("one"), provider("two")],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: u64::MAX,
+                reserve_bytes: 0,
+                limit: 10,
+                evidence_limit: 1,
+                deadline: None,
+            },
+        );
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]
@@ -768,6 +885,31 @@ mod tests {
         .expect_err("expired deadline");
         assert!(error.message.contains("deadline elapsed"));
         assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_deadline_bounds_manual_provider_inventory() {
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "manual-deadline".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 5".to_string()],
+            timeout_seconds: 30,
+        };
+        let started = std::time::Instant::now();
+        assert!(cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 0,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: Some(SystemTime::now() + Duration::from_millis(1)),
+            },
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[cfg(unix)]

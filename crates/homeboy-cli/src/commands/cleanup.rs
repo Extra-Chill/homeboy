@@ -2210,7 +2210,11 @@ fn cleanup_inventory_with_deadline(
                         } else {
                             OutputBudget::COLLECTION.max_items
                         },
-                        deadline,
+                        deadline: deadline.or_else(|| {
+                            SystemTime::now().checked_add(Duration::from_secs(
+                                config.retention.automatic_retention_max_run_seconds,
+                            ))
+                        }),
                     },
                 )?;
                 category_from_output(
