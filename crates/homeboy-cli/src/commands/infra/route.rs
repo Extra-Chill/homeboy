@@ -545,6 +545,9 @@ pub(crate) fn route_after_parse_with_provenance(
             // canonical plan root through the portable source channel so Lab
             // snapshots it before remapping nested plan/config paths.
             source_path: Some(&routing_source_path),
+            expected_source_snapshot_identity: retry_handoff
+                .as_ref()
+                .and_then(|handoff| handoff.expected_source_snapshot_identity.as_deref()),
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: retry_handoff.is_some(),
@@ -711,6 +714,7 @@ pub(crate) fn route_composed_lab_command(
             durable_agent_task_plan: None,
             durable_run_id: None,
             source_path: Some(&source_path),
+            expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: false,
@@ -2886,6 +2890,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
                     source_path,
+                    expected_source_snapshot_identity: None,
                     verified_cook_baseline: verified_cook_baseline.as_ref(),
                     job_overrides: self.job_overrides.clone(),
                 },
@@ -3730,6 +3735,7 @@ struct AgentTaskRetryHandoff {
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     primary_workspace: PathBuf,
     replays_generic_command: bool,
+    expected_source_snapshot_identity: Option<String>,
 }
 
 fn generic_lab_command_replay(
@@ -3974,6 +3980,7 @@ fn materialize_agent_task_retry_handoff(
             plan,
             primary_workspace,
             replays_generic_command: true,
+            expected_source_snapshot_identity: Some(replay.materialization.content_identity),
         }));
     }
     let primary_workspace = match retry_plan_primary_workspace(&plan) {
@@ -4019,6 +4026,7 @@ fn materialize_agent_task_retry_handoff(
         plan,
         primary_workspace,
         replays_generic_command: false,
+        expected_source_snapshot_identity: None,
     }))
 }
 

@@ -180,6 +180,8 @@ pub struct LabRoutingRequest<'a> {
     /// Controller checkout selected independently of CLI argv, such as the
     /// logical primary workspace of a materialized retry plan.
     pub source_path: Option<&'a std::path::Path>,
+    /// Persisted replay identity the Lab staging artifact must match.
+    pub expected_source_snapshot_identity: Option<&'a str>,
     /// Controller-derived evidence carried with a staged source snapshot. It
     /// never alters runner-side snapshot validation or workspace policy.
     pub verified_cook_baseline: Option<&'a serde_json::Value>,
@@ -1014,6 +1016,9 @@ fn execute_lab_offload_with_timeout(
     let durable_agent_task_plan = request.durable_agent_task_plan.cloned();
     let durable_run_id = request.durable_run_id.map(str::to_string);
     let source_path = request.source_path.map(std::path::Path::to_path_buf);
+    let expected_source_snapshot_identity = request
+        .expected_source_snapshot_identity
+        .map(str::to_string);
     let verified_cook_baseline = request.verified_cook_baseline.cloned();
     let require_controller_git_bundle = request.require_controller_git_bundle;
     let reuse_compatible_snapshot = request.reuse_compatible_snapshot;
@@ -1044,6 +1049,7 @@ fn execute_lab_offload_with_timeout(
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             durable_run_id: durable_run_id.as_deref(),
             source_path: source_path.as_deref(),
+            expected_source_snapshot_identity: expected_source_snapshot_identity.as_deref(),
             verified_cook_baseline: verified_cook_baseline.as_ref(),
             require_controller_git_bundle,
             reuse_compatible_snapshot,
@@ -1250,6 +1256,7 @@ mod tests {
             durable_agent_task_plan: None,
             durable_run_id: None,
             source_path: None,
+            expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: false,
@@ -1912,6 +1919,7 @@ mod tests {
                 durable_agent_task_plan: None,
                 durable_run_id: None,
                 source_path: None,
+                expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
                 reuse_compatible_snapshot: false,

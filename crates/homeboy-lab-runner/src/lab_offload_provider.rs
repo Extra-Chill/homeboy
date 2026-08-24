@@ -66,6 +66,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             durable_run_id: request.durable_run_id,
             source_path: request.source_path,
+            expected_source_snapshot_identity: request.expected_source_snapshot_identity,
             verified_cook_baseline: request.verified_cook_baseline,
             require_controller_git_bundle: request.require_controller_git_bundle,
             reuse_compatible_snapshot: request.reuse_compatible_snapshot,

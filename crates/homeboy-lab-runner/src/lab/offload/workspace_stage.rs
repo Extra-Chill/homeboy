@@ -11,7 +11,7 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Owned command facts consumed while materializing a workspace. This keeps the
 /// durable controller path bounded by the request lifetime rather than forcing
@@ -259,6 +259,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         run_isolation_token: run_isolation_token.clone(),
     };
+    verify_replay_staging_identity(source_path, request.expected_source_snapshot_identity)?;
     // Compatible snapshots are mutable runner workspaces, not shared immutable
     // source objects. A job-owned execution view must therefore materialize its
     // own checkout instead of borrowing a snapshot another job may reap.
@@ -279,6 +280,10 @@ fn prepare_lab_offload_workspace_stage_inner(
         },
     )?
     .0;
+    // The snapshot transfer may have raced with a controller workspace edit.
+    // Reject before constructing the runner command; the staged workspace is
+    // never admitted as a replay of different bytes.
+    verify_replay_staging_identity(source_path, request.expected_source_snapshot_identity)?;
     sync_mode = synced.sync_mode;
     if sync_mode == RunnerWorkspaceSyncMode::Snapshot
         && synced
@@ -1242,6 +1247,35 @@ mod tests {
     /// here is a boundary resolution (#7505).
     fn test_config_root() -> std::path::PathBuf {
         homeboy_core::paths::homeboy().expect("config root")
+    }
+
+    #[test]
+    fn replay_staging_rejects_bytes_changed_after_initial_identity_check() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("input.txt");
+        std::fs::write(&file, "recorded").expect("write recorded bytes");
+        let expected = crate::controller_workspace_materialization_identity(workspace.path())
+            .expect("capture replay identity");
+
+        verify_replay_staging_identity(workspace.path(), Some(&expected))
+            .expect("initial locked preflight identity");
+        std::fs::write(&file, "changed-before-snapshot").expect("change before staging read");
+
+        let error = verify_replay_staging_identity(workspace.path(), Some(&expected))
+            .expect_err("changed bytes cannot enter the staged replay");
+        assert!(error.message.contains("no longer matches"));
+    }
+
+    #[test]
+    fn replay_staging_accepts_unchanged_workspace_identity() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("input.txt"), "recorded")
+            .expect("write recorded bytes");
+        let expected = crate::controller_workspace_materialization_identity(workspace.path())
+            .expect("capture replay identity");
+
+        verify_replay_staging_identity(workspace.path(), Some(&expected))
+            .expect("unchanged replay may stage");
     }
 
     #[test]
@@ -3238,4 +3272,24 @@ mod tests {
             validation_dependencies: Vec::new(),
         }
     }
+}
+fn verify_replay_staging_identity(
+    source_path: &Path,
+    expected_identity: Option<&str>,
+) -> homeboy_core::Result<()> {
+    let Some(expected_identity) = expected_identity else {
+        return Ok(());
+    };
+    let actual_identity = crate::controller_workspace_materialization_identity(source_path)?;
+    if actual_identity == expected_identity {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "generic_lab_command_replay",
+        "Lab staging workspace no longer matches the persisted generic replay identity",
+        Some(source_path.display().to_string()),
+        Some(vec![
+            "Reissue the command as a new Lab run from the changed workspace.".to_string(),
+        ]),
+    ))
 }
