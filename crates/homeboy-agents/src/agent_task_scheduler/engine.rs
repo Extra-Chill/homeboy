@@ -1886,7 +1886,7 @@ fn recoverable_patch_proof(
     if homeboy_engine_primitives::content_hash::sha256_hex(&patch) != expected_sha256 {
         return Err("patch artifact content hash does not match its finalized record".to_string());
     }
-    if !crate::controller_scratch::workspace_matches_staged_patch(
+    if !crate::controller_scratch::workspace_matches_patch(
         workspace.root(),
         workspace.base_sha(),
         &patch,
