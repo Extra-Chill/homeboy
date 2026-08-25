@@ -972,6 +972,8 @@ fn remote_manifest_probe_command(root: &str) -> String {
     format!(
         concat!(
             "root={root}; test -e \"$root\" || exit 44; ",
+            "if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then printf '%s\\n' sha256sum >&2; exit {sha_exit}; fi; ",
+            "if ! stat -c %a \"$root\" >/dev/null 2>&1 && ! stat -f %Lp \"$root\" >/dev/null 2>&1; then printf '%s\\n' stat >&2; exit {stat_exit}; fi; ",
             "emit_entry() {{ ",
             "rel=$1; path=$2; ",
             "if [ -L \"$path\" ]; then ",
@@ -987,6 +989,7 @@ fn remote_manifest_probe_command(root: &str) -> String {
             "fi; }}; ",
             "if [ -d \"$root\" ]; then ",
             "command -v find >/dev/null 2>&1 || {{ printf '%s\\n' find >&2; exit {find_exit}; }}; ",
+            "if [ -n \"$(find \"$root\" -type l -print -quit)\" ]; then command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; fi; ",
             "find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o \\( -type f -o -type l \\) ",
             "-exec sh -c 'root=$1; shift; ",
             "for f do rel=${{f#\"$root\"/}}; ",
@@ -1001,7 +1004,7 @@ fn remote_manifest_probe_command(root: &str) -> String {
             "else printf \"%s\\n\" sha256sum >&2; exit {sha_exit}; fi; ",
             "set -- $hash_output; printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; ",
             "fi; done' sh \"$root\" {{}} +; ",
-            "else rel=${{root##*/}}; emit_entry \"$rel\" \"$root\"; fi"
+            "else if [ -L \"$root\" ]; then command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; fi; rel=${{root##*/}}; emit_entry \"$rel\" \"$root\"; fi"
         ),
         root = root,
         sha_exit = sha_exit,
