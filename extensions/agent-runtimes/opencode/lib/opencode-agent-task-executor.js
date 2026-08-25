@@ -27,6 +27,7 @@ const { finalizeOwnershipMarker, writeOwnershipMarker } = require('./opencode-ex
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -73,6 +74,7 @@ const OPENCODE_GIT_CAPTURE_OPTIONS = {
 const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
 const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 const OPENCODE_SESSION_EXPORT_TIMEOUT_MS = 2_000;
+const OPENCODE_SESSION_EXPORT_MAX_BYTES = 1024 * 1024;
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -1070,22 +1072,8 @@ function sessionMetadata(context = {}) {
 		return context.sessionMetadata;
 	}
 	const [sessionId] = sessionIds;
-	const result = spawnSync(context.commandSpec.command, [
-		...arrayValue(context.commandSpec.args),
-		'export',
-		sessionId,
-		'--sanitize',
-	], {
-		cwd: context.cwd,
-		env: context.spawnExtra?.env,
-		encoding: 'utf8',
-		maxBuffer: 1024 * 1024,
-		// Session provenance is supplementary to a completed provider run. Bound
-		// its follow-up process so a wedged export cannot hold Cook indefinitely.
-		timeout: OPENCODE_SESSION_EXPORT_TIMEOUT_MS,
-		killSignal: 'SIGKILL',
-	});
-	if (result.status !== 0 || result.error) {
+	const output = captureOpenCodeSessionExport(context, sessionId);
+	if (!output) {
 		context.sessionMetadata = {
 			status: 'unavailable',
 			session_id: sessionId,
@@ -1093,7 +1081,7 @@ function sessionMetadata(context = {}) {
 		};
 		return context.sessionMetadata;
 	}
-	const exported = parseOpenCodeExport(result.stdout);
+	const exported = parseOpenCodeExport(output);
 	const provider = stringValue(exported?.info?.model?.providerID);
 	const model = stringValue(exported?.info?.model?.id);
 	if (!provider || !model) {
@@ -1110,6 +1098,53 @@ function sessionMetadata(context = {}) {
 		model: `${provider}/${model}`,
 	};
 	return context.sessionMetadata;
+}
+
+function captureOpenCodeSessionExport(context, sessionId) {
+	const configuredTempRoot = context.spawnExtra?.env?.TMPDIR;
+	const tempRoot = isAbsolutePath(configuredTempRoot) ? configuredTempRoot : os.tmpdir();
+	let exportDirectory;
+	let outputFd;
+	try {
+		exportDirectory = fs.mkdtempSync(path.join(tempRoot, 'opencode-session-export-'));
+		const outputPath = path.join(exportDirectory, 'session.json');
+		outputFd = fs.openSync(outputPath, 'w', 0o600);
+		const result = spawnSync(context.commandSpec.command, [
+			...arrayValue(context.commandSpec.args),
+			'export',
+			sessionId,
+			'--sanitize',
+		], {
+			cwd: context.cwd,
+			env: context.spawnExtra?.env,
+			encoding: 'utf8',
+			stdio: ['ignore', outputFd, 'pipe'],
+			maxBuffer: OPENCODE_SESSION_EXPORT_MAX_BYTES,
+			// Session provenance is supplementary to a completed provider run. Bound
+			// its follow-up process so a wedged export cannot hold Cook indefinitely.
+			timeout: OPENCODE_SESSION_EXPORT_TIMEOUT_MS,
+			killSignal: 'SIGKILL',
+		});
+		fs.closeSync(outputFd);
+		outputFd = undefined;
+		if (result.status !== 0 || result.error) {
+			return '';
+		}
+		const bytes = fs.statSync(outputPath).size;
+		if (bytes === 0 || bytes > OPENCODE_SESSION_EXPORT_MAX_BYTES) {
+			return '';
+		}
+		return fs.readFileSync(outputPath, 'utf8');
+	} catch {
+		return '';
+	} finally {
+		if (outputFd !== undefined) {
+			try { fs.closeSync(outputFd); } catch { /* Cleanup is best-effort after capture failure. */ }
+		}
+		if (exportDirectory) {
+			try { fs.rmSync(exportDirectory, { recursive: true, force: true }); } catch { /* Temporary sanitized data cleanup is best-effort. */ }
+		}
+	}
 }
 
 function openCodeSessionIds(stdout = '') {
