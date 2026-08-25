@@ -162,7 +162,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
-| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves repository evidence before falling back to `main` |
+| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves configured repository or remote default-branch evidence before retaining its deferred `main` compatibility default when the provider has not materialized a checkout |
 | `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
 | `--title` | `<TEXT>` | Title for the finalized pull request. Defaults to a title derived from the goal / commit |
 | `--commit-message` | `<TEXT>` | Commit message for the cook's committed change. Defaults to a message derived from the goal |
@@ -760,8 +760,8 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | Option | Value | Description |
 | --- | --- | --- |
 | `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path |
-| `--from` | `<REF>` | _no help text_ |
-| `--base` | `<BRANCH>` | _no help text_ |
+| `--from` | `<REF>` | Source ref used to create every child worktree. When omitted, this is inferred from the repository default branch. An explicit value wins and must resolve to the same commit as `--base` |
+| `--base` | `<BRANCH>` | Pull-request base branch. When omitted, Homeboy resolves the registered repository's remote default branch before any worktree mutation |
 | `--branch-prefix` | `<PREFIX>` | _no help text_ |
 | `--fanout-id` | `<ID>` | _no help text_ |
 | `--worktree` | `<ISSUE_URL=HANDLE>` | Bind one issue URL to an existing provider-managed worktree handle. Repeat as `--worktree ISSUE_URL=HANDLE`. Every supplied issue must have exactly one binding; Homeboy validates and adopts the exact destination instead of requesting provider creation |
