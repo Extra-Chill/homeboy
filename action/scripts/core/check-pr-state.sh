@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Report whether the pull request is still eligible for candidate finalization.
+# Report whether the pull request remains eligible for PR-only publication.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,8 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 if ! pr_is_active; then
-  echo "::warning::PR #${PR_NUMBER:-unknown} is no longer open (merged or closed) — skipping final enforcement"
+  echo "::warning::PR #${PR_NUMBER:-unknown} is no longer open (merged or closed) — skipping PR-only publication"
   echo "active=false" >> "${GITHUB_OUTPUT}"
+  echo "reason=pr_closed" >> "${GITHUB_OUTPUT}"
 else
   echo "active=true" >> "${GITHUB_OUTPUT}"
+  echo "reason=active" >> "${GITHUB_OUTPUT}"
 fi

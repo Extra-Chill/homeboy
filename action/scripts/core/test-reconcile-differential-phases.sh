@@ -35,7 +35,7 @@ run_case() {
   shift 2
   rm -f "${tmp}/output"
   set +e
-  PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
+  PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=false GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
   local actual=$?
   set -e
   if [ "${actual}" -ne "${expected}" ]; then
@@ -49,7 +49,7 @@ payload_pass='{"success":true,"data":{"test_counts":{"failed":0,"errors":0}}}'
 payload_one='{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}'
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"pass"}' "${payload_pass}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
-run_case 0 'matching passing phases reconcile green'
+run_case 0 'merged PR still reconciles matching immutable passing phases'
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
 run_case 1 'introduced candidate failure remains blocking'

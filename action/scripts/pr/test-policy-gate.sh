@@ -36,6 +36,12 @@ exit 1
 EOF
 chmod +x "${FAKE_BIN}/homeboy"
 
+cat > "${FAKE_BIN}/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${PR_STATE:-OPEN}"
+EOF
+chmod +x "${FAKE_BIN}/gh"
+
 assert_policy() {
   local expected_safe="$1"
   local expected_merged="$2"
@@ -45,9 +51,15 @@ assert_policy() {
   local output_file safe merged
   output_file="${TMPDIR}/output-${label// /-}"
 
-  PATH="${FAKE_BIN}:${PATH}" \
-    GITHUB_OUTPUT="${output_file}" \
-    "$@" >/dev/null
+  local output status
+  set +e
+  output="$(PATH="${FAKE_BIN}:${PATH}" GITHUB_OUTPUT="${output_file}" "$@" 2>&1)"
+  status=$?
+  set -e
+  if [ "${status}" -ne 0 ]; then
+    printf 'FAIL: %s exited %s\n%s\n' "${label}" "${status}" "${output}"
+    exit 1
+  fi
 
   safe="$(awk '/^safe<<HOMEBOY_PR_POLICY$/{getline; print; exit}' "${output_file}")"
   merged="$(awk '/^merged<<HOMEBOY_PR_POLICY$/{getline; print; exit}' "${output_file}")"
@@ -58,6 +70,19 @@ assert_policy() {
     exit 1
   fi
 
+  printf 'PASS: %s\n' "${label}"
+}
+
+assert_reason() {
+  local expected="$1"
+  local label="$2"
+  local output_file="${TMPDIR}/output-${label// /-}"
+  local actual
+  actual="$(awk '/^reason<<HOMEBOY_PR_POLICY$/{getline; print; exit}' "${output_file}")"
+  if [ "${actual}" != "${expected}" ]; then
+    printf 'FAIL: %s\nexpected reason: %s\nactual reason:   %s\n' "${label}" "${expected}" "${actual}"
+    exit 1
+  fi
   printf 'PASS: %s\n' "${label}"
 }
 
@@ -98,5 +123,17 @@ assert_policy false false "blocked" \
     PR_HEAD_REPO="chubes4/world-of-wordpress" \
     HOMEBOY_FAKE_SAFE="false" \
     bash "${POLICY_GATE}"
+
+assert_policy false false "closed PR" \
+  env -C "${TMPDIR}" \
+    GITHUB_ACTION_PATH="${SCRIPT_DIR}/../.." \
+    GITHUB_REPOSITORY="chubes4/world-of-wordpress" \
+    POLICY_PATH="${POLICY}" \
+    PR_NUMBER="7" \
+    REPOSITORY="chubes4/world-of-wordpress" \
+    PR_STATE="MERGED" \
+    HOMEBOY_FAKE_SAFE="true" \
+    bash "${POLICY_GATE}"
+assert_reason pr_closed "closed PR"
 
 printf 'All PR policy gate checks passed.\n'
