@@ -208,6 +208,19 @@ fn digest_memo_min_hash_time() -> std::time::Duration {
     DIGEST_MEMO_MIN_HASH_TIME
 }
 
+/// Non-unix has no digest memo. `memoized_executable_digest` always misses and
+/// `memoize_executable_digest` is a no-op, so no elapsed hash time can make
+/// memoization reachable. `MAX` states that, rather than implying a threshold
+/// that decides nothing.
+///
+/// `executable_digest` is not itself `cfg`-gated, so the unix-only definition
+/// above escaped its call site and only Windows could see it (E0425). The two
+/// helpers beside it already carry `cfg(not(unix))` stubs; this one was missed.
+#[cfg(not(unix))]
+fn digest_memo_min_hash_time() -> std::time::Duration {
+    std::time::Duration::MAX
+}
+
 #[cfg(unix)]
 static EXECUTABLE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileIdentity, String>>> =
     OnceLock::new();
