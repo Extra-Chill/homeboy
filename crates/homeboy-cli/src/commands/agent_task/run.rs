@@ -23,11 +23,10 @@ use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::defaults;
 use homeboy::core::engine::shell::quote_args;
+use homeboy::core::worktree_provider::{self, WorktreeProvisionPlan};
 use homeboy::core::worktree_providers::{
-    plan_apply_enabled_worktree_provider_with_lifecycle_from_config,
     preview_apply_enabled_worktree_provider_task_attachment_from_config,
-    provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCleanupPolicy,
-    WorktreeProviderCreateIntent, WorktreeProviderCreatePlan, WorktreeProviderLifecycleIntent,
+    WorktreeProviderCleanupPolicy, WorktreeProviderCreateIntent, WorktreeProviderLifecycleIntent,
     WorktreeProviderTaskAttachmentStatus,
 };
 
@@ -3262,107 +3261,25 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         );
     }
 
-    let config = defaults::load_config();
     validate_cook_base_before_provisioning(args)?;
-    // A command provider's answer is external, bounded, and retryable. Preserve
-    // the complete creation intent in the Cook plan and resolve it only after
-    // Cook has materialized its durable recipe/run identity.
-    if config.worktree_providers.values().any(|provider| {
-        provider.enabled
-            && provider.apply_enabled
-            && (provider.commands.resolve_identity.is_some()
-                || provider.commands.resolve.is_some()
-                || provider.commands.list.is_some()
-                || provider.commands.ensure.is_some())
-    }) {
-        return Ok(serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": to_worktree,
-            "provision_intent": {
-                "repo": cook_provision_repository(args),
-                "base": args.base,
-                "head": args.head,
-                "task_url": args.dispatch.task_url,
-            },
-            // Cook owns this destination's terminal lifecycle. Its exact run id
-            // is assigned during durable materialization, before ensure runs.
-            "lifecycle_intent": {
-                "purpose": "agent_task_cook",
-                "cleanup_policy": "remove_on_success",
-            },
-        }));
-    }
-    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
-        Ok(identity) => {
-            homeboy::core::worktree_providers::validate_task_worktree_root(
-                Path::new(&identity.path),
-                to_worktree,
-            )?;
-            validate_cook_destination_identity(args, Path::new(&identity.path))?;
-            match homeboy::core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config) {
-                Ok(safety) if safety.fresh && !safety.dirty && !safety.unpushed && !identity.primary => return Ok(serde_json::json!({
-                    "action": "existing", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
-                    "workspace_identity": identity, "workspace_safety": safety,
-                })),
-                Ok(_) => return Err(homeboy::core::Error::validation_invalid_argument("to_worktree", "worktree provider safety attestation is not safe for mutation", Some(to_worktree.to_string()), None)),
-                Err(error) if error.details["worktree_provider_split"] == "timed_out" => return Ok(serde_json::json!({
-                    "action": "attestation_pending", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
-                    "worktree_provider_id": identity.provider_id,
-                    "workspace_identity": identity,
-                    "workspace_safety": { "state": "timed_out", "latency_ms": error.details["latency_ms"], "budget_ms": error.details["budget_ms"] },
-                })),
-                Err(error) => return Err(error),
-            }
-        }
-        Err(error)
-            if error
-                .details
-                .get("worktree_provider_lookup")
-                .and_then(Value::as_str)
-                == Some("not_found") => {}
-        Err(error)
-            if error
-                .details
-                .get("worktree_provider_lookup")
-                .and_then(Value::as_str)
-                == Some("timed_out") =>
-        {
-            // The lookup is bounded, but a timeout says nothing about whether
-            // this exact handle exists. Carry only the declared handle into
-            // Cook; durable materialization retries the same exact provider.
-            let provider_id = error
-                .details
-                .get("worktree_provider_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    homeboy::core::Error::internal_unexpected(
-                        "timed-out worktree provider lookup omitted its provider identity"
-                            .to_string(),
-                    )
-                })?;
-            return Ok(serde_json::json!({
-                "action": "lookup_pending",
-                "kind": "provider",
-                "handle": to_worktree,
-                "worktree_provider_id": provider_id,
-            }));
-        }
-        Err(error) => return Err(error),
-    }
-
-    let intent = cook_workspace_create_intent(args)?;
-    provision_apply_enabled_worktree_provider_from_config(&intent, &config).map(|provision| {
-        serde_json::json!({
-            "action": provision.action,
-            "provider": provision.resolution.provider_id,
-            "idempotency_key": provision.idempotency_key,
-            "handle": provision.resolution.worktree.handle,
-            "path": provision.resolution.worktree.path,
-            "branch": provision.resolution.worktree.branch,
-            "intent": cook_workspace_plan_identity(&intent),
-        })
-    })
+    // Preserve the complete provider-neutral intent until Cook has durably
+    // admitted its recipe and exact lifecycle owner. Ensure is forbidden before
+    // that point for both native and configured providers.
+    Ok(serde_json::json!({
+        "action": "lookup_pending",
+        "kind": "provider",
+        "handle": to_worktree,
+        "provision_intent": {
+            "repo": cook_provision_repository(args),
+            "base": args.base,
+            "head": args.head,
+            "task_url": args.dispatch.task_url,
+        },
+        "lifecycle_intent": {
+            "purpose": "agent_task_cook",
+            "cleanup_policy": "remove_on_success",
+        },
+    }))
 }
 
 /// The exact declaration used both by preview planning and live provider
@@ -3953,7 +3870,7 @@ fn resolve_cook_preview_destination(
                         .expect("preview lifecycle is bound before destination resolution"),
                     cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
                 };
-                let plan = match plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
+                let plan = match worktree_provider::plan_worktree_provision_from_config(
                     &intent, &lifecycle, &config,
                 ) {
                     Ok(plan) => plan,
@@ -3961,23 +3878,26 @@ fn resolve_cook_preview_destination(
                         return Ok((args, unresolved_provider_preview(&handle, error, &config)));
                     }
                 };
-                let WorktreeProviderCreatePlan::WouldCreate(resolution) = plan else {
+                let WorktreeProvisionPlan::Planned(destination) = plan else {
                     return Err(homeboy::core::Error::internal_unexpected(
-                        "worktree provider changed from absent to existing while previewing Cook"
+                        "worktree provider changed from absent to admitted while previewing Cook"
                             .to_string(),
                     ));
                 };
-                let planning_timeout =
-                    preview_provider_plan_timeout(&config, &resolution.provider_id);
+                let provider_id = match &destination.ownership.provider {
+                    homeboy::core::worktree_provider::WorktreeProviderIdentity::Native => "native",
+                    homeboy::core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
+                };
+                let planning_timeout = preview_provider_plan_timeout(&config, provider_id);
                 return Ok((
                     args,
                     serde_json::json!({
                         "action": "planned_create",
                         "kind": "provider",
-                        "handle": resolution.worktree.handle,
-                        "path": resolution.worktree.path,
-                        "branch": resolution.worktree.branch,
-                        "provider_id": resolution.provider_id,
+                        "handle": destination.ownership.handle,
+                        "path": destination.ownership.path,
+                        "branch": destination.ownership.branch,
+                        "provider_id": provider_id,
                         "intent": cook_workspace_plan_identity(&intent),
                         "planning_timeout_ms": planning_timeout["effective_timeout_ms"],
                         "planning_timeout": planning_timeout,

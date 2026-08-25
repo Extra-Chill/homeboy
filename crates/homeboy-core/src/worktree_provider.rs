@@ -69,6 +69,81 @@ pub trait WorktreeMutationProvider {
     ) -> Result<WorktreeMutationLookup>;
 }
 
+/// Exact creation request shared by native and configured worktree providers.
+pub type WorktreeProvisionIntent = worktree_providers::WorktreeProviderCreateIntent;
+/// Lifecycle ownership bound before a provisioning mutation is allowed.
+pub type WorktreeProvisionLifecycle = worktree_providers::WorktreeProviderLifecycleIntent;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProvisionDestination {
+    pub ownership: WorktreeOwnership,
+    /// Configured providers may issue an opaque exact identity. Native identity
+    /// remains in the task-worktree registry and is not projected into this slot.
+    pub exact_identity: Option<worktree_providers::WorktreeProviderExactIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeProvisionLookup {
+    Admitted(WorktreeProvisionDestination),
+    NotFound,
+}
+
+impl WorktreeProvisionLookup {
+    pub fn into_admitted(self, handle: &str) -> Result<WorktreeProvisionDestination> {
+        match self {
+            Self::Admitted(destination) => Ok(destination),
+            Self::NotFound => Err(Error::validation_invalid_argument(
+                "to_worktree",
+                format!("worktree handle `{handle}` is no longer admitted after provisioning"),
+                Some(handle.to_string()),
+                None,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeProvisionPlan {
+    Admitted(WorktreeProvisionDestination),
+    Planned(WorktreeProvisionDestination),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeProvisionAction {
+    Admitted,
+    Ensured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProvision {
+    pub destination: WorktreeProvisionDestination,
+    pub action: WorktreeProvisionAction,
+    pub idempotency_key: String,
+}
+
+/// Optional capability for admitting, planning, and ensuring a destination.
+/// Planning is read-only. Callers must durably bind lifecycle ownership before
+/// invoking `ensure`, and must re-admit its postcondition before use.
+pub trait WorktreeProvisionProvider {
+    fn admit(
+        &self,
+        handle: &str,
+        selected_provider: Option<&WorktreeProviderIdentity>,
+    ) -> Result<WorktreeProvisionLookup>;
+
+    fn plan(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvisionPlan>;
+
+    fn ensure(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvision>;
+}
+
 /// Built-in provider for Homeboy's standalone task-worktree registry.
 ///
 /// This intentionally excludes adopted workspace refs because the first
@@ -177,6 +252,110 @@ impl WorktreeMutationProvider for NativeWorktreeProvider {
     }
 }
 
+impl WorktreeProvisionProvider for NativeWorktreeProvider {
+    fn admit(
+        &self,
+        handle: &str,
+        selected_provider: Option<&WorktreeProviderIdentity>,
+    ) -> Result<WorktreeProvisionLookup> {
+        if selected_provider.is_some_and(|provider| provider != &WorktreeProviderIdentity::Native) {
+            return Ok(WorktreeProvisionLookup::NotFound);
+        }
+        Ok(match self.resolve(handle)? {
+            WorktreeProviderLookup::Found(ownership) => {
+                WorktreeProvisionLookup::Admitted(WorktreeProvisionDestination {
+                    ownership,
+                    exact_identity: None,
+                })
+            }
+            WorktreeProviderLookup::NotFound => WorktreeProvisionLookup::NotFound,
+        })
+    }
+
+    fn plan(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        _lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvisionPlan> {
+        if let WorktreeProvisionLookup::Admitted(destination) = self.admit(&intent.handle, None)? {
+            return Ok(WorktreeProvisionPlan::Admitted(destination));
+        }
+        validate_native_provision_handle(intent)?;
+        Ok(WorktreeProvisionPlan::Planned(
+            WorktreeProvisionDestination {
+                ownership: WorktreeOwnership {
+                    provider: WorktreeProviderIdentity::Native,
+                    handle: intent.handle.clone(),
+                    path: worktree::planned_create_path(&intent.repo, &intent.head, &intent.base)?,
+                    branch: intent.head.clone(),
+                    task_url: Some(intent.task_url.clone()),
+                },
+                exact_identity: None,
+            },
+        ))
+    }
+
+    fn ensure(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvision> {
+        if let WorktreeProvisionLookup::Admitted(destination) = self.admit(&intent.handle, None)? {
+            return Ok(WorktreeProvision {
+                destination,
+                action: WorktreeProvisionAction::Admitted,
+                idempotency_key: worktree_providers::worktree_provider_idempotency_key(intent),
+            });
+        }
+        validate_native_provision_handle(intent)?;
+        let created = worktree::create(worktree::WorktreeCreateOptions {
+            component_id: intent.repo.clone(),
+            branch: intent.head.clone(),
+            from: Some(intent.base.clone()),
+            task_url: Some(intent.task_url.clone()),
+            run_id: Some(lifecycle.owner_run_ref.clone()),
+            cleanup_policy: Some(match lifecycle.cleanup_policy {
+                worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess => {
+                    worktree::CleanupPolicy::RemoveWhenSafe
+                }
+                worktree_providers::WorktreeProviderCleanupPolicy::PreserveOnFailure => {
+                    worktree::CleanupPolicy::PreserveOnFailure
+                }
+            }),
+        })?;
+        Ok(WorktreeProvision {
+            destination: WorktreeProvisionDestination {
+                ownership: WorktreeOwnership {
+                    provider: WorktreeProviderIdentity::Native,
+                    handle: created.record.id,
+                    path: created.record.worktree_path,
+                    branch: created.record.branch,
+                    task_url: created.record.task_url,
+                },
+                exact_identity: None,
+            },
+            action: WorktreeProvisionAction::Ensured,
+            idempotency_key: worktree_providers::worktree_provider_idempotency_key(intent),
+        })
+    }
+}
+
+fn validate_native_provision_handle(intent: &WorktreeProvisionIntent) -> Result<()> {
+    let expected = worktree::handle_for_branch(&intent.repo, &intent.head);
+    if expected == intent.handle {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "native worktree creation for branch `{}` resolves to handle `{expected}`, not `{}`",
+            intent.head, intent.handle
+        ),
+        Some(intent.handle.clone()),
+        None,
+    ))
+}
+
 /// Adapter for configured command-backed worktree providers.
 pub struct CommandWorktreeProvider<'a> {
     config: &'a HomeboyConfig,
@@ -242,6 +421,117 @@ impl WorktreeMutationProvider for CommandWorktreeProvider<'_> {
     }
 }
 
+impl WorktreeProvisionProvider for CommandWorktreeProvider<'_> {
+    fn admit(
+        &self,
+        handle: &str,
+        selected_provider: Option<&WorktreeProviderIdentity>,
+    ) -> Result<WorktreeProvisionLookup> {
+        let identity = match selected_provider {
+            Some(WorktreeProviderIdentity::Native) => return Ok(WorktreeProvisionLookup::NotFound),
+            Some(WorktreeProviderIdentity::Configured(provider_id)) => {
+                worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+                    handle,
+                    provider_id,
+                    self.config,
+                )
+            }
+            None => {
+                worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(
+                    handle,
+                    self.config,
+                )
+            }
+        };
+        match identity {
+            Ok(identity) => Ok(WorktreeProvisionLookup::Admitted(
+                WorktreeProvisionDestination {
+                    ownership: WorktreeOwnership {
+                        provider: WorktreeProviderIdentity::Configured(
+                            identity.provider_id.clone(),
+                        ),
+                        handle: identity.handle.clone(),
+                        path: identity.path.clone(),
+                        branch: identity.branch.clone(),
+                        task_url: None,
+                    },
+                    exact_identity: Some(identity),
+                },
+            )),
+            Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => {
+                Ok(WorktreeProvisionLookup::NotFound)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn plan(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvisionPlan> {
+        if let WorktreeProvisionLookup::Admitted(destination) = self.admit(&intent.handle, None)? {
+            return Ok(WorktreeProvisionPlan::Admitted(destination));
+        }
+        let plan =
+            worktree_providers::plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
+                intent,
+                lifecycle,
+                self.config,
+            )?;
+        let (planned, resolution) = match plan {
+            worktree_providers::WorktreeProviderCreatePlan::Existing(resolution) => {
+                (false, resolution)
+            }
+            worktree_providers::WorktreeProviderCreatePlan::WouldCreate(resolution) => {
+                (true, resolution)
+            }
+        };
+        let destination = command_provision_destination(resolution);
+        Ok(if planned {
+            WorktreeProvisionPlan::Planned(destination)
+        } else {
+            WorktreeProvisionPlan::Admitted(destination)
+        })
+    }
+
+    fn ensure(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+    ) -> Result<WorktreeProvision> {
+        let provision = worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+            intent,
+            lifecycle,
+            self.config,
+        )?;
+        Ok(WorktreeProvision {
+            destination: command_provision_destination(provision.resolution),
+            action: if provision.action == "ensured" {
+                WorktreeProvisionAction::Ensured
+            } else {
+                WorktreeProvisionAction::Admitted
+            },
+            idempotency_key: provision.idempotency_key,
+        })
+    }
+}
+
+fn command_provision_destination(
+    resolution: worktree_providers::WorktreeProviderResolution,
+) -> WorktreeProvisionDestination {
+    WorktreeProvisionDestination {
+        ownership: WorktreeOwnership {
+            provider: WorktreeProviderIdentity::Configured(resolution.provider_id),
+            handle: resolution.worktree.handle,
+            path: resolution.worktree.path,
+            branch: resolution.worktree.branch,
+            task_url: resolution.worktree.task_url,
+        },
+        exact_identity: None,
+    }
+}
+
 /// Resolve through the single ordered provider boundary used by consumers.
 pub fn resolve_worktree_ownership(handle: &str) -> Result<WorktreeOwnership> {
     resolve_worktree_ownership_from_config(handle, &defaults::load_config())
@@ -301,6 +591,73 @@ pub fn resolve_worktree_mutation_target_from_config(
     Err(worktree_providers::worktree_provider_not_found_error(
         reference, config, true,
     ))
+}
+
+/// Admit an existing destination through native ownership first, then through
+/// configured apply-enabled ownership. A selected provider is exact authority
+/// for durable continuation and disables fallback.
+pub fn admit_worktree_provision_from_config(
+    handle: &str,
+    selected_provider: Option<&WorktreeProviderIdentity>,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProvisionLookup> {
+    let native = NativeWorktreeProvider;
+    if let WorktreeProvisionLookup::Admitted(destination) =
+        native.admit(handle, selected_provider)?
+    {
+        return Ok(WorktreeProvisionLookup::Admitted(destination));
+    }
+    if selected_provider == Some(&WorktreeProviderIdentity::Native) {
+        return Ok(WorktreeProvisionLookup::NotFound);
+    }
+
+    CommandWorktreeProvider::new(config).admit(handle, selected_provider)
+}
+
+/// Produce a non-mutating destination plan through the same provider selection
+/// execution will use. Configured creation remains preferred when declared;
+/// otherwise Homeboy's native task-worktree lifecycle is the provider.
+pub fn plan_worktree_provision_from_config(
+    intent: &WorktreeProvisionIntent,
+    lifecycle: &WorktreeProvisionLifecycle,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProvisionPlan> {
+    if let WorktreeProvisionLookup::Admitted(destination) =
+        admit_worktree_provision_from_config(&intent.handle, None, config)?
+    {
+        return Ok(WorktreeProvisionPlan::Admitted(destination));
+    }
+    if configured_provisioning_declared(config) {
+        CommandWorktreeProvider::new(config).plan(intent, lifecycle)
+    } else {
+        NativeWorktreeProvider.plan(intent, lifecycle)
+    }
+}
+
+/// Ensure an absent destination through its selected lifecycle provider. This
+/// method does not admit the postcondition; callers must invoke `admit` again.
+pub fn ensure_worktree_provision_from_config(
+    intent: &WorktreeProvisionIntent,
+    lifecycle: &WorktreeProvisionLifecycle,
+    selected_provider: Option<&WorktreeProviderIdentity>,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProvision> {
+    match selected_provider {
+        Some(WorktreeProviderIdentity::Native) => NativeWorktreeProvider.ensure(intent, lifecycle),
+        Some(WorktreeProviderIdentity::Configured(_)) => {
+            CommandWorktreeProvider::new(config).ensure(intent, lifecycle)
+        }
+        None if configured_provisioning_declared(config) => {
+            CommandWorktreeProvider::new(config).ensure(intent, lifecycle)
+        }
+        None => NativeWorktreeProvider.ensure(intent, lifecycle),
+    }
+}
+
+fn configured_provisioning_declared(config: &HomeboyConfig) -> bool {
+    config.worktree_providers.values().any(|provider| {
+        provider.enabled && provider.apply_enabled && provider.commands.ensure.is_some()
+    })
 }
 
 #[cfg(test)]
@@ -371,6 +728,55 @@ mod tests {
         ));
     }
 
+    fn assert_provision_admission_conformance(
+        provider: &dyn WorktreeProvisionProvider,
+        handle: &str,
+        expected_provider: WorktreeProviderIdentity,
+        expected_path: &Path,
+    ) {
+        let admit = || {
+            provider
+                .admit(handle, None)
+                .expect("owned provision destination admits")
+                .into_admitted(handle)
+                .expect("owned destination")
+        };
+        let admitted = admit();
+        let revalidated = admit();
+        assert_eq!(
+            admitted.ownership, revalidated.ownership,
+            "admission ownership must remain exact"
+        );
+        assert_eq!(
+            admitted.exact_identity.as_ref().map(|identity| (
+                &identity.provider_id,
+                &identity.token,
+                &identity.handle,
+                &identity.path,
+                &identity.branch,
+                identity.primary,
+            )),
+            revalidated.exact_identity.as_ref().map(|identity| (
+                &identity.provider_id,
+                &identity.token,
+                &identity.handle,
+                &identity.path,
+                &identity.branch,
+                identity.primary,
+            )),
+            "provider-issued exact identity must remain stable"
+        );
+        assert_eq!(admitted.ownership.provider, expected_provider);
+        assert_eq!(admitted.ownership.handle, handle);
+        assert_eq!(Path::new(&admitted.ownership.path), expected_path);
+        assert!(matches!(
+            provider
+                .admit("missing@worktree", None)
+                .expect("missing provision admission"),
+            WorktreeProvisionLookup::NotFound
+        ));
+    }
+
     fn initialize_native_worktree(home: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
         let source = tempfile::tempdir_in(home).expect("source checkout");
         let initialized = std::process::Command::new("git")
@@ -400,6 +806,17 @@ mod tests {
             .output()
             .expect("commit source file");
         assert!(committed.status.success());
+        let components = home.join(".config/homeboy/components");
+        std::fs::create_dir_all(&components).expect("component registry");
+        std::fs::write(
+            components.join("fixture.json"),
+            serde_json::json!({
+                "local_path": source.path(),
+                "remote_path": "wp-content/plugins/fixture"
+            })
+            .to_string(),
+        )
+        .expect("component registration");
         let path = home.join("native-worktree");
         let created = std::process::Command::new("git")
             .args([
@@ -434,6 +851,44 @@ mod tests {
                 WorktreeProviderIdentity::Native,
                 &path,
             );
+            assert_provision_admission_conformance(
+                &NativeWorktreeProvider,
+                "fixture@native",
+                WorktreeProviderIdentity::Native,
+                &path,
+            );
+            let intent = WorktreeProvisionIntent {
+                handle: "fixture@planned".to_string(),
+                repo: "fixture".to_string(),
+                base: "main".to_string(),
+                head: "planned".to_string(),
+                task_url: "https://example.test/issues/8017".to_string(),
+            };
+            let lifecycle = WorktreeProvisionLifecycle {
+                purpose: "agent_task_cook".to_string(),
+                owner_run_ref: "native-plan-run".to_string(),
+                cleanup_policy: worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+            };
+            let WorktreeProvisionPlan::Planned(planned) = NativeWorktreeProvider
+                .plan(&intent, &lifecycle)
+                .expect("native plan")
+            else {
+                panic!("missing native destination must be planned");
+            };
+            assert!(!Path::new(&planned.ownership.path).exists());
+            assert!(worktree::resolve_if_present(&intent.handle)
+                .expect("preview registry lookup")
+                .is_none());
+            let ensured = NativeWorktreeProvider
+                .ensure(&intent, &lifecycle)
+                .expect("native ensure");
+            assert_eq!(ensured.action, WorktreeProvisionAction::Ensured);
+            assert_eq!(ensured.destination.ownership.path, planned.ownership.path);
+            let replay = NativeWorktreeProvider
+                .ensure(&intent, &lifecycle)
+                .expect("native ensure replay");
+            assert_eq!(replay.action, WorktreeProvisionAction::Admitted);
+            assert_eq!(replay.idempotency_key, ensured.idempotency_key);
             std::fs::write(path.join("dirty"), "dirty\n").expect("dirty native worktree");
             assert_unsafe_lookup(&NativeWorktreeProvider, "fixture@native");
         });
@@ -557,7 +1012,62 @@ mod tests {
                 WorktreeProviderIdentity::Configured("command-fixture".to_string()),
                 workspace.path(),
             );
+            assert_provision_admission_conformance(
+                &CommandWorktreeProvider::new(&config),
+                "fixture@command",
+                WorktreeProviderIdentity::Configured("command-fixture".to_string()),
+                workspace.path(),
+            );
             assert_unsafe_lookup(&CommandWorktreeProvider::new(&config), "fixture@unsafe");
+        });
+    }
+
+    #[test]
+    fn declared_command_provisioning_fails_closed_instead_of_falling_back_to_native() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "incomplete-command".to_string(),
+                WorktreeProviderConfig {
+                    enabled: true,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    commands: WorktreeProviderCommands {
+                        ensure: Some(vec!["true".to_string()]),
+                        ..Default::default()
+                    },
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    list_result_mapping: None,
+                },
+            );
+            let config = HomeboyConfig {
+                worktree_providers: providers,
+                ..HomeboyConfig::default()
+            };
+            let intent = WorktreeProvisionIntent {
+                handle: "fixture@planned".to_string(),
+                repo: "fixture".to_string(),
+                base: "main".to_string(),
+                head: "planned".to_string(),
+                task_url: "https://example.test/issues/8017".to_string(),
+            };
+            let lifecycle = WorktreeProvisionLifecycle {
+                purpose: "agent_task_cook".to_string(),
+                owner_run_ref: "command-plan-run".to_string(),
+                cleanup_policy: worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+            };
+
+            let error = plan_worktree_provision_from_config(&intent, &lifecycle, &config)
+                .expect_err("declared command ownership must remain authoritative");
+            assert_eq!(
+                error.details["worktree_provider_missing_required_capabilities"],
+                serde_json::json!(["resolve_or_list"])
+            );
+            assert!(worktree::resolve_if_present(&intent.handle)
+                .expect("native registry lookup")
+                .is_none());
         });
     }
 }

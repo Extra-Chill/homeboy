@@ -7682,29 +7682,29 @@ fn materialize_pending_cook_workspace(
             )?;
         }
     }
-    let resolve = |options: &AgentTaskCookServiceOptions| {
-        match provider_id(options) {
-        Some(provider_id) => homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
-            &options.to_worktree,
-            &provider_id,
-            &config,
-        ),
-        None => homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(
-            &options.to_worktree,
-            &config,
-        ),
-    }
-    };
-    let mut identity = match with_controller_pre_provider_heartbeat(
+    let resolve =
+        |options: &AgentTaskCookServiceOptions,
+         selected: Option<&homeboy_core::worktree_provider::WorktreeProviderIdentity>| {
+            homeboy_core::worktree_provider::admit_worktree_provision_from_config(
+                &options.to_worktree,
+                selected,
+                &config,
+            )
+        };
+    let selected_provider = provider_id(options)
+        .map(homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured);
+    let mut destination = match with_controller_pre_provider_heartbeat(
         lifecycle_store,
         &initial_run_id,
         "worktree_provider_lookup",
         "resolving controller-owned provider workspace identity",
         COOK_HEARTBEAT_INTERVAL,
-        || resolve(options),
+        || resolve(options, selected_provider.as_ref()),
     ) {
-        Ok(identity) => identity,
-        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
+        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::Admitted(destination)) => {
+            destination
+        }
+        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::NotFound) => {
             match with_controller_pre_provider_heartbeat(
                 lifecycle_store,
                 &initial_run_id,
@@ -7716,8 +7716,14 @@ fn materialize_pending_cook_workspace(
                 Ok(provision) => {
                     // Pin the provider that performed the durable mutation. A later
                     // continuation re-resolves this exact destination through its owner.
-                    options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
-                        Value::String(provision.resolution.provider_id);
+                    let ensured_provider = provision.destination.ownership.provider.clone();
+                    if let homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
+                        provider_id,
+                    ) = &ensured_provider
+                    {
+                        options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
+                            Value::String(provider_id.clone());
+                    }
                     agent_task_lifecycle::persist_controller_plan_in_store(
                         lifecycle_store,
                         &initial_run_id,
@@ -7729,8 +7735,9 @@ fn materialize_pending_cook_workspace(
                         "worktree_provider_lookup",
                         "resolving materialized provider workspace identity",
                         COOK_HEARTBEAT_INTERVAL,
-                        || resolve(options),
+                        || resolve(options, Some(&ensured_provider)),
                     )?
+                    .into_admitted(&options.to_worktree)?
                 }
                 Err(ensure_error) if provider_ensure_timeout(&ensure_error) => {
                     // Ensure is a mutation and must never be retried after its
@@ -7758,9 +7765,24 @@ fn materialize_pending_cook_workspace(
                         "worktree_provider_lookup",
                         "reconciling provider workspace identity after ensure timeout",
                         COOK_HEARTBEAT_INTERVAL,
-                        || resolve(options),
+                        || {
+                            resolve(
+                                options,
+                                Some(&homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
+                                    provider_id.to_string(),
+                                )),
+                            )
+                        },
                     ) {
-                        Ok(identity) => identity,
+                        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::Admitted(
+                            destination,
+                        )) => destination,
+                        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::NotFound) => {
+                            return Err(annotate_pending_provider_self_repair_route(
+                                ensure_error,
+                                options,
+                            ));
+                        }
                         Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {
                             return Err(resolve_error);
                         }
@@ -7785,15 +7807,20 @@ fn materialize_pending_cook_workspace(
         }
         Err(error) => return Err(error),
     };
-    if homeboy_core::worktree_providers::worktree_provider_path_requires_materialization(
-        &identity.path,
-    ) {
-        identity = homeboy_core::worktree_providers::materialize_apply_enabled_worktree_provider_identity_from_config(
-            &identity,
+    if let Some(identity) = destination.exact_identity.as_ref().filter(|identity| {
+        homeboy_core::worktree_providers::worktree_provider_path_requires_materialization(
+            &identity.path,
+        )
+    }) {
+        let identity = homeboy_core::worktree_providers::materialize_apply_enabled_worktree_provider_identity_from_config(
+            identity,
             &config,
         )?;
+        destination.ownership.path = identity.path.clone();
+        destination.ownership.branch = identity.branch.clone();
+        destination.exact_identity = Some(identity);
     }
-    if identity.handle != options.to_worktree {
+    if destination.ownership.handle != options.to_worktree {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             "worktree provider did not resolve the declared exact Cook handle",
@@ -7806,6 +7833,14 @@ fn materialize_pending_cook_workspace(
         .metadata
         .pointer("/cook_provision/workspace_identity")
     {
+        let identity = destination.exact_identity.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_provision.workspace_identity",
+                "pending Cook configured identity resolved through a different provider kind",
+                Some(options.to_worktree.clone()),
+                None,
+            )
+        })?;
         let expected: homeboy_core::worktree_providers::WorktreeProviderExactIdentity =
             serde_json::from_value(expected.clone()).map_err(|error| {
                 Error::validation_invalid_argument(
@@ -7831,16 +7866,23 @@ fn materialize_pending_cook_workspace(
             ));
         }
     }
-    let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
-    if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "provider safety attestation is not current and safe for pending Cook execution",
-            Some(options.to_worktree.clone()),
-            None,
-        ));
-    }
-    let target = PathBuf::from(&identity.path);
+    let configured_evidence = destination
+        .exact_identity
+        .as_ref()
+        .map(|identity| {
+            let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(identity, &config)?;
+            if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+                return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    "provider safety attestation is not current and safe for pending Cook execution",
+                    Some(options.to_worktree.clone()),
+                    None,
+                ));
+            }
+            Ok((identity.clone(), safety))
+        })
+        .transpose()?;
+    let target = PathBuf::from(&destination.ownership.path);
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
@@ -7855,10 +7897,21 @@ fn materialize_pending_cook_workspace(
         task.metadata["cook_workspace_identity"] =
             crate::agent_task_workspace_identity::attest_workspace(&target)?;
     }
-    options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
-        serde_json::to_value(&identity).expect("workspace identity serializes");
-    options.initial_plan.metadata["cook_provision"]["workspace_safety"] =
-        serde_json::to_value(&safety).expect("workspace safety serializes");
+    if let Some((identity, safety)) = configured_evidence {
+        options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
+            serde_json::to_value(&identity).expect("workspace identity serializes");
+        options.initial_plan.metadata["cook_provision"]["workspace_safety"] =
+            serde_json::to_value(&safety).expect("workspace safety serializes");
+    }
+    options.initial_plan.metadata["cook_provision"]["provider_identity"] =
+        match destination.ownership.provider {
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
+                Value::String("native".to_string())
+            }
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider_id) => {
+                serde_json::json!({ "configured": provider_id })
+            }
+        };
     options.initial_plan.metadata["cook_provision"]["action"] =
         Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
@@ -8274,7 +8327,7 @@ fn provision_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
     config: &homeboy_core::defaults::HomeboyConfig,
-) -> Result<homeboy_core::worktree_providers::WorktreeProviderProvision> {
+) -> Result<homeboy_core::worktree_provider::WorktreeProvision> {
     let intent = &options.initial_plan.metadata["cook_provision"]["provision_intent"];
     let required = |field: &str| {
         intent.get(field).and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| {
@@ -8299,10 +8352,30 @@ fn provision_pending_cook_workspace(
     else {
         // Historical recipes did not declare ownership fields. Keep their
         // existing provider contract intact; new Cook plans always persist it.
-        return homeboy_core::worktree_providers::provision_apply_enabled_worktree_provider_from_config(
+        let provision = homeboy_core::worktree_providers::provision_apply_enabled_worktree_provider_from_config(
             &create_intent,
             config,
-        );
+        )?;
+        return Ok(homeboy_core::worktree_provider::WorktreeProvision {
+            destination: homeboy_core::worktree_provider::WorktreeProvisionDestination {
+                ownership: homeboy_core::worktree_provider::WorktreeOwnership {
+                    provider: homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
+                        provision.resolution.provider_id,
+                    ),
+                    handle: provision.resolution.worktree.handle,
+                    path: provision.resolution.worktree.path,
+                    branch: provision.resolution.worktree.branch,
+                    task_url: provision.resolution.worktree.task_url,
+                },
+                exact_identity: None,
+            },
+            action: if provision.action == "ensured" {
+                homeboy_core::worktree_provider::WorktreeProvisionAction::Ensured
+            } else {
+                homeboy_core::worktree_provider::WorktreeProvisionAction::Admitted
+            },
+            idempotency_key: provision.idempotency_key,
+        });
     };
     let purpose = lifecycle
         .get("purpose")
@@ -8339,13 +8412,16 @@ fn provision_pending_cook_workspace(
         &options.initial_run_id,
         &options.initial_plan,
     )?;
-    homeboy_core::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+    let selected_provider = configured_provider_id(options)
+        .map(homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured);
+    homeboy_core::worktree_provider::ensure_worktree_provision_from_config(
         &create_intent,
         &homeboy_core::worktree_providers::WorktreeProviderLifecycleIntent {
             purpose,
             owner_run_ref: options.initial_run_id.clone(),
             cleanup_policy,
         },
+        selected_provider.as_ref(),
         config,
     )
 }
