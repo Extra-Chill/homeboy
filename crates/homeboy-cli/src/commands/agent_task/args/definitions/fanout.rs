@@ -54,10 +54,18 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// slug for worktree handles and other workspace paths.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
-    #[arg(long = "from", default_value = "origin/main", value_name = "REF")]
-    pub from: String,
-    #[arg(long = "base", default_value = "main", value_name = "BRANCH")]
-    pub base: String,
+    /// Source ref used to create every child worktree. When omitted, this is
+    /// inferred from the repository default branch. An explicit value wins and
+    /// must resolve to the same commit as --base.
+    #[arg(long = "from", value_name = "REF")]
+    pub from: Option<String>,
+    /// Pull-request base branch. When omitted, Homeboy resolves the registered
+    /// repository's remote default branch before any worktree mutation.
+    #[arg(long = "base", value_name = "BRANCH")]
+    pub base: Option<String>,
+    /// Controller-resolved default-branch provenance persisted with the plan.
+    #[arg(skip)]
+    pub base_resolution: Option<serde_json::Value>,
     #[arg(long = "branch-prefix", default_value = "fix", value_name = "PREFIX")]
     pub branch_prefix: String,
     #[arg(long = "fanout-id", value_name = "ID")]

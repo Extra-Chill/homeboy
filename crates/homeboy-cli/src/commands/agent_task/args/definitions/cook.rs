@@ -1092,8 +1092,9 @@ pub struct AgentTaskCookArgs {
     #[arg(long)]
     pub no_progress: bool,
     /// Base branch the finalized pull request targets and the branch changes are
-    /// diffed against. When omitted, Cook resolves repository evidence before
-    /// falling back to `main`.
+    /// diffed against. When omitted, Cook resolves configured repository or
+    /// remote default-branch evidence before retaining its deferred `main`
+    /// compatibility default when the provider has not materialized a checkout.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
     /// Head branch to push and open the PR from. Defaults to the branch the

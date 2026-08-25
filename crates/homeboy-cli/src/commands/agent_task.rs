@@ -15,6 +15,7 @@ pub mod auth;
 pub(crate) mod candidate;
 pub mod contract;
 pub mod controller;
+pub(crate) mod default_branch;
 pub mod doctor;
 pub mod fanout;
 pub(crate) mod gate_contract;

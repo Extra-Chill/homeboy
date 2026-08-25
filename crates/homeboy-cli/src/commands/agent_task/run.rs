@@ -38,6 +38,7 @@ use super::args::{
     PromotionProviderArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
     ValidatePlanArgs,
 };
+use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::validate_gate_contracts;
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -3168,7 +3169,6 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
-    validate_cook_base_before_provisioning(args)?;
     let to_worktree = args.to_worktree.as_deref().ok_or_else(|| {
         homeboy::core::Error::validation_missing_argument(vec![
             "--to-worktree is required before provisioning a Cook destination".to_string(),
@@ -3183,6 +3183,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         })?;
         validate_cook_destination_identity(args, &path)?;
         let provider_identity = validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        validate_cook_base_before_provisioning(args)?;
         let mut provision = serde_json::json!({
             "action": "existing",
             "kind": "explicit_cwd",
@@ -3233,6 +3234,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 Some(direct_path.display().to_string()),
             )
         })?;
+        validate_cook_base_before_provisioning(args)?;
         return Ok(serde_json::json!({
             "action": "existing",
             "kind": "direct_task_worktree",
@@ -3254,12 +3256,14 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         }
         let path = PathBuf::from(record.path());
         homeboy::core::worktree_providers::validate_task_worktree_root(&path, to_worktree)?;
+        validate_cook_base_before_provisioning(args)?;
         return Ok(
             serde_json::json!({ "action": "existing", "kind": record.source_kind(), "handle": to_worktree, "path": path }),
         );
     }
 
     let config = defaults::load_config();
+    validate_cook_base_before_provisioning(args)?;
     // A command provider's answer is external, bounded, and retryable. Preserve
     // the complete creation intent in the Cook plan and resolve it only after
     // Cook has materialized its durable recipe/run identity.
@@ -3756,85 +3760,42 @@ fn annotate_worktree_provider_self_repair_route(
 }
 
 fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
-    if let Some(base) = args.base.clone() {
-        args.base_resolution = Some(serde_json::json!({ "base": base, "source": "explicit" }));
-        return Ok(());
-    }
-
     let workspace = args
         .dispatch
         .workspace
         .as_deref()
         .or(args.dispatch.cwd.as_deref())
-        .and_then(|path| homeboy::core::git::repo_root(Path::new(path)));
-    if let Some(workspace) = workspace {
-        if let Some(upstream) = git_upstream_branch(&workspace) {
-            set_resolved_cook_base(args, upstream, "workspace_upstream", &workspace);
-            return Ok(());
-        }
-    }
-
-    if let Some(component) = args
+        .map(Path::new);
+    let component = args
         .dispatch
         .repo
         .as_deref()
         .map(homeboy::core::component::registered_by_id)
         .transpose()?
         .flatten()
-    {
-        let path = PathBuf::from(component.local_path);
-        if let Some(base) = homeboy::core::git::default_branch_name(&path) {
-            set_resolved_cook_base(args, base, "repository_metadata", &path);
-            return Ok(());
-        }
-    }
-
-    if let Some(path) = args
-        .to_worktree
-        .as_deref()
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-    {
-        if let Some(base) = homeboy::core::git::default_branch_name(&path) {
-            set_resolved_cook_base(args, base, "remote_head", &path);
-            return Ok(());
-        }
-    }
-
-    args.base = Some("main".to_string());
-    args.base_resolution = Some(serde_json::json!({
-        "base": "main",
-        "source": "compatibility_fallback",
-        "evidence": "repository default-branch evidence unavailable",
-    }));
+        .map(|component| PathBuf::from(component.local_path));
+    let destination = args.to_worktree.as_deref().map(Path::new);
+    let resolution = resolve_default_branch(DefaultBranchRequest {
+        explicit_base: args.base.as_deref(),
+        explicit_from: None,
+        workspace,
+        component: component.as_deref(),
+        destination,
+        compatibility_fallback: Some("main"),
+    })?;
+    args.base = Some(resolution.base.clone());
+    args.base_resolution = Some(serde_json::to_value(resolution).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "serialize Cook default-branch resolution: {error}"
+        ))
+    })?);
     Ok(())
 }
 
-fn git_upstream_branch(path: &Path) -> Option<String> {
-    homeboy::core::git::output_optional(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .and_then(|upstream| {
-            upstream
-                .trim()
-                .split_once('/')
-                .map(|(_, branch)| branch.to_string())
-        })
-        .filter(|branch| !branch.is_empty())
-}
-
-fn set_resolved_cook_base(args: &mut AgentTaskCookArgs, base: String, source: &str, path: &Path) {
-    args.base = Some(base.clone());
-    args.base_resolution = Some(serde_json::json!({
-        "base": base,
-        "source": source,
-        "evidence_path": path,
-    }));
-}
-
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
-    let base = args
-        .base
-        .as_deref()
-        .expect("Cook base is resolved before provisioning");
+    let Some(base) = args.base.as_deref() else {
+        return Ok(());
+    };
     let path = args
         .dispatch
         .workspace
@@ -4683,11 +4644,6 @@ pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
-    // Backend policy is an execution prerequisite. Resolve it before validating
-    // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
-    // an operator must fix first.
-    let mut dispatch = dispatch_args_for_cook(args);
-    let request = dispatch_service::resolve_dispatch_request(dispatch.clone().into())?;
     if args.no_finalize {
         if let Some(provenance) = provenance {
             provenance
@@ -4705,6 +4661,19 @@ pub(crate) fn validate_cook_request_with_provenance(
                 })?;
         }
     }
+    if args.dispatch.core.queue_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle",
+            None,
+            None,
+        ));
+    }
+    // Backend policy is an execution prerequisite. Resolve it before validating
+    // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
+    // an operator must fix first.
+    let mut dispatch = dispatch_args_for_cook(args);
+    let request = dispatch_service::resolve_dispatch_request(dispatch.clone().into())?;
     if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task",
@@ -4745,14 +4714,6 @@ pub(crate) fn validate_cook_request_with_provenance(
                 "Use --no-finalize for a read-only Cook that will not commit, push, or open a PR."
                     .to_string(),
             ]),
-        ));
-    }
-    if args.dispatch.core.queue_only {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "queue-only",
-            "agent-task cook cannot queue its controller-owned lifecycle",
-            None,
-            None,
         ));
     }
     // Resolve against the same filtered rotation policy that compilation uses,
