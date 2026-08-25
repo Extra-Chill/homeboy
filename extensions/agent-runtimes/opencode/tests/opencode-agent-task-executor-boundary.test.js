@@ -678,6 +678,13 @@ if (process.argv[2] === 'export') {
   if (process.env.HOMEBOY_TEST_HANG_EXPORT === '1') {
     setInterval(() => {}, 1_000);
   } else {
+	if (process.env.HOMEBOY_TEST_DELAYED_EXPORT === '1') {
+	  const marker = ${JSON.stringify(path.join(root, 'delayed-session-export-marker'))};
+	  if (!fs.existsSync(marker)) {
+	    fs.writeFileSync(marker, 'first export unavailable');
+	    process.exit(1);
+	  }
+	}
     const exported = 'Exporting session\\n' + JSON.stringify({
       info: { model: { providerID: 'openai', id: 'gpt-5.6-sol' } },
       messages: [{ text: 'x'.repeat(70 * 1024) }],
@@ -720,6 +727,26 @@ if (process.argv[2] === 'export') {
 		status: 'captured', session_id: 'ses_default_model', model: 'openai/gpt-5.6-sol',
 	});
 	assert.deepEqual(fs.readdirSync(provenanceTempRoot).filter((name) => name.startsWith('opencode-session-export-')), []);
+	const delayedModelResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-delayed-session-model',
+		workspace_path: preflightWorkspace,
+		artifacts_path: path.join(root, 'delayed-model-artifacts'),
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				runtime_bin: provenanceOpenCode,
+				command_args: [],
+				runtime_env: { HOMEBOY_TEST_DELAYED_EXPORT: '1' },
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(delayedModelResult.status, 'succeeded', JSON.stringify(delayedModelResult.diagnostics));
+	assert.equal(delayedModelResult.metadata.model, 'openai/gpt-5.6-sol');
+	assert.deepEqual(delayedModelResult.metadata.opencode_session, {
+		status: 'captured', session_id: 'ses_default_model', model: 'openai/gpt-5.6-sol',
+	});
 	const exportStarted = Date.now();
 	const unavailableModelResult = await executeOpenCodeAgentTask({
 		...request,
@@ -736,7 +763,7 @@ if (process.argv[2] === 'export') {
 			},
 		},
 	}, { env: fixtureEnv });
-	assert.ok(Date.now() - exportStarted < 4_000, 'session export must not block provider completion');
+	assert.ok(Date.now() - exportStarted < 5_000, 'session export retries must not block provider completion');
 	assert.equal(unavailableModelResult.status, 'succeeded', JSON.stringify(unavailableModelResult.diagnostics));
 	assert.deepEqual(unavailableModelResult.metadata.opencode_session, {
 		status: 'unavailable',
