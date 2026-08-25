@@ -1257,6 +1257,9 @@ pub struct AgentTaskCookReport {
     /// provider dispatch instead of collapsing it into an attempt-budget result.
     pub terminal_phase: Option<String>,
     pub terminal_failure_classification: Option<String>,
+    /// Bounded causal facts for an initial provider-command failure. Complete
+    /// command evidence remains in the durable run named by `evidence_ref`.
+    pub primary_failure: Option<AgentTaskCookPrimaryFailure>,
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
     /// recipe was materialized. It may contain a bounded causal provider-command
@@ -1384,6 +1387,8 @@ impl serde::Serialize for AgentTaskCookReport {
             #[serde(skip_serializing_if = "Option::is_none")]
             terminal_failure_classification: Option<&'a String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            primary_failure: Option<&'a AgentTaskCookPrimaryFailure>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
             #[serde(skip_serializing_if = "Option::is_none")]
             failure_context: Option<&'a AgentTaskCookFailureContext>,
@@ -1413,6 +1418,7 @@ impl serde::Serialize for AgentTaskCookReport {
             stop_reason: self.stop_reason.as_ref(),
             terminal_phase: self.terminal_phase.as_ref(),
             terminal_failure_classification: self.terminal_failure_classification.as_ref(),
+            primary_failure: self.primary_failure.as_ref(),
             moving_base_recovery: self.moving_base_recovery.as_ref(),
             failure_context: self.failure_context.as_ref(),
             completion,
@@ -1747,6 +1753,19 @@ impl ContinuationAdmissionTrace {
 pub struct AgentTaskCookRecoveryAction {
     pub action: String,
     pub command: String,
+}
+
+/// Bounded primary cause for a provider command that failed before dispatch.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookPrimaryFailure {
+    pub schema: &'static str,
+    pub provider_id: String,
+    pub operation: String,
+    pub phase: String,
+    pub exit_code: i64,
+    pub stderr_excerpt: String,
+    pub evidence_ref: String,
+    pub next_action: AgentTaskCookRecoveryAction,
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -2097,6 +2116,7 @@ mod run_lifecycle_projection_tests {
             stop_reason: None,
             terminal_phase: None,
             terminal_failure_classification: None,
+            primary_failure: None,
             moving_base_recovery: None,
             failure_context: None,
         }
