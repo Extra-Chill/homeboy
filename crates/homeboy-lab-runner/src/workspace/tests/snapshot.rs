@@ -212,7 +212,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
                 .materialization_plan
                 .actual_materialization_mode
                 .as_deref(),
-            Some(RunnerWorkspaceSyncMode::SnapshotGit.label())
+            Some(RunnerWorkspaceSyncMode::SnapshotGit.as_str())
         );
         assert_eq!(
             git_output(Path::new(&synced.remote_path), &["rev-parse", "HEAD"])

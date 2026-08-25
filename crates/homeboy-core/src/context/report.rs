@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::component::{self, Component};
-use crate::extension_readiness::{extension_ready_status, is_extension_compatible};
+use crate::extension_readiness::is_extension_compatible;
 use crate::extension_store::{is_extension_linked, load_all_extensions};
 use crate::project::{self, Project};
 use crate::release_provider::{self, ReleaseStateEntry};
@@ -120,11 +120,20 @@ pub struct ExtensionEntry {
     pub description: String,
     pub runtime: String,
     pub compatible: bool,
-    pub ready: bool,
+    pub readiness: crate::extension_readiness::ExtensionReadinessState,
+    pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_follow_up_command: Option<String>,
     pub linked: bool,
 }
 
@@ -265,7 +274,10 @@ fn build_report_at(
         .iter()
         .filter(|m| show_all || linked_extension_ids.contains(&m.id) || m.executable.is_none())
         .map(|m| {
-            let ready_status = extension_ready_status(m);
+            let ready_status = crate::extension_readiness::extension_ready_status_with(
+                m,
+                crate::extension_readiness::ExtensionReadinessMode::Cached,
+            );
             ExtensionEntry {
                 id: m.id.clone(),
                 name: m.name.clone(),
@@ -283,9 +295,14 @@ fn build_report_at(
                 }
                 .to_string(),
                 compatible: is_extension_compatible(m, None),
+                readiness: ready_status.state,
                 ready: ready_status.ready,
                 ready_reason: ready_status.reason,
                 ready_detail: ready_status.detail,
+                readiness_cache_age_seconds: ready_status.cache_age_seconds,
+                readiness_probe_duration_ms: ready_status.probe_duration_ms,
+                readiness_timeout_ms: ready_status.timeout_ms,
+                readiness_follow_up_command: ready_status.follow_up_command,
                 linked: is_extension_linked(&m.id),
             }
         })

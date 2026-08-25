@@ -118,24 +118,7 @@ pub fn validate_deploy_component_local_paths(
         return validate_component_local_paths(project);
     }
 
-    let mut scoped_ids = component_ids.iter().cloned().collect::<HashSet<_>>();
-    let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
-    for component_id in component_ids {
-        validate_component_local_path(project, component_id)?;
-        let component = super::resolve_project_component_with_standalone_snapshot(
-            project,
-            component_id,
-            Some(&standalone_snapshot),
-        )?;
-
-        scoped_ids.extend(component.deploy_together);
-        scoped_ids.extend(
-            component
-                .artifact_inputs
-                .into_iter()
-                .map(|input| input.component),
-        );
-    }
+    let scoped_ids = scoped_deploy_component_ids(project, component_ids)?;
 
     let mut scoped_blockers = Vec::new();
     let mut hygiene_blockers = Vec::new();
@@ -175,6 +158,44 @@ pub fn validate_deploy_component_local_paths(
         err = err.with_hint(blocker);
     }
     Err(err)
+}
+
+fn scoped_deploy_component_ids(
+    project: &Project,
+    component_ids: &[String],
+) -> Result<HashSet<String>> {
+    let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
+    let mut scoped_ids = HashSet::new();
+    let mut pending = component_ids.to_vec();
+
+    while let Some(component_id) = pending.pop() {
+        if !scoped_ids.insert(component_id.clone()) {
+            continue;
+        }
+
+        // A missing checkout is reported as a scoped blocker below. We still keep
+        // the ID in scope so the operator sees that precise dependency, but we
+        // cannot resolve further dependencies from a path that is not present.
+        if !component_local_path_findings(project, &component_id).is_empty() {
+            continue;
+        }
+
+        let component = super::resolve_project_component_with_standalone_snapshot(
+            project,
+            &component_id,
+            Some(&standalone_snapshot),
+        )?;
+
+        pending.extend(component.deploy_together);
+        pending.extend(
+            component
+                .artifact_inputs
+                .into_iter()
+                .map(|input| input.component),
+        );
+    }
+
+    Ok(scoped_ids)
 }
 
 /// The operator-facing local_path findings for one attached component, as
@@ -380,6 +401,25 @@ mod tests {
     }
 
     #[test]
+    fn scoped_deploy_validation_ignores_multiple_unrelated_missing_component_local_paths() {
+        let requested = repo_with_component("requested", serde_json::json!({}));
+        let project = project_with_components(vec![
+            ("requested", requested.path().to_string_lossy().to_string()),
+            (
+                "stale-one",
+                "/tmp/homeboy-stale-unrelated-component-one".to_string(),
+            ),
+            (
+                "stale-two",
+                "/tmp/homeboy-stale-unrelated-component-two".to_string(),
+            ),
+        ]);
+
+        validate_deploy_component_local_paths(&project, &["requested".to_string()])
+            .expect("multiple unrelated stale local_paths should stay hygiene-only");
+    }
+
+    #[test]
     fn scoped_deploy_validation_blocks_missing_direct_dependency_local_path() {
         let requested = repo_with_component(
             "requested",
@@ -441,6 +481,48 @@ mod tests {
         assert!(err.hints.iter().any(|hint| hint
             .message
             .contains("Component 'producer' local_path '/tmp/homeboy-stale-producer-component' does not exist")));
+        assert!(!err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy-stale-unrelated-component")));
+    }
+
+    #[test]
+    fn scoped_deploy_validation_blocks_transitive_dependency_local_path() {
+        let requested = repo_with_component(
+            "requested",
+            serde_json::json!({ "deploy_together": ["required"] }),
+        );
+        let required = repo_with_component(
+            "required",
+            serde_json::json!({
+                "artifact_inputs": [{
+                    "component": "producer",
+                    "artifact": "dist/producer.zip",
+                    "target": "vendor/producer.zip",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }]
+            }),
+        );
+        let project = project_with_components(vec![
+            ("requested", requested.path().to_string_lossy().to_string()),
+            ("required", required.path().to_string_lossy().to_string()),
+            (
+                "producer",
+                "/tmp/homeboy-stale-transitive-producer-component".to_string(),
+            ),
+            (
+                "stale",
+                "/tmp/homeboy-stale-unrelated-component".to_string(),
+            ),
+        ]);
+
+        let err = validate_deploy_component_local_paths(&project, &["requested".to_string()])
+            .expect_err("stale transitive dependency should block scoped deploy");
+
+        assert!(err.hints.iter().any(|hint| hint.message.contains(
+            "Component 'producer' local_path '/tmp/homeboy-stale-transitive-producer-component' does not exist"
+        )));
         assert!(!err
             .hints
             .iter()
