@@ -81,10 +81,21 @@ if [ "${1:-}" = "nextest" ] && [ "${2:-}" = "--version" ]; then
     exit 0
 fi
 
+for variable in HOMEBOY_RUNTIME_SIDECAR_WRITER HOMEBOY_TEST_RESULTS_FILE HOMEBOY_TEST_FAILURES_FILE HOMEBOY_NO_TESTS_APPLICABLE_FILE HOMEBOY_ANNOTATIONS_DIR; do
+    if [ -n "${!variable:-}" ]; then
+        printf 'parent sidecar variable leaked into test child: %s\n' "$variable" >&2
+        exit 97
+    fi
+done
+
 printf '%s\n' "$@" > "${HOMEBOY_FAKE_CARGO_ARGS}"
 echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
 EOF
 chmod +x "$BIN_DIR/cargo"
+
+printf 'parent-results\n' > "$SIDECAR_DIR/parent-results.json"
+printf 'parent-failures\n' > "$SIDECAR_DIR/parent-failures.json"
+printf 'parent-no-tests\n' > "$SIDECAR_DIR/parent-no-tests"
 
 OUTPUT=$(
     PATH="$BIN_DIR:$PATH" \
@@ -100,6 +111,10 @@ OUTPUT=$(
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     HOMEBOY_RUNTIME_SIDECAR_WRITER="$HELPER_DIR/sidecar-writer.sh" \
+    HOMEBOY_TEST_RESULTS_FILE="$SIDECAR_DIR/parent-results.json" \
+    HOMEBOY_TEST_FAILURES_FILE="$SIDECAR_DIR/parent-failures.json" \
+    HOMEBOY_NO_TESTS_APPLICABLE_FILE="$SIDECAR_DIR/parent-no-tests" \
+    HOMEBOY_ANNOTATIONS_DIR="$SIDECAR_DIR/parent-annotations" \
     HOMEBOY_SIDECAR_DIR="$SIDECAR_DIR" \
     HOMEBOY_FAKE_CARGO_ARGS="$WORKDIR/cargo-args.txt" \
     bash "$SCRIPT_DIR/test-runner.sh"
@@ -107,6 +122,13 @@ OUTPUT=$(
 
 if [[ "$OUTPUT" != *"Running cargo nextest"* ]]; then
     printf 'Expected nextest runner selection. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+if [ "$(cat "$SIDECAR_DIR/parent-results.json")" != "parent-results" ] \
+    || [ "$(cat "$SIDECAR_DIR/parent-failures.json")" != "parent-failures" ] \
+    || [ "$(cat "$SIDECAR_DIR/parent-no-tests")" != "parent-no-tests" ]; then
+    printf 'Test child mutated a parent runtime sidecar.\n' >&2
     exit 1
 fi
 

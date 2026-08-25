@@ -719,6 +719,16 @@ PY
     [ "$canonical_names" = "$failed_names_file" ] || rm -f "$canonical_names"
 }
 
+rust_run_test_child() {
+    env \
+        -u HOMEBOY_RUNTIME_SIDECAR_WRITER \
+        -u HOMEBOY_TEST_RESULTS_FILE \
+        -u HOMEBOY_TEST_FAILURES_FILE \
+        -u HOMEBOY_NO_TESTS_APPLICABLE_FILE \
+        -u HOMEBOY_ANNOTATIONS_DIR \
+        "$@"
+}
+
 rust_nextest_cleanup() {
     local status="${1:-$?}" path
     for path in "${NEXTEST_BATCH_FAILED_NAMES:-}" "${NEXTEST_FAILED_NAMES:-}" "${NEXTEST_EXECUTION_DATA:-}" "${SHARD_OUTPUT:-}" "${NEXTEST_LIST_JSON:-}" "${NEXTEST_LIST_OUTPUT:-}" "${SHARD_DATA:-}"; do
@@ -787,7 +797,7 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" != "1" ] && [ "${HOMEBOY_COVERAGE:-}" = 
             echo "DEBUG: cargo ${TARPAULIN_ARGS[*]} $*"
         fi
 
-        homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "cargo tarpaulin" -- cargo "${TARPAULIN_ARGS[@]}" "$@" || true
+        homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "cargo tarpaulin" -- rust_run_test_child cargo "${TARPAULIN_ARGS[@]}" "$@" || true
 
         # Parse test results for homeboy core (best-effort, non-blocking)
         PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
@@ -1135,7 +1145,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 exit 1
             fi
             homeboy_runner_harness_register_cleanup "$NEXTEST_LIST_JSON"
-            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list "${NEXTEST_LIST_SOURCE_ARGS[@]}" --message-format json -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" rust_run_test_child cargo nextest list "${NEXTEST_LIST_SOURCE_ARGS[@]}" --message-format json -E "$NEXTEST_FILTER" || true
             if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_JSON" "$NEXTEST_BATCH"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
@@ -1166,7 +1176,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 rust_nextest_cleanup 1
                 exit 1
             fi
-            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads "$(rust_nextest_shard_threads)" --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- rust_run_test_child env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads "$(rust_nextest_shard_threads)" --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
             if ! NEXTEST_BATCH_FAILED_NAMES="$(mktemp)"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
@@ -1221,7 +1231,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 *) TARGET_ARGS=(--test "$target") ;;
             esac
             echo "Replaying Rust shard test: ${package}::${target}::${name}"
-            homeboy_run_step_capture SHARD_OUTPUT SHARD_EXIT "cargo test" -- cargo test --manifest-path "${PROJECT_PATH}/Cargo.toml" -p "$package" "${TARGET_ARGS[@]}" -- "$name" --exact --test-threads=1 || true
+            homeboy_run_step_capture SHARD_OUTPUT SHARD_EXIT "cargo test" -- rust_run_test_child cargo test --manifest-path "${PROJECT_PATH}/Cargo.toml" -p "$package" "${TARGET_ARGS[@]}" -- "$name" --exact --test-threads=1 || true
             IFS=$'\t' read -r PASSED FAILED SKIPPED < <(rust_shard_cargo_counts "$SHARD_OUTPUT")
             if [ "$FAILED" -gt 0 ] && [ -n "$CARGO_FAILED_IDS" ]; then
                 printf '%s\n' "$test_id" >> "$CARGO_FAILED_IDS"
@@ -1433,7 +1443,7 @@ rust_execute_test_run() {
     fi
 
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "started" 0
-    homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- "${COMMAND_BINARY[@]}" "$@" || true
+    homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- rust_run_test_child "${COMMAND_BINARY[@]}" "$@" || true
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "completed" "$TEST_EXIT"
 
     if [ "$NEXTEST_MEASURED" = "1" ]; then
