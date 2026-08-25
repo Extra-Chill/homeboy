@@ -2,6 +2,15 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.7] - 2026-08-25
+
+### Fixed
+- aggregate Test evidence by identity
+- enforce suffixed measurement commands
+- consume observed failed test IDs
+- validate terminal test evidence contract
+- reconcile test outcomes by identity
+
 ## [2.15.6] - 2026-08-24
 
 ### Fixed
