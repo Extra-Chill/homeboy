@@ -183,7 +183,6 @@ static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileId
 /// not durable and is not memoized -- which costs nothing, because a file that
 /// hashes that fast is cheap to hash again. The controller binaries this memo
 /// exists for are hundreds of megabytes and take seconds.
-#[cfg(unix)]
 const DIGEST_MEMO_MIN_HASH_TIME: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Test override for [`DIGEST_MEMO_MIN_HASH_TIME`], in milliseconds.
@@ -196,9 +195,10 @@ const DIGEST_MEMO_MIN_HASH_TIME: std::time::Duration = std::time::Duration::from
 static DIGEST_MEMO_MIN_HASH_TIME_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
 
-#[cfg(unix)]
+/// The memo guard. `executable_digest` is not platform-gated, so neither is
+/// this. Only the test override is unix-only, because the memo it overrides is.
 fn digest_memo_min_hash_time() -> std::time::Duration {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     {
         let configured = DIGEST_MEMO_MIN_HASH_TIME_MS.load(std::sync::atomic::Ordering::Relaxed);
         if configured != u64::MAX {
