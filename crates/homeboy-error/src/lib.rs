@@ -149,6 +149,7 @@ pub enum ErrorCode {
 
     RemoteCommandFailed,
     RemoteCommandTimeout,
+    RemoteCapabilityMissing,
 
     DeployNoComponentsConfigured,
     DeployBuildFailed,
@@ -219,6 +220,7 @@ impl ErrorCode {
 
             ErrorCode::RemoteCommandFailed => "remote.command_failed",
             ErrorCode::RemoteCommandTimeout => "remote.command_timeout",
+            ErrorCode::RemoteCapabilityMissing => "remote.capability_missing",
 
             ErrorCode::DeployNoComponentsConfigured => "deploy.no_components_configured",
             ErrorCode::DeployBuildFailed => "deploy.build_failed",
@@ -602,6 +604,15 @@ pub struct RemoteCommandFailedDetails {
     pub stdout: String,
     pub stderr: String,
     pub target: TargetDetails,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemoteCapabilityMissingDetails {
+    pub capability: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<TargetDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_evidence: Option<CommandEvidence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1403,6 +1414,17 @@ impl Error {
         details: impl Serialize,
     ) -> Self {
         Self::new(ErrorCode::RemoteCommandFailed, message, to_details(details))
+    }
+
+    pub fn remote_capability_missing(
+        message: impl Into<String>,
+        details: RemoteCapabilityMissingDetails,
+    ) -> Self {
+        Self::new(
+            ErrorCode::RemoteCapabilityMissing,
+            message,
+            to_details(details),
+        )
     }
 
     pub fn git_command_failed(message: impl Into<String>) -> Self {

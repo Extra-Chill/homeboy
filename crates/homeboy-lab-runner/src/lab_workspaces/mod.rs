@@ -204,7 +204,7 @@ pub(super) fn workspace_mapping_entry(
         role: role.into(),
         local_path: synced.local_path.clone(),
         remote_path: synced.remote_path.clone(),
-        sync_mode: synced.sync_mode.label().to_string(),
+        sync_mode: synced.sync_mode.as_str().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
         dependency_freshness: None,
         source_provenance: None,
@@ -244,7 +244,7 @@ pub(super) fn workspace_mapping_entry_for_validation_dependency(
         role: dependency.role.clone(),
         local_path: dependency.local_path.clone(),
         remote_path: dependency.remote_path.clone(),
-        sync_mode: RunnerWorkspaceSyncMode::Snapshot.label().to_string(),
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot.as_str().to_string(),
         snapshot_identity: dependency.id.clone(),
         dependency_freshness: Some(serde_json::json!({
             "id": dependency.id.as_str(),
@@ -264,7 +264,7 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
         role: role.into(),
         local_path: dependency.local_path.clone(),
         remote_path: dependency.remote_path.clone(),
-        sync_mode: dependency.sync_mode.label().to_string(),
+        sync_mode: dependency.sync_mode.as_str().to_string(),
         snapshot_identity: dependency.head.clone(),
         dependency_freshness: Some(serde_json::json!({
             "local_path": dependency.local_path.as_str(),
@@ -311,7 +311,7 @@ pub(super) fn workspace_mapping_entries_for_git_dependency(
                 .join(subpath)
                 .display()
                 .to_string(),
-            sync_mode: dependency.sync_mode.label().to_string(),
+            sync_mode: dependency.sync_mode.as_str().to_string(),
             snapshot_identity: dependency.head.clone(),
             dependency_freshness: None,
             source_provenance: None,

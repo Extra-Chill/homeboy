@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::project::Project;
 use crate::server::execute_local_command_in_dir_with_timeout;
@@ -9,13 +10,31 @@ use homeboy_engine_primitives::template;
 use crate::extension_store::load_extension;
 use homeboy_extension_contract::ExtensionManifest;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionReadinessState {
+    Ready,
+    NotReady,
+    Unknown,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExtensionReadyStatus {
-    pub ready: bool,
+    pub state: ExtensionReadinessState,
+    pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up_command: Option<String>,
 }
 
 /// Whether a caller wants readiness actually probed, or only the metadata that
@@ -30,8 +49,8 @@ pub struct ExtensionReadyStatus {
 pub enum ExtensionReadinessMode {
     /// Run the declared `ready_check`, bounded by [`ready_check_timeout`].
     Probe,
-    /// Do not spawn anything; report the probe as deliberately not run.
-    Skip,
+    /// Do not spawn anything; return matching cached evidence or `unknown`.
+    Cached,
 }
 
 /// Wall-clock bound applied to a single `ready_check`.
@@ -73,6 +92,16 @@ pub const READY_CHECK_SKIPPED_REASON: &str = "ready_check_skipped";
 /// `ready_reason` reported when a `ready_check` hit its wall-clock bound.
 pub const READY_CHECK_TIMEOUT_REASON: &str = "ready_check_timeout";
 
+const READINESS_CACHE_SCHEMA: &str = "homeboy/extension-readiness-cache/v1";
+
+#[derive(Deserialize, Serialize)]
+struct ExtensionReadinessCache {
+    schema: String,
+    identity: String,
+    checked_at: u64,
+    status: ExtensionReadyStatus,
+}
+
 pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadyStatus {
     extension_ready_status_with(extension, ExtensionReadinessMode::Probe)
 }
@@ -82,32 +111,28 @@ pub fn extension_ready_status_with(
     mode: ExtensionReadinessMode,
 ) -> ExtensionReadyStatus {
     let Some(runtime) = extension.runtime() else {
-        return ExtensionReadyStatus {
-            ready: true,
-            reason: None,
-            detail: None,
-        };
+        return static_ready_status();
     };
 
     let Some(ready_check) = runtime.ready_check.as_ref() else {
-        return ExtensionReadyStatus {
-            ready: true,
-            reason: None,
-            detail: None,
-        };
+        return static_ready_status();
     };
 
-    // The caller asked for metadata only. Mirror the re-entrant case below: the
-    // check did not run, the reason says so, and the answer does not pretend to
-    // be a failed probe. (#10517)
-    if matches!(mode, ExtensionReadinessMode::Skip) {
-        return ExtensionReadyStatus {
-            ready: true,
+    let follow_up_command = format!("homeboy extension show {} --live-readiness", extension.id);
+    let identity = readiness_identity(extension, ready_check, runtime.entrypoint.as_deref());
+    if matches!(mode, ExtensionReadinessMode::Cached) {
+        return read_cached_status(extension, &identity).unwrap_or_else(|| ExtensionReadyStatus {
+            state: ExtensionReadinessState::Unknown,
+            ready: None,
             reason: Some(READY_CHECK_SKIPPED_REASON.to_string()),
-            detail: Some(
-                "ready_check not run: this command was asked for metadata only. Run `homeboy extension show <id>` without --skip-ready-check for live readiness.".to_string(),
-            ),
-        };
+            detail: Some(format!(
+                "Metadata-only inspection did not run ready_check and no matching live readiness probe is cached. Run `{follow_up_command}`."
+            )),
+            cache_age_seconds: None,
+            probe_duration_ms: None,
+            timeout_ms: Some(duration_ms(ready_check_timeout())),
+            follow_up_command: Some(follow_up_command),
+        });
     }
 
     // Re-entry guard: if we are already inside a `ready_check`, do not run it
@@ -116,19 +141,29 @@ pub fn extension_ready_status_with(
     // nested inspection completes instead of spawning another check. (#8115)
     if std::env::var_os(READY_CHECK_ACTIVE_ENV).is_some() {
         return ExtensionReadyStatus {
-            ready: true,
+            state: ExtensionReadinessState::Unknown,
+            ready: None,
             reason: Some("ready_check_reentrant_skipped".to_string()),
             detail: Some(
                 "ready_check skipped: already evaluating readiness for this extension (re-entrant invocation)".to_string(),
             ),
+            cache_age_seconds: None,
+            probe_duration_ms: None,
+            timeout_ms: Some(duration_ms(ready_check_timeout())),
+            follow_up_command: Some(follow_up_command),
         };
     }
 
     let Some(extension_path) = extension.extension_path.as_ref() else {
         return ExtensionReadyStatus {
-            ready: false,
+            state: ExtensionReadinessState::NotReady,
+            ready: Some(false),
             reason: Some("missing_extension_path".to_string()),
             detail: Some("ready_check configured but extension_path is missing".to_string()),
+            cache_age_seconds: None,
+            probe_duration_ms: None,
+            timeout_ms: Some(duration_ms(ready_check_timeout())),
+            follow_up_command: Some(follow_up_command),
         };
     };
 
@@ -139,6 +174,7 @@ pub fn extension_ready_status_with(
     ];
     let command = template::render(ready_check, &vars);
     let timeout = ready_check_timeout();
+    let started = Instant::now();
     // Mark the child (and anything it spawns) as running inside a ready_check so
     // a re-entrant `homeboy` invocation trips the guard above.
     let output = execute_local_command_in_dir_with_timeout(
@@ -147,56 +183,156 @@ pub fn extension_ready_status_with(
         Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
         timeout,
     );
+    let probe_duration_ms = duration_ms(started.elapsed());
 
-    if output.success {
-        return ExtensionReadyStatus {
-            ready: true,
+    let status = if output.success {
+        ExtensionReadyStatus {
+            state: ExtensionReadinessState::Ready,
+            ready: Some(true),
             reason: None,
             detail: None,
-        };
-    }
-
-    // A probe that ran out of wall clock is not the same answer as a probe that
-    // ran and said no. Naming it keeps "the doctor is slow" distinguishable from
-    // "the extension is broken", and keeps the surrounding metadata usable.
-    if output.timed_out {
-        return ExtensionReadyStatus {
-            ready: false,
+            cache_age_seconds: Some(0),
+            probe_duration_ms: Some(probe_duration_ms),
+            timeout_ms: Some(duration_ms(timeout)),
+            follow_up_command: Some(follow_up_command.clone()),
+        }
+    } else if output.timed_out {
+        // The process did not answer. Keep that distinct from a negative answer.
+        ExtensionReadyStatus {
+            state: ExtensionReadinessState::TimedOut,
+            ready: None,
             reason: Some(READY_CHECK_TIMEOUT_REASON.to_string()),
             detail: Some(format!(
                 "ready_check '{}' exceeded its {}s bound and its process group was terminated; \
-                 extension metadata is unaffected. Set {} to change the bound, or pass \
-                 --skip-ready-check to inventory commands.",
+                 extension metadata is unaffected. Set {} to change the bound, or retry with `{}`.",
                 command,
                 timeout.as_secs(),
-                READY_CHECK_TIMEOUT_ENV
+                READY_CHECK_TIMEOUT_ENV,
+                follow_up_command
             )),
+            cache_age_seconds: Some(0),
+            probe_duration_ms: Some(probe_duration_ms),
+            timeout_ms: Some(duration_ms(timeout)),
+            follow_up_command: Some(follow_up_command.clone()),
+        }
+    } else {
+        let detail_output = if output.stderr.trim().is_empty() {
+            output.stdout
+        } else {
+            output.stderr
         };
-    }
+        let detail = detail_output.trim();
+        let detail = if detail.is_empty() {
+            format!(
+                "ready_check '{}' failed with exit code {}",
+                command, output.exit_code
+            )
+        } else {
+            format!(
+                "ready_check '{}' failed with exit code {}: {}",
+                command, output.exit_code, detail
+            )
+        };
 
-    let detail_output = if output.stderr.trim().is_empty() {
-        output.stdout
-    } else {
-        output.stderr
-    };
-    let detail = detail_output.trim();
-    let detail = if detail.is_empty() {
-        format!(
-            "ready_check '{}' failed with exit code {}",
-            command, output.exit_code
-        )
-    } else {
-        format!(
-            "ready_check '{}' failed with exit code {}: {}",
-            command, output.exit_code, detail
-        )
+        ExtensionReadyStatus {
+            state: ExtensionReadinessState::NotReady,
+            ready: Some(false),
+            reason: Some("ready_check_failed".to_string()),
+            detail: Some(detail),
+            cache_age_seconds: Some(0),
+            probe_duration_ms: Some(probe_duration_ms),
+            timeout_ms: Some(duration_ms(timeout)),
+            follow_up_command: Some(follow_up_command.clone()),
+        }
     };
 
+    write_cached_status(extension, identity, &status);
+    status
+}
+
+fn static_ready_status() -> ExtensionReadyStatus {
     ExtensionReadyStatus {
-        ready: false,
-        reason: Some("ready_check_failed".to_string()),
-        detail: Some(detail),
+        state: ExtensionReadinessState::Ready,
+        ready: Some(true),
+        reason: None,
+        detail: None,
+        cache_age_seconds: None,
+        probe_duration_ms: None,
+        timeout_ms: None,
+        follow_up_command: None,
     }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn readiness_identity(
+    extension: &ExtensionManifest,
+    ready_check: &str,
+    entrypoint: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(extension.id.as_bytes());
+    hasher.update([0]);
+    hasher.update(extension.version.as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        extension
+            .extension_path
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update([0]);
+    if let Some(revision) = extension
+        .extension_path
+        .as_deref()
+        .and_then(|path| crate::extension_update_check::read_source_revision_at(path.as_ref()))
+    {
+        hasher.update(revision.as_bytes());
+    }
+    hasher.update([0]);
+    hasher.update(ready_check.as_bytes());
+    hasher.update([0]);
+    hasher.update(entrypoint.unwrap_or_default().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn readiness_cache_filename(extension_id: &str) -> String {
+    let digest = Sha256::digest(extension_id.as_bytes());
+    format!("extension-readiness.{digest:x}.json")
+}
+
+fn read_cached_status(
+    extension: &ExtensionManifest,
+    identity: &str,
+) -> Option<ExtensionReadyStatus> {
+    let cache: ExtensionReadinessCache =
+        crate::update_check_cache::read_cache(&readiness_cache_filename(&extension.id))?;
+    if cache.schema != READINESS_CACHE_SCHEMA || cache.identity != identity {
+        return None;
+    }
+    let mut status = cache.status;
+    status.cache_age_seconds =
+        Some(crate::update_check_cache::now_unix().saturating_sub(cache.checked_at));
+    Some(status)
+}
+
+fn write_cached_status(
+    extension: &ExtensionManifest,
+    identity: String,
+    status: &ExtensionReadyStatus,
+) {
+    crate::update_check_cache::write_cache(
+        &readiness_cache_filename(&extension.id),
+        &ExtensionReadinessCache {
+            schema: READINESS_CACHE_SCHEMA.to_string(),
+            identity,
+            checked_at: crate::update_check_cache::now_unix(),
+            status: status.clone(),
+        },
+    );
 }
 
 /// Check if a extension is compatible with a project.
@@ -228,6 +364,46 @@ pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&P
 mod tests {
     use super::*;
 
+    struct ReadinessEnvironment {
+        _home: crate::test_support::HomeGuard,
+        active: Option<std::ffi::OsString>,
+        timeout: Option<std::ffi::OsString>,
+    }
+
+    impl ReadinessEnvironment {
+        fn new(active: Option<&str>, timeout: Option<&str>) -> Self {
+            let home = crate::test_support::HomeGuard::new();
+            let prior_active = std::env::var_os(READY_CHECK_ACTIVE_ENV);
+            let prior_timeout = std::env::var_os(READY_CHECK_TIMEOUT_ENV);
+            match active {
+                Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
+                None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
+            }
+            match timeout {
+                Some(value) => std::env::set_var(READY_CHECK_TIMEOUT_ENV, value),
+                None => std::env::remove_var(READY_CHECK_TIMEOUT_ENV),
+            }
+            Self {
+                _home: home,
+                active: prior_active,
+                timeout: prior_timeout,
+            }
+        }
+    }
+
+    impl Drop for ReadinessEnvironment {
+        fn drop(&mut self) {
+            match &self.active {
+                Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
+                None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
+            }
+            match &self.timeout {
+                Some(value) => std::env::set_var(READY_CHECK_TIMEOUT_ENV, value),
+                None => std::env::remove_var(READY_CHECK_TIMEOUT_ENV),
+            }
+        }
+    }
+
     fn manifest_with_ready_check(extension_path: &str, ready_check: &str) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": "fixture",
@@ -249,20 +425,12 @@ mod tests {
         // A ready_check that would fail if executed proves the command is never
         // run when the re-entry sentinel is already set. (#8115)
         let manifest = manifest_with_ready_check("/tmp", "exit 1");
-        let prior = std::env::var_os(READY_CHECK_ACTIVE_ENV);
-        std::env::set_var(READY_CHECK_ACTIVE_ENV, "1");
+        let _environment = ReadinessEnvironment::new(Some("1"), None);
 
         let status = extension_ready_status(&manifest);
 
-        match prior {
-            Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
-            None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
-        }
-
-        assert!(
-            status.ready,
-            "a re-entrant ready_check must report ready instead of recursing"
-        );
+        assert_eq!(status.ready, None);
+        assert_eq!(status.state, ExtensionReadinessState::Unknown);
         assert_eq!(
             status.reason.as_deref(),
             Some("ready_check_reentrant_skipped")
@@ -272,17 +440,12 @@ mod tests {
     #[test]
     fn ready_check_runs_when_not_reentrant() {
         let manifest = manifest_with_ready_check("/tmp", "true");
-        let prior = std::env::var_os(READY_CHECK_ACTIVE_ENV);
-        std::env::remove_var(READY_CHECK_ACTIVE_ENV);
+        let _environment = ReadinessEnvironment::new(None, None);
 
         let status = extension_ready_status(&manifest);
 
-        match prior {
-            Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
-            None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
-        }
-
-        assert!(status.ready, "a passing ready_check reports ready");
+        assert_eq!(status.ready, Some(true));
+        assert_eq!(status.state, ExtensionReadinessState::Ready);
         assert_eq!(status.reason, None);
     }
 
@@ -292,21 +455,14 @@ mod tests {
     #[test]
     fn a_skipped_ready_check_never_runs_the_command() {
         let manifest = manifest_with_ready_check("/tmp", "exit 1");
-        let prior = std::env::var_os(READY_CHECK_ACTIVE_ENV);
-        std::env::remove_var(READY_CHECK_ACTIVE_ENV);
+        let _environment = ReadinessEnvironment::new(None, None);
 
-        let status = extension_ready_status_with(&manifest, ExtensionReadinessMode::Skip);
-
-        if let Some(value) = prior {
-            std::env::set_var(READY_CHECK_ACTIVE_ENV, value);
-        }
+        let status = extension_ready_status_with(&manifest, ExtensionReadinessMode::Cached);
 
         assert_eq!(status.reason.as_deref(), Some(READY_CHECK_SKIPPED_REASON));
-        assert!(
-            status.ready,
-            "a skipped probe reports 'not evaluated', not 'not ready'"
-        );
-        assert!(status.detail.unwrap_or_default().contains("metadata only"));
+        assert_eq!(status.ready, None);
+        assert_eq!(status.state, ExtensionReadinessState::Unknown);
+        assert!(status.detail.unwrap_or_default().contains("Metadata-only"));
     }
 
     /// A `ready_check` that outlives its budget must produce an answer rather
@@ -315,27 +471,59 @@ mod tests {
     #[test]
     fn a_ready_check_that_outlives_its_bound_reports_a_timeout_instead_of_hanging() {
         let manifest = manifest_with_ready_check("/tmp", "sleep 30");
-        let prior_active = std::env::var_os(READY_CHECK_ACTIVE_ENV);
-        let prior_timeout = std::env::var_os(READY_CHECK_TIMEOUT_ENV);
-        std::env::remove_var(READY_CHECK_ACTIVE_ENV);
-        std::env::set_var(READY_CHECK_TIMEOUT_ENV, "1");
+        let _environment = ReadinessEnvironment::new(None, Some("1"));
 
         let status = extension_ready_status(&manifest);
 
-        match prior_active {
-            Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
-            None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
-        }
-        match prior_timeout {
-            Some(value) => std::env::set_var(READY_CHECK_TIMEOUT_ENV, value),
-            None => std::env::remove_var(READY_CHECK_TIMEOUT_ENV),
-        }
-
-        assert!(!status.ready);
+        assert_eq!(status.ready, None);
+        assert_eq!(status.state, ExtensionReadinessState::TimedOut);
         assert_eq!(status.reason.as_deref(), Some(READY_CHECK_TIMEOUT_REASON));
         let detail = status.detail.unwrap_or_default();
         assert!(detail.contains("exceeded its 1s bound"), "{detail}");
         assert!(detail.contains("metadata is unaffected"), "{detail}");
+    }
+
+    #[test]
+    fn a_failed_ready_check_is_typed_not_ready() {
+        let manifest = manifest_with_ready_check("/tmp", "exit 7");
+        let _environment = ReadinessEnvironment::new(None, None);
+
+        let status = extension_ready_status(&manifest);
+
+        assert_eq!(status.state, ExtensionReadinessState::NotReady);
+        assert_eq!(status.ready, Some(false));
+        assert_eq!(status.reason.as_deref(), Some("ready_check_failed"));
+        assert!(status.probe_duration_ms.is_some());
+        assert_eq!(status.timeout_ms, Some(30_000));
+    }
+
+    #[test]
+    fn a_live_probe_refreshes_the_static_readiness_cache() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("ready");
+            let command = format!("test -f {}", sentinel.display());
+            let manifest =
+                manifest_with_ready_check(home.path().to_string_lossy().as_ref(), &command);
+
+            let missing = extension_ready_status(&manifest);
+            assert_eq!(missing.ready, Some(false));
+            assert_eq!(
+                extension_ready_status_with(&manifest, ExtensionReadinessMode::Cached).ready,
+                Some(false)
+            );
+
+            std::fs::write(&sentinel, "ready").expect("sentinel");
+            let refreshed = extension_ready_status(&manifest);
+            assert_eq!(refreshed.ready, Some(true));
+            let cached = extension_ready_status_with(&manifest, ExtensionReadinessMode::Cached);
+            assert_eq!(cached.ready, Some(true));
+            assert_eq!(cached.state, ExtensionReadinessState::Ready);
+            assert_eq!(cached.cache_age_seconds, Some(0));
+            assert_eq!(
+                cached.follow_up_command.as_deref(),
+                Some("homeboy extension show fixture --live-readiness")
+            );
+        });
     }
 
     #[test]
