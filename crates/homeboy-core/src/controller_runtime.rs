@@ -195,8 +195,8 @@ const DIGEST_MEMO_MIN_HASH_TIME: std::time::Duration = std::time::Duration::from
 static DIGEST_MEMO_MIN_HASH_TIME_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
 
-/// The memo guard. `executable_digest` is not platform-gated, so neither is
-/// this. Only the test override is unix-only, because the memo it overrides is.
+/// Unix memo guard with a test-only threshold override.
+#[cfg(unix)]
 fn digest_memo_min_hash_time() -> std::time::Duration {
     #[cfg(all(test, unix))]
     {
