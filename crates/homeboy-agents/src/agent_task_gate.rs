@@ -116,6 +116,116 @@ pub struct VerifyGateOptions {
     pub hydrate_dependencies: bool,
 }
 
+/// Append every CLI flag needed to replay a durable gate contract.
+///
+/// File-backed programs are already snapshotted into `verify` or
+/// `private_verify`; `input_sources` retains their original provenance without
+/// requiring the receiving controller to read the source file again.
+pub fn append_promotion_gate_argv(command: &mut Vec<String>, gates: &VerifyGateOptions) {
+    for (flag, values) in [
+        ("--verify", &gates.verify),
+        ("--private-verify", &gates.private_verify),
+    ] {
+        for value in values {
+            command.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    for source in &gates.input_sources {
+        if let Ok(source) = serde_json::to_string(source) {
+            command.extend(["--gate-input-source".to_string(), source]);
+        }
+    }
+    let gates_json = serde_json::to_value(gates).unwrap_or(serde_json::Value::Null);
+    for (key, flag) in [
+        ("private_gate_reveal", "--private-gate-reveal"),
+        ("execution_policy", "--gate-execution-policy"),
+        ("gate_timeout_seconds", "--gate-timeout-seconds"),
+        (
+            "gate_heartbeat_interval_seconds",
+            "--gate-heartbeat-interval-seconds",
+        ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
+        ),
+    ] {
+        if let Some(value) = gates_json.get(key) {
+            let value = value
+                .as_str()
+                .map(|value| value.replace('_', "-"))
+                .or_else(|| value.as_u64().map(|value| value.to_string()));
+            if let Some(value) = value {
+                command.extend([flag.to_string(), value]);
+            }
+        }
+    }
+    for (key, flag) in [
+        ("rerun_completed_gates", "--rerun-completed-gates"),
+        ("accept_inherited_failures", "--accept-inherited-failures"),
+    ] {
+        if gates_json.get(key).and_then(serde_json::Value::as_bool) == Some(true) {
+            command.push(flag.to_string());
+        }
+    }
+    if let Some(environment) = gates_json.get("gate_environment") {
+        if let Some(mode) = environment.get("mode").and_then(serde_json::Value::as_str) {
+            command.extend([
+                "--gate-environment-mode".to_string(),
+                mode.replace('_', "-"),
+            ]);
+        }
+        for (key, flag) in [("variables", "--gate-env"), ("preserve", "--gate-env-from")] {
+            if let Some(values) = environment.get(key).and_then(serde_json::Value::as_object) {
+                for (name, value) in values {
+                    if let Some(value) = value.as_str() {
+                        command.extend([flag.to_string(), format!("{name}={value}")]);
+                    }
+                }
+            }
+        }
+        for (key, flag) in [
+            ("isolate_home", "--isolate-gate-home"),
+            ("isolate_xdg", "--isolate-gate-xdg"),
+        ] {
+            if let Some(value) = environment.get(key).and_then(serde_json::Value::as_bool) {
+                command.push(format!("{flag}={value}"));
+            }
+        }
+        if let Some(value) = environment
+            .get("shared_cargo_target")
+            .and_then(serde_json::Value::as_bool)
+        {
+            command.push(if value {
+                "--gate-shared-cargo-target".to_string()
+            } else {
+                "--no-gate-shared-cargo-target".to_string()
+            });
+        }
+        if let Some(inputs) = environment
+            .get("extension_inputs")
+            .and_then(serde_json::Value::as_array)
+        {
+            for input in inputs {
+                if let Ok(input) = serde_json::to_string(input) {
+                    command.extend(["--gate-extension-input".to_string(), input]);
+                }
+            }
+        }
+    }
+    for toolchain in &gates.gate_toolchains {
+        if toolchain.probe_arguments == ["--version"] {
+            command.extend(["--gate-toolchain".to_string(), toolchain.command.clone()]);
+        } else if let Ok(toolchain) = serde_json::to_string(toolchain) {
+            command.extend(["--gate-toolchain-spec".to_string(), toolchain]);
+        }
+    }
+    for artifact in &gates.gate_package_artifacts {
+        if let Ok(artifact) = serde_json::to_string(artifact) {
+            command.extend(["--gate-package-artifact".to_string(), artifact]);
+        }
+    }
+}
+
 /// Controller-captured provenance for an inline or file-backed gate program.
 /// Private sources intentionally retain only path-independent metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
