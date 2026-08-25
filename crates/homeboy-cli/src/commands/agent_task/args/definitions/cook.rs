@@ -996,6 +996,18 @@ pub struct AgentTaskCookArgs {
     /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
+    /// Temporarily use the explicit clean --cwd as workspace authority while
+    /// repairing the configured provider that owns this repository. The
+    /// provider must declare its repository under
+    /// settings.worktree_provider_self_repair; normal Cook gates, review, PR
+    /// finalization, and durable provenance remain active.
+    #[arg(
+        long,
+        value_name = "PROVIDER_ID",
+        requires = "cwd",
+        conflicts_with_all = ["workspace", "to_worktree"]
+    )]
+    pub worktree_provider_self_repair: Option<String>,
     #[arg(
         long,
         value_name = "COMMAND",

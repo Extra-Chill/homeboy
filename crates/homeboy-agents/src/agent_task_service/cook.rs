@@ -7500,10 +7500,17 @@ fn materialize_pending_cook_workspace(
                         Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {
                             return Err(resolve_error);
                         }
-                        Err(_) => return Err(ensure_error),
+                        Err(_) => {
+                            return Err(annotate_pending_provider_self_repair_route(
+                                ensure_error,
+                                options,
+                            ));
+                        }
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(annotate_pending_provider_self_repair_route(error, options));
+                }
             }
         }
         Err(error) => return Err(error),
@@ -7739,6 +7746,98 @@ fn provider_resolve_timeout(error: &Error) -> bool {
 fn provider_ensure_timeout(error: &Error) -> bool {
     error.details["worktree_provider_call_classification"] == "timeout"
         && error.details["worktree_provider_operation"] == "ensure"
+}
+
+fn annotate_pending_provider_self_repair_route(
+    mut error: Error,
+    options: &AgentTaskCookServiceOptions,
+) -> Error {
+    if error.details["worktree_provider_operation"] != "ensure" {
+        return error;
+    }
+    let Some(provider_id) = error.details["worktree_provider_id"].as_str() else {
+        return error;
+    };
+    let repository = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/provision_intent/repo")
+        .and_then(Value::as_str);
+    let config = homeboy_core::defaults::load_config();
+    let Ok(Some(contract)) =
+        homeboy_core::worktree_providers::worktree_provider_self_repair_contract_from_config(
+            provider_id,
+            &config,
+        )
+    else {
+        return error;
+    };
+    if repository != Some(contract.repository.as_str()) {
+        return error;
+    }
+    let intent = &options.initial_plan.metadata["cook_provision"]["provision_intent"];
+    let task = options.initial_plan.tasks.first();
+    let mut replay_argv = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        task.map(|task| task.instructions.clone())
+            .unwrap_or_else(|| "<original-cook-prompt>".to_string()),
+        "--repo".to_string(),
+        contract.repository.clone(),
+        "--task-url".to_string(),
+        intent["task_url"]
+            .as_str()
+            .unwrap_or("<original-task-url>")
+            .to_string(),
+        "--cwd".to_string(),
+        "<clean-existing-linked-worktree>".to_string(),
+        "--worktree-provider-self-repair".to_string(),
+        provider_id.to_string(),
+        "--base".to_string(),
+        intent["base"].as_str().unwrap_or(&options.base).to_string(),
+        "--head".to_string(),
+        intent["head"]
+            .as_str()
+            .or(options.head.as_deref())
+            .unwrap_or("<original-head>")
+            .to_string(),
+    ];
+    if let Some(task) = task {
+        replay_argv.extend(["--backend".to_string(), task.executor.backend.clone()]);
+        if let Some(selector) = &task.executor.selector {
+            replay_argv.extend(["--selector".to_string(), selector.clone()]);
+        }
+        if let Some(model) = task.executor.model() {
+            replay_argv.extend(["--model".to_string(), model.to_string()]);
+        }
+    }
+    for gate in &options.gates.verify {
+        replay_argv.extend(["--verify".to_string(), gate.clone()]);
+    }
+    for gate in &options.gates.private_verify {
+        replay_argv.extend(["--private-verify".to_string(), gate.clone()]);
+    }
+    if options.no_finalize {
+        replay_argv.push("--no-finalize".to_string());
+    } else if options.draft_pr {
+        replay_argv.push("--draft-pr".to_string());
+    }
+    error.details["worktree_provider_self_repair"] = serde_json::json!({
+        "schema": "homeboy/worktree-provider-self-repair-route/v1",
+        "provider_id": provider_id,
+        "repository": contract.repository,
+        "failed_operation": "ensure",
+        "workspace_authority": "explicit_clean_existing_checkout",
+        "replay_argv": replay_argv,
+        "replay_requires": ["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository"],
+        "provider_lifecycle_reconciliation": {
+            "status": "required_after_repair_ships",
+            "action": "resume_normal_provider_lifecycle_finalization",
+        },
+    });
+    error
 }
 
 fn known_cwd_recovery_command(options: &AgentTaskCookServiceOptions) -> Option<String> {

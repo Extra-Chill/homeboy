@@ -6672,6 +6672,13 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
         config
             .worktree_providers
             .insert("competing".to_string(), provider_config(&competing, false));
+        config.settings.insert(
+            homeboy_core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
+                .to_string(),
+            serde_json::json!({
+                "owner": { "repository": "fixture" }
+            }),
+        );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
 
         let cook_id = "owner-timeout";
@@ -6709,6 +6716,17 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
             record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
             "ensure"
         );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"]
+                ["failed_operation"],
+            "ensure"
+        );
+        assert!(record.metadata["pre_execution_failure"]["details"]
+            ["worktree_provider_self_repair"]["replay_argv"]
+            .as_array()
+            .expect("typed self-repair replay")
+            .iter()
+            .any(|argument| argument == "--worktree-provider-self-repair"));
         let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
         assert_eq!(
             plan.metadata["cook_provision"]["worktree_provider_id"],

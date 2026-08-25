@@ -16,10 +16,71 @@ use crate::error::{CommandEvidence, Error, Result};
 
 /// `HomeboyConfig.settings` key containing provider lifecycle command settings.
 pub const WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY: &str = "worktree_provider_lifecycle";
+/// `HomeboyConfig.settings` key declaring which repository owns each provider.
+pub const WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY: &str = "worktree_provider_self_repair";
 
 #[derive(Debug, Deserialize)]
 struct WorktreeProviderLifecycleSettings {
     finalize: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorktreeProviderSelfRepairContract {
+    pub provider_id: String,
+    /// Configured component id whose checkout may temporarily replace this
+    /// provider's workspace authority while that provider is being repaired.
+    pub repository: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeProviderSelfRepairSettings {
+    repository: String,
+}
+
+/// Resolve the generic provider/repository ownership declaration used to admit
+/// a provider self-repair bootstrap. The contract deliberately contains no
+/// provider product fields: repository identity remains a configured Homeboy
+/// component id, and the explicit checkout is supplied by the operator.
+pub fn worktree_provider_self_repair_contract_from_config(
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderSelfRepairContract>> {
+    let Some(value) = config
+        .settings
+        .get(WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY)
+    else {
+        return Ok(None);
+    };
+    let settings = serde_json::from_value::<BTreeMap<String, WorktreeProviderSelfRepairSettings>>(
+        value.clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            format!("settings.{WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY}"),
+            format!(
+                "provider self-repair settings must map provider ids to repository identities: {error}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    let Some(settings) = settings.get(provider_id) else {
+        return Ok(None);
+    };
+    if settings.repository.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            format!(
+                "settings.{WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY}.{provider_id}.repository"
+            ),
+            "provider self-repair repository must be a non-empty configured component id",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(WorktreeProviderSelfRepairContract {
+        provider_id: provider_id.to_string(),
+        repository: settings.repository.clone(),
+    }))
 }
 
 /// Resolve the provider-agnostic terminal lifecycle argv configured through the
@@ -3948,6 +4009,32 @@ mod tests {
                 .expect("list result mapping")
                 .items,
             "$.result.items"
+        );
+    }
+
+    #[test]
+    fn resolves_generic_provider_self_repair_repository_ownership() {
+        let mut config = HomeboyConfig::default();
+        config.settings.insert(
+            WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY.to_string(),
+            json!({
+                "workspace-service": {
+                    "repository": "workspace-service-component"
+                }
+            }),
+        );
+
+        let contract =
+            worktree_provider_self_repair_contract_from_config("workspace-service", &config)
+                .expect("valid generic self-repair settings")
+                .expect("declared provider contract");
+
+        assert_eq!(contract.provider_id, "workspace-service");
+        assert_eq!(contract.repository, "workspace-service-component");
+        assert!(
+            worktree_provider_self_repair_contract_from_config("other", &config)
+                .expect("undeclared provider is not an error")
+                .is_none()
         );
     }
 
