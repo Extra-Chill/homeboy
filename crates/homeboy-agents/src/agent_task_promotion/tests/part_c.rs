@@ -142,11 +142,15 @@ fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
 fn configured_command_provider_is_resolved_lazily_with_provenance() {
     let workspace = tempfile::tempdir().expect("workspace");
     git(workspace.path(), &["init", "-b", "cook-target"]);
+    let lookup_log = tempfile::NamedTempFile::new()
+        .expect("lookup log")
+        .into_temp_path();
     let provider = tempfile::NamedTempFile::new().expect("provider command");
     std::fs::write(
         provider.path(),
         format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf 'resolve\\n' >> '{}'\nprintf '%s\\n' '{}'\n",
+            lookup_log.display(),
             serde_json::json!({
                 "worktrees": [{
                     "handle": "fixture@cook-target",
@@ -198,6 +202,13 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
         },
     );
 
+    preflight_configured_workspace_provider_with_config("fixture@cook-target", &config)
+        .expect("Cook promotion preflight admits configured target");
+    assert_eq!(
+        std::fs::read_to_string(&lookup_log).expect("preflight lookup log"),
+        "resolve\n"
+    );
+
     let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
         &promotion_options("fixture@cook-target"),
         &config,
@@ -240,6 +251,11 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
     assert_eq!(
         error.details["worktree_provider"]["path"],
         workspace.path().display().to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lookup_log).expect("revalidation lookup log"),
+        "resolve\nresolve\n",
+        "Cook must re-resolve provider ownership immediately before promotion"
     );
 }
 
