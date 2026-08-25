@@ -2703,6 +2703,7 @@ fn executable_digest(path: &Path) -> Result<String> {
     // hash it, in a process that is about to fork a controller runtime.
     #[cfg(all(test, unix))]
     EXECUTABLE_DIGEST_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(unix)]
     let hashing_started = std::time::Instant::now();
     let digest = content_hash::sha256_file(path).map_err(|error| {
         Error::internal_io(
@@ -2710,6 +2711,7 @@ fn executable_digest(path: &Path) -> Result<String> {
             Some("hash pinned controller executable".to_string()),
         )
     })?;
+    #[cfg(unix)]
     if hashing_started.elapsed() >= digest_memo_min_hash_time() {
         memoize_executable_digest(identity, &digest);
     }
