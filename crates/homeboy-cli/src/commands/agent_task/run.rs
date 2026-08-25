@@ -3182,8 +3182,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
         })?;
         validate_cook_destination_identity(args, &path)?;
-        let logical_provider_provenance =
-            validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        let provider_identity = validate_cook_cwd_destination_identity(&path, to_worktree)?;
         let mut provision = serde_json::json!({
             "action": "existing",
             "kind": "explicit_cwd",
@@ -3207,8 +3206,21 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 },
             });
         }
-        if let Some(provenance) = logical_provider_provenance {
-            provision["logical_provider_provenance"] = provenance;
+        if let Some((identity, safety)) = provider_identity {
+            provision["provider"] = Value::String(identity.provider_id.clone());
+            provision["workspace_identity"] =
+                serde_json::to_value(&identity).expect("provider identity serializes");
+            provision["workspace_safety"] =
+                serde_json::to_value(&safety).expect("provider safety serializes");
+        } else if !Path::new(to_worktree).is_dir()
+            && homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?.is_none()
+        {
+            provision["logical_provider_provenance"] = serde_json::json!({
+                "schema": "homeboy/logical-worktree-handle-provenance/v1",
+                "handle": to_worktree,
+                "canonical_path": path,
+                "validation": "exact_handle_basename",
+            });
         }
         return Ok(provision);
     }
@@ -3433,8 +3445,13 @@ fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::R
 fn validate_cook_cwd_destination_identity(
     cwd: &Path,
     to_worktree: &str,
-) -> homeboy::core::Result<Option<Value>> {
-    let (destination, logical_provider_provenance) = if Path::new(to_worktree).is_dir() {
+) -> homeboy::core::Result<
+    Option<(
+        homeboy::core::worktree_providers::WorktreeProviderExactIdentity,
+        homeboy::core::worktree_providers::WorktreeProviderSafetyAttestation,
+    )>,
+> {
+    let (destination, provider_identity) = if Path::new(to_worktree).is_dir() {
         std::fs::canonicalize(to_worktree).map(|path| (path, None))
     } else if let Some(record) =
         homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
@@ -3442,19 +3459,33 @@ fn validate_cook_cwd_destination_identity(
         ensure_active_managed_cook_destination(to_worktree)?;
         std::fs::canonicalize(record.path()).map(|path| (path, None))
     } else {
-        // The supplied CWD is authoritative. An external handle must retain
-        // the complete canonical checkout basename, which is injective and
-        // avoids a provider lookup on this local authority boundary.
-        validate_logical_worktree_handle_path_relationship(cwd, to_worktree)?;
-        Ok((
-            cwd.to_path_buf(),
-            Some(serde_json::json!({
-                "schema": "homeboy/logical-worktree-handle-provenance/v1",
-                "handle": to_worktree,
-                "canonical_path": cwd,
-                "validation": "exact_handle_basename",
-            })),
-        ))
+        let config = defaults::load_config();
+        match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_path_from_config(cwd, &config)? {
+            Some(identity) => {
+                if identity.handle != to_worktree {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "to_worktree",
+                        "--cwd and --to-worktree resolve to different provider worktrees",
+                        Some(to_worktree.to_string()),
+                        None,
+                    ));
+                }
+                let safety = homeboy::core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
+                if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "to_worktree",
+                        "worktree provider safety attestation is not safe for Cook execution",
+                        Some(to_worktree.to_string()),
+                        None,
+                    ));
+                }
+                Ok((PathBuf::from(&identity.path), Some((identity, safety))))
+            }
+            None => {
+                validate_logical_worktree_handle_path_relationship(cwd, to_worktree)?;
+                Ok((cwd.to_path_buf(), None))
+            }
+        }
     }
     .map_err(|error| {
         homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
@@ -3467,7 +3498,7 @@ fn validate_cook_cwd_destination_identity(
             None,
         ));
     }
-    Ok(logical_provider_provenance)
+    Ok(provider_identity)
 }
 
 pub(crate) fn validate_logical_worktree_handle_path_relationship(
@@ -3512,9 +3543,11 @@ pub(crate) fn resolve_cook_destination(
         let cwd = std::fs::canonicalize(cwd).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
         })?;
-        // A supplied checkout is the writable Cook authority. Preserve its
-        // canonical path instead of deriving an unrelated issue handle.
-        args.to_worktree = Some(cwd.display().to_string());
+        let config = defaults::load_config();
+        args.to_worktree = Some(match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_path_from_config(&cwd, &config)? {
+            Some(identity) => identity.handle,
+            None => cwd.display().to_string(),
+        });
         resolve_cook_base(&mut args)?;
         return Ok(args);
     }

@@ -3990,10 +3990,9 @@ pub fn terminal_review_form_continuation_is_eligible(
 /// This deliberately stops before recipe/lifecycle materialization, transport
 /// preparation, provider dispatch, and finalization.
 pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    // Continuation can lead directly to promotion/finalization. Apply the same
-    // durable model-provenance boundary here so it cannot admit a legacy null
-    // model candidate that publication will deterministically reject.
-    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
+    let mut options = options.clone();
+    canonicalize_cook_provider_workspace(&mut options)?;
+    let options = &options;
     let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
@@ -4007,8 +4006,43 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
                 .and_then(Value::as_str)
                 == Some("verification_pending")
         });
+    let record = agent_task_lifecycle::status(&options.initial_run_id).ok();
+    let review_form_continuation = record.as_ref().is_some_and(|record| {
+        review_form_attempt_is_ready_for_cook_continuation(&options.initial_plan, record)
+            .unwrap_or(false)
+    });
+    if review_form_continuation
+        && !record.as_ref().is_some_and(|record| {
+            terminal_review_form_continuation_is_eligible(&options.initial_plan, record)
+                .unwrap_or(false)
+        })
+    {
+        let mut error = Error::validation_invalid_argument(
+            "cook_continuation",
+            "terminal review-form continuation is not eligible for execution",
+            Some(options.initial_run_id.clone()),
+            None,
+        );
+        error.details["continuation_admission"] = serde_json::json!({
+            "first_authoritative_denial": "terminal_review_form_eligibility",
+            "predicates": [{ "name": "terminal_review_form_eligibility", "outcome": "fail" }],
+        });
+        return Err(error);
+    }
+    // Continuation can lead directly to promotion/finalization. Apply the same
+    // durable model-provenance boundary after terminal-form eligibility so
+    // preflight reports the same first authoritative denial as execution.
+    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
     let authenticated_historical_review_continuation =
         authenticated_historical_review_form_workspace_with_trace(options, false)?;
+    if review_form_continuation && !authenticated_historical_review_continuation {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation",
+            "terminal review-form continuation workspace could not be authenticated",
+            Some(options.initial_run_id.clone()),
+            None,
+        ));
+    }
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
@@ -4534,6 +4568,7 @@ fn run_cook_spine(
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    canonicalize_cook_provider_workspace(&mut options)?;
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
@@ -4661,6 +4696,7 @@ fn run_cook_spine(
     } else {
         options
     };
+    canonicalize_cook_provider_workspace(&mut options)?;
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.
@@ -8870,6 +8906,40 @@ fn rebind_baseline_continuation_workspace(
             options.source_worktree_path = Some(worktree.path().into());
         }
     }
+    Ok(())
+}
+
+/// Normalize path-spelled legacy recipes and explicit CWDs to the provider's
+/// canonical handle before any continuation admission or execution decision.
+/// Safety remains a separate admission check so a retained dirty candidate can
+/// still prove itself against its durable promotion baseline.
+fn canonicalize_cook_provider_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    let path = options.source_worktree_path.as_deref().or_else(|| {
+        std::path::Path::new(&options.to_worktree)
+            .is_dir()
+            .then_some(std::path::Path::new(&options.to_worktree))
+    });
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let config = homeboy_core::defaults::load_config();
+    let Some(identity) = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_path_from_config(path, &config)? else {
+        return Ok(());
+    };
+    if !std::path::Path::new(&options.to_worktree).is_dir()
+        && options.to_worktree != identity.handle
+    {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook source path and provider handle identify different worktrees",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    options.to_worktree = identity.handle.clone();
+    options.source_worktree_path = Some(PathBuf::from(&identity.path));
+    options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
+        serde_json::to_value(identity).expect("provider identity serializes");
     Ok(())
 }
 
