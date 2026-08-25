@@ -28,5 +28,8 @@ fn main() -> std::process::ExitCode {
         return homeboy::commands::status::run_status_probe_child(args.get(2));
     }
     let runtime = CliRuntime::with_capabilities(&PRODUCT_CAPABILITIES);
+    if let Some(exit_code) = runtime.run_startup_fast_path(&args) {
+        return exit_code;
+    }
     runtime.run_from_args(args)
 }
