@@ -196,6 +196,30 @@ pub struct WorktreeProviderResolution {
     pub worktree: WorktreeProviderHandle,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeProviderTaskAttachmentStatus {
+    Eligible,
+    AlreadyAttached,
+    Attached,
+}
+
+/// Provider-owned assessment for attaching tracker ownership to one exact
+/// existing allocation. Product-specific ownership predicates remain opaque to
+/// Homeboy; the echoed checkout identity prevents a provider from broadening
+/// the requested mutation.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorktreeProviderTaskAttachment {
+    pub schema: String,
+    pub provider_id: String,
+    pub handle: String,
+    pub task_url: String,
+    pub path: String,
+    pub branch: String,
+    pub primary: bool,
+    pub status: WorktreeProviderTaskAttachmentStatus,
+}
+
 /// Non-mutating provider answer for one explicit workspace creation intent.
 /// Existing destinations retain their resolved metadata; absent destinations
 /// require a provider-declared path projection before they can be represented
@@ -934,6 +958,310 @@ fn compatibility_identity_token(resolution: &WorktreeProviderResolution) -> Stri
         resolution.worktree.branch.as_str(),
     ]);
     format!("compat-v1:{digest}")
+}
+
+/// Ask every eligible provider whether it owns the exact allocation and can
+/// attach the supplied tracker identity. Providers return `not_owned` to
+/// decline; every ownership or safety denial is a strict failure.
+pub fn preview_apply_enabled_worktree_provider_task_attachment_from_config(
+    handle: &str,
+    task_url: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderTaskAttachment>> {
+    let task_url = normalize_task_url(task_url);
+    let idempotency_key = task_attachment_idempotency_key(handle, &task_url);
+    let mut assessments = Vec::new();
+    for (provider_id, provider) in &config.worktree_providers {
+        if !provider.enabled || !provider.apply_enabled {
+            continue;
+        }
+        let command = match (
+            &provider.commands.task_attachment_preview,
+            &provider.commands.task_attachment_apply,
+        ) {
+            (Some(command), Some(_)) => command,
+            (None, None) => continue,
+            _ => {
+                return Err(Error::validation_invalid_argument(
+                    "worktree_providers.commands",
+                    format!("worktree provider `{provider_id}` must configure both task_attachment_preview and task_attachment_apply"),
+                    Some(provider_id.clone()),
+                    None,
+                ));
+            }
+        };
+        let command = expand_task_attachment_command(command, handle, &task_url, &idempotency_key);
+        let (payload, _, _) =
+            run_provider_split_command(provider_id, provider, &command, "task_attachment_preview")?;
+        if task_attachment_not_owned(&payload) {
+            continue;
+        }
+        assessments.push(parse_task_attachment(
+            provider_id,
+            handle,
+            &task_url,
+            &command,
+            "task_attachment_preview",
+            payload,
+            false,
+        )?);
+    }
+    match assessments.len() {
+        0 => Ok(None),
+        1 => Ok(assessments.pop()),
+        _ => Err(task_attachment_error(
+            handle,
+            &task_url,
+            "multiple providers claim the exact worktree for task attachment",
+            "ambiguous",
+            None,
+        )),
+    }
+}
+
+/// Execute one provider-owned attachment after repeating the same read-only
+/// assessment used by preview. Already-attached ownership is idempotent and
+/// does not invoke the mutation command.
+pub fn apply_worktree_provider_task_attachment_from_config(
+    assessment: &WorktreeProviderTaskAttachment,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderTaskAttachment> {
+    let current = preview_apply_enabled_worktree_provider_task_attachment_from_config(
+        &assessment.handle,
+        &assessment.task_url,
+        config,
+    )?
+    .ok_or_else(|| {
+        task_attachment_error(
+            &assessment.handle,
+            &assessment.task_url,
+            "the provider no longer owns the exact worktree for task attachment",
+            "not_owned",
+            Some(&assessment.provider_id),
+        )
+    })?;
+    if current.provider_id != assessment.provider_id
+        || current.path != assessment.path
+        || current.branch != assessment.branch
+        || current.primary != assessment.primary
+    {
+        return Err(task_attachment_error(
+            &assessment.handle,
+            &assessment.task_url,
+            "worktree provider task-attachment identity changed after preview",
+            "conflict",
+            Some(&assessment.provider_id),
+        ));
+    }
+    if current.status == WorktreeProviderTaskAttachmentStatus::AlreadyAttached {
+        return Ok(current);
+    }
+    let provider = &config.worktree_providers[&current.provider_id];
+    let command = provider
+        .commands
+        .task_attachment_apply
+        .as_ref()
+        .expect("paired task attachment command");
+    let task_url = normalize_task_url(&current.task_url);
+    let idempotency_key = task_attachment_idempotency_key(&current.handle, &task_url);
+    let command =
+        expand_task_attachment_command(command, &current.handle, &task_url, &idempotency_key);
+    let output = run_provider_mutation_command(
+        &current.provider_id,
+        provider,
+        &command,
+        "task_attachment_apply",
+    )?;
+    let payload = serde_json::from_slice(&output).map_err(|error| {
+        provider_lookup_error(
+            &current.provider_id,
+            &command,
+            "task_attachment_apply",
+            "malformed",
+            "worktree_providers.commands.task_attachment_apply",
+            format!(
+                "worktree provider `{}` returned invalid task-attachment evidence: {error}",
+                current.provider_id
+            ),
+            false,
+        )
+    })?;
+    parse_task_attachment(
+        &current.provider_id,
+        &current.handle,
+        &task_url,
+        &command,
+        "task_attachment_apply",
+        payload,
+        true,
+    )
+}
+
+pub fn unsupported_worktree_provider_task_attachment_error(handle: &str, task_url: &str) -> Error {
+    let task_url = normalize_task_url(task_url);
+    task_attachment_error(
+        handle,
+        &task_url,
+        "the exact worktree is not tracker-owned and its provider does not support task attachment",
+        "unsupported",
+        None,
+    )
+}
+
+fn task_attachment_idempotency_key(handle: &str, task_url: &str) -> String {
+    homeboy_engine_primitives::content_hash::nul_separated_digest([
+        "worktree_provider_task_attachment_v1",
+        handle,
+        task_url,
+    ])
+}
+
+fn expand_task_attachment_command(
+    command: &[String],
+    handle: &str,
+    task_url: &str,
+    idempotency_key: &str,
+) -> Vec<String> {
+    command
+        .iter()
+        .map(|argument| {
+            argument
+                .replace("{handle}", handle)
+                .replace("{task_url}", task_url)
+                .replace("{idempotency_key}", idempotency_key)
+        })
+        .collect()
+}
+
+fn task_attachment_not_owned(payload: &Value) -> bool {
+    payload.get("status").and_then(Value::as_str) == Some("not_owned")
+}
+
+fn parse_task_attachment(
+    provider_id: &str,
+    handle: &str,
+    task_url: &str,
+    command: &[String],
+    operation: &str,
+    payload: Value,
+    applied: bool,
+) -> Result<WorktreeProviderTaskAttachment> {
+    if let Some(
+        status @ ("conflicting_task" | "foreign_owner" | "dirty" | "ambiguous" | "inactive"
+        | "unsafe"),
+    ) = payload.get("status").and_then(Value::as_str)
+    {
+        return Err(task_attachment_error(
+            handle,
+            task_url,
+            payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("worktree provider rejected task attachment"),
+            status,
+            Some(provider_id),
+        ));
+    }
+    let attachment: WorktreeProviderTaskAttachment =
+        serde_json::from_value(payload).map_err(|error| {
+            provider_lookup_error(
+                provider_id,
+                command,
+                operation,
+                "malformed",
+                &format!("worktree_providers.commands.{operation}"),
+                format!("worktree provider `{provider_id}` returned an invalid task-attachment envelope: {error}"),
+                false,
+            )
+        })?;
+    let valid_status = if applied {
+        matches!(
+            attachment.status,
+            WorktreeProviderTaskAttachmentStatus::Attached
+                | WorktreeProviderTaskAttachmentStatus::AlreadyAttached
+        )
+    } else {
+        matches!(
+            attachment.status,
+            WorktreeProviderTaskAttachmentStatus::Eligible
+                | WorktreeProviderTaskAttachmentStatus::AlreadyAttached
+        )
+    };
+    if attachment.schema != "homeboy/worktree-provider-task-attachment/v1"
+        || attachment.provider_id != provider_id
+        || attachment.handle != handle
+        || normalize_task_url(&attachment.task_url) != task_url
+        || attachment.primary
+        || !valid_status
+    {
+        return Err(provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "malformed",
+            &format!("worktree_providers.commands.{operation}"),
+            format!("worktree provider `{provider_id}` returned task-attachment evidence that does not bind the exact request"),
+            false,
+        ));
+    }
+    validate_task_attachment_checkout(provider_id, &attachment)?;
+    Ok(WorktreeProviderTaskAttachment {
+        task_url: task_url.to_string(),
+        ..attachment
+    })
+}
+
+fn validate_task_attachment_checkout(
+    provider_id: &str,
+    attachment: &WorktreeProviderTaskAttachment,
+) -> Result<()> {
+    let path = std::path::Path::new(&attachment.path);
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        task_attachment_error(
+            &attachment.handle,
+            &attachment.task_url,
+            &format!("provider `{provider_id}` returned an unresolvable task-attachment checkout: {error}"),
+            "unsafe",
+            Some(provider_id),
+        )
+    })?;
+    if canonical != path
+        || attachment.branch.trim().is_empty()
+        || crate::git::current_branch(&canonical).as_deref() != Some(attachment.branch.as_str())
+    {
+        return Err(task_attachment_error(
+            &attachment.handle,
+            &attachment.task_url,
+            "provider task-attachment checkout identity does not match the exact linked checkout",
+            "unsafe",
+            Some(provider_id),
+        ));
+    }
+    validate_task_worktree_root(&canonical, &attachment.handle)
+}
+
+fn task_attachment_error(
+    handle: &str,
+    task_url: &str,
+    message: &str,
+    status: &str,
+    provider_id: Option<&str>,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "to_worktree",
+        message,
+        Some(handle.to_string()),
+        Some(vec![format!(
+            "Attach task `{task_url}` to exact worktree `{handle}` through its workspace provider, then rerun Cook."
+        )]),
+    );
+    error.details["worktree_provider_task_attachment"] = Value::String(status.to_string());
+    error.details["handle"] = Value::String(handle.to_string());
+    error.details["task_url"] = Value::String(task_url.to_string());
+    if let Some(provider_id) = provider_id {
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+    }
+    error
 }
 /// Find the sole apply-enabled provider worktree owned by a tracker URL.
 /// Providers must map `task_url` to participate, preserving existing provider
@@ -2730,20 +3058,20 @@ fn annotate_provider_lookup_error(
 pub fn compact_provider_failure_details(details: &Value) -> Option<Value> {
     const STDERR_EXCERPT_LIMIT: usize = 512;
 
+    let provider_id = details.get("worktree_provider_id")?.as_str()?;
     let operation = details.get("worktree_provider_operation")?.as_str()?;
     let evidence = details.get("command_evidence")?;
     let stderr = evidence.get("stderr")?.as_str()?;
-    let stderr_excerpt: String = stderr
+    let stderr_excerpt = crate::redaction::redact_string(stderr);
+    let stderr_excerpt: String = stderr_excerpt
         .lines()
         .find(|line| !line.trim().is_empty())
-        .unwrap_or(stderr)
+        .unwrap_or(&stderr_excerpt)
         .chars()
         .take(STDERR_EXCERPT_LIMIT)
         .collect();
-    if stderr_excerpt.trim().is_empty() {
-        return None;
-    }
     Some(serde_json::json!({
+        "provider_id": provider_id,
         "operation": operation,
         "exit_code": evidence.get("exit_code"),
         "replay_command": details.get("worktree_provider_replay_command").or_else(|| evidence.get("command")),
@@ -2782,6 +3110,7 @@ mod compact_provider_failure_details_tests {
     fn projects_short_stderr_for_ensure_resolve_and_plan_failures() {
         for operation in ["ensure", "resolve", "plan"] {
             let details = json!({
+                "worktree_provider_id": "fixture",
                 "worktree_provider_operation": operation,
                 "worktree_provider_replay_command": format!("fixture-provider {operation}"),
                 "command_evidence": {
@@ -2794,6 +3123,7 @@ mod compact_provider_failure_details_tests {
             assert_eq!(
                 compact_provider_failure_details(&details),
                 Some(json!({
+                    "provider_id": "fixture",
                     "operation": operation,
                     "exit_code": 17,
                     "replay_command": format!("fixture-provider {operation}"),
@@ -2807,6 +3137,7 @@ mod compact_provider_failure_details_tests {
     fn bounds_large_stderr_without_changing_durable_evidence() {
         let stderr = format!("Error: {}", "x".repeat(2_048));
         let details = json!({
+            "worktree_provider_id": "fixture",
             "worktree_provider_operation": "ensure",
             "worktree_provider_replay_command": "fixture-provider ensure",
             "command_evidence": {
@@ -2829,6 +3160,42 @@ mod compact_provider_failure_details_tests {
             details["command_evidence"]["stderr"].as_str(),
             Some(stderr.as_str())
         );
+    }
+
+    #[test]
+    fn preserves_empty_stderr_as_a_typed_provider_failure() {
+        let details = json!({
+            "worktree_provider_id": "fixture",
+            "worktree_provider_operation": "resolve",
+            "command_evidence": {
+                "command": "fixture-provider resolve",
+                "exit_code": 1,
+                "stderr": "",
+            },
+        });
+
+        let projection = compact_provider_failure_details(&details).expect("compact evidence");
+        assert_eq!(projection["stderr_excerpt"], "");
+    }
+
+    #[test]
+    fn redacts_sensitive_stderr_in_the_compact_projection() {
+        let details = json!({
+            "worktree_provider_id": "fixture",
+            "worktree_provider_operation": "resolve",
+            "command_evidence": {
+                "command": "fixture-provider resolve",
+                "exit_code": 1,
+                "stderr": "Authorization: Bearer provider-secret\nretry denied",
+            },
+        });
+
+        let projection = compact_provider_failure_details(&details).expect("compact evidence");
+        assert_eq!(
+            projection["stderr_excerpt"],
+            "Authorization: Bearer [REDACTED]"
+        );
+        assert!(!projection.to_string().contains("provider-secret"));
     }
 }
 
@@ -3910,6 +4277,8 @@ mod tests {
                     "apply_enabled": true,
                     "commands": {
                         "resolve_task": ["fixture-bin", "resolve-task", "{task_url}"],
+                        "task_attachment_preview": ["fixture-bin", "attach-preview", "{handle}", "{task_url}"],
+                        "task_attachment_apply": ["fixture-bin", "attach", "{handle}", "{task_url}", "{idempotency_key}"],
                         "resolve_task_not_found_exit_codes": [42],
                         "cleanup_preview": ["fixture-bin", "preview"],
                         "cleanup_apply": ["fixture-bin", "apply"],
@@ -3936,6 +4305,14 @@ mod tests {
         assert_eq!(
             provider.commands.resolve_task_not_found_exit_codes,
             vec![42]
+        );
+        assert_eq!(
+            provider
+                .commands
+                .task_attachment_apply
+                .as_ref()
+                .expect("command")[1],
+            "attach"
         );
         assert_eq!(
             provider.commands.cleanup_preview.as_ref().expect("command"),
@@ -6503,6 +6880,177 @@ mod tests {
         )
         .expect_err("duplicate ownership must be explicit");
         assert!(error.message.contains("project@first, project@second"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_attachment_contract_is_previewable_bounded_and_idempotent() {
+        let (_root, workspace) = linked_workspace("fix-13427");
+        let fixture = unique_fixture_script_dir();
+        let state = fixture.join("attached");
+        let calls = fixture.join("apply-calls");
+        let script = fixture.join("provider");
+        fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+schema=homeboy/worktree-provider-task-attachment/v1
+if [ "$1" = preview ]; then
+  status=eligible
+  [ -f '{}' ] && status=already_attached
+else
+  printf 'apply\n' >> '{}'
+  touch '{}'
+  status=attached
+fi
+printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","path":"{}","branch":"fix-13427","primary":false,"status":"%s"}}\n' "$schema" "$2" "$3" "$status"
+"#,
+                state.display(),
+                calls.display(),
+                state.display(),
+                workspace.display(),
+            ),
+        )
+        .expect("write provider");
+        make_executable(&script);
+        let mut provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                task_attachment_preview: Some(vec![
+                    script.display().to_string(),
+                    "preview".to_string(),
+                    "{handle}".to_string(),
+                    "{task_url}".to_string(),
+                    "{idempotency_key}".to_string(),
+                ]),
+                task_attachment_apply: Some(vec![
+                    script.display().to_string(),
+                    "apply".to_string(),
+                    "{handle}".to_string(),
+                    "{task_url}".to_string(),
+                    "{idempotency_key}".to_string(),
+                ]),
+                ..Default::default()
+            },
+            list_result_mapping: None,
+        };
+        let task_url = " HTTPS://Example.TEST:443/project/issues/13427/?from=cook ";
+        let config = config_with_provider(provider.clone());
+
+        let preview = preview_apply_enabled_worktree_provider_task_attachment_from_config(
+            "fixture@fix-13427",
+            task_url,
+            &config,
+        )
+        .expect("preview succeeds")
+        .expect("provider owns exact handle");
+        assert_eq!(
+            preview.status,
+            WorktreeProviderTaskAttachmentStatus::Eligible
+        );
+        assert_eq!(
+            preview.task_url,
+            "https://example.test/project/issues/13427"
+        );
+        assert!(!state.exists(), "preview must not mutate provider state");
+
+        let applied = apply_worktree_provider_task_attachment_from_config(&preview, &config)
+            .expect("attachment succeeds");
+        assert_eq!(
+            applied.status,
+            WorktreeProviderTaskAttachmentStatus::Attached
+        );
+        assert_eq!(fs::read_to_string(&calls).unwrap(), "apply\n");
+
+        let replay = preview_apply_enabled_worktree_provider_task_attachment_from_config(
+            "fixture@fix-13427",
+            task_url,
+            &config,
+        )
+        .expect("replay preview succeeds")
+        .expect("same provider still owns handle");
+        assert_eq!(
+            replay.status,
+            WorktreeProviderTaskAttachmentStatus::AlreadyAttached
+        );
+        apply_worktree_provider_task_attachment_from_config(&replay, &config)
+            .expect("same-task replay is idempotent");
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            "apply\n",
+            "idempotent replay must not repeat the mutation"
+        );
+
+        provider.commands.task_attachment_apply =
+            Some(vec![fake_failing_provider_script(), "{handle}".to_string()]);
+        fs::remove_file(&state).expect("restore eligible state");
+        let failure = apply_worktree_provider_task_attachment_from_config(
+            &preview,
+            &config_with_provider(provider),
+        )
+        .expect_err("provider mutation failure remains fail-closed");
+        assert_eq!(
+            failure.details["worktree_provider_operation"],
+            "task_attachment_apply"
+        );
+        assert_eq!(
+            failure.details["worktree_provider_call_classification"],
+            "command"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_attachment_contract_rejects_conflicts_and_reports_unsupported_repair() {
+        let (_root, workspace) = linked_workspace("fix-13427-conflict");
+        let script = fake_provider_script_body(&format!(
+            "printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-task-attachment/v1\",\"provider_id\":\"fixture\",\"handle\":\"fixture@fix-13427\",\"task_url\":\"https://example.test/issues/other\",\"path\":\"{}\",\"branch\":\"fix-13427-conflict\",\"primary\":false,\"status\":\"conflicting_task\",\"reason\":\"exact worktree already belongs to another task\"}}'\n",
+            workspace.display()
+        ));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                task_attachment_preview: Some(vec![script, "{handle}".to_string()]),
+                task_attachment_apply: Some(vec!["false".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: None,
+        };
+        let error = preview_apply_enabled_worktree_provider_task_attachment_from_config(
+            "fixture@fix-13427",
+            "https://example.test/issues/13427",
+            &config_with_provider(provider),
+        )
+        .expect_err("conflicting tracker ownership must fail closed");
+        assert_eq!(
+            error.details["worktree_provider_task_attachment"],
+            "conflicting_task"
+        );
+        assert!(error.message.contains("another task"));
+
+        let unsupported = unsupported_worktree_provider_task_attachment_error(
+            "fixture@fix-13427",
+            "https://example.test/issues/13427",
+        );
+        assert_eq!(
+            unsupported.details["worktree_provider_task_attachment"],
+            "unsupported"
+        );
+        assert_eq!(unsupported.details["tried"].as_array().unwrap().len(), 1);
+        assert!(unsupported.details["tried"][0]
+            .as_str()
+            .unwrap()
+            .contains("fixture@fix-13427"));
     }
 
     #[test]

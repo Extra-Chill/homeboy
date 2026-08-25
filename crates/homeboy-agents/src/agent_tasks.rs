@@ -288,8 +288,9 @@ pub mod review_dossier {
 /// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
     pub use super::super::agent_task_gate::{
-        AgentTaskGateArtifactEnvironmentMapping, AgentTaskGateArtifactPathRequirement,
-        AgentTaskGateEnvironment, AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
+        append_promotion_gate_argv, AgentTaskGateArtifactEnvironmentMapping,
+        AgentTaskGateArtifactPathRequirement, AgentTaskGateEnvironment,
+        AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
         AgentTaskGateEnvironmentVariable, AgentTaskGateExecutionPolicy,
         AgentTaskGateExtensionInput, AgentTaskGateExtensionInputProvenance,
         AgentTaskGateFailureEvidence, AgentTaskGateInputSource,
@@ -367,7 +368,8 @@ pub mod lifecycle {
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{
-        inject_raw_record_metadata_for_corruption_test, rewrite_record_for_test,
+        fail_next_record_write_for_test, inject_raw_record_metadata_for_corruption_test,
+        rewrite_record_for_test,
     };
     pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
 }

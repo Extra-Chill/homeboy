@@ -260,7 +260,7 @@ pub fn sync_workspace_in_roots(
                 // Snapshot-git deliberately retains Git metadata for callers
                 // that need a checkout baseline.
                 materialization_plan.actual_materialization_mode =
-                    Some(RunnerWorkspaceSyncMode::SnapshotGit.label().to_string());
+                    Some(RunnerWorkspaceSyncMode::SnapshotGit.as_str().to_string());
             }
             materialization_plan.fallback_reason = fallback_reason;
             let metadata = workspace_metadata(WorkspaceMetadataRequest {
@@ -1028,7 +1028,7 @@ pub fn reuse_compatible_snapshot_workspace(
     )?;
     let local_path_string = local_path.display().to_string();
     let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
-        snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.label()
+        snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
             && snapshot.local_path == local_path_string
             && snapshot.source_commit.as_deref() == Some(source_commit.as_str())
             && snapshot.source_dirty == Some(false)
@@ -1141,7 +1141,7 @@ fn compatible_incremental_snapshot(
     )?;
     let local_path = local_path.display().to_string();
     Ok(snapshots.snapshots.into_iter().find_map(|snapshot| {
-        (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.label()
+        (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
             && snapshot.local_path == local_path
             && snapshot.snapshot_excludes == excludes)
             .then(|| {
@@ -1938,7 +1938,7 @@ fn workspace_metadata(request: WorkspaceMetadataRequest<'_>) -> RunnerWorkspaceM
         )),
         local_path: request.local_path.display().to_string(),
         remote_path: request.remote_path.to_string(),
-        sync_mode: request.sync_mode.label().to_string(),
+        sync_mode: request.sync_mode.as_str().to_string(),
         actual_materialization_mode: request.actual_materialization_mode.map(str::to_string),
         fallback_reason: request.fallback_reason.map(str::to_string),
         snapshot_identity: request.snapshot_identity.to_string(),
@@ -4265,7 +4265,7 @@ fn workspace_lease(
         runner_id: runner_id.to_string(),
         local_path: current.local_path.clone(),
         remote_path: current.remote_path.clone(),
-        sync_mode: current.sync_mode.label().to_string(),
+        sync_mode: current.sync_mode.as_str().to_string(),
         materialized: current.materialized,
         lifecycle_owner: RunnerLifecycleOwner::Controller,
         source_commit: current.source_commit.clone(),

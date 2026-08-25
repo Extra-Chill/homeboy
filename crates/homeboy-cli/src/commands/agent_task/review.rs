@@ -13,6 +13,7 @@ use homeboy::agents::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
+use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{
     canonical_recoverable_patch_artifacts, AgentTaskPromotionOptions, AgentTaskPromotionReport,
@@ -225,9 +226,9 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             &serde_json::to_value(&record).unwrap_or(Value::Null),
         )
     });
-    let cook_base = agent_task_service::load_recipe_for_attempt(&record.run_id)?
+    let cook_contract = agent_task_service::load_recipe_for_attempt(&record.run_id)?
         .map(|recipe| {
-            recipe
+            let base = recipe
                 .finalization
                 .get("base")
                 .and_then(Value::as_str)
@@ -237,10 +238,19 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                     homeboy::core::Error::validation_invalid_argument(
                         "cook_recipe.finalization.base",
                         "durable Cook recipe is missing its declared promotion base",
-                        Some(recipe.cook_id),
+                        Some(recipe.cook_id.clone()),
                         None,
                     )
-                })
+                })?;
+            let gates = serde_json::from_value(recipe.gate_policy.clone()).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "cook_recipe.gate_policy",
+                    format!("durable Cook recipe has an invalid gate policy: {error}"),
+                    Some(recipe.cook_id),
+                    None,
+                )
+            })?;
+            Ok::<_, homeboy::core::Error>((base, gates))
         })
         .transpose()?;
     let promotion_candidates = aggregate_review
@@ -254,7 +264,8 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                             source_run_id: Some(&record.run_id),
                             aggregate_path: record.aggregate_path.as_deref(),
                             to_worktree: args.to_worktree.as_deref(),
-                            cook_base: cook_base.as_deref(),
+                            cook_base: cook_contract.as_ref().map(|(base, _)| base.as_str()),
+                            cook_gates: cook_contract.as_ref().map(|(_, gates)| gates),
                             provider_command: args.provider_command.as_deref(),
                             provider_argv: &args.provider_argv,
                             latest_promotion: record.metadata.get("latest_promotion"),
@@ -444,7 +455,8 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
     Value::Object(object)
 }
 
-pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
+pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
+    args.gates.snapshot_file_inputs()?;
     let to_worktree = args.to_worktree.clone();
     let source_reference = parse_promotion_run_artifact_reference(&args.source)?;
     let source_spec = source_reference
@@ -2600,6 +2612,7 @@ struct PromotionCandidateContext<'a> {
     aggregate_path: Option<&'a str>,
     to_worktree: Option<&'a str>,
     cook_base: Option<&'a str>,
+    cook_gates: Option<&'a VerifyGateOptions>,
     provider_command: Option<&'a str>,
     provider_argv: &'a [String],
     latest_promotion: Option<&'a Value>,
@@ -2689,6 +2702,12 @@ fn promotion_candidates(
                         append_resume_contract(&mut command, contract);
                     } else if let Some(base) = context.cook_base {
                         command.extend(["--base".to_string(), base.to_string()]);
+                        if let Some(gates) = context.cook_gates {
+                            homeboy::agents::agent_tasks::gate::append_promotion_gate_argv(
+                                &mut command,
+                                gates,
+                            );
+                        }
                     }
                     if let Some(provider_command) = context.provider_command {
                         command.push("--provider-command".to_string());
@@ -3945,6 +3964,7 @@ mod tests {
                 aggregate_path: None,
                 to_worktree: Some("fixture@target"),
                 cook_base: None,
+                cook_gates: None,
                 provider_command: None,
                 provider_argv: &provider_argv,
                 latest_promotion: None,
@@ -4007,6 +4027,7 @@ mod tests {
                 aggregate_path: None,
                 to_worktree: Some("fixture@target"),
                 cook_base: Some("trunk"),
+                cook_gates: None,
                 provider_command: None,
                 provider_argv: &[],
                 latest_promotion: None,
@@ -4032,6 +4053,103 @@ mod tests {
                 "trunk",
             ])
         );
+    }
+
+    #[test]
+    fn promotion_candidates_retain_snapshotted_cook_gates_and_private_provenance() {
+        let review = AgentTaskAggregateReport {
+            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
+            summary: AgentTaskAggregateSummary::default(),
+            tasks: Vec::new(),
+            artifact_inventory: Vec::new(),
+            apply_candidates: vec![AgentTaskDecisionRef {
+                task_id: "task-1".to_string(),
+                decision: AgentTaskReconciliationDecision::ApplyCandidate,
+                reason: "patch available".to_string(),
+                artifact_ids: vec!["patch-1".to_string()],
+            }],
+            issue_report_candidates: Vec::new(),
+            retry_plan: Vec::new(),
+            review_candidates: Vec::new(),
+            matrix: Vec::new(),
+        };
+        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "test",
+            "status": "succeeded",
+            "totals": { "skipped": 0 },
+        }))
+        .expect("aggregate");
+        let gates: VerifyGateOptions = serde_json::from_value(serde_json::json!({
+            "verify": ["cargo test", "printf 'file-backed public gate'"],
+            "private_verify": ["private-check", "printf 'file-backed private gate'"],
+            "input_sources": [
+                {"visibility": "visible", "source_kind": "inline", "sha256": "sha256:inline-public", "size_bytes": 10, "redaction_policy": "full_evidence"},
+                {"visibility": "visible", "source_kind": "file", "path": "/fixture/public-gate.sh", "sha256": "sha256:file-public", "size_bytes": 24, "redaction_policy": "full_evidence"},
+                {"visibility": "private", "source_kind": "inline", "sha256": "sha256:inline-private", "size_bytes": 13, "redaction_policy": "summary_only"},
+                {"visibility": "private", "source_kind": "file", "sha256": "sha256:file-private", "size_bytes": 25, "redaction_policy": "summary_only"}
+            ],
+            "private_gate_reveal": "summary_only",
+            "execution_policy": "continue_all",
+            "gate_timeout_seconds": 42,
+            "gate_heartbeat_interval_seconds": 7,
+            "gate_no_progress_timeout_seconds": 11,
+            "rerun_completed_gates": true,
+            "accept_inherited_failures": true,
+            "gate_environment": {"mode": "replace", "variables": {"MODE": "test"}, "preserve": {}, "isolate_home": true, "isolate_xdg": true, "shared_cargo_target": false, "extension_inputs": []},
+            "gate_toolchains": [],
+            "gate_package_artifacts": [],
+            "gate_diagnostic_sidecars": [],
+            "hydrate_dependencies": true,
+        }))
+        .expect("gate fixture");
+
+        let candidates = promotion_candidates(
+            PromotionCandidateContext {
+                source: "cook-attempt-9400",
+                source_run_id: Some("cook-attempt-9400"),
+                aggregate_path: None,
+                to_worktree: Some("fixture@target"),
+                cook_base: Some("trunk"),
+                cook_gates: Some(&gates),
+                provider_command: None,
+                provider_argv: &[],
+                latest_promotion: None,
+            },
+            &aggregate,
+            &review,
+        );
+
+        let command = candidates[0]["command"]
+            .as_array()
+            .expect("promotion command")
+            .iter()
+            .map(|value| value.as_str().expect("command argument").to_string())
+            .collect::<Vec<_>>();
+        assert!(command
+            .windows(2)
+            .any(|args| args == ["--verify", "cargo test"]));
+        assert!(command
+            .windows(2)
+            .any(|args| args == ["--private-verify", "private-check"]));
+        assert_eq!(
+            command
+                .iter()
+                .filter(|argument| argument.as_str() == "--gate-input-source")
+                .count(),
+            4
+        );
+        let provenance = command
+            .windows(2)
+            .filter(|args| args[0] == "--gate-input-source")
+            .map(|args| serde_json::from_str::<Value>(&args[1]).expect("gate provenance"))
+            .collect::<Vec<_>>();
+        assert_eq!(provenance[3]["sha256"], "sha256:file-private");
+        assert!(provenance[3].get("path").is_none());
+        assert!(!command
+            .iter()
+            .any(|argument| argument.contains("private-gate.sh")));
+        assert!(crate::cli_surface::Cli::try_parse_from(&command).is_ok());
     }
 
     #[test]
@@ -4107,6 +4225,7 @@ mod tests {
                 aggregate_path: None,
                 to_worktree: Some("fixture@target"),
                 cook_base: None,
+                cook_gates: None,
                 provider_command: None,
                 provider_argv: &[],
                 latest_promotion: None,
@@ -4128,6 +4247,7 @@ mod tests {
                 aggregate_path: None,
                 to_worktree: Some("fixture@target"),
                 cook_base: None,
+                cook_gates: None,
                 provider_command: None,
                 provider_argv: &[],
                 latest_promotion: None,

@@ -13,7 +13,7 @@ pub(super) fn run_doctor(args: FuzzDoctorArgs) -> homeboy::core::Result<FuzzDoct
     let source_revision = read_source_revision(&extension.id);
     let update = check_update_available(&extension.id);
     let update_command = format!("homeboy extension update {}", extension.id);
-    let status = if ready.ready && update.is_none() {
+    let status = if ready.ready == Some(true) && update.is_none() {
         "ok"
     } else {
         "attention"
@@ -31,6 +31,7 @@ pub(super) fn run_doctor(args: FuzzDoctorArgs) -> homeboy::core::Result<FuzzDoct
             version: extension.version.clone(),
             path: extension.extension_path.clone().unwrap_or_default(),
             linked,
+            readiness: ready.state,
             ready: ready.ready,
             ready_reason: ready.reason,
             ready_detail: ready.detail,

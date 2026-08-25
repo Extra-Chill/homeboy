@@ -314,7 +314,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         .materialization_plan
         .actual_materialization_mode
         .as_deref()
-        .unwrap_or_else(|| sync_mode.label());
+        .unwrap_or_else(|| sync_mode.as_str());
     let remote_cwd = synced.remote_path.clone();
     let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
     // The primary workspace sync materializes each declared dependency checkout
@@ -661,7 +661,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     let path_materialization_plan = workspace_path_materialization_plan(
         &workspace_mapping,
         PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-        sync_mode.label(),
+        sync_mode.as_str(),
     );
     let path_remaps = path_remaps_from_materialization_plan(
         &path_materialization_plan,
@@ -1026,7 +1026,7 @@ fn lab_path_materialization_mode(
     ) {
         return "existing_remote".to_string();
     }
-    sync_mode.label().to_string()
+    sync_mode.as_str().to_string()
 }
 
 fn rewrite_lab_offload_remote_command_args(
@@ -2382,7 +2382,7 @@ mod tests {
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            RunnerWorkspaceSyncMode::Snapshot.label(),
+            RunnerWorkspaceSyncMode::Snapshot.as_str(),
         );
         let path_remaps = path_remaps_from_materialization_plan(
             &plan,
@@ -2666,7 +2666,7 @@ mod tests {
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            RunnerWorkspaceSyncMode::Snapshot.label(),
+            RunnerWorkspaceSyncMode::Snapshot.as_str(),
         );
 
         assert_eq!(plan.entries.len(), 1);
