@@ -49,8 +49,15 @@ pub(crate) struct PreparedSource {
     pub source_content_hash: String,
 }
 
+/// One spec installed by an install run.
+///
+/// Rigs and stacks are different concepts, but the record of having installed
+/// one is not: both carried these five fields from their own declaration, with
+/// no conversion between them, and both land in the same `RigInstallResult`.
+/// A field added to one and not the other compiled clean and left the two
+/// lists in a single JSON payload describing the same thing differently.
 #[derive(Debug, Clone, Serialize)]
-pub struct InstalledRig {
+pub struct InstalledSpec {
     pub id: String,
     pub description: String,
     pub path: PathBuf,
@@ -58,14 +65,11 @@ pub struct InstalledRig {
     pub source_revision: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct InstalledStack {
-    pub id: String,
-    pub description: String,
-    pub path: PathBuf,
-    pub spec_path: PathBuf,
-    pub source_revision: Option<String>,
-}
+/// A rig installed by an install run.
+pub type InstalledRig = InstalledSpec;
+
+/// A stack installed by an install run.
+pub type InstalledStack = InstalledSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigSourceMetadata {
