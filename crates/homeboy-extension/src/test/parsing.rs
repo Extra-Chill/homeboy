@@ -12,31 +12,44 @@ pub use homeboy_extension_contract::test_parsing::{
 
 #[derive(Debug, Deserialize)]
 struct RawTestFailure {
-    #[serde(alias = "test_id", default)]
+    #[serde(default)]
+    test_id: Option<String>,
+    #[serde(default)]
     test_name: Option<String>,
-    #[serde(alias = "file", default)]
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
     test_file: Option<String>,
-    #[serde(alias = "failure_type", default)]
+    #[serde(default)]
+    failure_type: Option<String>,
+    #[serde(default)]
     error_type: Option<String>,
     #[serde(default)]
     message: Option<String>,
-    #[serde(alias = "source", default)]
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
     source_file: Option<String>,
-    #[serde(alias = "source_line", alias = "line", default)]
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
     source_line: Option<u32>,
 }
 
 impl From<RawTestFailure> for TestFailure {
     fn from(raw: RawTestFailure) -> Self {
         Self {
-            test_name: raw.test_name.unwrap_or_else(|| "unknown test".to_string()),
-            test_file: raw.test_file.unwrap_or_default(),
-            error_type: raw.error_type.unwrap_or_default(),
+            test_name: raw
+                .test_id
+                .or(raw.test_name)
+                .unwrap_or_else(|| "unknown test".to_string()),
+            test_file: raw.file.or(raw.test_file).unwrap_or_default(),
+            error_type: raw.failure_type.or(raw.error_type).unwrap_or_default(),
             message: raw
                 .message
                 .unwrap_or_else(|| "test failure (no message provided)".to_string()),
-            source_file: raw.source_file.unwrap_or_default(),
-            source_line: raw.source_line.unwrap_or_default(),
+            source_file: raw.source_file.or(raw.source).unwrap_or_default(),
+            source_line: raw.line.or(raw.source_line).unwrap_or_default(),
         }
     }
 }
@@ -863,6 +876,39 @@ mod tests {
         assert_eq!(parsed.failures[0].source_line, 42);
         assert_eq!(parsed.failures[0].error_type, "assertion");
         assert_eq!(parsed.failures[0].message, "failed assertion");
+    }
+
+    #[test]
+    fn failures_file_parser_accepts_normalized_runtime_helper_aliases() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let failures_file = temp_dir.path().join("test-failures.json");
+        std::fs::write(
+            &failures_file,
+            r#"[{
+                "test_id": "suite::case",
+                "test_name": "suite::case",
+                "file": "tests/suite.rs",
+                "test_file": "tests/suite.rs",
+                "line": 42,
+                "source_line": 42,
+                "failure_type": "assertion",
+                "error_type": "assertion",
+                "message": "failed assertion",
+                "source_file": "tests/suite.rs"
+            }]"#,
+        )
+        .expect("write normalized test failures");
+
+        let parsed = parse_failures_file(&failures_file)
+            .expect("normalized runtime-helper failures should parse")
+            .expect("test failures payload should be present");
+
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.failures[0].test_name, "suite::case");
+        assert_eq!(parsed.failures[0].test_file, "tests/suite.rs");
+        assert_eq!(parsed.failures[0].source_file, "tests/suite.rs");
+        assert_eq!(parsed.failures[0].source_line, 42);
+        assert_eq!(parsed.failures[0].error_type, "assertion");
     }
 
     #[test]
