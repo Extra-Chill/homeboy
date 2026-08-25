@@ -64,7 +64,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 ..RunnerSettings::default()
             },
         )),
-        RunnerCommand::List { full } => map_registry(list(full)),
+        RunnerCommand::List { full } => list(full)
+            .map(|(output, exit_code)| (RunnerCommandOutput::List(Box::new(output)), exit_code)),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
         RunnerCommand::Trust {
@@ -539,6 +540,13 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             command,
             extension_env_providers,
         ),
+        RunnerCommand::List { full: false } => {
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json(run(RunnerArgs {
+                    command: RunnerCommand::List { full: false },
+                }));
+            registry::compact_list_command_run(stdout_result, exit_code)
+        }
         command => {
             let (stdout_result, exit_code) =
                 crate::commands::utils::response::map_cmd_result_to_json(run(RunnerArgs {
