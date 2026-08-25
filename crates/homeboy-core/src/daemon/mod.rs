@@ -218,6 +218,29 @@ impl LocalControllerJobClient {
         Self::connect()
     }
 
+    /// Connect to the current daemon build, first applying its canonical idle
+    /// restart when authoritative status proves that no durable jobs are active.
+    ///
+    /// The lease-bound stop is a compare-and-swap on the daemon observed by the
+    /// report. A concurrent replacement therefore causes the stop to refuse
+    /// rather than terminating an unobserved owner, and the final connection
+    /// re-runs exact-build validation before any controller job is submitted.
+    pub fn connect_current_build_recovering_idle() -> Result<Self> {
+        let status = read_status()?;
+        if recovery_actions::authorizes_automatic_idle_restart(&status) {
+            match status.freshness.lease_id.as_deref() {
+                Some(lease_id) => {
+                    stop_for_lease(lease_id)?;
+                }
+                None => {
+                    stop()?;
+                }
+            }
+            start_background(DEFAULT_ADDR)?;
+        }
+        Self::connect_current_build()
+    }
+
     pub fn connect() -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()

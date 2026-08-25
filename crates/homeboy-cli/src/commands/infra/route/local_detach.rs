@@ -673,12 +673,16 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
-    // A daemon build mismatch cannot be resumed from the handoff parent: it has
-    // no materialized Cook recipe yet. Reject it before the first durable write
-    // so the supplied repair command can be followed by the same invocation.
+    // This is still before the first durable Cook write, but the validated
+    // request is already held in `child_args`. When authoritative daemon status
+    // authorizes a confirmation-free idle restart, recover under the exact
+    // lease and continue this same request instead of making the operator
+    // reconstruct it after `homeboy daemon recover --yes` (#13513).
     let preflight_controller_client = cli
         .detach_after_handoff
-        .then(homeboy::core::daemon::LocalControllerJobClient::connect_current_build)
+        .then(
+            homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle,
+        )
         .transpose()?;
 
     // One store for the whole handoff. The parent record, the child record, the
