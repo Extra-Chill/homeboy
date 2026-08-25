@@ -52,8 +52,8 @@ pub(super) fn remote_version_after_deploy_effect(
         observe_remote_version_from_applied_tree(component, project, base_path, client)
     else {
         return Ok(PostDeployVerification::AppliedUnverified(format!(
-            "Deploy command completed for '{}' at '{}', and Homeboy retried post-deploy remote_version verification against the applied tree, but the postcondition remained unreadable. Artifact mutation evidence is preserved; reverify with 'homeboy deploy {} --check'.",
-            component.id, effect.remote_path, project.id
+            "Deploy command completed for '{}' at '{}', and Homeboy retried post-deploy remote_version verification against the applied tree, but the postcondition remained unreadable. Artifact mutation evidence is preserved; reverify with 'homeboy deploy --project {} --component {} --check'.",
+            component.id, effect.remote_path, project.id, component.id
         )));
     };
 
@@ -186,7 +186,7 @@ mod tests {
             "unexpected outcome: {message}"
         );
         assert!(
-            message.contains("homeboy deploy site --check"),
+            message.contains("homeboy deploy --project site --component plugin --check"),
             "unexpected outcome: {message}"
         );
     }

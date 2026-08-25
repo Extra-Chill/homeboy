@@ -514,7 +514,7 @@ pub fn run_multi(
                 error: Some(match status {
                     lifecycle::DeployTargetStatus::AppliedUnverified => {
                         format!(
-                            "Mutation already applied in the resumed deploy run; reverify with 'homeboy deploy {} --check'",
+                            "Mutation already applied in the resumed deploy run; reverify with 'homeboy deploy --project {} --check'",
                             project_id
                         )
                     }
