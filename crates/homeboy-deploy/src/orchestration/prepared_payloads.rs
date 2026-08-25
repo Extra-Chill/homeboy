@@ -53,56 +53,59 @@ pub(super) fn prepare_component_deployments(
         let effective_config = config.clone();
         let is_artifact_deploy =
             !component.deploy_config().is_git_deploy() && !component.is_file_component();
-        let effective_config =
-            if is_artifact_deploy && !config.skip_build && config.prepared_artifact.is_none() {
-                let mut preparation_config = effective_config.clone();
-                // The existing detached checkout is the authoritative exact-ref source.
-                preparation_config.requested_ref = None;
-                preparation_config.requested_refs.clear();
-                let mut request =
-                    ComponentPayloadPreparationRequest::new(&component, &preparation_config);
-                request.config.exact_ref_materialized =
-                    config.requested_ref_for(&component.id).is_some();
-                if let Some(lease) = release_artifacts.get(&component.id).cloned() {
-                    if let Err(error) = payloads.insert(request.clone(), Some(lease)) {
-                        failures.push(ComponentDeployResult::failed(
-                            &component,
-                            base_path,
-                            local_versions.get(&component.id).cloned(),
-                            remote_versions.get(&component.id).cloned(),
-                            error.to_string(),
-                        ));
-                        continue;
-                    }
+        let effective_config = if is_artifact_deploy
+            && !config.skip_build
+            && config.prepared_artifact.is_none()
+            && !release_artifacts.contains_key(&component.id)
+        {
+            let mut preparation_config = effective_config.clone();
+            // The existing detached checkout is the authoritative exact-ref source.
+            preparation_config.requested_ref = None;
+            preparation_config.requested_refs.clear();
+            let mut request =
+                ComponentPayloadPreparationRequest::new(&component, &preparation_config);
+            request.config.exact_ref_materialized =
+                config.requested_ref_for(&component.id).is_some();
+            if let Some(lease) = release_artifacts.get(&component.id).cloned() {
+                if let Err(error) = payloads.insert(request.clone(), Some(lease)) {
+                    failures.push(ComponentDeployResult::failed(
+                        &component,
+                        base_path,
+                        local_versions.get(&component.id).cloned(),
+                        remote_versions.get(&component.id).cloned(),
+                        error.to_string(),
+                    ));
+                    continue;
                 }
-                match payloads.prepare(request, &mut release_artifact_store) {
-                    Ok(payload) => {
-                        binding_payloads.insert(component.id.clone(), payload.artifact.clone());
-                        let payload_build_ran = payload.build_ran;
-                        let mut prepared = effective_config;
-                        prepared.prepared_artifact = Some(payload.artifact.clone());
-                        prepared.skip_build = true;
-                        prepared.requested_ref = None;
-                        (prepared, payload_build_ran)
-                    }
-                    Err(error) => {
-                        let mut failure = ComponentDeployResult::failed(
-                            &component,
-                            base_path,
-                            local_versions.get(&component.id).cloned(),
-                            remote_versions.get(&component.id).cloned(),
-                            error.to_string(),
-                        );
-                        if let Some(exit_code) = preparation_build_exit_code(&error) {
-                            failure = failure.with_build_exit_code(Some(exit_code));
-                        }
-                        failures.push(failure);
-                        continue;
-                    }
+            }
+            match payloads.prepare(request, &mut release_artifact_store) {
+                Ok(payload) => {
+                    binding_payloads.insert(component.id.clone(), payload.artifact.clone());
+                    let payload_build_ran = payload.build_ran;
+                    let mut prepared = effective_config;
+                    prepared.prepared_artifact = Some(payload.artifact.clone());
+                    prepared.skip_build = true;
+                    prepared.requested_ref = None;
+                    (prepared, payload_build_ran)
                 }
-            } else {
-                (effective_config, false)
-            };
+                Err(error) => {
+                    let mut failure = ComponentDeployResult::failed(
+                        &component,
+                        base_path,
+                        local_versions.get(&component.id).cloned(),
+                        remote_versions.get(&component.id).cloned(),
+                        error.to_string(),
+                    );
+                    if let Some(exit_code) = preparation_build_exit_code(&error) {
+                        failure = failure.with_build_exit_code(Some(exit_code));
+                    }
+                    failures.push(failure);
+                    continue;
+                }
+            }
+        } else {
+            (effective_config, false)
+        };
 
         match prepare_component_deploy(
             &component,

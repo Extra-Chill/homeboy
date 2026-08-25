@@ -864,6 +864,7 @@ mod tests {
         checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
     };
     use crate::planning::{load_project_components, ExtensionSkippedComponent};
+    use crate::types::DeployArtifactSource;
     use homeboy_core::component::ComponentScriptsConfig;
     use homeboy_core::project::ProjectComponentAttachment;
     use homeboy_core::test_support::{home_env_guard, with_isolated_home};
@@ -2683,6 +2684,117 @@ mod tests {
             !artifact.starts_with(&component.local_path),
             "the stale configured-checkout artifact must not be reused"
         );
+    }
+
+    #[test]
+    fn explicit_version_release_asset_keeps_release_identity_and_ignores_stale_local_zip() {
+        with_isolated_home(|_| {
+            let temp = TempDir::new().expect("temp dir");
+            let component_path = temp.path().join("plugin");
+            std::fs::create_dir_all(component_path.join("build")).expect("build dir");
+            std::fs::write(component_path.join("plugin.php"), "Version: 1.7.0\n")
+                .expect("source version");
+
+            let stale_artifact = component_path.join("build/plugin.zip");
+            write_versioned_zip(&stale_artifact, "plugin/plugin.php", "Version: 1.6.0\n");
+
+            let release_artifact_path = temp.path().join("release-plugin.zip");
+            write_versioned_zip(
+                &release_artifact_path,
+                "plugin/plugin.php",
+                "Version: 1.7.0\n",
+            );
+            let release_bytes = std::fs::read(&release_artifact_path).expect("release bytes");
+            let release = ReleaseArtifactLease::test_new(
+                homeboy_core::git::release_download::ReleaseArtifact {
+                    path: release_artifact_path.clone(),
+                    tag: "v1.7.0".to_string(),
+                    commit: Some("release-commit".to_string()),
+                    url: "https://example.test/plugin/releases/download/v1.7.0/plugin.zip"
+                        .to_string(),
+                    name: "plugin.zip".to_string(),
+                    size: release_bytes.len() as u64,
+                    sha256: crate::sha256_file(&release_artifact_path).expect("sha"),
+                },
+            )
+            .expect("lease");
+
+            let component = Component {
+                id: "plugin".to_string(),
+                local_path: component_path.to_string_lossy().to_string(),
+                remote_path: "plugins/plugin".to_string(),
+                remote_url: Some("https://github.com/example/plugin".to_string()),
+                build_artifact: Some("build/plugin.zip".to_string()),
+                extract_command: Some("unzip -o {{artifact}}".to_string()),
+                version_targets: Some(vec![homeboy_core::component::VersionTarget {
+                    file: "plugin.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: Some("plugin/plugin.php".to_string()),
+                }]),
+                ..Component::default()
+            };
+            let mut config = base_deploy_config();
+            config.component_ids = vec!["plugin".to_string()];
+            config.expected_version = Some("1.7.0".to_string());
+
+            let dry_run = run_dry_run_mode(
+                std::slice::from_ref(&component),
+                &HashMap::from([("plugin".to_string(), "1.7.0".to_string())]),
+                &HashMap::new(),
+                &Project::default(),
+                "/srv/site",
+                &DeployConfig {
+                    dry_run: true,
+                    ..config.clone()
+                },
+            )
+            .expect("dry-run plan");
+            assert_eq!(
+                dry_run.results[0].artifact_source,
+                Some(DeployArtifactSource::ReleaseAsset)
+            );
+
+            let prepared = prepare_component_deployments(
+                std::slice::from_ref(&component),
+                &config,
+                &Project::default(),
+                "/srv/site",
+                &HashMap::from([("plugin".to_string(), "1.7.0".to_string())]),
+                &HashMap::new(),
+                &HashMap::from([("plugin".to_string(), release)]),
+            )
+            .expect("prepare explicit-version release deploy");
+
+            assert_eq!(
+                prepared[0].artifact_source,
+                Some(DeployArtifactSource::ReleaseAsset)
+            );
+            assert!(
+                prepared[0].config.prepared_artifact.is_none(),
+                "canonical release assets must not be rewritten into prepared_artifact inputs"
+            );
+            assert_eq!(
+                prepared[0].artifact_path.as_deref(),
+                Some(release_artifact_path.as_path())
+            );
+            let deployed_bytes =
+                std::fs::read(prepared[0].artifact_path.as_ref().expect("artifact path"))
+                    .expect("prepared bytes");
+            assert_eq!(
+                deployed_bytes, release_bytes,
+                "execution must use the resolved release asset instead of the stale local zip"
+            );
+        });
+    }
+
+    fn write_versioned_zip(path: &Path, entry: &str, contents: &str) {
+        let file = std::fs::File::create(path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(entry, zip::write::FileOptions::default())
+            .expect("zip entry");
+        use std::io::Write as _;
+        zip.write_all(contents.as_bytes()).expect("zip contents");
+        zip.finish().expect("zip finish");
     }
 
     #[test]
