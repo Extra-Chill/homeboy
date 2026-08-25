@@ -203,7 +203,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let secret_env = dispatch_secret_env(request, &provider_config);
     let runtime_dependency_graph_evidence = (!runtime_dependency_graph.is_empty())
         .then(|| runtime_dependency_graph.to_evidence_value());
-    let command_policy = resolve_dispatch_command_policy(request)?;
+    let managed_worktree = workspace_target
+        .as_ref()
+        .is_some_and(DispatchWorkspaceTarget::is_managed);
+    let command_policy = resolve_dispatch_command_policy(request, managed_worktree)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let resolved_prompt = if prompt_spec.is_literal {
@@ -218,6 +221,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             resolved_prompt.content.clone(),
             request.task_url.as_deref(),
             &command_policy,
+            managed_worktree,
         );
         let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
             request
@@ -521,6 +525,7 @@ fn dispatch_instructions(
     instructions: String,
     task_url: Option<&str>,
     command_policy: &AgentCommandPolicy,
+    managed_worktree: bool,
 ) -> String {
     // The command policy is stated in the prompt as well as enforced. Homeboy
     // structurally refuses a denied command at its own tool boundary, but a
@@ -528,12 +533,17 @@ fn dispatch_instructions(
     // crosses that boundary — for those runtimes the agent has to be told, in
     // terms it cannot miss, what it may not run and what to do instead.
     let constraints = command_policy.prompt_constraints();
-    let instructions = match constraints {
+    let mut instructions = match constraints {
         Some(constraints) if !instructions.contains("Command policy (declared by the operator") => {
             format!("{instructions}\n\n{constraints}")
         }
         _ => instructions,
     };
+    if managed_worktree && !instructions.contains("Parallel worktree patch preservation:") {
+        instructions.push_str(
+            "\n\nParallel worktree patch preservation:\n- Never use `git stash`; its stack is shared by every worktree in the repository.\n- Before current-base reconciliation, run `homeboy git patch preserve <operation-id> --path <worktree>`. Restore only with `homeboy git patch restore <operation-id> --path <worktree>`, never by stack position.\n- Keep the durable patch evidence until restoration and cleanup state are recorded.",
+        );
+    }
 
     if task_url.is_none() || instructions.contains("Generated change guardrails") {
         return instructions;
@@ -655,6 +665,13 @@ pub(crate) struct DispatchWorkspaceTarget {
 }
 
 impl DispatchWorkspaceTarget {
+    fn is_managed(&self) -> bool {
+        matches!(
+            self.kind.as_deref(),
+            Some("homeboy-worktree" | "worktree-provider")
+        )
+    }
+
     fn path(root: std::path::PathBuf, kind: &str) -> Self {
         let slug = root
             .file_name()
@@ -812,6 +829,7 @@ mod tests {
             "Implement the tracked change.".to_string(),
             Some("https://example.test/issues/1"),
             &AgentCommandPolicy::default(),
+            false,
         );
 
         assert!(instructions.contains("successful gates remain authoritative"));
@@ -826,6 +844,7 @@ mod tests {
             "Implement the tracked change.".to_string(),
             None,
             &AgentCommandPolicy::default(),
+            false,
         );
 
         assert_eq!(instructions, "Implement the tracked change.");
@@ -839,12 +858,38 @@ mod tests {
             ..AgentCommandPolicy::default()
         };
 
-        let instructions =
-            dispatch_instructions("Implement the tracked change.".to_string(), None, &policy);
+        let instructions = dispatch_instructions(
+            "Implement the tracked change.".to_string(),
+            None,
+            &policy,
+            false,
+        );
 
         assert!(instructions.contains("`cargo test`"));
         assert!(instructions.contains("this host routes builds to CI"));
         assert!(instructions.contains("Make your edits, commit"));
+    }
+
+    #[test]
+    fn managed_worktree_refuses_repository_global_stash_and_guides_safe_recovery() {
+        let request = dispatch_request(DispatchRequestOverrides::default());
+        let policy = resolve_dispatch_command_policy(&request, true).expect("managed policy");
+
+        let decision = policy.evaluate("git stash push -u");
+        let denial = decision.denial().expect("stash denied");
+        assert_eq!(denial.matched_pattern.as_deref(), Some("git stash*"));
+        assert!(denial.reason.contains("repository-global"));
+
+        let instructions = dispatch_instructions(
+            "Reconcile with the current base.".to_string(),
+            None,
+            &policy,
+            true,
+        );
+        assert!(instructions.contains("Never use `git stash`"));
+        assert!(instructions.contains("homeboy git patch preserve <operation-id>"));
+        assert!(instructions.contains("homeboy git patch restore <operation-id>"));
+        assert!(instructions.contains("durable patch evidence"));
     }
 
     #[test]

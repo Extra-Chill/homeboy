@@ -1,5 +1,5 @@
 use super::args::{ComponentPathArgs, IssueArgs, IssueCommand, PrArgs, PrCommand};
-use super::GitCommand;
+use super::{GitCommand, PatchCommand};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -137,5 +137,31 @@ fn issue_find_path_flag_parses() {
             assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
         }
         _ => panic!("expected issue find command"),
+    }
+}
+
+#[test]
+fn operation_owned_patch_commands_parse() {
+    for (action, restore) in [("preserve", false), ("restore", true)] {
+        let cli = TestCli::try_parse_from([
+            "git",
+            "patch",
+            action,
+            "cook-123",
+            "--path",
+            "/tmp/worktree",
+        ])
+        .expect("patch command parses");
+
+        let GitCommand::Patch { command } = cli.command else {
+            panic!("expected patch command");
+        };
+        let (operation_id, path, parsed_restore) = match command {
+            PatchCommand::Preserve { operation_id, path } => (operation_id, path, false),
+            PatchCommand::Restore { operation_id, path } => (operation_id, path, true),
+        };
+        assert_eq!(operation_id, "cook-123");
+        assert_eq!(path.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(parsed_restore, restore);
     }
 }

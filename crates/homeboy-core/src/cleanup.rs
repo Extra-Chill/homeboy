@@ -347,7 +347,7 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| unsafe {
         let stat = stat.assume_init();
-        stat.f_bavail.saturating_mul(stat.f_frsize)
+        u64::from(stat.f_bavail).saturating_mul(stat.f_frsize)
     })
 }
 

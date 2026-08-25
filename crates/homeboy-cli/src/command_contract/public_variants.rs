@@ -171,6 +171,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: None,
     },
     PublicOutputVariantContract {
+        command: "git",
+        variant: "patch",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("patch"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
         command: "api",
         variant: "response",
         discriminator_field: Some("variant"),

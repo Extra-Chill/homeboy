@@ -11,6 +11,7 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod patch_preservation;
 mod pr_land;
 mod pr_policy;
 mod pr_refresh;
@@ -73,6 +74,10 @@ pub use operations_tags::{
     delete_local_tag, delete_remote_tag, fetch_origin, fetch_tags, get_head_commit, get_tag_commit,
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote, tags_pointing_at_commit,
+};
+pub use patch_preservation::{
+    preserve_worktree_patch, restore_worktree_patch, PatchPreservationEvidence,
+    PatchPreservationState, PreservedPatchArtifact,
 };
 pub use pr_land::{land_prs, PrCheckWaiver, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
