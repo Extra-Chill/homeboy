@@ -64,15 +64,19 @@ install_wp_codebox() {
     preflight_wp_codebox_version() {
         local bin_path="$1"
         local script_dir
-        local resolver
         local selection_module
         local result
 
-        # Keep the setup gate bound to the same runtime manifest as the PHPUnit
-        # adapter. The resolver supports both installed and checkout layouts.
+        # Setup runs before Homeboy installs this extension beside the shared
+        # runtime shim. Validate through the canonical helper in the extension
+        # source currently being installed; runtime consumers use the shim once
+        # the installed sibling exists.
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        resolver="${script_dir}/../lib/agent-runtime-paths.cjs"
-        selection_module="$(node "${resolver}" "wp-codebox/lib/wp-codebox-runtime-selection.js")" || return 1
+        selection_module="${script_dir}/../../lib/wp-codebox-runtime-selection.js"
+        if [ ! -f "${selection_module}" ]; then
+            echo "WordPress setup runtime selection helper missing at ${selection_module}" >&2
+            return 1
+        fi
         result="$(node - "${selection_module}" "${bin_path}" <<'NODE'
 const { preflightWpCodeboxCommand } = require(process.argv[2]);
 const result = preflightWpCodeboxCommand([process.argv[3]]);

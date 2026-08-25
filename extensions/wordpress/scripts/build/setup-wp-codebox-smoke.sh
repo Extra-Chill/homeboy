@@ -4,11 +4,13 @@ set -euo pipefail
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NODE_BIN_DIR="$(dirname "$(command -v node)")"
 FAKE_BIN="${TMPDIR}/bin"
 HOME_DIR="${TMPDIR}/home"
 EXTENSION_DIR="${TMPDIR}/extension"
+GENERATION_ROOT="${TMPDIR}/runtime-generation"
+ROOT_DIR="${GENERATION_ROOT}/setup-source/wordpress"
 GITHUB_ENV_FILE="${TMPDIR}/github-env"
 SOURCE_GITHUB_ENV_FILE="${TMPDIR}/source-github-env"
 MISSING_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/missing-release-github-env"
@@ -17,8 +19,34 @@ ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 REAL_GIT_BIN="${TMPDIR}/real-git-bin"
 
-mkdir -p "${FAKE_BIN}" "${REAL_GIT_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
+mkdir -p "${FAKE_BIN}" "${REAL_GIT_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ROOT_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
 ln -s "$(command -v git)" "${REAL_GIT_BIN}/git"
+
+# Reproduce Homeboy's setup generation: setup executes from a copied extension
+# source while shared runtimes are already materialized, but the final
+# extensions/wordpress sibling does not exist until setup completes.
+cp -R "${SOURCE_ROOT}/scripts" "${ROOT_DIR}/scripts"
+cp -R "${SOURCE_ROOT}/lib" "${ROOT_DIR}/lib"
+cp "${SOURCE_ROOT}/wordpress.json" "${ROOT_DIR}/wordpress.json"
+cp -R "${SOURCE_ROOT}/../agent-runtimes" "${GENERATION_ROOT}/agent-runtimes"
+
+for missing_sibling in "${GENERATION_ROOT}/extensions/wordpress" "${GENERATION_ROOT}/wordpress"; do
+    if [ -e "${missing_sibling}" ]; then
+        echo "Setup generation fixture must not contain preinstalled sibling: ${missing_sibling}" >&2
+        exit 1
+    fi
+done
+
+PREINSTALL_SHIM="${GENERATION_ROOT}/agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js"
+if node -e 'require(process.argv[1])' "${PREINSTALL_SHIM}" 2> "${TMPDIR}/preinstall-shim.err"; then
+    echo "Pre-install runtime shim unexpectedly resolved without a WordPress sibling" >&2
+    exit 1
+fi
+if ! grep -q 'requires the installed WordPress extension' "${TMPDIR}/preinstall-shim.err"; then
+    echo "Expected pre-install runtime shim failure to name the missing WordPress sibling" >&2
+    cat "${TMPDIR}/preinstall-shim.err" >&2
+    exit 1
+fi
 
 cat > "${EXTENSION_DIR}/scripts/build/persist-wp-codebox-overrides.mjs" <<'NODE'
 #!/usr/bin/env node
@@ -173,6 +201,12 @@ chmod +x "${FAKE_BIN}/npm"
     HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/setup.out"
 )
+
+if ! grep -q 'WordPress extension setup complete.' "${TMPDIR}/setup.out"; then
+    echo "Expected copied-generation setup to complete without a preinstalled WordPress sibling" >&2
+    cat "${TMPDIR}/setup.out" >&2
+    exit 1
+fi
 
 if ! grep -q '^HOMEBOY_WP_CODEBOX_BIN=' "${GITHUB_ENV_FILE}"; then
     echo "Expected setup to export HOMEBOY_WP_CODEBOX_BIN" >&2
