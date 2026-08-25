@@ -1425,7 +1425,10 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
 /// this, run-plan admitted children but never wrote
 /// `agent-task-batches/<fanout_id>.json`, so status failed with
 /// `No such file or directory`.
-fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan, placement: Placement) -> Result<()> {
+fn persist_fanout_run_batch_record(
+    plan: &BatchCookFanoutPlan,
+    placement: Placement,
+) -> Result<bool> {
     let children = plan
         .cooks
         .iter()
@@ -1434,7 +1437,7 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan, placement: Placem
             run_id: cook.run_id(),
         })
         .collect::<Vec<_>>();
-    batch::persist_fanout_run_batch(
+    let record = batch::persist_fanout_run_batch(
         &plan.fanout_id,
         &plan.fanout_id,
         &children,
@@ -1445,20 +1448,20 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan, placement: Placem
             "dependency_graph": plan.dependency_graph_metadata()?,
         }),
     )?;
-    Ok(())
+    Ok(record.state != batch::AgentTaskBatchState::Planning)
 }
 
 fn claim_fanout_run_batch_coordinator(
     plan: &BatchCookFanoutPlan,
     placement: Placement,
-) -> Result<String> {
-    persist_fanout_run_batch_record(plan, placement)?;
+) -> Result<(String, bool)> {
+    let retry = persist_fanout_run_batch_record(plan, placement)?;
     if let Some(claim_id) = batch::claim_fanout_run_batch(&plan.fanout_id)? {
         eprintln!(
             "{{\"event\":\"coordinator_admission_claimed\",\"phase\":\"admitting\",\"children_total\":{},\"next_action\":\"homeboy agent-task fanout status {}\"}}",
             plan.cooks.len(), plan.fanout_id,
         );
-        return Ok(claim_id);
+        return Ok((claim_id, retry));
     }
     Err(Error::validation_invalid_argument(
         "fanout_id",
@@ -1517,15 +1520,18 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
 fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
     plan: BatchCookFanoutPlan,
     attempt_dispatcher: &CookAttemptDispatcherFactory,
-    claim_id: Option<String>,
+    claim: Option<(String, bool)>,
     placement: Placement,
 ) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
-    let claim_id = match claim_id {
-        Some(claim_id) => claim_id,
+    let (claim_id, retry) = match claim {
+        Some(claim) => claim,
         None => claim_fanout_run_batch_coordinator(&plan, placement)?,
     };
+    let previously_terminal = retry
+        .then(|| durable_terminal_worktree_paths(&plan))
+        .transpose()?;
     let outcome = (|| {
         let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
         persist_batch_cook_recipes(&plan, |options| {
@@ -1550,12 +1556,12 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
                     max_concurrency: concurrency.limit,
                 },
                 Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
-                agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
+                cook_batch_coordinator_control(&plan.fanout_id, retry),
             )
         });
         heartbeat.finish()?;
         let result = result?;
-        finalize_provider_worktrees(&plan, &result.value)?;
+        finalize_provider_worktrees(&plan, &result.value, previously_terminal.as_ref())?;
         record_terminal_batch_admission_failures(&plan, &result.value)?;
         notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
         let result = batch_cook_result(&plan, result, &concurrency);
@@ -1582,15 +1588,18 @@ fn run_batch_cook_fanout_plan_with_placement(
 fn run_batch_cook_fanout_plan_with_executor_claim(
     plan: BatchCookFanoutPlan,
     executor: SharedAgentTaskExecutor,
-    claim_id: Option<String>,
+    claim: Option<(String, bool)>,
     placement: Placement,
 ) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
-    let claim_id = match claim_id {
-        Some(claim_id) => claim_id,
+    let (claim_id, retry) = match claim {
+        Some(claim) => claim,
         None => claim_fanout_run_batch_coordinator(&plan, placement)?,
     };
+    let previously_terminal = retry
+        .then(|| durable_terminal_worktree_paths(&plan))
+        .transpose()?;
     let outcome = (|| {
         let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
         persist_batch_cook_recipes(&plan, |options| {
@@ -1612,12 +1621,12 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
                     max_concurrency: concurrency.limit,
                 },
                 executor,
-                agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
+                cook_batch_coordinator_control(&plan.fanout_id, retry),
             )
         });
         heartbeat.finish()?;
         let result = result?;
-        finalize_provider_worktrees(&plan, &result.value)?;
+        finalize_provider_worktrees(&plan, &result.value, previously_terminal.as_ref())?;
         record_terminal_batch_admission_failures(&plan, &result.value)?;
         notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
         let result = batch_cook_result(&plan, result, &concurrency);
@@ -1627,6 +1636,15 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
         record_batch_failure(&plan, &claim_id, "coordinator", error);
     }
     outcome
+}
+
+fn cook_batch_coordinator_control(
+    fanout_id: &str,
+    retry: bool,
+) -> agent_task_service::AgentTaskCookBatchControl {
+    let mut control = agent_task_service::detached_batch_coordinator_control(fanout_id);
+    control.skip_durably_terminal_children |= retry;
+    control
 }
 
 fn validate_batch_gate_contracts(
@@ -1672,6 +1690,7 @@ fn record_gate_contract_validation(
 fn finalize_provider_worktrees(
     plan: &BatchCookFanoutPlan,
     report: &agent_task_service::AgentTaskCookBatchReport,
+    previously_terminal: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
     if !configured_provider_workspace_creation()? {
         return Ok(());
@@ -1688,6 +1707,9 @@ fn finalize_provider_worktrees(
         else {
             continue;
         };
+        if previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id())) {
+            continue;
+        }
         let resolution =
             homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
                 &cook.to_worktree,
@@ -2005,18 +2027,32 @@ fn cook_batch_inner(
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
     let persisted = args.run_plan && !args.dry_run;
-    let claim_id = persisted
+    let claim = persisted
         .then(|| claim_fanout_run_batch_coordinator(&plan, placement))
         .transpose()?;
     if let Err(error) = validate_batch_cook_gates(&plan, batch_gate_workspace(&args)?) {
-        record_batch_preflight_failure(claim_id.as_deref(), &plan, "gate_preflight", &error)?;
+        record_batch_preflight_failure(
+            claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
+            &plan,
+            "gate_preflight",
+            &error,
+        )?;
         return Err(error);
     }
-    let worktrees = match queue_or_reuse_worktrees(&args, &plan) {
+    let previously_terminal = claim
+        .as_ref()
+        .is_some_and(|(_, retry)| *retry)
+        .then(|| durable_terminal_worktree_paths(&plan))
+        .transpose()?;
+    let worktrees = match queue_or_reuse_worktrees_with_terminal_paths(
+        &args,
+        &plan,
+        previously_terminal.as_ref(),
+    ) {
         Ok(worktrees) => worktrees,
         Err(error) => {
             record_batch_preflight_failure(
-                claim_id.as_deref(),
+                claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
                 &plan,
                 "worktree_preflight",
                 &error,
@@ -2039,7 +2075,10 @@ fn cook_batch_inner(
     if persisted && blocked > 0 {
         batch::record_fanout_run_batch_failure(
             &plan.fanout_id,
-            claim_id.as_deref().expect("persisted coordinator claim"),
+            claim
+                .as_ref()
+                .map(|(claim_id, _)| claim_id.as_str())
+                .expect("persisted coordinator claim"),
             "worktree_preflight",
             serde_json::json!({ "worktrees": worktrees.rows }),
         )?;
@@ -2053,7 +2092,7 @@ fn cook_batch_inner(
     let private_artifact_path = if can_run && plan_has_private_gates {
         if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
             record_batch_preflight_failure(
-                claim_id.as_deref(),
+                claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
                 &plan,
                 "worktree_preflight",
                 &error,
@@ -2065,7 +2104,7 @@ fn cook_batch_inner(
         if can_run {
             if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
                 record_batch_preflight_failure(
-                    claim_id.as_deref(),
+                    claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
                     &plan,
                     "worktree_preflight",
                     &error,
@@ -2081,7 +2120,7 @@ fn cook_batch_inner(
         // materialization.
         if let Err(error) = preflight_batch_cook_recipes(&plan, attempt_dispatcher) {
             record_batch_preflight_failure(
-                claim_id.as_deref(),
+                claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
                 &plan,
                 "provider_preflight",
                 &error,
@@ -2094,13 +2133,13 @@ fn cook_batch_inner(
             Some(dispatcher) => run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
                 plan.clone(),
                 dispatcher,
-                claim_id.clone(),
+                claim.clone(),
                 placement,
             )?,
             None => run_batch_cook_fanout_plan_with_executor_claim(
                 plan.clone(),
                 Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
-                claim_id.clone(),
+                claim.clone(),
                 placement,
             )?,
         };
@@ -2678,6 +2717,14 @@ fn queue_or_reuse_worktrees(
     args: &AgentTaskFanoutCookBatchArgs,
     plan: &BatchCookFanoutPlan,
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
+    queue_or_reuse_worktrees_with_terminal_paths(args, plan, None)
+}
+
+fn queue_or_reuse_worktrees_with_terminal_paths(
+    args: &AgentTaskFanoutCookBatchArgs,
+    plan: &BatchCookFanoutPlan,
+    previously_terminal: Option<&BTreeMap<String, String>>,
+) -> Result<worktree::WorktreeQueueCreateOutput> {
     let provider_workspace_creation = configured_provider_workspace_creation()?;
     let queue_create = |cooks: Vec<&BatchCookSpec>, dry_run: bool| {
         worktree::queue_create(worktree::WorktreeQueueCreateOptions {
@@ -2707,8 +2754,22 @@ fn queue_or_reuse_worktrees(
 
     let mut reused = Vec::new();
     let mut to_create = Vec::new();
+    let provider_config = provider_workspace_creation.then(homeboy::core::defaults::load_config);
     for cook in &plan.cooks {
         let branch = cook.head.as_ref().expect("generated cooks have heads");
+        if let Some(path) = previously_terminal.and_then(|terminal| terminal.get(&cook.run_id())) {
+            reused.push(worktree::WorktreeQueueCreateRow {
+                branch: branch.clone(),
+                handle: cook.to_worktree.clone(),
+                status: worktree::WorktreeQueueCreateStatus::Created,
+                command: vec!["terminal".to_string(), cook.to_worktree.clone()],
+                retry_after_seconds: None,
+                active_lock_holder: None,
+                path: Some(path.clone()),
+                error: None,
+            });
+            continue;
+        }
         if cook.adopted_worktree {
             let resolution = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
                 &cook.to_worktree,
@@ -2790,6 +2851,50 @@ fn queue_or_reuse_worktrees(
             });
             continue;
         }
+        if let Some(config) = &provider_config {
+            match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+                    &cook.to_worktree,
+                    config,
+                    None,
+                ) {
+                Ok(resolution) => {
+                    if resolution.worktree.branch != *branch {
+                        return Err(Error::validation_invalid_argument(
+                            "worktree",
+                            "resolved provider worktree branch does not match its Cook child",
+                            Some(cook.to_worktree.clone()),
+                            None,
+                        ));
+                    }
+                    if resolution.worktree.task_url.as_deref().is_some_and(|task_url| {
+                        cook.task_url.as_deref().is_none_or(|expected| {
+                            homeboy::core::worktree_providers::normalize_task_url(task_url)
+                                != homeboy::core::worktree_providers::normalize_task_url(expected)
+                        })
+                    }) {
+                        return Err(Error::validation_invalid_argument(
+                            "worktree",
+                            "resolved provider worktree tracker does not match its Cook child",
+                            Some(cook.to_worktree.clone()),
+                            None,
+                        ));
+                    }
+                    reused.push(worktree::WorktreeQueueCreateRow {
+                        branch: branch.clone(),
+                        handle: cook.to_worktree.clone(),
+                        status: worktree::WorktreeQueueCreateStatus::Created,
+                        command: Vec::new(),
+                        retry_after_seconds: None,
+                        active_lock_holder: None,
+                        path: Some(resolution.worktree.path),
+                        error: None,
+                    });
+                    continue;
+                }
+                Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {}
+                Err(error) => return Err(error),
+            }
+        }
         match (!provider_workspace_creation)
             .then(|| active_registered_worktree_path(&cook.to_worktree))
         {
@@ -2831,6 +2936,34 @@ fn queue_or_reuse_worktrees(
             rows,
         },
     )
+}
+
+fn durable_terminal_worktree_paths(plan: &BatchCookFanoutPlan) -> Result<BTreeMap<String, String>> {
+    let mut terminal = BTreeMap::new();
+    for cook in &plan.cooks {
+        let Ok(record) = agent_task_lifecycle::status(&cook.run_id()) else {
+            continue;
+        };
+        if !record.state.is_terminal() {
+            continue;
+        }
+        let recipe = agent_task_service::load_recipe(&cook.run_id())?;
+        let path = recipe
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.plan.tasks.first())
+            .and_then(|task| task.workspace.root.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "worktree",
+                    "terminal Cook recipe does not preserve its immutable workspace",
+                    Some(cook.to_worktree.clone()),
+                    None,
+                )
+            })?;
+        terminal.insert(cook.run_id(), path);
+    }
+    Ok(terminal)
 }
 
 /// A preview must not contact a worktree provider, inspect existing worktrees,
@@ -5581,7 +5714,8 @@ mod tests {
                     .collect(),
             };
 
-            finalize_provider_worktrees(&plan, &report).expect("dispatcher fanout terminalization");
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("dispatcher fanout terminalization");
 
             let records = std::fs::read_to_string(records).expect("provider finalization records");
             assert!(records.contains(&format!(
@@ -6878,6 +7012,184 @@ fi
             assert!(!repair_commands
                 .iter()
                 .any(|command| command.contains("homeboy worktree create")));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_fanout_retry_re_resolves_out_of_band_worktrees_without_ensuring_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|_| {
+            let fixture = tempfile::tempdir().expect("provider fixture");
+            let workspace_root = fixture.path().join("worktrees");
+            let ensure_calls = fixture.path().join("ensure-calls");
+            let provider = fixture.path().join("provider");
+            std::fs::create_dir(&workspace_root).expect("provider worktree directory");
+            std::fs::write(
+                &provider,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  path='{}/'$2\n  if [ -d \"$path\" ]; then\n    branch=$(git -C \"$path\" branch --show-current)\n    printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"%s\",\"branch\":\"%s\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\" \"$path\" \"$branch\"\n  else\n    exit 1\n  fi\n  ;;\nensure)\n  printf '%s\\n' \"$2\" >> '{}'\n  exit 1\n  ;;\nesac\n",
+                    workspace_root.display(),
+                    ensure_calls.display(),
+                ),
+            )
+            .expect("write provider");
+            let mut permissions = std::fs::metadata(&provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "fixture".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        resolve: Some(vec![
+                            provider.display().to_string(),
+                            "resolve".to_string(),
+                            "{handle}".to_string(),
+                        ]),
+                        resolve_not_found_exit_codes: vec![1],
+                        ensure: Some(vec![
+                            provider.display().to_string(),
+                            "ensure".to_string(),
+                            "{handle}".to_string(),
+                            "{repo}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                            task_url: None,
+                        },
+                    ),
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let mut args = cook_batch_args();
+            args.dry_run = false;
+            let plan = build_cook_batch_plan(&args).expect("immutable fanout plan");
+            let original_plan = plan.clone();
+            let (first_claim, retry) =
+                claim_fanout_run_batch_coordinator(&plan, Placement::Auto).expect("first claim");
+            assert!(!retry);
+            batch::record_fanout_run_batch_failure(
+                &plan.fanout_id,
+                &first_claim,
+                "worktree_preflight",
+                json!({ "worktrees": "blocked" }),
+            )
+            .expect("record blocked preflight");
+            let (_, retry) = claim_fanout_run_batch_coordinator(&plan, Placement::Auto)
+                .expect("reclaim repaired batch");
+            assert!(retry);
+            assert!(
+                cook_batch_coordinator_control(&plan.fanout_id, retry)
+                    .skip_durably_terminal_children
+            );
+
+            let blocked = queue_or_reuse_worktrees(&args, &plan).expect("blocked first attempt");
+            assert_eq!(
+                blocked.rows[0].status,
+                worktree::WorktreeQueueCreateStatus::Failed
+            );
+            assert!(blocked.rows[1..]
+                .iter()
+                .all(|row| { row.status == worktree::WorktreeQueueCreateStatus::Queued }));
+            assert_eq!(
+                std::fs::read_to_string(&ensure_calls).expect("first ensure call"),
+                format!("{}\n", plan.cooks[0].to_worktree)
+            );
+
+            let mismatched = &plan.cooks[0];
+            let mismatched_path = workspace_root.join(&mismatched.to_worktree);
+            std::fs::create_dir(&mismatched_path).expect("materialize mismatched destination");
+            assert!(Command::new("git")
+                .args(["init", "--quiet", "-b", "wrong-branch"])
+                .current_dir(&mismatched_path)
+                .status()
+                .expect("initialize mismatched destination")
+                .success());
+            let mismatch = queue_or_reuse_worktrees(&args, &plan)
+                .expect_err("immutable branch mismatch must be rejected");
+            assert!(mismatch.message.contains("branch does not match"));
+            std::fs::remove_dir_all(&mismatched_path).expect("remove mismatched destination");
+
+            for cook in &plan.cooks {
+                let path = workspace_root.join(&cook.to_worktree);
+                std::fs::create_dir(&path).expect("materialize provider destination");
+                assert!(Command::new("git")
+                    .args(["init", "--quiet", "-b", cook.head.as_deref().expect("head")])
+                    .current_dir(&path)
+                    .status()
+                    .expect("initialize provider destination")
+                    .success());
+            }
+
+            let recovered =
+                queue_or_reuse_worktrees(&args, &plan).expect("re-resolve recovered destinations");
+
+            assert_eq!(plan, original_plan, "resolution cannot mutate Cook intent");
+            assert!(recovered.rows.iter().all(|row| {
+                row.status == worktree::WorktreeQueueCreateStatus::Created
+                    && row.path.as_deref().is_some_and(|path| {
+                        path.starts_with(workspace_root.to_string_lossy().as_ref())
+                    })
+                    && row.error.is_none()
+            }));
+
+            let terminal_cook = &plan.cooks[0];
+            let terminal_path = workspace_root.join(&terminal_cook.to_worktree);
+            std::fs::remove_dir_all(&terminal_path).expect("simulate finalized terminal worktree");
+            let terminal_paths =
+                BTreeMap::from([(terminal_cook.run_id(), terminal_path.display().to_string())]);
+            let terminal_replay =
+                queue_or_reuse_worktrees_with_terminal_paths(&args, &plan, Some(&terminal_paths))
+                    .expect("terminal child does not reprovision its finalized worktree");
+            assert_eq!(
+                terminal_replay.rows[0].path.as_deref(),
+                Some(terminal_path.to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                std::fs::read_to_string(&ensure_calls).expect("ensure call remains recorded"),
+                format!("{}\n", plan.cooks[0].to_worktree),
+                "exact recovered destinations must not trigger duplicate creation"
+            );
+            assert!(cook_batch_next_actions(
+                &args,
+                &plan.fanout_id,
+                "ready",
+                true,
+                false,
+                &recovered,
+                false,
+                None,
+            )
+            .iter()
+            .all(|action| !action.label.starts_with("create blocked worktree")));
         });
     }
 
