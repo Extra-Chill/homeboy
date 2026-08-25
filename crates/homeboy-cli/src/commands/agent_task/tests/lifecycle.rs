@@ -157,7 +157,8 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
         .expect("persist Lab transport failure");
 
         let record = agent_task_lifecycle::status(run_id).expect("durable failed record");
-        let aggregate = homeboy_agents::agent_task_lifecycle::read_aggregate(run_id)
+        let aggregate = test_lifecycle_store()
+            .read_aggregate(run_id)
             .expect("durable aggregate");
         assert!(record.lab_handoff.is_none());
         assert!(record.runner_job_id().is_none());
