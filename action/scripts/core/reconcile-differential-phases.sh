@@ -6,6 +6,7 @@ set -euo pipefail
 
 artifact_root="${PHASE_ARTIFACT_ROOT:?PHASE_ARTIFACT_ROOT is required}"
 command="${COMMAND:?COMMAND is required}"
+artifact_key="${ARTIFACT_KEY:?ARTIFACT_KEY is required}"
 action_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fail_closed() {
@@ -23,6 +24,7 @@ fail_closed() {
 # failed the job silently: exit 1, `results=fail` recorded, and not one word
 # explaining why. Keeping this in the current shell keeps the diagnosis visible.
 RESOLVED_MANIFEST=""
+RESOLVED_ARTIFACT_NAME=""
 manifest_for() {
   local phase="$1"
   local path attempt selected="" selected_attempt=0 selected_count=0
@@ -38,14 +40,23 @@ manifest_for() {
     fi
   done < <(find "${artifact_root}" -path "*/${phase}/manifest.json" -type f | sort)
   if [ -z "${selected}" ]; then
-    fail_closed "No ${phase} provenance artifact found under '${artifact_root}'. The ${phase} job did not upload one — check whether it ran, was skipped, or failed before writing evidence."
+    local expected_artifact="homeboy-differential-${phase}-${artifact_key}-${RUN_ATTEMPT}"
+    fail_closed "No ${phase} provenance artifact '${expected_artifact}' was found under '${artifact_root}'. The ${phase} producer did not publish valid evidence. Repair that producer, then rerun the complete workflow: gh run rerun ${GITHUB_RUN_ID:-<run-id>} --repo ${REPOSITORY:?REPOSITORY is required}"
   fi
   [ "${selected_count}" -eq 1 ] || fail_closed "Expected one newest ${phase} provenance artifact; found ${selected_count} at attempt ${selected_attempt}."
   RESOLVED_MANIFEST="${selected}"
+  local relative="${selected#"${artifact_root}"/}" first_component=""
+  first_component="${relative%%/*}"
+  if [[ "${first_component}" == homeboy-differential-* ]]; then
+    RESOLVED_ARTIFACT_NAME="${first_component}"
+  else
+    RESOLVED_ARTIFACT_NAME="homeboy-differential-${phase}-${artifact_key}-${selected_attempt}"
+  fi
 }
 
 manifest_for candidate
 candidate_manifest="${RESOLVED_MANIFEST}"
+candidate_artifact_name="${RESOLVED_ARTIFACT_NAME}"
 candidate_dir="$(dirname "${candidate_manifest}")"
 
 # Report WHICH identity field failed.
@@ -56,58 +67,58 @@ candidate_dir="$(dirname "${candidate_manifest}")"
 # Artifacts are untrusted transport, so the checks themselves stay strict — only
 # the reporting changes.
 _field_mismatch() {
-  local phase="$1" field="$2" expected="$3" actual="$4"
-  fail_closed "${phase} phase provenance field '${field}' does not match this workflow: expected '${expected}', artifact has '${actual}'."
+  local phase="$1" artifact_name="$2" field="$3" expected="$4" actual="$5"
+  fail_closed "Malformed provenance from ${phase} producer artifact '${artifact_name}': ${phase} phase provenance field '${field}' does not match this workflow: expected '${expected}', artifact has '${actual}'. Repair the ${phase} producer, then rerun the complete workflow: gh run rerun ${GITHUB_RUN_ID:-<run-id>} --repo ${REPOSITORY}"
 }
 
 _check_equals() {
-  local phase="$1" manifest="$2" field="$3" expected="$4"
+  local phase="$1" artifact_name="$2" manifest="$3" field="$4" expected="$5"
   local actual
   actual="$(jq -r --arg f "${field}" '.[$f] // "<absent>"' "${manifest}" 2>/dev/null || printf '<unreadable>')"
-  [ "${actual}" = "${expected}" ] || _field_mismatch "${phase}" "${field}" "${expected}" "${actual}"
+  [ "${actual}" = "${expected}" ] || _field_mismatch "${phase}" "${artifact_name}" "${field}" "${expected}" "${actual}"
 }
 
 _check_predicate() {
-  local phase="$1" manifest="$2" field="$3" description="$4" filter="$5"
+  local phase="$1" artifact_name="$2" manifest="$3" field="$4" description="$5" filter="$6"
   jq -e "${filter}" "${manifest}" >/dev/null 2>&1 && return 0
   local actual
   actual="$(jq -c --arg f "${field}" '.[$f] // "<absent>"' "${manifest}" 2>/dev/null || printf '<unreadable>')"
-  fail_closed "${phase} phase provenance field '${field}' is invalid: ${description}. Artifact has ${actual}."
+  fail_closed "Malformed provenance from ${phase} producer artifact '${artifact_name}': ${phase} phase provenance field '${field}' is invalid: ${description}. Artifact has ${actual}. Repair the ${phase} producer, then rerun the complete workflow: gh run rerun ${GITHUB_RUN_ID:-<run-id>} --repo ${REPOSITORY}"
 }
 
 validate_manifest() {
-  local phase="$1" manifest="$2" expected_sha="$3"
+  local phase="$1" artifact_name="$2" manifest="$3" expected_sha="$4"
 
-  [ -f "${manifest}" ] || fail_closed "${phase} phase provenance artifact is missing at '${manifest}'."
+  [ -f "${manifest}" ] || fail_closed "Malformed provenance from ${phase} producer artifact '${artifact_name}': manifest is missing at '${manifest}'."
   jq -e 'type == "object"' "${manifest}" >/dev/null 2>&1 \
-    || fail_closed "${phase} phase provenance at '${manifest}' is not a JSON object."
+    || fail_closed "Malformed provenance from ${phase} producer artifact '${artifact_name}': manifest at '${manifest}' is not a JSON object."
 
-  _check_equals "${phase}" "${manifest}" phase           "${phase}"
-  _check_equals "${phase}" "${manifest}" repository      "${REPOSITORY:?REPOSITORY is required}"
-  _check_equals "${phase}" "${manifest}" candidate_sha   "${CANDIDATE_SHA:?CANDIDATE_SHA is required}"
-  _check_equals "${phase}" "${manifest}" base_sha        "${BASE_SHA:?BASE_SHA is required}"
-  _check_equals "${phase}" "${manifest}" checkout_sha    "${expected_sha}"
-  _check_equals "${phase}" "${manifest}" command         "${command}"
-  _check_equals "${phase}" "${manifest}" action_revision "${ACTION_REVISION:?ACTION_REVISION is required}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" phase           "${phase}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" repository      "${REPOSITORY:?REPOSITORY is required}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" candidate_sha   "${CANDIDATE_SHA:?CANDIDATE_SHA is required}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" base_sha        "${BASE_SHA:?BASE_SHA is required}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" checkout_sha    "${expected_sha}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" command         "${command}"
+  _check_equals "${phase}" "${artifact_name}" "${manifest}" action_revision "${ACTION_REVISION:?ACTION_REVISION is required}"
 
-  _check_predicate "${phase}" "${manifest}" run_attempt \
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" run_attempt \
     "must be a positive number no greater than this run's attempt (${RUN_ATTEMPT})" \
     '(.run_attempt | type == "number" and . > 0 and . <= (env.RUN_ATTEMPT | tonumber))'
-  _check_predicate "${phase}" "${manifest}" component \
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" component \
     'must be a non-empty string' \
     '(.component | type == "string" and length > 0)'
-  _check_predicate "${phase}" "${manifest}" cli_revision \
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" cli_revision \
     'must be a non-empty string' \
     '(.cli_revision | type == "string" and length > 0)'
-  _check_predicate "${phase}" "${manifest}" binary_sha256 \
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" binary_sha256 \
     'must be a 64-character hex digest' \
     '(.binary_sha256 | type == "string" and test("^[0-9a-f]{64}$"))'
-  _check_predicate "${phase}" "${manifest}" results \
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" results \
     "must be an object recording '${command}' as pass, fail, or timeout" \
     "(.results | type == \"object\" and (.[\"${command}\"] == \"pass\" or .[\"${command}\"] == \"fail\" or .[\"${command}\"] == \"timeout\"))"
 }
 
-validate_manifest candidate "${candidate_manifest}" "${CANDIDATE_SHA}"
+validate_manifest candidate "${candidate_artifact_name}" "${candidate_manifest}" "${CANDIDATE_SHA}"
 candidate_results="$(jq -c '.results' "${candidate_manifest}")"
 candidate_output="${candidate_dir}/homeboy-ci-results"
 [ -d "${candidate_output}" ] || fail_closed "Candidate result payload is missing."
@@ -115,8 +126,9 @@ candidate_output="${candidate_dir}/homeboy-ci-results"
 if [ "${REQUIRE_BASELINE:-false}" = "true" ]; then
   manifest_for baseline
   baseline_manifest="${RESOLVED_MANIFEST}"
+  baseline_artifact_name="${RESOLVED_ARTIFACT_NAME}"
   baseline_dir="$(dirname "${baseline_manifest}")"
-  validate_manifest baseline "${baseline_manifest}" "${BASE_SHA}"
+  validate_manifest baseline "${baseline_artifact_name}" "${baseline_manifest}" "${BASE_SHA}"
   candidate_component="$(jq -r '.component' "${candidate_manifest}")"
   baseline_component="$(jq -r '.component' "${baseline_manifest}")"
   candidate_cli="$(jq -r '.cli_revision' "${candidate_manifest}")"

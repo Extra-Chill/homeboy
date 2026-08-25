@@ -35,7 +35,7 @@ run_case() {
   shift 2
   rm -f "${tmp}/output"
   set +e
-  PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=false GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
+  PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=false GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
   local actual=$?
   set -e
   if [ "${actual}" -ne "${expected}" ]; then
@@ -92,10 +92,11 @@ if grep -A3 '^  baseline:' "${WORKFLOW}" | grep -q 'candidate'; then
 fi
 printf 'PASS: workflow keeps candidate and baseline retries independent\n'
 
+# shellcheck disable=SC2016
 if grep -F 'results="${RESULTS:-{}}"' "${WORKFLOW}" >/dev/null \
-  || [ "$(grep -Fc 'results="${RESULTS:-}"' "${WORKFLOW}")" -ne 3 ] \
-  || [ "$(grep -Fc "[ -n \"\${results}\" ] || results='{}'" "${WORKFLOW}")" -ne 3 ]; then
-  printf 'FAIL: candidate and baseline provenance do not preserve populated result JSON\n'
+  || [ "$(grep -Fc 'results="${RESULTS:-}"' "${WORKFLOW}")" -ne 1 ] \
+  || [ "$(grep -Fc "[ -n \"\${results}\" ] || results='{}'" "${WORKFLOW}")" -ne 1 ]; then
+  printf 'FAIL: Test shard provenance does not preserve populated result JSON\n'
   exit 1
 fi
 RESULTS='{"review test":"pass"}'
@@ -138,7 +139,7 @@ run_case_message() {
   rm -f "${tmp}/output"
   set +e
   local out
-  out="$(PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" 2>&1)"
+  out="$(PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo GITHUB_RUN_ID=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" 2>&1)"
   local actual=$?
   set -e
   if [ "${actual}" -ne "${expected_exit}" ]; then
@@ -173,8 +174,68 @@ write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass
 run_case_message 1 "field 'component'" 'an empty component is named'
 
 rm -rf "${tmp}/artifacts"
+write_phase candidate candidate component '' '{"review test":"pass"}' "${payload_pass}"
+write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_message 1 "candidate producer artifact 'homeboy-differential-candidate-fixture-key-2'" 'malformed provenance names its producing artifact'
+run_case_message 1 "field 'cli_revision'" 'empty CLI provenance remains distinct from a gate failure'
+run_case_message 1 'gh run rerun 42 --repo example/repo' 'malformed provenance supplies a complete-workflow rerun command'
+
+rm -rf "${tmp}/artifacts"
 mkdir -p "${tmp}/artifacts/candidate"
 write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
-run_case_message 1 "No candidate provenance artifact found" 'a wholly absent candidate artifact reports that it is absent, not silently'
+run_case_message 1 "No candidate provenance artifact" 'a wholly absent candidate artifact reports that it is absent, not silently'
+
+write_aggregate_phase() {
+  local root="$1" phase="$2" checkout_sha="$3" command="$4" cli="$5"
+  local artifact="homeboy-differential-${phase}-aggregate-key-2"
+  local dir="${root}/${artifact}/${phase}"
+  mkdir -p "${dir}/homeboy-ci-results"
+  jq -cn --arg phase "${phase}" --arg checkout_sha "${checkout_sha}" --arg command "${command}" --arg cli_revision "${cli}" \
+    '{phase:$phase,repository:"example/repo",candidate_sha:"candidate",base_sha:"base",checkout_sha:$checkout_sha,command:$command,component:"component",action_revision:"action-sha",cli_revision:$cli_revision,binary_sha256:("a" * 64),run_attempt:2,results:{($command):"pass"}}' \
+    > "${dir}/manifest.json"
+}
+
+# Regression for #438: all six producers carry the one selected CLI identity,
+# so three passing differential gates deterministically remain three passing
+# aggregate checks instead of becoming provenance failures.
+for command in 'review audit' 'review lint' 'review test'; do
+  aggregate_root="${tmp}/aggregate-$(printf '%s' "${command}" | tr ' ' '-')"
+  write_aggregate_phase "${aggregate_root}" candidate candidate "${command}" 'homeboy 9.9.9+candidate'
+  write_aggregate_phase "${aggregate_root}" baseline base "${command}" 'homeboy 9.9.9+candidate'
+  rm -f "${tmp}/aggregate-output"
+  PHASE_ARTIFACT_ROOT="${aggregate_root}" REPOSITORY=example/repo GITHUB_RUN_ID=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND="${command}" ARTIFACT_KEY=aggregate-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=false GITHUB_OUTPUT="${tmp}/aggregate-output" \
+    bash "${RECONCILE}" >/dev/null
+  grep -F "{\"${command}\":\"pass\"}" "${tmp}/aggregate-output" >/dev/null \
+    || { printf 'FAIL: %s aggregate did not preserve six-phase passing evidence\n' "${command}"; exit 1; }
+done
+printf 'PASS: six revision-bound passing phases deterministically produce three passing aggregates\n'
+
+# The shared reconciler is the enforcement path for Audit, Lint, and Test. Prove
+# each aggregate emits producer, artifact, and rerun evidence for transported
+# malformed provenance rather than degrading to a generic gate failure.
+for command in 'review audit' 'review lint' 'review test'; do
+  aggregate_root="${tmp}/malformed-$(printf '%s' "${command}" | tr ' ' '-')"
+  write_aggregate_phase "${aggregate_root}" candidate candidate "${command}" ''
+  write_aggregate_phase "${aggregate_root}" baseline base "${command}" 'homeboy 9.9.9+candidate'
+  rm -f "${tmp}/aggregate-output"
+  set +e
+  aggregate_message="$(PHASE_ARTIFACT_ROOT="${aggregate_root}" REPOSITORY=example/repo GITHUB_RUN_ID=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND="${command}" ARTIFACT_KEY=aggregate-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true GITHUB_OUTPUT="${tmp}/aggregate-output" bash "${RECONCILE}" 2>&1)"
+  aggregate_status=$?
+  set -e
+  if [ "${aggregate_status}" -eq 0 ]; then
+    printf 'FAIL: %s aggregate accepted malformed CLI provenance\n' "${command}"
+    exit 1
+  fi
+  for evidence in \
+    "candidate producer artifact 'homeboy-differential-candidate-aggregate-key-2'" \
+    "field 'cli_revision'" \
+    'gh run rerun 42 --repo example/repo'; do
+    case "${aggregate_message}" in
+      *"${evidence}"*) ;;
+      *) printf 'FAIL: %s malformed aggregate omitted %s\n%s\n' "${command}" "${evidence}" "${aggregate_message}"; exit 1 ;;
+    esac
+  done
+done
+printf 'PASS: every aggregate reports malformed provenance with producer, artifact, and rerun evidence\n'
 
 printf 'Reconcile provenance diagnosis checks passed.\n'

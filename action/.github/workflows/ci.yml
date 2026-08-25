@@ -543,30 +543,32 @@ jobs:
           pr-policy-merge: 'false'
 
       - name: Write candidate phase provenance
+        id: provenance
         if: always()
         shell: bash
         env:
+          PHASE: candidate
+          PHASE_ARTIFACT_NAME: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          PHASE_OUTPUT_DIR: differential-phase/candidate
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           COMMAND: ${{ matrix.command }}
           COMPONENT: ${{ steps.phase.outputs.component }}
-          CLI_REVISION: ${{ steps.phase.outputs.homeboy-version }}
+          CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
-          ACTION_REF: ${{ inputs.action-ref }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
-          mkdir -p differential-phase/candidate
-          action_revision="$(git -C .homeboy-action rev-parse HEAD)"
-          results="${RESULTS:-}"
-          [ -n "${results}" ] || results='{}'
-          jq -cn --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
+          ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
+          export ACTION_REVISION
+          bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
           cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
           cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
 
       - name: Upload candidate phase evidence
-        if: always()
+        if: always() && steps.provenance.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
@@ -638,27 +640,30 @@ jobs:
           pr-comment: 'false'
           auto-issue: 'false'
       - name: Write baseline phase provenance
+        id: provenance
         if: always() && matrix.baseline == 'true'
         shell: bash
         env:
+          PHASE: baseline
+          PHASE_ARTIFACT_NAME: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          PHASE_OUTPUT_DIR: differential-phase/baseline
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHECKOUT_SHA: ${{ github.event.pull_request.base.sha }}
           COMMAND: ${{ matrix.command }}
           COMPONENT: ${{ steps.phase.outputs.component }}
-          CLI_REVISION: ${{ steps.phase.outputs.homeboy-version }}
+          CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
-          mkdir -p differential-phase/baseline
-          action_revision="$(git -C .homeboy-action rev-parse HEAD)"
-          results="${RESULTS:-}"
-          [ -n "${results}" ] || results='{}'
-          jq -cn --arg phase baseline --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${BASE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/baseline/manifest.json
+          ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
+          export ACTION_REVISION
+          bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
           cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
       - name: Upload baseline phase evidence
-        if: always() && matrix.baseline == 'true'
+        if: always() && matrix.baseline == 'true' && steps.provenance.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
@@ -1117,6 +1122,7 @@ jobs:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           COMMAND: ${{ matrix.command }}
+          ARTIFACT_KEY: ${{ matrix.artifact_key }}
           ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' }}
