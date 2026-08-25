@@ -25,6 +25,7 @@ pub use fingerprint::{
 pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
 pub(crate) use promote::emit_promotion_progress;
+pub(crate) use promote::promotion_cancellation;
 pub(crate) use promote::with_gate_supervision;
 pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub(crate) use promote::{

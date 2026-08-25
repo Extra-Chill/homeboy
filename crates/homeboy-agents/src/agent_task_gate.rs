@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -690,20 +690,15 @@ fn hydrate_dependency_root(
                 crate::agent_task_promotion::emit_promotion_progress(
                     "hydration",
                     None,
-                    status
-                        .progress
-                        .as_ref()
-                        .map(|progress| {
-                            progress
-                                .current
-                                .clone()
-                                .unwrap_or_else(|| progress.phase.clone())
-                        })
-                        .or_else(|| Some(status.output_tail.clone())),
+                    Some(format!(
+                        "composer install elapsed={}ms last-progress={}ms",
+                        status.elapsed_ms,
+                        status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                    )),
                 );
                 Ok(())
             }),
-            is_cancelled: Arc::new(|| false),
+            is_cancelled: crate::agent_task_promotion::promotion_cancellation(),
         };
         let report = run_gate_command_with_supervision(
             &root.path,
@@ -717,6 +712,17 @@ fn hydrate_dependency_root(
             &[],
         )?;
         if report.status != AgentTaskGateStatus::Succeeded {
+            let duration_ms = started.elapsed().as_millis();
+            let termination =
+                serde_json::to_value(report.termination).unwrap_or_else(|_| json!("failed"));
+            crate::agent_task_promotion::emit_promotion_progress(
+                "hydration",
+                None,
+                Some(format!(
+                    "composer install stopped after {duration_ms}ms: {}",
+                    termination.as_str().unwrap_or("failed")
+                )),
+            );
             return Err(Error::dependency_step_failed(
                 "promotion.gate_setup",
                 "composer",
@@ -724,12 +730,22 @@ fn hydrate_dependency_root(
                 Vec::new(),
                 Vec::new(),
                 Some(command.to_string()),
-                Some(
-                    json!({ "termination": report.termination, "stdout": text_tail(&report.stdout, 20), "stderr": text_tail(&report.stderr, 20) }),
-                ),
+                Some(json!({
+                    "termination": report.termination,
+                    "reason": "composer_install_failed",
+                    "duration_ms": duration_ms,
+                })),
             ));
         }
         if !composer_vendor_matches_lock(&root.path)? {
+            let duration_ms = started.elapsed().as_millis();
+            crate::agent_task_promotion::emit_promotion_progress(
+                "hydration",
+                None,
+                Some(format!(
+                    "composer install stopped after {duration_ms}ms: lock/vendor mismatch"
+                )),
+            );
             return Err(Error::dependency_step_failed(
                 "promotion.gate_setup",
                 "composer",
@@ -740,15 +756,22 @@ fn hydrate_dependency_root(
                 Some(json!({
                     "termination": report.termination,
                     "reason": "composer_lock_vendor_mismatch_after_install",
+                    "duration_ms": duration_ms,
                 })),
             ));
         }
+        let duration_ms = started.elapsed().as_millis();
+        crate::agent_task_promotion::emit_promotion_progress(
+            "hydration",
+            None,
+            Some(format!("composer install completed in {duration_ms}ms")),
+        );
         return Ok(Some(HydratedDependencyRoot {
             root: root.path,
             lock_identity: root.lock_identity,
             command: command.to_string(),
             reason: "composer_lock_vendor_mismatch".to_string(),
-            duration_ms: started.elapsed().as_millis(),
+            duration_ms,
             termination: "completed".to_string(),
             status: "succeeded".to_string(),
             output: "Composer dependencies installed for the declared lock identity".to_string(),
@@ -853,6 +876,59 @@ fn is_composer_root(root: &Path) -> bool {
     root.join("composer.json").is_file() && root.join("composer.lock").is_file()
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ComposerPackageIdentity {
+    name: String,
+    version: String,
+    source_type: Option<String>,
+    source_url: Option<String>,
+    source_reference: Option<String>,
+    dist_type: Option<String>,
+    dist_url: Option<String>,
+    dist_reference: Option<String>,
+    dist_shasum: Option<String>,
+}
+
+fn composer_package_identities(
+    value: &serde_json::Value,
+    fields: &[&str],
+) -> Option<BTreeSet<ComposerPackageIdentity>> {
+    let mut packages = Vec::new();
+    let mut found_array = false;
+    for field in fields {
+        let Some(array) = value.get(field) else {
+            continue;
+        };
+        found_array = true;
+        packages.extend(array.as_array()?);
+    }
+    found_array.then(|| {
+        packages
+            .into_iter()
+            .map(|package| {
+                let nested = |section: &str, field: &str| {
+                    package
+                        .get(section)
+                        .and_then(|value| value.get(field))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
+                Some(ComposerPackageIdentity {
+                    name: package.get("name")?.as_str()?.to_string(),
+                    version: package.get("version")?.as_str()?.to_string(),
+                    source_type: nested("source", "type"),
+                    source_url: nested("source", "url"),
+                    source_reference: nested("source", "reference"),
+                    dist_type: nested("dist", "type"),
+                    dist_url: nested("dist", "url"),
+                    dist_reference: nested("dist", "reference"),
+                    dist_shasum: nested("dist", "shasum"),
+                })
+            })
+            .collect::<Option<BTreeSet<_>>>()
+    })?
+}
+
 fn composer_vendor_matches_lock(root: &Path) -> Result<bool> {
     if !is_composer_root(root) {
         return Ok(false);
@@ -878,26 +954,17 @@ fn composer_vendor_matches_lock(root: &Path) -> Result<bool> {
         Ok(value) => value,
         Err(_) => return Ok(false),
     };
-    let identities = |value: &serde_json::Value, fields: &[&str]| -> BTreeMap<String, String> {
-        fields
-            .iter()
-            .flat_map(|field| {
-                value
-                    .get(field)
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-            })
-            .filter_map(|package| {
-                Some((
-                    package.get("name")?.as_str()?.to_string(),
-                    package.get("version")?.as_str()?.to_string(),
-                ))
-            })
-            .collect()
+    let Some(expected) = composer_package_identities(&lock, &["packages", "packages-dev"]) else {
+        return Ok(false);
     };
-    let expected = identities(&lock, &["packages", "packages-dev"]);
-    let actual = identities(&installed, &["packages"]);
+    let actual = if let Some(packages) = installed.as_array() {
+        composer_package_identities(&json!({ "packages": packages }), &["packages"])
+    } else {
+        composer_package_identities(&installed, &["packages"])
+    };
+    let Some(actual) = actual else {
+        return Ok(false);
+    };
     Ok(expected == actual)
 }
 
@@ -4057,6 +4124,7 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Serializes tests that mutate process-global environment state.
@@ -4866,6 +4934,24 @@ mod tests {
         assert!(composer.command.contains("composer") && composer.command.contains("install"));
     }
 
+    #[test]
+    fn composer_lock_reference_must_match_installed_vendor() {
+        let checkout = tempfile::tempdir().expect("checkout");
+        write_composer_fixture(checkout.path(), "1.0.0");
+        fs::write(
+            checkout.path().join("composer.lock"),
+            r#"{"packages":[{"name":"acme/package","version":"1.0.0","dist":{"type":"zip","url":"https://example.test/package.zip","reference":"new-reference"}}],"packages-dev":[]}"#,
+        )
+        .expect("composer lock");
+        fs::write(
+            checkout.path().join("vendor/composer/installed.json"),
+            r#"{"packages":[{"name":"acme/package","version":"1.0.0","dist":{"type":"zip","url":"https://example.test/package.zip","reference":"old-reference"}}]}"#,
+        )
+        .expect("installed metadata");
+
+        assert!(!composer_vendor_matches_lock(checkout.path()).expect("freshness check"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn changed_composer_vendor_runs_bounded_install_and_records_command_reason_and_timing() {
@@ -4922,7 +5008,11 @@ mod tests {
         let checkout = tempfile::tempdir().expect("checkout");
         let tools = tempfile::tempdir().expect("tools");
         write_composer_fixture(checkout.path(), "0.9.0");
-        fs::write(tools.path().join("composer"), "#!/bin/sh\nsleep 1\n").expect("composer shim");
+        fs::write(
+            tools.path().join("composer"),
+            "#!/bin/sh\nprintf 'credential=super-secret-value\\n'\nsleep 1\n",
+        )
+        .expect("composer shim");
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(
             tools.path().join("composer"),
@@ -4936,21 +5026,95 @@ mod tests {
         );
         let _path = EnvVarGuard::set(&[("PATH", Path::new(&path))]);
 
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let observed_progress = Arc::clone(&progress);
         let started = Instant::now();
-        let error = hydrate_gate_dependency_roots_with_timeouts(
-            checkout.path(),
-            true,
-            "fixture",
-            Duration::from_secs(5),
-            Duration::from_millis(100),
-            Duration::from_millis(10),
+        let error = crate::agent_task_promotion::with_promotion_progress(
+            Arc::new(move |status| {
+                if let Some(last_progress) = &status.last_progress {
+                    observed_progress
+                        .lock()
+                        .expect("promotion progress")
+                        .push(last_progress.clone());
+                }
+                Ok(())
+            }),
+            || {
+                hydrate_gate_dependency_roots_with_timeouts(
+                    checkout.path(),
+                    true,
+                    "fixture",
+                    Duration::from_secs(5),
+                    Duration::from_millis(100),
+                    Duration::from_millis(10),
+                )
+            },
         )
         .expect_err("stalled Composer install is bounded");
         assert_eq!(error.code.as_str(), "dependency_step_failed");
         assert!(error.details["cause"]["termination"]
             .to_string()
             .contains("no_progress"));
+        assert!(error.details["cause"]["duration_ms"].is_number());
+        assert!(!error.details.to_string().contains("super-secret-value"));
+        assert!(!progress
+            .lock()
+            .expect("promotion progress")
+            .iter()
+            .any(|message| message.contains("super-secret-value")));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_promotion_stops_composer_hydration() {
+        let _lock = env_mutex();
+        let checkout = tempfile::tempdir().expect("checkout");
+        let tools = tempfile::tempdir().expect("tools");
+        write_composer_fixture(checkout.path(), "0.9.0");
+        fs::write(tools.path().join("composer"), "#!/bin/sh\nsleep 5\n").expect("composer shim");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            tools.path().join("composer"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("composer shim permissions");
+        let path = format!(
+            "{}:{}",
+            tools.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path = EnvVarGuard::set(&[("PATH", Path::new(&path))]);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancellation = Arc::clone(&cancelled);
+
+        let started = Instant::now();
+        let error = crate::agent_task_promotion::with_gate_supervision(
+            GateSupervision {
+                timeout: Duration::from_secs(10),
+                no_progress_timeout: Duration::from_secs(10),
+                heartbeat_interval: Duration::from_millis(10),
+                on_spawn: Arc::new(|_, _| Ok(())),
+                on_heartbeat: Arc::new(|_| Ok(())),
+                is_cancelled: Arc::new(move || cancellation.load(Ordering::SeqCst)),
+            },
+            || {
+                hydrate_gate_dependency_roots_with_timeouts(
+                    checkout.path(),
+                    true,
+                    "fixture",
+                    Duration::from_secs(10),
+                    Duration::from_secs(10),
+                    Duration::from_millis(10),
+                )
+            },
+        )
+        .expect_err("cancelled promotion stops Composer");
+
+        assert!(error.details["cause"]["termination"]
+            .to_string()
+            .contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[cfg(unix)]

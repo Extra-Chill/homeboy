@@ -102,6 +102,15 @@ pub(crate) fn emit_promotion_progress(
     });
 }
 
+pub(crate) fn promotion_cancellation() -> Arc<dyn Fn() -> bool + Send + Sync> {
+    GATE_SUPERVISION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|supervision| Arc::clone(&supervision.is_cancelled))
+            .unwrap_or_else(|| Arc::new(|| false))
+    })
+}
+
 pub(crate) fn with_gate_supervision<T>(
     supervision: crate::agent_task_gate::GateSupervision,
     operation: impl FnOnce() -> Result<T>,
