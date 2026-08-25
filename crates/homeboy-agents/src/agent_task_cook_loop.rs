@@ -85,7 +85,6 @@ pub enum AgentTaskCookLoopStatus {
     BaselineRed,
     /// Immutable-base replay could not establish whether the candidate failed
     /// differently, so provider remediation is intentionally withheld.
-    BaselineInconclusive,
     IntentionalNoChange,
     NoChanges,
     NoOpGateFailed,
@@ -243,17 +242,6 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                         && comparison.matches_candidate_failure
                 })
         });
-    let baseline_inconclusive = options
-        .promotion_report
-        .deterministic_gates
-        .iter()
-        .any(|gate| {
-            gate.status == AgentTaskGateStatus::Failed
-                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
-                    comparison.result
-                        == crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive
-                })
-        });
     let intentional_no_change = (options.promotion_report.status
         == AgentTaskPromotionStatus::VerifiedNoChanges)
         .then(|| {
@@ -333,8 +321,6 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::NoChanges
     } else if baseline_red {
         AgentTaskCookLoopStatus::BaselineRed
-    } else if baseline_inconclusive {
-        AgentTaskCookLoopStatus::BaselineInconclusive
     } else if !failed_gates.is_empty() {
         AgentTaskCookLoopStatus::RetriesExhausted
     } else if matches!(&review_form_gap, Some(Some(_))) {
@@ -359,12 +345,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gate_results,
         follow_up_request,
         intentional_no_change,
-        metadata: report_metadata(
-            options.metadata,
-            &failure_progression,
-            baseline_red,
-            baseline_inconclusive,
-        ),
+        metadata: report_metadata(options.metadata, &failure_progression, baseline_red),
     }
 }
 
@@ -816,7 +797,6 @@ fn report_metadata(
     metadata: Value,
     progression: &AgentTaskCookLoopFailureProgression,
     baseline_red: bool,
-    baseline_inconclusive: bool,
 ) -> Value {
     let mut metadata = metadata.as_object().cloned().unwrap_or_default();
     metadata.insert("failure_progression".to_string(), json!(progression));
@@ -825,19 +805,6 @@ fn report_metadata(
         metadata.insert(
             "failure_origin".to_string(),
             Value::String("inherited_infrastructure".to_string()),
-        );
-    }
-    if baseline_inconclusive {
-        metadata.insert("baseline_inconclusive".to_string(), Value::Bool(true));
-        metadata.insert(
-            "failure_origin".to_string(),
-            Value::String("baseline_replay_inconclusive".to_string()),
-        );
-        metadata.insert(
-            "next_action".to_string(),
-            Value::String(
-                "repair the gate baseline setup or replay environment, then rerun Cook".to_string(),
-            ),
         );
     }
     Value::Object(metadata)
@@ -1181,8 +1148,14 @@ mod tests {
         }
     }
 
+    /// An inconclusive baseline must not retry and must not excuse the
+    /// candidate. `should_retry` already refuses to spend an attempt unless
+    /// every failed gate proved `CandidateRegression`, so the run is terminal
+    /// on that alone -- it does not need a status of its own, and giving it one
+    /// reported a red candidate gate as broken infrastructure. The specific
+    /// reason now travels on `baseline_comparison.diagnostic`.
     #[test]
-    fn inconclusive_baseline_replay_is_terminal_with_recovery_action() {
+    fn inconclusive_baseline_replay_is_terminal_without_excusing_the_candidate() {
         let mut gate = failed_gate();
         gate.baseline_comparison
             .as_mut()
@@ -1200,15 +1173,16 @@ mod tests {
             metadata: Value::Null,
         });
 
-        assert_eq!(report.status, AgentTaskCookLoopStatus::BaselineInconclusive);
+        // Terminal: no attempt is spent on a comparison that proved nothing.
         assert!(report.follow_up_request.is_none());
-        assert_eq!(
+        // The candidate gate is red and stays the candidate's problem.
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        // No infrastructure remediation is asserted, because none was proven.
+        assert!(report.metadata.get("baseline_inconclusive").is_none());
+        assert_ne!(
             report.metadata["failure_origin"],
             "baseline_replay_inconclusive"
         );
-        assert!(report.metadata["next_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("replay environment")));
     }
 
     #[test]
