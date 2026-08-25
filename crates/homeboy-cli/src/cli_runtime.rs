@@ -2372,10 +2372,15 @@ fn extension_after_help(
 
     if !extension_health.broken_link_ids.is_empty() {
         lines.push(format!(
-            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details or `homeboy extension relink <id> <path>` to repair.",
+            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details.",
             extension_health.broken_link_ids.len(),
             extension_health.broken_link_ids.join(", ")
         ));
+        lines.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "Repair `{id}`: `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`."
+            )
+        }));
     }
 
     if lines.is_empty() {
@@ -3493,10 +3498,11 @@ fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &Ext
     }
 
     if !extension_health.broken_link_ids.is_empty() {
-        hints.push(format!(
-            "broken extension link(s): {}; repair with `homeboy extension relink <id> <path>`",
-            extension_health.broken_link_ids.join(", ")
-        ));
+        hints.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "broken extension link `{id}`; repair with `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`"
+            )
+        }));
     }
 }
 
@@ -4877,7 +4883,9 @@ mod tests {
                 "root help should warn about broken extension links: {help}"
             );
             assert!(help.contains("homeboy extension list"));
-            assert!(help.contains("homeboy extension relink <id> <path>"));
+            assert!(help.contains("homeboy extension relink stale-runtime <path>"));
+            assert!(help.contains("homeboy extension uninstall stale-runtime"));
+            assert!(!help.contains(extensions_dir.to_string_lossy().as_ref()));
             assert!(!help.contains("/missing-stale-runtime"));
         });
     }
@@ -4902,7 +4910,9 @@ mod tests {
         .expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
-        assert!(output.contains("broken extension link(s): sample-runtime"));
+        assert!(output.contains("broken extension link `sample-runtime`"));
+        assert!(output.contains("homeboy extension relink sample-runtime <path>"));
+        assert!(output.contains("homeboy extension uninstall sample-runtime"));
         assert!(output.contains("homeboy extension list"));
     }
 
