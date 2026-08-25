@@ -1079,19 +1079,21 @@ impl CliRuntime {
 
         if let Commands::AgentTask(agent_task) = &cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
-                if let Err(err) =
-                    crate::commands::agent_task::run::validate_cook_request_with_provenance(
-                        cook,
-                        Some(&command_provenance),
-                    )
-                {
-                    output_runtime::emit_json_result_for_identity(
-                        Err(err),
-                        output_file.as_deref(),
-                        2,
-                        &command_identity,
-                    );
-                    return std::process::ExitCode::from(2);
+                if !cook.preview {
+                    if let Err(err) =
+                        crate::commands::agent_task::run::validate_cook_request_with_provenance(
+                            cook,
+                            Some(&command_provenance),
+                        )
+                    {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(err),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
                 }
             }
         }
@@ -4468,6 +4470,28 @@ mod tests {
                 "Cook validation failures must precede ambient discovery"
             );
         });
+    }
+
+    #[test]
+    fn cook_preview_reaches_backend_resolution_before_runtime_validation() {
+        std::thread::Builder::new()
+            .name("cook-preview-runtime-routing".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                crate::test_support::with_isolated_home(|_| {
+                    let preview = CliRuntime::new().run_from_args(argv(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--preview",
+                    ]));
+
+                    assert_eq!(preview, std::process::ExitCode::SUCCESS);
+                });
+            })
+            .expect("spawn Cook preview runtime-routing test")
+            .join()
+            .expect("Cook preview runtime-routing test");
     }
 
     #[test]
