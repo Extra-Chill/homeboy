@@ -4277,7 +4277,7 @@ fn run_cook_reported(
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let failure_options = options.clone();
+    let mut failure_options = options.clone();
     let result = match run_cook_spine(
         store,
         lifecycle_store,
@@ -4289,12 +4289,28 @@ fn run_cook_reported(
     ) {
         Ok(result) => result,
         Err(mut error) => {
+            let admission_run_id = error
+                .details
+                .as_object_mut()
+                .and_then(|details| details.remove("cook_admission_run_id"))
+                .and_then(|run_id| run_id.as_str().map(str::to_string));
+            if let Some(run_id) = admission_run_id.as_deref() {
+                if let Ok(recipe) = store.load_recipe(&failure_options.cook_id) {
+                    if let Some(attempt) = recipe
+                        .attempts
+                        .iter()
+                        .find(|attempt| attempt.run_id == run_id)
+                    {
+                        failure_options.initial_run_id = attempt.run_id.clone();
+                        failure_options.initial_plan = attempt.plan.clone();
+                    }
+                }
+            }
             // Recipe persistence is the first half of Cook admission. If the
-            // initial lifecycle write failed transiently, complete the same
-            // immutable attempt now rather than returning a recipe-only Cook
+            // lifecycle row or index write failed transiently, complete the
+            // same immutable attempt now rather than returning a partial Cook
             // whose advertised continuation has no record to address (#10849).
             if store.recipe_exists(&failure_options.cook_id)
-                && !lifecycle_store.record_exists(&failure_options.initial_run_id)?
                 && super::cook_pre_execution::recover_recipe_attempt_with_stores(
                     store,
                     lifecycle_store,
@@ -4711,7 +4727,14 @@ fn run_cook_spine(
         lifecycle_store,
         &options,
         recipe_materialization.created,
-    )?;
+    )
+    .map_err(|mut error| {
+        if !error.details.is_object() {
+            error.details = serde_json::json!({});
+        }
+        error.details["cook_admission_run_id"] = Value::String(options.initial_run_id.clone());
+        error
+    })?;
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.

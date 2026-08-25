@@ -9885,6 +9885,92 @@ fn normal_cook_repairs_a_transient_initial_lifecycle_write_before_reporting_fail
 }
 
 #[test]
+fn normal_cook_repairs_the_immutable_attempt_when_replay_uses_a_fresh_run_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-replayed-initial-lifecycle-recovery";
+        let durable_run_id = "cook-replayed-initial-lifecycle-recovery-attempt-1";
+        let replay_run_id = "cook-replayed-initial-lifecycle-recovery-fresh-attempt-1";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut durable_options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        durable_options.initial_run_id = durable_run_id.to_string();
+        project_controller_owned_gate_contract(&mut durable_options);
+        project_initial_finalizing_review_form_contract(&mut durable_options);
+        persist_initial_recipe(&durable_options).expect("persist immutable recipe");
+
+        let mut replay_options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        replay_options.initial_run_id = replay_run_id.to_string();
+        agent_task_lifecycle::fail_next_record_write_for_test();
+
+        let report = run_cook(CookContext::new(replay_options, Arc::new(UnusedExecutor)))
+            .expect("normal Cook repairs the immutable attempt");
+
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.latest_run_id.as_deref(), Some(durable_run_id));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert!(agent_task_lifecycle::run_record_exists(durable_run_id)
+            .expect("immutable lifecycle exists"));
+        assert!(!agent_task_lifecycle::run_record_exists(replay_run_id)
+            .expect("fresh caller identity remains unused"));
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("Cook index exists");
+        assert_eq!(index.latest_run_id, durable_run_id);
+        assert_eq!(index.attempts.len(), 1);
+    });
+}
+
+#[test]
+fn normal_cook_repairs_a_transient_initial_index_write() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-initial-index-write-recovery";
+        let run_id = "cook-initial-index-write-recovery-attempt-1";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.initial_run_id = run_id.to_string();
+        project_controller_owned_gate_contract(&mut options);
+        project_initial_finalizing_review_form_contract(&mut options);
+        persist_initial_recipe(&options).expect("persist immutable recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("persist lifecycle before Cook registration");
+        assert!(
+            !agent_task_lifecycle::cook_index_exists(cook_id).expect("Cook index starts absent")
+        );
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("normal Cook repairs its index registration");
+
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.latest_run_id.as_deref(), Some(run_id));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("Cook index exists");
+        assert_eq!(index.latest_run_id, run_id);
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("recovered attempt")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+    });
+}
+
+#[test]
 fn recipe_recovery_rejects_foreign_lifecycle_record_before_indexing() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
