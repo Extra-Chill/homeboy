@@ -6151,6 +6151,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         "stop_reason": bounded_value(value.get("stop_reason").unwrap_or(&Value::Null)),
         "terminal_phase": value.get("terminal_phase"),
         "terminal_failure_classification": value.get("terminal_failure_classification"),
+        "primary_failure": value.get("primary_failure"),
         "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state", "aggregate_path"])).collect::<Vec<_>>(),
         "attempts_omitted": attempts.len().saturating_sub(COMPACT_TASK_LIMIT),
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),

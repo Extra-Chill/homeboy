@@ -58,7 +58,10 @@ pub struct VerifyGateArgs {
     /// controller's invocation directory.
     #[arg(long = "private-verify-file", value_name = "PATH")]
     pub private_verify_file: Vec<String>,
-    #[arg(skip)]
+    /// Durable source metadata emitted by Homeboy-generated promotion commands.
+    /// This preserves the immutable provenance of a previously snapshotted gate;
+    /// private entries retain no source path.
+    #[arg(long = "gate-input-source", value_name = "JSON", value_parser = parse_gate_input_source)]
     pub input_sources: Vec<AgentTaskGateInputSource>,
     /// How much of a `--private-verify` gate's output to reveal: `summary-only`
     /// (default) shows just pass/fail; other policies expose more detail.
@@ -174,6 +177,14 @@ impl VerifyGateArgs {
     /// relative-path semantics, before Cook can provision or dispatch anything.
     pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
         if !self.input_sources.is_empty() {
+            if !self.verify_file.is_empty() || !self.private_verify_file.is_empty() {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "gate-input-source",
+                    "cannot combine retained gate provenance with file inputs",
+                    None,
+                    Some(vec!["Use inline --verify or --private-verify commands with --gate-input-source, or let Homeboy snapshot the file inputs.".to_string()]),
+                ));
+            }
             return Ok(());
         }
         self.input_sources.extend(self.verify.iter().map(|program| {
@@ -406,6 +417,15 @@ fn parse_gate_package_artifact(
 ) -> Result<AgentTaskGatePackageArtifactRequirement, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate package artifact declaration: {error}"))
+}
+
+fn parse_gate_input_source(value: &str) -> Result<AgentTaskGateInputSource, String> {
+    let source: AgentTaskGateInputSource = serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate input source declaration: {error}"))?;
+    if source.visibility == AgentTaskGateVisibility::Private && source.path.is_some() {
+        return Err("private gate input source must not include a path".to_string());
+    }
+    Ok(source)
 }
 
 fn parse_gate_toolchain_requirement(
