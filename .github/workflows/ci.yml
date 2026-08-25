@@ -316,8 +316,9 @@ jobs:
       # are WordPress-scoped and unreachable from this component. This also
       # carries #2697 (structural generic field-type resolution), which has been
       # released since v1.37.1 but could not reach this repository while the pin
-      # was frozen.
-      extension-ref: fd4165ef2b9713672d0e25786c3af27c03012aae
+      # was frozen. The current pin also carries #2721, which prevents Homeboy's
+      # own tests from corrupting the parent test-failure identity sidecar.
+      extension-ref: bb41c22ecab8a56f772be0208b1970ddded4f8b9
       source: .
       scope: auto
       differential-gating: 'true'
