@@ -2,6 +2,9 @@ use crate::component::{self, Component};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 mod dependency_graph;
 #[path = "deps_provider.rs"]
@@ -73,6 +76,336 @@ pub struct DependencyInstallResult {
     /// One entry per dependency provider that ran an install. Providers that
     /// report nothing to install (e.g. no manifest detected) are omitted.
     pub installs: Vec<DependencyCommandResult>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyHydrationStatus {
+    Reused,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyHydrationTermination {
+    NotStarted,
+    Completed,
+    ExitFailure,
+    TimedOut,
+    NoProgress,
+    Cancelled,
+    SpawnFailed,
+    OutputValidationFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyHydrationOutcome {
+    pub schema: String,
+    pub workspace: String,
+    pub package_root: String,
+    pub provider_id: String,
+    pub command: Vec<String>,
+    pub reason: String,
+    pub duration_ms: u128,
+    pub termination: DependencyHydrationTermination,
+    pub status: DependencyHydrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DependencyHydrationProgress {
+    pub provider_id: String,
+    pub phase: String,
+    pub elapsed_ms: u128,
+    pub last_progress_ms_ago: Option<u128>,
+}
+
+pub struct DependencyHydrationPolicy {
+    pub timeout: Duration,
+    pub no_progress_timeout: Duration,
+    pub heartbeat_interval: Duration,
+    pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub on_progress: Arc<dyn Fn(&DependencyHydrationProgress) + Send + Sync>,
+}
+
+impl Default for DependencyHydrationPolicy {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30 * 60),
+            no_progress_timeout: Duration::from_secs(5 * 60),
+            heartbeat_interval: Duration::from_secs(5),
+            is_cancelled: Arc::new(|| false),
+            on_progress: Arc::new(|_| {}),
+        }
+    }
+}
+
+const DEPENDENCY_HYDRATION_SCHEMA: &str = "homeboy/dependency-hydration-outcome/v1";
+const DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
+/// Hydrate dependencies through provider-declared reusable-state, install, and
+/// output contracts. Package manifests, command argv, and freshness semantics
+/// remain provider-owned; this function only supervises and records outcomes.
+pub fn hydrate_declared_dependencies(
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+) -> Result<Vec<DependencyHydrationOutcome>> {
+    let path_arg = path.display().to_string();
+    let Ok(mut component) = component::resolve_effective(None, Some(&path_arg), None) else {
+        return Ok(Vec::new());
+    };
+    component.local_path = path_arg;
+    let providers = provider::resolve_dependency_providers_optional(&component, path)?;
+    let mut outcomes = Vec::new();
+
+    for provider in providers {
+        let Some(plan) = provider.hydration_plan(&component, path)? else {
+            continue;
+        };
+        let provider_id = crate::redaction::redact_string(&plan.provider_id);
+        let install_command = crate::redaction::redact_argv(&plan.install.argv());
+        let started = Instant::now();
+        (policy.on_progress)(&DependencyHydrationProgress {
+            provider_id: provider_id.clone(),
+            phase: "assessing_reusable_state".to_string(),
+            elapsed_ms: 0,
+            last_progress_ms_ago: None,
+        });
+
+        let mut stale_reason = "provider_did_not_declare_reusable_state".to_string();
+        if let Some(reusable) = &plan.reusable {
+            let assessment = run_hydration_command(
+                &reusable.command,
+                &provider_id,
+                "assessing_reusable_state",
+                policy,
+            );
+            let reusable_command = crate::redaction::redact_argv(&reusable.command.argv());
+            let reusable_reason = crate::redaction::redact_string(&reusable.reusable_reason);
+            stale_reason = crate::redaction::redact_string(&reusable.stale_reason);
+            let execution = match assessment {
+                Ok(execution) => execution,
+                Err(termination) => {
+                    outcomes.push(hydration_outcome(
+                        workspace,
+                        package_root,
+                        provider_id,
+                        reusable_command,
+                        "reusable_state_assessment_failed".to_string(),
+                        started.elapsed(),
+                        termination,
+                        DependencyHydrationStatus::Failed,
+                        None,
+                    ));
+                    break;
+                }
+            };
+            if reusable
+                .reusable_exit_codes
+                .contains(&execution.exit_code.unwrap_or(-1))
+                && declared_outputs_ready(path, &plan.outputs)
+            {
+                outcomes.push(hydration_outcome(
+                    workspace,
+                    package_root,
+                    provider_id,
+                    install_command,
+                    reusable_reason,
+                    started.elapsed(),
+                    DependencyHydrationTermination::NotStarted,
+                    DependencyHydrationStatus::Reused,
+                    None,
+                ));
+                continue;
+            }
+        } else if !plan.outputs.is_empty() && declared_outputs_ready(path, &plan.outputs) {
+            outcomes.push(hydration_outcome(
+                workspace,
+                package_root,
+                provider_id,
+                install_command,
+                "provider_declared_outputs_ready".to_string(),
+                started.elapsed(),
+                DependencyHydrationTermination::NotStarted,
+                DependencyHydrationStatus::Reused,
+                None,
+            ));
+            continue;
+        }
+
+        (policy.on_progress)(&DependencyHydrationProgress {
+            provider_id: provider_id.clone(),
+            phase: "installing".to_string(),
+            elapsed_ms: started.elapsed().as_millis(),
+            last_progress_ms_ago: None,
+        });
+        let execution =
+            match run_hydration_command(&plan.install, &provider_id, "installing", policy) {
+                Ok(execution) => execution,
+                Err(termination) => {
+                    outcomes.push(hydration_outcome(
+                        workspace,
+                        package_root,
+                        provider_id,
+                        install_command,
+                        stale_reason,
+                        started.elapsed(),
+                        termination,
+                        DependencyHydrationStatus::Failed,
+                        None,
+                    ));
+                    break;
+                }
+            };
+        let exit_code = execution.exit_code;
+        if !exit_code.is_some_and(|code| plan.install_success_exit_codes.contains(&code)) {
+            outcomes.push(hydration_outcome(
+                workspace,
+                package_root,
+                provider_id,
+                install_command,
+                stale_reason,
+                started.elapsed(),
+                DependencyHydrationTermination::ExitFailure,
+                DependencyHydrationStatus::Failed,
+                exit_code,
+            ));
+            break;
+        }
+        if !declared_outputs_ready(path, &plan.outputs) {
+            outcomes.push(hydration_outcome(
+                workspace,
+                package_root,
+                provider_id,
+                install_command,
+                "provider_declared_outputs_missing_after_install".to_string(),
+                started.elapsed(),
+                DependencyHydrationTermination::OutputValidationFailed,
+                DependencyHydrationStatus::Failed,
+                exit_code,
+            ));
+            break;
+        }
+        outcomes.push(hydration_outcome(
+            workspace,
+            package_root,
+            provider_id,
+            install_command,
+            stale_reason,
+            started.elapsed(),
+            DependencyHydrationTermination::Completed,
+            DependencyHydrationStatus::Succeeded,
+            exit_code,
+        ));
+    }
+
+    Ok(outcomes)
+}
+
+struct HydrationCommandExecution {
+    exit_code: Option<i32>,
+}
+
+fn run_hydration_command(
+    command: &provider::DependencyProviderCommand,
+    provider_id: &str,
+    phase: &str,
+    policy: &DependencyHydrationPolicy,
+) -> std::result::Result<HydrationCommandExecution, DependencyHydrationTermination> {
+    if (policy.is_cancelled)() {
+        return Err(DependencyHydrationTermination::Cancelled);
+    }
+    let declared_program = Path::new(&command.program);
+    let resolved_program =
+        if declared_program.is_relative() && declared_program.components().count() > 1 {
+            command.cwd.join(declared_program)
+        } else {
+            declared_program.to_path_buf()
+        };
+    let mut process = Command::new(resolved_program);
+    process
+        .args(&command.args)
+        .current_dir(&command.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    homeboy_engine_primitives::command::isolate_process_tree(&mut process);
+    let mut child = process
+        .spawn()
+        .map_err(|_| DependencyHydrationTermination::SpawnFailed)?;
+    let progress = Arc::clone(&policy.on_progress);
+    let cancellation = Arc::clone(&policy.is_cancelled);
+    let output =
+        homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_progress(
+            &mut child,
+            DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
+            policy.timeout.max(Duration::from_millis(1)),
+            Some(policy.no_progress_timeout.max(Duration::from_millis(1))),
+            policy.heartbeat_interval.max(Duration::from_millis(1)),
+            move || cancellation(),
+            |heartbeat| {
+                progress(&DependencyHydrationProgress {
+                    provider_id: provider_id.to_string(),
+                    phase: phase.to_string(),
+                    elapsed_ms: heartbeat.elapsed.as_millis(),
+                    last_progress_ms_ago: heartbeat
+                        .last_progress_elapsed
+                        .map(|value| value.as_millis()),
+                });
+                Ok(())
+            },
+        )
+        .map_err(|_| DependencyHydrationTermination::SpawnFailed)?;
+    use homeboy_engine_primitives::command::SupervisedCommandTermination;
+    match output.termination {
+        SupervisedCommandTermination::Completed => Ok(HydrationCommandExecution {
+            exit_code: output.output.status.code(),
+        }),
+        SupervisedCommandTermination::Cancelled => Err(DependencyHydrationTermination::Cancelled),
+        SupervisedCommandTermination::TimedOut => Err(DependencyHydrationTermination::TimedOut),
+        SupervisedCommandTermination::NoProgress => Err(DependencyHydrationTermination::NoProgress),
+    }
+}
+
+fn declared_outputs_ready(path: &Path, outputs: &[DependencyInstallOutput]) -> bool {
+    outputs.iter().all(|output| {
+        let output_path = path.join(&output.path);
+        match output.kind {
+            DependencyInstallOutputKind::Path => output_path.exists(),
+            DependencyInstallOutputKind::File => output_path.is_file(),
+            DependencyInstallOutputKind::Directory => output_path.is_dir(),
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hydration_outcome(
+    workspace: &str,
+    package_root: &str,
+    provider_id: String,
+    command: Vec<String>,
+    reason: String,
+    duration: Duration,
+    termination: DependencyHydrationTermination,
+    status: DependencyHydrationStatus,
+    exit_code: Option<i32>,
+) -> DependencyHydrationOutcome {
+    DependencyHydrationOutcome {
+        schema: DEPENDENCY_HYDRATION_SCHEMA.to_string(),
+        workspace: workspace.to_string(),
+        package_root: package_root.to_string(),
+        provider_id,
+        command,
+        reason: crate::redaction::redact_string(&reason),
+        duration_ms: duration.as_millis(),
+        termination,
+        status,
+        exit_code,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +904,8 @@ fn combine_provider_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
     #[test]
     fn extension_owned_install_path_becomes_portable_invocation() {
@@ -659,6 +994,222 @@ mod tests {
                 .expect("unrelated linked extensions do not require dependency hydration");
 
             assert!(plan.is_empty());
+        });
+    }
+
+    fn hydration_policy(
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<Mutex<Vec<String>>>,
+    ) -> DependencyHydrationPolicy {
+        DependencyHydrationPolicy {
+            timeout: Duration::from_secs(3),
+            no_progress_timeout: Duration::from_millis(150),
+            heartbeat_interval: Duration::from_millis(10),
+            is_cancelled: Arc::new(move || cancelled.load(Ordering::SeqCst)),
+            on_progress: Arc::new(move |event| {
+                progress.lock().unwrap().push(event.phase.clone());
+            }),
+        }
+    }
+
+    #[test]
+    fn provider_declared_reusable_state_skips_install() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{
+                    "provider":"fixture-provider",
+                    "commands":{
+                        "reusable":{
+                            "argv":["sh","-c","exit 0"],
+                            "reusable_reason":"fixture_state_matches",
+                            "stale_reason":"fixture_state_differs"
+                        },
+                        "install":{"argv":["sh","-c","printf installed > install-ran"]}
+                    }
+                }"#,
+            )
+            .expect("provider manifest");
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .expect("reusable state assessment");
+
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Reused);
+            assert_eq!(outcomes[0].reason, "fixture_state_matches");
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::NotStarted
+            );
+            assert!(!root.path().join("install-ran").exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_state_runs_exact_declared_command_and_reports_progress() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("install-fixture"),
+                "#!/bin/sh\nprintf '%s' \"$*\" > invoked-argv\nprintf ready > prepared.state\n",
+            )
+            .expect("fixture installer");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                root.path().join("install-fixture"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("fixture permissions");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{
+                    "provider":"fixture-provider",
+                    "commands":{
+                        "reusable":{
+                            "argv":["sh","-c","exit 1"],
+                            "reusable_reason":"fixture_state_matches",
+                            "stale_reason":"fixture_state_differs"
+                        },
+                        "install":{"argv":["./install-fixture","--mode","declared"]}
+                    },
+                    "outputs":[{"path":"prepared.state","kind":"file"}]
+                }"#,
+            )
+            .expect("provider manifest");
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(Arc::new(AtomicBool::new(false)), Arc::clone(&progress)),
+            )
+            .expect("stale state hydration");
+
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("invoked-argv")).unwrap(),
+                "--mode declared"
+            );
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(outcomes[0].reason, "fixture_state_differs");
+            assert_eq!(
+                outcomes[0].command,
+                vec!["./install-fixture", "--mode", "declared"]
+            );
+            let progress = progress.lock().unwrap();
+            assert!(progress
+                .iter()
+                .any(|phase| phase == "assessing_reusable_state"));
+            assert!(progress.iter().any(|phase| phase == "installing"));
+        });
+    }
+
+    #[test]
+    fn stalled_declared_install_is_bounded_by_no_progress() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}"#,
+            )
+            .expect("provider manifest");
+            let started = Instant::now();
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .expect("bounded hydration outcome");
+
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Failed);
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::NoProgress
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn cancellation_stops_declared_install() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}"#,
+            )
+            .expect("provider manifest");
+            let started = Instant::now();
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(true)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .expect("cancelled hydration outcome");
+
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::Cancelled
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydration_evidence_redacts_declared_command_secrets() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("install-fixture"),
+                "#!/bin/sh\nprintf ready > prepared.state\n",
+            )
+            .expect("fixture installer");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                root.path().join("install-fixture"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("fixture permissions");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{
+                    "provider":"fixture-provider",
+                    "commands":{"install":{"argv":["./install-fixture","--token","fixture-secret-value"]}},
+                    "outputs":[{"path":"prepared.state","kind":"file"}]
+                }"#,
+            )
+            .expect("provider manifest");
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .expect("redacted hydration evidence");
+            let evidence = serde_json::to_string(&outcomes).unwrap();
+
+            assert!(!evidence.contains("fixture-secret-value"));
+            assert!(evidence.contains("[REDACTED]"));
         });
     }
 }

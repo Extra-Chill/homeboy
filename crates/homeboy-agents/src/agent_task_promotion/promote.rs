@@ -1878,13 +1878,30 @@ fn run_promotion_gates(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
     let destination_gate_setup = if gate_workspace.is_dir() {
-        crate::agent_task_gate::hydrate_gate_dependency_roots_with_timeouts(
+        let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
+            timeout: options.gates.gate_timeout(),
+            no_progress_timeout: options.gates.gate_no_progress_timeout(),
+            heartbeat_interval: options.gates.gate_heartbeat_interval(),
+            is_cancelled: promotion_cancellation(),
+            on_progress: Arc::new(|progress| {
+                emit_promotion_progress(
+                    "hydration",
+                    None,
+                    Some(format!(
+                        "provider={} phase={} elapsed={}ms last-progress={}ms",
+                        progress.provider_id,
+                        progress.phase,
+                        progress.elapsed_ms,
+                        progress.last_progress_ms_ago.unwrap_or(progress.elapsed_ms),
+                    )),
+                );
+            }),
+        };
+        let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_with_policy(
             &gate_workspace,
             options.gates.hydrate_dependencies,
             "destination_gate_workspace",
-            options.gates.gate_timeout(),
-            options.gates.gate_no_progress_timeout(),
-            options.gates.gate_heartbeat_interval(),
+            &hydration_policy,
         )
         .map_err(|error| {
             gate_setup_failure(
@@ -1892,7 +1909,14 @@ fn run_promotion_gates(
                 "destination_gate_workspace",
                 error,
             )
-        })?
+        })?;
+        if let Some(failed) = setup
+            .iter()
+            .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
+        {
+            return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
+        }
+        setup
     } else {
         // An opaque provider destination cannot be hydrated locally. Its gate
         // provider remains the authority, and the report makes no local
@@ -1983,7 +2007,7 @@ fn run_promotion_gates(
         gate_results,
         dependencies_materialized: destination_gate_setup
             .iter()
-            .any(|setup| setup.status == "succeeded"),
+            .any(|setup| setup.status == homeboy_core::deps::DependencyHydrationStatus::Succeeded),
         candidate_setup,
         destination_gate_setup,
         candidate_checkout,
@@ -2022,8 +2046,27 @@ fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Er
         Some(serde_json::json!({
             "classification": classification,
             "code": error.code.as_str(),
-            "message": bounded_setup_error_text(&error.message),
-            "details": bounded_setup_error_text(&error.details.to_string()),
+            "message": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.message)),
+            "details": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.details.to_string())),
+            "retry_action": "retry_dependency_hydration",
+        })),
+    )
+}
+
+fn gate_setup_outcome_failure(
+    classification: &str,
+    outcome: &homeboy_core::deps::DependencyHydrationOutcome,
+) -> Error {
+    Error::dependency_step_failed(
+        "promotion.gate_setup",
+        outcome.provider_id.clone(),
+        outcome.exit_code,
+        Vec::new(),
+        Vec::new(),
+        Some(outcome.command.join(" ")),
+        Some(serde_json::json!({
+            "classification": classification,
+            "outcome": outcome,
             "retry_action": "retry_dependency_hydration",
         })),
     )
