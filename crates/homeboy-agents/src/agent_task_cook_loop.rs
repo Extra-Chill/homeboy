@@ -1381,6 +1381,7 @@ mod tests {
                 failure_fingerprint: "rustup unavailable".to_string(),
                 matches_candidate_failure: true,
                 result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+                diagnostic: None,
             });
         let baseline_red = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
@@ -2314,6 +2315,7 @@ mod tests {
             failure_fingerprint: String::new(),
             matches_candidate_failure: false,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
+            diagnostic: None,
         });
         gate
     }
@@ -2367,6 +2369,7 @@ mod tests {
             failure_fingerprint: String::new(),
             matches_candidate_failure: false,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
+            diagnostic: None,
         });
         gate
     }
