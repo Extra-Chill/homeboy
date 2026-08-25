@@ -25,8 +25,10 @@ use homeboy::core::defaults;
 use homeboy::core::engine::shell::quote_args;
 use homeboy::core::worktree_providers::{
     plan_apply_enabled_worktree_provider_with_lifecycle_from_config,
+    preview_apply_enabled_worktree_provider_task_attachment_from_config,
     provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCleanupPolicy,
     WorktreeProviderCreateIntent, WorktreeProviderCreatePlan, WorktreeProviderLifecycleIntent,
+    WorktreeProviderTaskAttachmentStatus,
 };
 
 use super::super::agent_task_dispatch::DispatchArgs;
@@ -3687,6 +3689,38 @@ fn resolve_cook_preview_destination(
         path
     } else {
         let config = defaults::load_config();
+        let task_attachment = args
+            .dispatch
+            .task_url
+            .as_deref()
+            .map(|task_url| {
+                preview_apply_enabled_worktree_provider_task_attachment_from_config(
+                    &handle, task_url, &config,
+                )
+            })
+            .transpose()?
+            .flatten();
+        if let Some(attachment) = task_attachment.as_ref().filter(|attachment| {
+            attachment.status == WorktreeProviderTaskAttachmentStatus::Eligible
+        }) {
+            let path = PathBuf::from(&attachment.path);
+            homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
+            validate_cook_destination_identity(&args, &path)?;
+            resolve_cook_base(&mut args)?;
+            return Ok((
+                args,
+                serde_json::json!({
+                    "action": "planned_task_attachment",
+                    "kind": "provider",
+                    "handle": attachment.handle,
+                    "path": attachment.path,
+                    "branch": attachment.branch,
+                    "provider_id": attachment.provider_id,
+                    "task_url": attachment.task_url,
+                    "attachment_status": attachment.status,
+                }),
+            ));
+        }
         let resolution = match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
             &handle,
             &config,
@@ -3707,22 +3741,17 @@ fn resolve_cook_preview_destination(
                     cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
                 };
                 let plan = match plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
-                    &intent,
-                    &lifecycle,
-                    &config,
+                    &intent, &lifecycle, &config,
                 ) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        return Ok((
-                            args,
-                            unresolved_provider_preview(&handle, error, &config),
-                        ));
+                        return Ok((args, unresolved_provider_preview(&handle, error, &config)));
                     }
                 };
-                let WorktreeProviderCreatePlan::WouldCreate(resolution) = plan
-                else {
+                let WorktreeProviderCreatePlan::WouldCreate(resolution) = plan else {
                     return Err(homeboy::core::Error::internal_unexpected(
-                        "worktree provider changed from absent to existing while previewing Cook".to_string(),
+                        "worktree provider changed from absent to existing while previewing Cook"
+                            .to_string(),
                     ));
                 };
                 let planning_timeout =
@@ -3743,10 +3772,7 @@ fn resolve_cook_preview_destination(
                 ));
             }
             Err(error) if issue_derived => {
-                return Ok((
-                    args,
-                    unresolved_provider_preview(&handle, error, &config),
-                ));
+                return Ok((args, unresolved_provider_preview(&handle, error, &config)));
             }
             Err(error) => return Err(error),
         };

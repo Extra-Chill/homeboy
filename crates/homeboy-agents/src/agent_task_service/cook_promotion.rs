@@ -556,103 +556,7 @@ pub(crate) fn cook_promotion_argv(
         "--artifact-id".to_string(),
         artifact_id.to_string(),
     ];
-    for (flag, values) in [
-        ("--verify", &options.gates.verify),
-        ("--private-verify", &options.gates.private_verify),
-    ] {
-        for value in values {
-            command.extend([flag.to_string(), value.clone()]);
-        }
-    }
-    let gates = serde_json::to_value(&options.gates).unwrap_or(Value::Null);
-    for (key, flag) in [
-        ("private_gate_reveal", "--private-gate-reveal"),
-        ("execution_policy", "--gate-execution-policy"),
-        ("gate_timeout_seconds", "--gate-timeout-seconds"),
-        (
-            "gate_heartbeat_interval_seconds",
-            "--gate-heartbeat-interval-seconds",
-        ),
-        (
-            "gate_no_progress_timeout_seconds",
-            "--gate-no-progress-timeout-seconds",
-        ),
-    ] {
-        if let Some(value) = gates.get(key) {
-            let value = value
-                .as_str()
-                .map(|value| value.replace('_', "-"))
-                .or_else(|| value.as_u64().map(|value| value.to_string()));
-            if let Some(value) = value {
-                command.extend([flag.to_string(), value]);
-            }
-        }
-    }
-    for (key, flag) in [
-        ("rerun_completed_gates", "--rerun-completed-gates"),
-        ("accept_inherited_failures", "--accept-inherited-failures"),
-    ] {
-        if gates.get(key).and_then(Value::as_bool) == Some(true) {
-            command.push(flag.to_string());
-        }
-    }
-    if let Some(environment) = gates.get("gate_environment") {
-        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
-            command.extend([
-                "--gate-environment-mode".to_string(),
-                mode.replace('_', "-"),
-            ]);
-        }
-        for (key, flag) in [("variables", "--gate-env"), ("preserve", "--gate-env-from")] {
-            if let Some(values) = environment.get(key).and_then(Value::as_object) {
-                for (name, value) in values {
-                    if let Some(value) = value.as_str() {
-                        command.extend([flag.to_string(), format!("{name}={value}")]);
-                    }
-                }
-            }
-        }
-        for (key, flag) in [
-            ("isolate_home", "--isolate-gate-home"),
-            ("isolate_xdg", "--isolate-gate-xdg"),
-        ] {
-            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
-                command.push(format!("{flag}={value}"));
-            }
-        }
-        if let Some(value) = environment
-            .get("shared_cargo_target")
-            .and_then(Value::as_bool)
-        {
-            command.push(if value {
-                "--gate-shared-cargo-target".to_string()
-            } else {
-                "--no-gate-shared-cargo-target".to_string()
-            });
-        }
-        if let Some(inputs) = environment
-            .get("extension_inputs")
-            .and_then(Value::as_array)
-        {
-            for input in inputs {
-                if let Ok(input) = serde_json::to_string(input) {
-                    command.extend(["--gate-extension-input".to_string(), input]);
-                }
-            }
-        }
-    }
-    for toolchain in &options.gates.gate_toolchains {
-        if toolchain.probe_arguments == ["--version"] {
-            command.extend(["--gate-toolchain".to_string(), toolchain.command.clone()]);
-        } else if let Ok(toolchain) = serde_json::to_string(toolchain) {
-            command.extend(["--gate-toolchain-spec".to_string(), toolchain]);
-        }
-    }
-    for artifact in &options.gates.gate_package_artifacts {
-        if let Ok(artifact) = serde_json::to_string(artifact) {
-            command.extend(["--gate-package-artifact".to_string(), artifact]);
-        }
-    }
+    crate::agent_task_gate::append_promotion_gate_argv(&mut command, &options.gates);
     if let Some(provider) = &options.provider_command {
         command.extend(["--provider-command".to_string(), provider.clone()]);
     }
@@ -4644,6 +4548,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             stop_reason,
             terminal_phase: None,
             terminal_failure_classification: None,
+            primary_failure: None,
             moving_base_recovery: None,
             failure_context,
         },
