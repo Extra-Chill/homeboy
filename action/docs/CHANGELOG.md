@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.11] - 2026-08-25
+
+### Fixed
+- preserve setup failure evidence
+- pin WP Codebox setup checkout
+
 ## [2.15.10] - 2026-08-25
 
 ### Fixed
