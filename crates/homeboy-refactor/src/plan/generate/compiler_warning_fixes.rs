@@ -289,7 +289,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
         let content = r#"
-pub(crate) fn public_function() {}
+pub fn public_function() {}
 
 #[cfg(test)]
 mod tests {
