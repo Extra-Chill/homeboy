@@ -166,7 +166,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
                 )
                 .total_bytes,
             );
-            below_reconstructable_reserve(root, reserve).then(|| (root, reserve))
+            below_reconstructable_reserve(root, reserve).then_some((root, reserve))
         })
         .collect();
     if pressured.is_empty() {
@@ -179,7 +179,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
-            &root,
+            root,
             "managed worktree",
             "worktree capacity is not measurable on this platform",
         );
@@ -188,7 +188,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
             .is_some_and(|available| available < reserve_bytes)
         {
             return Err(reconstructable_admission_error(
-                &root,
+                root,
                 budget.available_bytes,
                 budget.available_inodes,
                 reserve_bytes,
@@ -347,7 +347,7 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| unsafe {
         let stat = stat.assume_init();
-        (stat.f_bavail as u64).saturating_mul(stat.f_frsize)
+        stat.f_bavail.saturating_mul(stat.f_frsize)
     })
 }
 
@@ -746,10 +746,9 @@ fn directory_has_child(target: &fs::File, mut inspect: impl FnMut(fs::File) -> b
 
 #[cfg(unix)]
 fn lock_in_directory_is_held(target: &fs::File) -> bool {
-    use std::ffi::CStr;
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    let lock = CStr::from_bytes_with_nul(b".cargo-lock\0").expect("static Cargo lock name");
+    let lock = c".cargo-lock";
     let fd = unsafe {
         libc::openat(
             target.as_raw_fd(),
