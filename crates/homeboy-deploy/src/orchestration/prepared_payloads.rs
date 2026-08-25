@@ -66,18 +66,6 @@ pub(super) fn prepare_component_deployments(
                 ComponentPayloadPreparationRequest::new(&component, &preparation_config);
             request.config.exact_ref_materialized =
                 config.requested_ref_for(&component.id).is_some();
-            if let Some(lease) = release_artifacts.get(&component.id).cloned() {
-                if let Err(error) = payloads.insert(request.clone(), Some(lease)) {
-                    failures.push(ComponentDeployResult::failed(
-                        &component,
-                        base_path,
-                        local_versions.get(&component.id).cloned(),
-                        remote_versions.get(&component.id).cloned(),
-                        error.to_string(),
-                    ));
-                    continue;
-                }
-            }
             match payloads.prepare(request, &mut release_artifact_store) {
                 Ok(payload) => {
                     binding_payloads.insert(component.id.clone(), payload.artifact.clone());
