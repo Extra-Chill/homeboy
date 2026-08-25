@@ -44,7 +44,7 @@ use super::super::CmdResult;
 use super::candidate::{canonical_candidate_projection, classify_candidates};
 use super::{
     AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
-    RecordReplacementGateProofArgs, ReviewArgs, VerifyReplacementArgs,
+    RecordReplacementGateProofArgs, ReviewArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 
 #[derive(Args, Debug)]
@@ -456,7 +456,6 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
 }
 
 pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
-    args.gates.snapshot_file_inputs()?;
     let to_worktree = args.to_worktree.clone();
     let source_reference = parse_promotion_run_artifact_reference(&args.source)?;
     let source_spec = source_reference
@@ -485,6 +484,12 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             None => None,
         },
     };
+    let gates = resolve_promotion_gates(
+        &mut args.gates,
+        args.gates_from_cook_recipe,
+        source_run_id.as_deref(),
+        &args.source,
+    )?;
     let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
         requested_artifact_id
             .as_deref()
@@ -518,7 +523,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         task_id,
         artifact_id,
         dry_run: args.dry_run,
-        gates: args.gates.into(),
+        gates,
         provider_command: args.provider_command,
         provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
             argv: args.provider_argv,
@@ -553,6 +558,54 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
     }
 
     Ok((value, exit_code))
+}
+
+pub(crate) fn resolve_promotion_gates(
+    gates: &mut VerifyGateArgs,
+    from_cook_recipe: bool,
+    source_run_id: Option<&str>,
+    source: &str,
+) -> homeboy::core::Result<VerifyGateOptions> {
+    if !from_cook_recipe {
+        gates.snapshot_file_inputs()?;
+        return Ok(gates.clone().into());
+    }
+    let supplied_gates = VerifyGateOptions::from(gates.clone());
+    if gates.has_deterministic_gate()
+        || !gates.input_sources.is_empty()
+        || supplied_gates != VerifyGateOptions::default()
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "gates-from-cook-recipe",
+            "cannot combine a durable Cook gate reference with explicit gate options",
+            None,
+            None,
+        ));
+    }
+    let run_id = source_run_id.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "gates-from-cook-recipe",
+            "requires a source owned by a durable Cook attempt",
+            Some(source.to_string()),
+            None,
+        )
+    })?;
+    let recipe = agent_task_service::load_recipe_for_attempt(run_id)?.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "gates-from-cook-recipe",
+            "source run has no durable Cook recipe",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    serde_json::from_value(recipe.gate_policy).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "cook_recipe.gate_policy",
+            format!("durable Cook recipe has an invalid gate policy: {error}"),
+            Some(recipe.cook_id),
+            None,
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2699,15 +2752,16 @@ fn promotion_candidates(
                     if let Some(contract) = continuation
                         .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                     {
-                        append_resume_contract(&mut command, contract);
+                        if context.cook_gates.is_some() {
+                            append_resume_base(&mut command, contract);
+                        } else {
+                            append_resume_contract(&mut command, contract);
+                        }
                     } else if let Some(base) = context.cook_base {
                         command.extend(["--base".to_string(), base.to_string()]);
-                        if let Some(gates) = context.cook_gates {
-                            homeboy::agents::agent_tasks::gate::append_promotion_gate_argv(
-                                &mut command,
-                                gates,
-                            );
-                        }
+                    }
+                    if context.cook_gates.is_some() {
+                        command.push("--gates-from-cook-recipe".to_string());
                     }
                     if let Some(provider_command) = context.provider_command {
                         command.push("--provider-command".to_string());
@@ -2737,12 +2791,20 @@ fn promotion_candidates(
 
 /// Render the durable gate contract rather than relying on evolving CLI defaults.
 fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
-    if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
-        command.extend(["--base".to_string(), base.to_string()]);
-    }
+    append_resume_base(command, contract);
     let Some(gates) = contract.get("gates") else {
         return;
     };
+    append_resume_gates(command, gates);
+}
+
+fn append_resume_base(command: &mut Vec<String>, contract: &Value) {
+    if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
+        command.extend(["--base".to_string(), base.to_string()]);
+    }
+}
+
+fn append_resume_gates(command: &mut Vec<String>, gates: &Value) {
     for (key, flag) in [
         ("verify", "--verify"),
         ("private_verify", "--private-verify"),
@@ -4126,29 +4188,21 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("command argument").to_string())
             .collect::<Vec<_>>();
-        assert!(command
-            .windows(2)
-            .any(|args| args == ["--verify", "cargo test"]));
-        assert!(command
-            .windows(2)
-            .any(|args| args == ["--private-verify", "private-check"]));
-        assert_eq!(
-            command
+        assert!(command.contains(&"--gates-from-cook-recipe".to_string()));
+        for private_value in [
+            "private-check",
+            "printf 'file-backed private gate'",
+            "private-gate.sh",
+            "sha256:file-private",
+        ] {
+            assert!(!command
                 .iter()
-                .filter(|argument| argument.as_str() == "--gate-input-source")
-                .count(),
-            4
-        );
-        let provenance = command
-            .windows(2)
-            .filter(|args| args[0] == "--gate-input-source")
-            .map(|args| serde_json::from_str::<Value>(&args[1]).expect("gate provenance"))
-            .collect::<Vec<_>>();
-        assert_eq!(provenance[3]["sha256"], "sha256:file-private");
-        assert!(provenance[3].get("path").is_none());
+                .any(|argument| argument.contains(private_value)));
+        }
+        assert!(!command.iter().any(|argument| argument == "--verify"));
         assert!(!command
             .iter()
-            .any(|argument| argument.contains("private-gate.sh")));
+            .any(|argument| argument == "--private-verify"));
         assert!(crate::cli_surface::Cli::try_parse_from(&command).is_ok());
     }
 

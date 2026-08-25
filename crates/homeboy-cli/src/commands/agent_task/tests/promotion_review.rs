@@ -2,6 +2,7 @@
 
 use super::support::*;
 use crate::agents::agent_task_service::DerivedCookBaselineCapability;
+use clap::Parser;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -80,6 +81,78 @@ fn cli_promotion_resume_policy_matches_the_shared_service() {
             ),
         );
     }
+}
+
+#[test]
+fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
+    with_temp_home(|| {
+        let run_id = "cook-retained-gates-attempt-1";
+        let private_program = "printf 'private $TOKEN'\n";
+        let gates = homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            private_verify: vec![private_program.to_string()],
+            input_sources: vec![serde_json::from_value(json!({
+                "visibility": "private",
+                "source_kind": "file",
+                "sha256": "sha256:private-fixture",
+                "size_bytes": private_program.len(),
+                "redaction_policy": "summary_only"
+            }))
+            .expect("private source provenance")],
+            ..Default::default()
+        };
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: "cook-retained-gates".to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: test_plan(),
+            to_worktree: "fixture@retained-gates".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: gates.clone(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Retained gates".to_string(),
+            commit_message: "Retained gates".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fixture",
+            "--no-finalize",
+        ])
+        .expect("parse default gate options");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        let mut cli_gates = cook.gates;
+
+        let hydrated = review::resolve_promotion_gates(&mut cli_gates, true, Some(run_id), run_id)
+            .expect("hydrate durable Cook gates");
+
+        assert_eq!(hydrated, gates);
+        assert_eq!(hydrated.private_verify, [private_program]);
+        assert_eq!(hydrated.input_sources[0].path, None);
+    });
 }
 
 #[test]
