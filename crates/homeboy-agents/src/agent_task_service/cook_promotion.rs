@@ -4644,6 +4644,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             stop_reason,
             terminal_phase: None,
             terminal_failure_classification: None,
+            primary_failure: None,
             moving_base_recovery: None,
             failure_context,
         },

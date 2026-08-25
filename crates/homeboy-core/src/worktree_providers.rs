@@ -2730,20 +2730,20 @@ fn annotate_provider_lookup_error(
 pub fn compact_provider_failure_details(details: &Value) -> Option<Value> {
     const STDERR_EXCERPT_LIMIT: usize = 512;
 
+    let provider_id = details.get("worktree_provider_id")?.as_str()?;
     let operation = details.get("worktree_provider_operation")?.as_str()?;
     let evidence = details.get("command_evidence")?;
     let stderr = evidence.get("stderr")?.as_str()?;
-    let stderr_excerpt: String = stderr
+    let stderr_excerpt = crate::redaction::redact_string(stderr);
+    let stderr_excerpt: String = stderr_excerpt
         .lines()
         .find(|line| !line.trim().is_empty())
-        .unwrap_or(stderr)
+        .unwrap_or(&stderr_excerpt)
         .chars()
         .take(STDERR_EXCERPT_LIMIT)
         .collect();
-    if stderr_excerpt.trim().is_empty() {
-        return None;
-    }
     Some(serde_json::json!({
+        "provider_id": provider_id,
         "operation": operation,
         "exit_code": evidence.get("exit_code"),
         "replay_command": details.get("worktree_provider_replay_command").or_else(|| evidence.get("command")),
@@ -2782,6 +2782,7 @@ mod compact_provider_failure_details_tests {
     fn projects_short_stderr_for_ensure_resolve_and_plan_failures() {
         for operation in ["ensure", "resolve", "plan"] {
             let details = json!({
+                "worktree_provider_id": "fixture",
                 "worktree_provider_operation": operation,
                 "worktree_provider_replay_command": format!("fixture-provider {operation}"),
                 "command_evidence": {
@@ -2794,6 +2795,7 @@ mod compact_provider_failure_details_tests {
             assert_eq!(
                 compact_provider_failure_details(&details),
                 Some(json!({
+                    "provider_id": "fixture",
                     "operation": operation,
                     "exit_code": 17,
                     "replay_command": format!("fixture-provider {operation}"),
@@ -2807,6 +2809,7 @@ mod compact_provider_failure_details_tests {
     fn bounds_large_stderr_without_changing_durable_evidence() {
         let stderr = format!("Error: {}", "x".repeat(2_048));
         let details = json!({
+            "worktree_provider_id": "fixture",
             "worktree_provider_operation": "ensure",
             "worktree_provider_replay_command": "fixture-provider ensure",
             "command_evidence": {
@@ -2829,6 +2832,42 @@ mod compact_provider_failure_details_tests {
             details["command_evidence"]["stderr"].as_str(),
             Some(stderr.as_str())
         );
+    }
+
+    #[test]
+    fn preserves_empty_stderr_as_a_typed_provider_failure() {
+        let details = json!({
+            "worktree_provider_id": "fixture",
+            "worktree_provider_operation": "resolve",
+            "command_evidence": {
+                "command": "fixture-provider resolve",
+                "exit_code": 1,
+                "stderr": "",
+            },
+        });
+
+        let projection = compact_provider_failure_details(&details).expect("compact evidence");
+        assert_eq!(projection["stderr_excerpt"], "");
+    }
+
+    #[test]
+    fn redacts_sensitive_stderr_in_the_compact_projection() {
+        let details = json!({
+            "worktree_provider_id": "fixture",
+            "worktree_provider_operation": "resolve",
+            "command_evidence": {
+                "command": "fixture-provider resolve",
+                "exit_code": 1,
+                "stderr": "Authorization: Bearer provider-secret\nretry denied",
+            },
+        });
+
+        let projection = compact_provider_failure_details(&details).expect("compact evidence");
+        assert_eq!(
+            projection["stderr_excerpt"],
+            "Authorization: Bearer [REDACTED]"
+        );
+        assert!(!projection.to_string().contains("provider-secret"));
     }
 }
 
