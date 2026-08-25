@@ -183,6 +183,49 @@ after_phpunit_config="$(python3 -c 'import json,sys; print(json.load(open(sys.ar
 [ "$after_php" != "$after_phpunit_config" ] || fail "a PHPUnit config edit did not move the workspace fingerprint"
 printf 'PASS: PHPUnit config edits move the workspace fingerprint\n'
 
+# Extra-Chill/homeboy#13494 — the concatenation order is core's, and core hashes
+# in `Ord for PathBuf` order, which compares path components. Sorting the joined
+# text instead disagrees whenever a directory name is a prefix of a sibling
+# followed by a byte below "/" (`inc/auth/` beside `inc/auth-tokens/`, which is
+# what `extrachill-users` has). Same files, different order, different digest —
+# and core then rejected every inventory this producer wrote, permanently.
+mkdir -p "${plugin}/inc/auth" "${plugin}/inc/auth-tokens"
+printf '<?php\n// auth\n' > "${plugin}/inc/auth/handler.php"
+printf '<?php\n// auth-tokens\n' > "${plugin}/inc/auth-tokens/token.php"
+run_producer "${WORKDIR}/ordered.json" > /dev/null || fail "producer failed with sibling-prefix directories"
+python3 - "${WORKDIR}/ordered.json" "$plugin" "$EXTENSION_PATH" <<'PY' || fail "workspace fingerprint ordering assertions failed"
+import hashlib, json, os, sys
+from pathlib import Path
+
+doc = json.load(open(sys.argv[1]))
+root = Path(sys.argv[2]).resolve()
+config = json.loads((Path(sys.argv[3]) / "wordpress.json").read_text())["test"]["inventory"]
+names = set(config["fingerprint_names"])
+extensions = set(config["fingerprint_extensions"])
+skip = set(config["fingerprint_skip_dirs"])
+
+selected = []
+for directory, subdirectories, files in os.walk(root):
+    subdirectories[:] = [name for name in subdirectories if name not in skip]
+    for name in files:
+        path = Path(directory) / name
+        if path.is_file() and (path.name in names or (path.suffix and path.suffix[1:] in extensions)):
+            selected.append(path.relative_to(root))
+
+def digest(order):
+    return hashlib.sha256(
+        "".join(f"{path}\0{(root / path).read_text()}\0" for path in order).encode()
+    ).hexdigest()
+
+by_components = sorted(selected, key=lambda path: path.parts)
+by_joined_text = sorted(selected, key=str)
+assert by_components != by_joined_text, "fixture no longer discriminates between the two orders"
+assert digest(by_components) != digest(by_joined_text), "fixture contents no longer discriminate"
+assert doc["workspace_fingerprint"] == digest(by_components), \
+    "producer must concatenate in path-component order, which is what core re-derives"
+print("PASS: workspace fingerprint orders by path components, not by the joined path text")
+PY
+
 # An empty enumeration is refused: it cannot be told apart from a broken
 # producer, and sharding nothing would report a green suite that ran no tests.
 empty="${WORKDIR}/empty"
