@@ -28,6 +28,7 @@
       "bash scripts/bench/nodejs-workload-progress-forwarding-smoke.sh",
       "bash scripts/bench/nodejs-workload-utils-smoke.sh",
       "bash scripts/build/build-runner-shell-smoke.sh",
+      "bash tests/release-package-manifest-smoke.sh",
       "bash scripts/runtime/nodejs-invocation-runtime-smoke.sh",
       "node scripts/trace/trace-helpers-smoke.mjs",
       "bash tests/local-workspace-deps-smoke.sh",

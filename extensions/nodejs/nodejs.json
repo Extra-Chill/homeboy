@@ -130,6 +130,13 @@
       "description": "npm registry URL for publishing"
     },
     {
+      "id": "release_package_script",
+      "label": "Release Package Script",
+      "type": "string",
+      "default": "",
+      "description": "Optional package.json script that emits a terminal JSON artifact manifest. Its artifacts are merged with the canonical npm tarball."
+    },
+    {
       "id": "targeted_test_script",
       "label": "Targeted Test Script",
       "type": "string",
