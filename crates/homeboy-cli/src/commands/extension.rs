@@ -34,9 +34,11 @@ enum ExtensionCommand {
         /// Project ID to filter compatible extensions
         #[arg(short, long)]
         project: Option<String>,
-        /// Report installed metadata only. Skips each extension's ready_check,
-        /// so `ready_reason` is `ready_check_skipped` instead of a live answer
-        #[arg(long)]
+        /// Run live readiness probes concurrently and refresh cached readiness
+        #[arg(long, conflicts_with = "skip_ready_check")]
+        live_readiness: bool,
+        /// Deprecated compatibility flag; inventory is metadata-only by default
+        #[arg(long, hide = true)]
         skip_ready_check: bool,
     },
     /// Compare installed extension revisions with their current checkout HEADs
@@ -51,9 +53,11 @@ enum ExtensionCommand {
     Show {
         /// Extension ID
         extension_id: String,
-        /// Report installed metadata only. Skips the extension's ready_check,
-        /// so `ready_reason` is `ready_check_skipped` instead of a live answer
-        #[arg(long)]
+        /// Run the live readiness probe and refresh cached readiness
+        #[arg(long, conflicts_with = "skip_ready_check")]
+        live_readiness: bool,
+        /// Deprecated compatibility flag; inspection is metadata-only by default
+        #[arg(long, hide = true)]
         skip_ready_check: bool,
     },
     /// Execute a extension
@@ -207,16 +211,21 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List {
             project,
+            live_readiness,
             skip_ready_check,
-        } => list(project, readiness_mode(skip_ready_check)),
+        } => list(project, readiness_mode(live_readiness, skip_ready_check)),
         ExtensionCommand::DiffInstalled {
             extension_id,
             runner,
         } => diff_installed(extension_id.as_deref(), runner.as_deref()),
         ExtensionCommand::Show {
             extension_id,
+            live_readiness,
             skip_ready_check,
-        } => show_extension(&extension_id, readiness_mode(skip_ready_check)),
+        } => show_extension(
+            &extension_id,
+            readiness_mode(live_readiness, skip_ready_check),
+        ),
         ExtensionCommand::Run {
             extension_id,
             project,
@@ -512,11 +521,20 @@ pub struct ExtensionDetail {
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_ready_check: Option<bool>,
-    pub ready: bool,
+    pub readiness: homeboy_extension::ExtensionReadinessState,
+    pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_follow_up_command: Option<String>,
     pub linked: bool,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -623,7 +641,7 @@ pub struct InstalledExtensionDiff {
     pub manifest_path: String,
     pub linked: bool,
     pub copied: bool,
-    pub ready: bool,
+    pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -644,13 +662,12 @@ pub struct InstalledExtensionDiff {
     pub next_command: String,
 }
 
-/// Inventory commands answer "what is installed"; readiness is a separate,
-/// expensive question that `--skip-ready-check` opts out of (#10517).
-fn readiness_mode(skip_ready_check: bool) -> ExtensionReadinessMode {
-    if skip_ready_check {
-        ExtensionReadinessMode::Skip
-    } else {
+/// Inventory is static by default; callers must explicitly request live probes.
+fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionReadinessMode {
+    if live_readiness {
         ExtensionReadinessMode::Probe
+    } else {
+        ExtensionReadinessMode::Cached
     }
 }
 
@@ -675,7 +692,7 @@ fn diff_installed(
         return runner_diff_installed(extension_id, runner_id);
     }
 
-    let rows = extension::list_summaries(None)
+    let rows = extension::list_summaries_with(None, ExtensionReadinessMode::Cached)
         .into_iter()
         .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
         .map(installed_extension_diff)
@@ -830,7 +847,7 @@ fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff
         source_url,
         source_path,
         has_setup,
-        setup_status: if summary.ready {
+        setup_status: if summary.ready == Some(true) {
             "ready".to_string()
         } else if has_setup {
             "setup_required".to_string()
@@ -899,12 +916,15 @@ fn runner_diff_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 }
 
 fn installed_extension_diff_status(
-    ready: bool,
+    ready: Option<bool>,
     installed_revision: Option<&str>,
     checkout_revision: Option<&str>,
 ) -> String {
-    if !ready {
+    if ready == Some(false) {
         return "unready".to_string();
+    }
+    if ready.is_none() {
+        return "unknown".to_string();
     }
     match (installed_revision, checkout_revision) {
         (Some(installed), Some(checkout)) if installed == checkout => "current".to_string(),
@@ -997,9 +1017,14 @@ fn show_extension(
         runtime_requirements: extension.runtime.clone(),
         has_setup,
         has_ready_check,
+        readiness: ready_status.state,
         ready: ready_status.ready,
         ready_reason: ready_status.reason,
         ready_detail: ready_status.detail,
+        readiness_cache_age_seconds: ready_status.cache_age_seconds,
+        readiness_probe_duration_ms: ready_status.probe_duration_ms,
+        readiness_timeout_ms: ready_status.timeout_ms,
+        readiness_follow_up_command: ready_status.follow_up_command,
         linked,
         path: extension.extension_path.clone().unwrap_or_default(),
         source_revision,
@@ -1884,13 +1909,13 @@ mod tests {
     /// produced by a probe that ran anyway.
     #[cfg(unix)]
     #[test]
-    fn extension_list_with_skip_ready_check_never_spawns_the_ready_check() {
+    fn cached_extension_list_never_spawns_the_ready_check() {
         with_isolated_home(|home| {
             let sentinel = home.path().join("ready-check-ran");
             write_extension_with_observable_ready_check(home.path(), "readiness", &sentinel);
 
             let (output, exit_code) =
-                list(None, ExtensionReadinessMode::Skip).expect("extension list");
+                list(None, ExtensionReadinessMode::Cached).expect("extension list");
 
             assert_eq!(exit_code, 0);
             assert!(
@@ -1911,11 +1936,10 @@ mod tests {
         });
     }
 
-    /// The default is deliberately unchanged: dropping readiness from the
-    /// default answer would be a silent, user-visible contract change.
+    /// The explicit live mode is the control for the cached inventory test.
     #[cfg(unix)]
     #[test]
-    fn extension_list_still_probes_readiness_by_default() {
+    fn live_extension_list_probes_readiness() {
         with_isolated_home(|home| {
             let sentinel = home.path().join("ready-check-ran");
             write_extension_with_observable_ready_check(home.path(), "readiness", &sentinel);
@@ -1924,7 +1948,7 @@ mod tests {
 
             assert!(
                 sentinel.exists(),
-                "the default inventory answer still reports live readiness"
+                "live inventory must report live readiness"
             );
             let ExtensionOutput::List { extensions, .. } = output else {
                 panic!("expected extension list output");
@@ -1933,9 +1957,16 @@ mod tests {
                 .iter()
                 .find(|summary| summary.id == "readiness")
                 .expect("fixture extension");
-            assert!(entry.ready);
+            assert_eq!(entry.ready, Some(true));
             assert_eq!(entry.ready_reason, None);
         });
+    }
+
+    #[test]
+    fn extension_inventory_defaults_to_cached_readiness() {
+        assert_eq!(readiness_mode(false, false), ExtensionReadinessMode::Cached);
+        assert_eq!(readiness_mode(false, true), ExtensionReadinessMode::Cached);
+        assert_eq!(readiness_mode(true, false), ExtensionReadinessMode::Probe);
     }
 
     #[test]
@@ -2077,8 +2108,8 @@ mod tests {
             )
             .expect("extension manifest");
 
-            let (output, exit_code) =
-                show_extension(extension_id, ExtensionReadinessMode::Skip).expect("show extension");
+            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Cached)
+                .expect("show extension");
             assert_eq!(exit_code, 0);
             let ExtensionOutput::Show { extension } = output else {
                 panic!("expected extension show output");
@@ -2098,7 +2129,7 @@ mod tests {
             );
 
             let (output, exit_code) =
-                list(None, ExtensionReadinessMode::Skip).expect("list extensions");
+                list(None, ExtensionReadinessMode::Cached).expect("list extensions");
             assert_eq!(exit_code, 0);
             let ExtensionOutput::List { extensions, .. } = output else {
                 panic!("expected extension list output");
@@ -2189,8 +2220,8 @@ mod tests {
             )
             .expect("extension manifest");
 
-            let (output, exit_code) =
-                show_extension(extension_id, ExtensionReadinessMode::Skip).expect("show extension");
+            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Cached)
+                .expect("show extension");
             assert_eq!(exit_code, 0);
             let ExtensionOutput::Show { extension } = output else {
                 panic!("expected extension show output");
@@ -2247,20 +2278,24 @@ mod tests {
     #[test]
     fn installed_extension_diff_status_reports_stale_current_and_unknown() {
         assert_eq!(
-            installed_extension_diff_status(true, Some("abc1234"), Some("abc1234")),
+            installed_extension_diff_status(Some(true), Some("abc1234"), Some("abc1234")),
             "current"
         );
         assert_eq!(
-            installed_extension_diff_status(true, Some("abc1234"), Some("def5678")),
+            installed_extension_diff_status(Some(true), Some("abc1234"), Some("def5678")),
             "stale"
         );
         assert_eq!(
-            installed_extension_diff_status(true, Some("abc1234"), None),
+            installed_extension_diff_status(Some(true), Some("abc1234"), None),
             "current"
         );
         assert_eq!(
-            installed_extension_diff_status(false, Some("abc1234"), Some("abc1234")),
+            installed_extension_diff_status(Some(false), Some("abc1234"), Some("abc1234")),
             "unready"
+        );
+        assert_eq!(
+            installed_extension_diff_status(None, Some("abc1234"), Some("abc1234")),
+            "unknown"
         );
     }
 
@@ -2274,9 +2309,14 @@ mod tests {
             runtime: "platform".to_string(),
             compatible: true,
             core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-            ready: true,
+            readiness: homeboy_extension::ExtensionReadinessState::Ready,
+            ready: Some(true),
             ready_reason: None,
             ready_detail: None,
+            readiness_cache_age_seconds: None,
+            readiness_probe_duration_ms: None,
+            readiness_timeout_ms: None,
+            readiness_follow_up_command: None,
             linked: true,
             path: "/tmp/homeboy-extensions/rust".to_string(),
             manifest_path: None,
@@ -2333,9 +2373,14 @@ mod tests {
                 runtime: "platform".to_string(),
                 compatible: true,
                 core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-                ready: true,
+                readiness: homeboy_extension::ExtensionReadinessState::Ready,
+                ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
+                readiness_cache_age_seconds: None,
+                readiness_probe_duration_ms: None,
+                readiness_timeout_ms: None,
+                readiness_follow_up_command: None,
                 linked: false,
                 path: extension_dir.to_string_lossy().to_string(),
                 manifest_path: None,
@@ -2381,9 +2426,14 @@ mod tests {
                 runtime: "platform".to_string(),
                 compatible: true,
                 core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-                ready: true,
+                readiness: homeboy_extension::ExtensionReadinessState::Ready,
+                ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
+                readiness_cache_age_seconds: None,
+                readiness_probe_duration_ms: None,
+                readiness_timeout_ms: None,
+                readiness_follow_up_command: None,
                 manifest_path: None,
                 error: None,
                 diagnostic: None,
@@ -2414,7 +2464,7 @@ mod tests {
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(extension_dir.join("broken.json"), "{secret-value").expect("manifest");
 
-            let error = match show_extension(extension_id, ExtensionReadinessMode::Skip) {
+            let error = match show_extension(extension_id, ExtensionReadinessMode::Cached) {
                 Err(error) => error,
                 Ok(_) => panic!("show must report the manifest failure"),
             };
@@ -2444,13 +2494,13 @@ mod tests {
             .expect("broken extension link");
 
             let (output, _) =
-                list(None, ExtensionReadinessMode::Skip).expect("list broken extension");
+                list(None, ExtensionReadinessMode::Cached).expect("list broken extension");
             let ExtensionOutput::List { extensions, .. } = output else {
                 panic!("expected extension list output");
             };
             let list_actions = &extensions[0].repair_actions;
 
-            let show_error = match show_extension(extension_id, ExtensionReadinessMode::Skip) {
+            let show_error = match show_extension(extension_id, ExtensionReadinessMode::Cached) {
                 Err(error) => error,
                 Ok(_) => panic!("show should report the broken link"),
             };

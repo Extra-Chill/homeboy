@@ -140,12 +140,25 @@ pub struct RunnerArtifactRef {
 pub enum RunnerWorkspaceSyncMode {
     #[default]
     Snapshot,
+    /// Deliberate exception to `rename_all`: this mode's wire string is
+    /// `snapshot-git`, the spelling every durable consumer already uses —
+    /// on-disk runner-workspace metadata (`.homeboy/runner-workspace.json`),
+    /// the materialization-mode allowlists that verify Lab provenance, and
+    /// the CLI surface. Renaming the variant or its serde attribute must
+    /// move `as_str` with it, or
+    /// `runner_workspace_sync_mode_matches_its_serialized_form` fails.
+    #[serde(rename = "snapshot-git")]
     SnapshotGit,
     Git,
 }
 
 impl RunnerWorkspaceSyncMode {
-    pub fn label(self) -> &'static str {
+    /// This mode as its own canonical wire string — the value `serde`
+    /// produces, pinned to it by
+    /// `runner_workspace_sync_mode_matches_its_serialized_form`. Replaced
+    /// `label`, which restated the same strings by hand with nothing tying
+    /// them to the serde attributes (#13400).
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Snapshot => "snapshot",
             Self::SnapshotGit => "snapshot-git",
@@ -406,10 +419,25 @@ pub enum RunnerTunnelMode {
 }
 
 impl RunnerTunnelMode {
+    /// This mode rendered for humans — `direct SSH`, `reverse-connected`.
+    ///
+    /// A different vocabulary, not a different format of
+    /// [`RunnerTunnelMode::metadata_value`]: this is prose for operator-facing
+    /// output, and it is deliberately not the wire string. Merging the two
+    /// would put a space and a hyphen into persisted metadata that
+    /// `#[serde(rename_all = "snake_case")]` spells `direct_ssh`, with no
+    /// compile error to catch it.
     pub fn label(&self) -> &'static str {
         self.labels().0
     }
 
+    /// This mode as its own canonical wire string — the value `serde` already
+    /// produces, pinned to it by
+    /// `runner_tunnel_mode_metadata_value_matches_its_serialized_form`.
+    ///
+    /// Unlike [`RunnerTunnelMode::label`], this is a hand-written restatement
+    /// of the derived form, so it can drift silently on a variant rename or a
+    /// serde attribute change (#13400). The pin is what stops that.
     pub fn metadata_value(&self) -> &'static str {
         self.labels().1
     }
@@ -871,6 +899,62 @@ fn advertised_capability_versions(
             .insert(capability.version);
     }
     versions
+}
+
+#[cfg(test)]
+mod runner_workspace_sync_mode_tests {
+    use super::RunnerWorkspaceSyncMode;
+
+    /// `as_str` must stay the value `serde` produces. It replaced `label`,
+    /// which drifted from the derived serde form: it returned
+    /// `"snapshot-git"` while `#[serde(rename_all = "snake_case")]`
+    /// serialized `SnapshotGit` as `"snapshot_git"`, a spelling every
+    /// materialization-mode allowlist rejects (#13400). The variant now
+    /// carries an explicit rename and this pin fails if either side moves.
+    #[test]
+    fn runner_workspace_sync_mode_matches_its_serialized_form() {
+        for mode in [
+            RunnerWorkspaceSyncMode::Snapshot,
+            RunnerWorkspaceSyncMode::SnapshotGit,
+            RunnerWorkspaceSyncMode::Git,
+        ] {
+            assert_eq!(
+                serde_json::to_value(mode).expect("serialize"),
+                serde_json::json!(mode.as_str()),
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod runner_tunnel_mode_label_tests {
+    use super::RunnerTunnelMode;
+
+    /// `metadata_value` restates what `#[serde(rename_all = "snake_case")]`
+    /// already produces. It agrees today, which is exactly the state
+    /// `RunnerWorkspaceSyncMode` was in before it drifted — nothing tied the
+    /// copy to its source. This is that tie (#13400).
+    #[test]
+    fn runner_tunnel_mode_metadata_value_matches_its_serialized_form() {
+        for mode in [RunnerTunnelMode::DirectSsh, RunnerTunnelMode::Reverse] {
+            assert_eq!(
+                serde_json::to_value(&mode).expect("serialize"),
+                serde_json::json!(mode.metadata_value()),
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// `label` is a different vocabulary, not a different format, and merging
+    /// it into `metadata_value` would push prose into persisted metadata
+    /// through a string assignment with no compile error. It fails here
+    /// instead.
+    #[test]
+    fn the_operator_facing_vocabulary_stays_prose() {
+        assert_eq!(RunnerTunnelMode::DirectSsh.label(), "direct SSH");
+        assert_eq!(RunnerTunnelMode::Reverse.label(), "reverse-connected");
+    }
 }
 
 #[cfg(test)]

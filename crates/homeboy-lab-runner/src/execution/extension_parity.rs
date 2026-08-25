@@ -524,7 +524,7 @@ fn show_runner_extension(
     extension_id: &str,
 ) -> Result<server::CommandOutput> {
     let command = format!(
-        "cd {} && {} extension show {}",
+        "cd {} && {} extension show {} --live-readiness",
         shell::quote_path(cwd),
         shell::quote_path(homeboy_path),
         shell::quote_arg(extension_id)

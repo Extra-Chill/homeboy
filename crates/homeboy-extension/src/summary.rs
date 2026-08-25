@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use super::execution::{
     extension_ready_status_with, is_extension_compatible, ExtensionReadinessMode,
+    ExtensionReadinessState,
 };
 use super::manifest::ActionType;
 use super::{evaluate_core_compatibility, CoreCompatibilityReport};
@@ -22,11 +23,20 @@ pub struct ExtensionSummary {
     pub runtime: String,
     pub compatible: bool,
     pub core_compatibility: CoreCompatibilityReport,
-    pub ready: bool,
+    pub readiness: ExtensionReadinessState,
+    pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_follow_up_command: Option<String>,
     pub linked: bool,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,114 +76,140 @@ pub struct ActionSummary {
 
 /// List all extensions with pre-computed summary fields.
 ///
-/// Aggregates ready status, compatibility, linked status, CLI info, actions,
-/// and runtime details into a single summary per extension.
+/// Aggregates cached readiness, compatibility, linked status, CLI info,
+/// actions, and runtime details into a single summary per extension.
 pub fn list_summaries(project: Option<&homeboy_core::project::Project>) -> Vec<ExtensionSummary> {
-    list_summaries_with(project, ExtensionReadinessMode::Probe)
+    list_summaries_with(project, ExtensionReadinessMode::Cached)
 }
 
 /// [`list_summaries`], with control over whether readiness is actually probed.
 ///
-/// Every field except `ready`/`ready_reason`/`ready_detail` is read from the
-/// installed manifest and costs nothing. Readiness is the only part that spawns
-/// an operator-authored shell command, so it is the only part a caller should
-/// ever have to opt out of (#10517).
+/// Every field except live readiness is read from installed metadata and costs
+/// nothing. Callers that need a fresh answer must explicitly request `Probe`.
 pub fn list_summaries_with(
     project: Option<&homeboy_core::project::Project>,
     readiness: ExtensionReadinessMode,
 ) -> Vec<ExtensionSummary> {
     let extensions = discover_extensions();
 
-    let mut summaries: Vec<ExtensionSummary> = extensions
-        .into_iter()
-        .map(|extension| match extension {
-            DiscoveredExtension::Valid(ext) => {
-                let ready_status = extension_ready_status_with(&ext, readiness);
-                let compatible = is_extension_compatible(&ext, project);
-                let linked = is_extension_linked(&ext.id);
-
-                let (cli_tool, cli_display_name) = ext
-                    .cli
-                    .as_ref()
-                    .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
-                    .unwrap_or((None, None));
-
-                let actions: Vec<ActionSummary> = ext
-                    .actions
-                    .iter()
-                    .map(|a| ActionSummary {
-                        id: a.id.clone(),
-                        label: a.label.clone(),
-                        action_type: a.action_type.clone(),
-                    })
-                    .collect();
-                let notification_transports = ext
-                    .notification_transports
-                    .iter()
-                    .map(|transport| transport.descriptor())
-                    .collect();
-
-                let has_setup = ext
-                    .runtime()
-                    .and_then(|r| r.setup_command.as_ref())
-                    .map(|_| true);
-                let has_ready_check = ext
-                    .runtime()
-                    .and_then(|r| r.ready_check.as_ref())
-                    .map(|_| true);
-
-                let source_revision =
-                    homeboy_core::extension_update_check::read_source_revision(&ext.id);
-                let core_compatibility = evaluate_core_compatibility(
-                    ext.requires
-                        .as_ref()
-                        .and_then(|requires| requires.homeboy.as_deref()),
-                    source_revision.clone(),
-                )
-                .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
-
-                ExtensionSummary {
-                    id: ext.id.clone(),
-                    name: ext.name.clone(),
-                    version: ext.version.clone(),
-                    description: ext
-                        .description
-                        .as_ref()
-                        .and_then(|d| d.lines().next())
-                        .unwrap_or("")
-                        .to_string(),
-                    runtime: if ext.executable.is_some() {
-                        "executable".to_string()
-                    } else {
-                        "platform".to_string()
-                    },
-                    compatible,
-                    core_compatibility,
-                    ready: ready_status.ready,
-                    ready_reason: ready_status.reason,
-                    ready_detail: ready_status.detail,
-                    linked,
-                    path: ext.extension_path.clone().unwrap_or_default(),
-                    manifest_path: None,
-                    error: None,
-                    diagnostic: None,
-                    symlink_target: None,
-                    source_revision,
-                    cli_tool,
-                    cli_display_name,
-                    actions,
-                    repair_actions: Vec::new(),
-                    notification_transports,
-                    has_setup,
-                    has_ready_check,
-                }
-            }
-            DiscoveredExtension::Invalid(failure) => invalid_summary(failure),
+    let mut summaries: Vec<ExtensionSummary> = if readiness == ExtensionReadinessMode::Probe {
+        std::thread::scope(|scope| {
+            let probes = extensions
+                .into_iter()
+                .map(|extension| {
+                    scope.spawn(move || summary_for_extension(extension, project, readiness))
+                })
+                .collect::<Vec<_>>();
+            probes
+                .into_iter()
+                .map(|probe| probe.join().expect("extension readiness probe panicked"))
+                .collect()
         })
-        .collect();
+    } else {
+        extensions
+            .into_iter()
+            .map(|extension| summary_for_extension(extension, project, readiness))
+            .collect()
+    };
 
     summaries.sort_by(|a, b| a.id.cmp(&b.id));
     summaries
+}
+
+fn summary_for_extension(
+    extension: DiscoveredExtension,
+    project: Option<&homeboy_core::project::Project>,
+    readiness: ExtensionReadinessMode,
+) -> ExtensionSummary {
+    match extension {
+        DiscoveredExtension::Valid(ext) => {
+            let ready_status = extension_ready_status_with(&ext, readiness);
+            let compatible = is_extension_compatible(&ext, project);
+            let linked = is_extension_linked(&ext.id);
+
+            let (cli_tool, cli_display_name) = ext
+                .cli
+                .as_ref()
+                .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
+                .unwrap_or((None, None));
+
+            let actions: Vec<ActionSummary> = ext
+                .actions
+                .iter()
+                .map(|a| ActionSummary {
+                    id: a.id.clone(),
+                    label: a.label.clone(),
+                    action_type: a.action_type.clone(),
+                })
+                .collect();
+            let notification_transports = ext
+                .notification_transports
+                .iter()
+                .map(|transport| transport.descriptor())
+                .collect();
+
+            let has_setup = ext
+                .runtime()
+                .and_then(|r| r.setup_command.as_ref())
+                .map(|_| true);
+            let has_ready_check = ext
+                .runtime()
+                .and_then(|r| r.ready_check.as_ref())
+                .map(|_| true);
+
+            let source_revision =
+                homeboy_core::extension_update_check::read_source_revision(&ext.id);
+            let core_compatibility = evaluate_core_compatibility(
+                ext.requires
+                    .as_ref()
+                    .and_then(|requires| requires.homeboy.as_deref()),
+                source_revision.clone(),
+            )
+            .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
+
+            ExtensionSummary {
+                id: ext.id.clone(),
+                name: ext.name.clone(),
+                version: ext.version.clone(),
+                description: ext
+                    .description
+                    .as_ref()
+                    .and_then(|d| d.lines().next())
+                    .unwrap_or("")
+                    .to_string(),
+                runtime: if ext.executable.is_some() {
+                    "executable".to_string()
+                } else {
+                    "platform".to_string()
+                },
+                compatible,
+                core_compatibility,
+                readiness: ready_status.state,
+                ready: ready_status.ready,
+                ready_reason: ready_status.reason,
+                ready_detail: ready_status.detail,
+                readiness_cache_age_seconds: ready_status.cache_age_seconds,
+                readiness_probe_duration_ms: ready_status.probe_duration_ms,
+                readiness_timeout_ms: ready_status.timeout_ms,
+                readiness_follow_up_command: ready_status.follow_up_command,
+                linked,
+                path: ext.extension_path.clone().unwrap_or_default(),
+                manifest_path: None,
+                error: None,
+                diagnostic: None,
+                symlink_target: None,
+                source_revision,
+                cli_tool,
+                cli_display_name,
+                actions,
+                repair_actions: Vec::new(),
+                notification_transports,
+                has_setup,
+                has_ready_check,
+            }
+        }
+        DiscoveredExtension::Invalid(failure) => invalid_summary(failure),
+    }
 }
 
 fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
@@ -194,9 +230,14 @@ fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
         runtime: String::new(),
         compatible: false,
         core_compatibility: CoreCompatibilityReport::undeclared(None),
-        ready: false,
+        readiness: ExtensionReadinessState::NotReady,
+        ready: Some(false),
         ready_reason: Some(failure.category.to_string()),
         ready_detail: Some(failure.diagnostic.to_string()),
+        readiness_cache_age_seconds: None,
+        readiness_probe_duration_ms: None,
+        readiness_timeout_ms: None,
+        readiness_follow_up_command: None,
         linked: failure.path.is_symlink(),
         path: failure.path.to_string_lossy().to_string(),
         manifest_path: Some(failure.manifest_path.to_string_lossy().to_string()),
@@ -220,6 +261,22 @@ mod tests {
     use homeboy_core::paths;
 
     #[cfg(unix)]
+    fn write_ready_check_extension(home: &std::path::Path, id: &str, ready_check: String) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": id,
+                "version": "1.0.0",
+                "executable": { "runtime": { "ready_check": ready_check } }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn list_summaries_includes_broken_extension_symlinks() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -233,7 +290,7 @@ mod tests {
 
             assert_eq!(summaries.len(), 1);
             assert_eq!(summaries[0].id, "sample-runtime");
-            assert!(!summaries[0].ready);
+            assert_eq!(summaries[0].ready, Some(false));
             assert!(summaries[0].linked);
             assert_eq!(summaries[0].error.as_deref(), Some("target_missing"));
             assert_eq!(summaries[0].ready_reason.as_deref(), Some("target_missing"));
@@ -293,6 +350,32 @@ mod tests {
                 .is_some_and(|path| path.ends_with("invalid/invalid.json")));
             assert_eq!(summaries[1].id, "valid");
             assert_eq!(summaries[1].name, "Valid");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_readiness_probes_independent_extensions_concurrently() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let first = home.path().join("first-started");
+            let second = home.path().join("second-started");
+            let wait_for_peer = |own: &std::path::Path, peer: &std::path::Path| {
+                format!(
+                    "touch '{}' && i=0; while [ ! -f '{}' ] && [ $i -lt 200 ]; do i=$((i + 1)); sleep 0.01; done; test -f '{}'",
+                    own.display(),
+                    peer.display(),
+                    peer.display()
+                )
+            };
+            write_ready_check_extension(home.path(), "first", wait_for_peer(&first, &second));
+            write_ready_check_extension(home.path(), "second", wait_for_peer(&second, &first));
+
+            let summaries = list_summaries_with(None, ExtensionReadinessMode::Probe);
+
+            assert_eq!(summaries.len(), 2);
+            assert!(summaries
+                .iter()
+                .all(|summary| summary.readiness == ExtensionReadinessState::Ready));
         });
     }
 }
