@@ -295,14 +295,22 @@ pub(crate) fn normalize_convention_tags(tags: Vec<String>) -> Vec<String> {
 /// This is opt-in scaffolding: existing callsites still use `fingerprint_file`
 /// directly. Consumer migration lands in subsequent slices.
 #[derive(Debug, Clone, Default)]
-pub struct FingerprintIndex {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) struct FingerprintIndex {
     inner: HashMap<PathBuf, FileFingerprint>,
 }
 
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
 impl FingerprintIndex {
     /// Build an index by fingerprinting every file in `snapshot` once,
     /// reusing the snapshot's already-loaded content (no disk re-reads).
-    pub fn from_snapshot(snapshot: &CodebaseSnapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &CodebaseSnapshot) -> Self {
         let root = snapshot.root();
         let mut inner = HashMap::with_capacity(snapshot.len());
         for (path, content) in snapshot.iter() {
@@ -314,23 +322,23 @@ impl FingerprintIndex {
     }
 
     /// Look up the fingerprint for an absolute file path from the snapshot.
-    pub fn get(&self, path: &Path) -> Option<&FileFingerprint> {
+    pub(crate) fn get(&self, path: &Path) -> Option<&FileFingerprint> {
         self.inner.get(path)
     }
 
     /// Number of fingerprinted files (may be less than the source snapshot
     /// if some extensions have no fingerprinter).
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 
     /// Whether the index is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
     /// Iterate `(path, fingerprint)` pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&Path, &FileFingerprint)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Path, &FileFingerprint)> {
         self.inner.iter().map(|(p, fp)| (p.as_path(), fp))
     }
 }

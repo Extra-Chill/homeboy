@@ -13,20 +13,28 @@ use super::claims::{Claim, ClaimType};
 
 /// Result of verifying a claim.
 #[derive(Debug, Clone)]
-pub enum VerifyResult {
+pub(crate) enum VerifyResult {
     /// Claim verified as true
     Verified,
     /// Claim verified as false
     Broken { suggestion: Option<String> },
     /// Cannot verify mechanically - agent must check
-    NeedsVerification { hint: String },
+    ///
+    /// `doc_drift` matches on this variant but never surfaces the hint text.
+    NeedsVerification {
+        #[allow(
+            dead_code,
+            reason = "constructed for future surfacing; no reader today"
+        )]
+        hint: String,
+    },
 }
 
 /// Verify a claim against the codebase.
 ///
 /// The `component_id` is used to strip component-prefixed paths (e.g., `homeboy/docs/index.md`
 /// becomes `docs/index.md` when verifying against the homeboy component).
-pub fn verify_claim(
+pub(crate) fn verify_claim(
     claim: &Claim,
     source_path: &Path,
     docs_path: &Path,

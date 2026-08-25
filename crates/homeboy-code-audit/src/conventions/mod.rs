@@ -21,7 +21,7 @@ use homeboy_audit_contract::AuditConfig;
 /// `Language` now lives in `homeboy_engine_primitives::language` — the foundation layer,
 /// since it is a source-file primitive with no audit dependencies. Re-exported
 /// here so existing `crate::conventions::Language` paths keep resolving.
-pub use homeboy_engine_primitives::language::Language;
+pub(crate) use homeboy_engine_primitives::language::Language;
 
 /// Generic, framework-agnostic tracker-reference regex defaults shipped with
 /// Homeboy core. These match issue/PR/ticket URL shapes that are not tied to
@@ -31,7 +31,7 @@ pub use homeboy_engine_primitives::language::Language;
 /// extension-provided defaults asset and are merged in when a component opts
 /// into builtin profile defaults, keeping core free of framework literals
 /// (#2240).
-pub fn builtin_tracker_reference_regexes() -> &'static [&'static str] {
+pub(crate) fn builtin_tracker_reference_regexes() -> &'static [&'static str] {
     &[
         r"https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+",
         r"@see\s+https?://[^\s)]+",
@@ -40,7 +40,7 @@ pub fn builtin_tracker_reference_regexes() -> &'static [&'static str] {
 
 /// A discovered convention: a pattern that most files in a group follow.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Convention {
+pub(crate) struct Convention {
     /// Human-readable name (auto-generated or from config).
     pub name: String,
     /// The glob pattern that groups these files.
@@ -68,7 +68,7 @@ pub struct Convention {
 // `Outlier` and `Deviation` now live in the shared audit contract; re-exported
 // so existing `crate::conventions::{Outlier, Deviation}` and
 // `crate::{Outlier, Deviation}` paths resolve.
-pub use homeboy_audit_contract::{Deviation, Outlier};
+pub(crate) use homeboy_audit_contract::{Deviation, Outlier};
 
 pub(crate) fn unwired_test_file_finding() -> AuditFinding {
     AuditFinding::UnwiredNestedRustTest
@@ -91,7 +91,7 @@ pub(crate) fn unwired_test_file_finding() -> AuditFinding {
 /// The algorithm:
 /// 1. Find methods that appear in ≥ 60% of files (the "convention")
 /// 2. Find files that are missing any of those methods (the "outliers")
-pub fn discover_conventions_with_config(
+pub(crate) fn discover_conventions_with_config(
     group_name: &str,
     glob_pattern: &str,
     fingerprints: &[FileFingerprint],
@@ -400,7 +400,7 @@ pub fn discover_conventions_with_config(
 /// position-by-position. Positions where tokens vary across files are treated
 /// as "type parameters" (expected to differ). Only structural differences
 /// (different token count, different constant tokens) are flagged.
-pub fn check_signature_consistency(
+pub(crate) fn check_signature_consistency(
     conventions: &mut [Convention],
     root: &Path,
     audit_config: &AuditConfig,

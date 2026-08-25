@@ -14,7 +14,7 @@ pub use homeboy_audit_contract::AuditFinding;
 /// Fragmented conventions are suppressed — the convention metadata still appears
 /// in the report, but individual findings are noise when the pattern itself is
 /// uncertain.
-pub fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
+pub(crate) fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for result in results {

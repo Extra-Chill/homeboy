@@ -40,7 +40,11 @@ pub fn weighted_finding_score_with(
     scoring.weighted_finding_score(result)
 }
 
-pub fn score_delta(
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) fn score_delta(
     before: &CodeAuditResult,
     after: &CodeAuditResult,
     scoring: AuditConvergenceScoring,
@@ -49,7 +53,11 @@ pub fn score_delta(
         - weighted_finding_score_with(after, scoring) as isize
 }
 
-pub fn finding_fingerprint(finding: &Finding) -> String {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) fn finding_fingerprint(finding: &Finding) -> String {
     finding_baseline_fingerprint(finding)
 }
 

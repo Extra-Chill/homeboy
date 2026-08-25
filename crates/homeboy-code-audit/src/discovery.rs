@@ -14,7 +14,7 @@ use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 
 /// Result of auto-discovering file groups.
-pub struct DiscoveryResult {
+pub(crate) struct DiscoveryResult {
     /// Grouped files with conventions.
     pub groups: Vec<(String, String, Vec<FileFingerprint>)>,
     /// Every extension-provided source file that fingerprinted, with NO
