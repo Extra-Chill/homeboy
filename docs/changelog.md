@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.2] - 2026-08-25
+
+### Changed
+- collapse dead ambient twins and narrow the agent_tasks facade
+- triage the last twin-type clusters and unblock the extensions release
+- follow lifecycle-bound preview replay
+- seal the crate boundary so rustc can see inside it
+- adapt composed route placement fixture
+- resolve parsed command preflight once
+- collapse two more twin types made visible by better type resolution
+- drop 13 modules from the crate's public API
+- narrow the facade to what actually leaves the crate
+- collapse ContractDetail, and close out the twin-type backlog
+
+### Fixed
+- renew pre-provider Cook heartbeat
+- bind runtime evidence to execution
+- honor replay snapshot includes
+- honor provider preview planning budgets
+- require durable Lab acceptance identity
+- inventory runner extensions before preflight
+- emit runtime failure evidence
+- bound pretty command output
+- bound emitted command run envelopes
+- bound emitted operational envelopes
+- bound operational CLI output
+
 ## [0.360.1] - 2026-08-24
 
 ### Changed
