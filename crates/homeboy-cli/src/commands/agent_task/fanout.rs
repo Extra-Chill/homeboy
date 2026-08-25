@@ -2884,6 +2884,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 active_lock_holder: None,
                 path: Some(path.clone()),
                 error: None,
+                failure: None,
             });
             continue;
         }
@@ -3010,6 +3011,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                         active_lock_holder: None,
                         path: Some(resolution.worktree.path),
                         error: None,
+                        failure: None,
                     });
                     states.insert(
                         cook.to_worktree.clone(),
