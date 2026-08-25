@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.13] - 2026-08-25
+
+### Fixed
+- bind candidate SHA before build
+
 ## [3.38.12] - 2026-08-25
 
 ### Changed
