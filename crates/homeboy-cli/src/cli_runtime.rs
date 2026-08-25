@@ -2372,10 +2372,15 @@ fn extension_after_help(
 
     if !extension_health.broken_link_ids.is_empty() {
         lines.push(format!(
-            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details or `homeboy extension relink <id> <path>` to repair.",
+            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details.",
             extension_health.broken_link_ids.len(),
             extension_health.broken_link_ids.join(", ")
         ));
+        lines.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "Repair `{id}`: `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`."
+            )
+        }));
     }
 
     if lines.is_empty() {
@@ -2423,6 +2428,7 @@ struct LabInventoryAdmissionDiagnostic {
     terminal_reason: &'static str,
     refresh_error_code: Option<String>,
     refresh_error: Option<String>,
+    refresh_error_details: Option<serde_json::Value>,
 }
 
 /// Resolve the inventory used by a terminal resource-policy placement decision.
@@ -2456,6 +2462,7 @@ where
                 terminal_reason: "no_ready_capacity",
                 refresh_error_code: None,
                 refresh_error: None,
+                refresh_error_details: None,
             },
         );
     }
@@ -2482,14 +2489,25 @@ where
                     terminal_reason,
                     refresh_error_code: None,
                     refresh_error: None,
+                    refresh_error_details: None,
                 },
             )
         }
         Err(error) => {
             let timed_out = error.code == crate::core::ErrorCode::RemoteCommandTimeout;
             let refresh_error_code = error.code.as_str().to_string();
+            let mut resolved = observed;
+            resolved.reasons.insert(
+                0,
+                if timed_out {
+                    "bounded_admission_refresh_timeout"
+                } else {
+                    "bounded_admission_refresh_failed"
+                }
+                .to_string(),
+            );
             (
-                observed,
+                resolved,
                 LabInventoryAdmissionDiagnostic {
                     observed_state,
                     observed_at_ms,
@@ -2504,6 +2522,7 @@ where
                     },
                     refresh_error_code: Some(refresh_error_code),
                     refresh_error: Some(error.message),
+                    refresh_error_details: Some(error.details),
                 },
             )
         }
@@ -3493,10 +3512,11 @@ fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &Ext
     }
 
     if !extension_health.broken_link_ids.is_empty() {
-        hints.push(format!(
-            "broken extension link(s): {}; repair with `homeboy extension relink <id> <path>`",
-            extension_health.broken_link_ids.join(", ")
-        ));
+        hints.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "broken extension link `{id}`; repair with `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`"
+            )
+        }));
     }
 }
 
@@ -4259,14 +4279,14 @@ mod tests {
     #[test]
     fn fresh_empty_inventory_does_not_open_a_refresh_probe() {
         let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             100,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
 
         assert_eq!(
             resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+            crate::runner::runners::LabRunnerReadinessState::Absent
         );
         assert!(!diagnostic.refresh_attempted);
         assert_eq!(diagnostic.observed_at_ms, 100);
@@ -4337,7 +4357,7 @@ mod tests {
             },
         );
         let (fresh_empty, fresh_diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             300,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
@@ -4877,7 +4897,9 @@ mod tests {
                 "root help should warn about broken extension links: {help}"
             );
             assert!(help.contains("homeboy extension list"));
-            assert!(help.contains("homeboy extension relink <id> <path>"));
+            assert!(help.contains("homeboy extension relink stale-runtime <path>"));
+            assert!(help.contains("homeboy extension uninstall stale-runtime"));
+            assert!(!help.contains(extensions_dir.to_string_lossy().as_ref()));
             assert!(!help.contains("/missing-stale-runtime"));
         });
     }
@@ -4902,7 +4924,9 @@ mod tests {
         .expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
-        assert!(output.contains("broken extension link(s): sample-runtime"));
+        assert!(output.contains("broken extension link `sample-runtime`"));
+        assert!(output.contains("homeboy extension relink sample-runtime <path>"));
+        assert!(output.contains("homeboy extension uninstall sample-runtime"));
         assert!(output.contains("homeboy extension list"));
     }
 

@@ -6,8 +6,10 @@ use super::execution::{
 };
 use super::manifest::ActionType;
 use super::{evaluate_core_compatibility, CoreCompatibilityReport};
+use homeboy_core::error::ExecutableAction;
 use homeboy_core::extension_store::{
-    discover_extensions, is_extension_linked, DiscoveredExtension, ExtensionManifestFailure,
+    broken_extension_link_repair_actions, discover_extensions, is_extension_linked,
+    DiscoveredExtension, ExtensionManifestFailure,
 };
 use homeboy_extension_contract::NotificationTransportDescriptor;
 
@@ -53,6 +55,8 @@ pub struct ExtensionSummary {
     pub cli_display_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repair_actions: Vec<ExecutableAction>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notification_transports: Vec<NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,6 +202,7 @@ fn summary_for_extension(
                 cli_tool,
                 cli_display_name,
                 actions,
+                repair_actions: Vec::new(),
                 notification_transports,
                 has_setup,
                 has_ready_check,
@@ -212,6 +217,11 @@ fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
         .symlink_target
         .as_ref()
         .map(|target| target.to_string_lossy().to_string());
+    let repair_actions = if failure.category == "target_missing" {
+        broken_extension_link_repair_actions(&failure.id)
+    } else {
+        Vec::new()
+    };
     ExtensionSummary {
         id: failure.id,
         name: String::new(),
@@ -238,6 +248,7 @@ fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
         cli_tool: None,
         cli_display_name: None,
         actions: Vec::new(),
+        repair_actions,
         notification_transports: Vec::new(),
         has_setup: None,
         has_ready_check: None,
@@ -290,6 +301,22 @@ mod tests {
             assert_eq!(
                 summaries[0].symlink_target.as_deref(),
                 Some(target.to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                summaries[0]
+                    .repair_actions
+                    .iter()
+                    .map(|action| action.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["extension.relink", "extension.uninstall"]
+            );
+            assert_eq!(
+                summaries[0].repair_actions[0].args,
+                ["extension", "relink", "sample-runtime", "<path>"]
+            );
+            assert_eq!(
+                summaries[0].repair_actions[1].args,
+                ["extension", "uninstall", "sample-runtime"]
             );
         });
     }

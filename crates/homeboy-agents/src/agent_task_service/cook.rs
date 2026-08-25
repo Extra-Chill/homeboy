@@ -3823,6 +3823,146 @@ fn retryable_review_form_terminal_failure(
         })
 }
 
+fn provider_timeout_ms(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+) -> Option<u64> {
+    let timeout = aggregate.outcomes.iter().find(|outcome| {
+        outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
+            || outcome.failure_classification
+                == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
+            || outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+    })?;
+    timeout
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.data["timeout_ms"].as_u64())
+        .max()
+        .or_else(|| {
+            plan.tasks
+                .iter()
+                .map(|task| {
+                    crate::agent_task_timeout::effective_provider_timeout_ms(
+                        task.limits.timeout_ms.or(plan.options.timeout_ms),
+                        task.limits.max_runtime_ms,
+                    )
+                })
+                .max()
+        })
+        .or(Some(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS))
+}
+
+fn make_provider_timeout_actionable(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    remaining_budget: Option<AgentTaskExecutionBudget>,
+    provider_execution_active: bool,
+) {
+    let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
+        return;
+    };
+    let remaining_executions = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_executions)
+        .unwrap_or(0);
+    let remaining_retries = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_same_provider_retries)
+        .unwrap_or(0);
+    let remaining_rotations = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_rotations)
+        .unwrap_or(0);
+    let next_timeout_ms = timeout_ms.saturating_add(timeout_ms.max(1));
+    let remaining_deadline_ms = remaining_budget
+        .as_ref()
+        .and_then(|budget| budget.remaining_deadline_ms(crate::agent_task_timeout::now_unix_ms()));
+    let deadline_expired = remaining_deadline_ms == Some(0);
+    let can_retry = remaining_executions > 0
+        && remaining_retries > 0
+        && next_timeout_ms > timeout_ms
+        && !deadline_expired;
+    let command = can_retry.then(|| {
+        format!(
+            "{} --timeout-ms {next_timeout_ms}",
+            cook_continue_command(None, run_id, false, None)
+        )
+    });
+    let recovery_guidance = if deadline_expired {
+        "The durable provider execution deadline is exhausted.".to_string()
+    } else {
+        command
+            .as_deref()
+            .map(|command| format!("After any deferred cleanup completes, retry with `{command}`."))
+            .unwrap_or_else(|| "No provider timeout retry budget remains.".to_string())
+    };
+    let deferred_cleanup_pending = provider_execution_active
+        || aggregate.outcomes.iter().any(|outcome| {
+            outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
+                && !super::execution::deferred_cleanup_receipt_is_terminal(outcome, run_id)
+        });
+
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_timeout".to_string());
+    report.value.stop_reason = Some(format!(
+        "provider exceeded timeout_ms={timeout_ms} without a successful candidate; promotion, gates, and finalization were not reached. Remaining budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}",
+    ));
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "provider".to_string();
+        context.reason_code = "provider_timeout".to_string();
+        context.diagnostic = Some(serde_json::json!({
+            "class": "agent_task.provider_timeout",
+            "message": format!("provider exceeded timeout_ms={timeout_ms}"),
+            "data": {
+                "timeout_ms": timeout_ms,
+                "finalization_reached": false,
+                "finalization_not_reached_reason": "provider execution did not produce a successful candidate",
+                "remaining_provider_executions": remaining_executions,
+                "remaining_same_provider_retries": remaining_retries,
+                "remaining_provider_rotations": remaining_rotations,
+                "remaining_execution_deadline_ms": remaining_deadline_ms,
+                "deferred_cleanup_pending": deferred_cleanup_pending,
+            }
+        }));
+        context.recovery_legal = can_retry && !deferred_cleanup_pending;
+        context.recovery_reason = if deadline_expired {
+            "the durable provider execution deadline is exhausted".to_string()
+        } else if !can_retry {
+            "provider timeout retry budget is exhausted".to_string()
+        } else if deferred_cleanup_pending {
+            "provider timeout retry is blocked until deferred cleanup is terminal".to_string()
+        } else {
+            "an explicit provider timeout increase can consume the remaining retry budget"
+                .to_string()
+        };
+        context.legal_actions.clear();
+        context.next_actions.clear();
+        if deferred_cleanup_pending {
+            context.next_actions.push(AgentTaskCookRecoveryAction {
+                action: "status".to_string(),
+                command: format!("homeboy agent-task status {run_id} --exact --full"),
+            });
+        }
+        if let Some(command) = command {
+            let action = AgentTaskCookRecoveryAction {
+                action: "resume".to_string(),
+                command,
+            };
+            if deferred_cleanup_pending {
+                context.next_actions.push(action);
+            } else {
+                context.legal_actions.push(action.clone());
+                context.next_actions.push(action);
+            }
+        }
+    }
+}
+
 /// Whether a terminal review-form attempt may re-enter Cook's historical
 /// continuation path. This is intentionally narrower than terminality: only
 /// authenticated form-only continuations with a provider timeout or an
@@ -3850,10 +3990,9 @@ pub fn terminal_review_form_continuation_is_eligible(
 /// This deliberately stops before recipe/lifecycle materialization, transport
 /// preparation, provider dispatch, and finalization.
 pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    // Continuation can lead directly to promotion/finalization. Apply the same
-    // durable model-provenance boundary here so it cannot admit a legacy null
-    // model candidate that publication will deterministically reject.
-    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
+    let mut options = options.clone();
+    canonicalize_cook_provider_workspace(&mut options)?;
+    let options = &options;
     let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
@@ -3867,8 +4006,43 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
                 .and_then(Value::as_str)
                 == Some("verification_pending")
         });
+    let record = agent_task_lifecycle::status(&options.initial_run_id).ok();
+    let review_form_continuation = record.as_ref().is_some_and(|record| {
+        review_form_attempt_is_ready_for_cook_continuation(&options.initial_plan, record)
+            .unwrap_or(false)
+    });
+    if review_form_continuation
+        && !record.as_ref().is_some_and(|record| {
+            terminal_review_form_continuation_is_eligible(&options.initial_plan, record)
+                .unwrap_or(false)
+        })
+    {
+        let mut error = Error::validation_invalid_argument(
+            "cook_continuation",
+            "terminal review-form continuation is not eligible for execution",
+            Some(options.initial_run_id.clone()),
+            None,
+        );
+        error.details["continuation_admission"] = serde_json::json!({
+            "first_authoritative_denial": "terminal_review_form_eligibility",
+            "predicates": [{ "name": "terminal_review_form_eligibility", "outcome": "fail" }],
+        });
+        return Err(error);
+    }
+    // Continuation can lead directly to promotion/finalization. Apply the same
+    // durable model-provenance boundary after terminal-form eligibility so
+    // preflight reports the same first authoritative denial as execution.
+    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
     let authenticated_historical_review_continuation =
         authenticated_historical_review_form_workspace_with_trace(options, false)?;
+    if review_form_continuation && !authenticated_historical_review_continuation {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation",
+            "terminal review-form continuation workspace could not be authenticated",
+            Some(options.initial_run_id.clone()),
+            None,
+        ));
+    }
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
@@ -4394,6 +4568,7 @@ fn run_cook_spine(
     durable_observer: Option<&CookProgressObserver<'_>>,
     allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    canonicalize_cook_provider_workspace(&mut options)?;
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
@@ -4521,6 +4696,7 @@ fn run_cook_spine(
     } else {
         options
     };
+    canonicalize_cook_provider_workspace(&mut options)?;
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.
@@ -5730,7 +5906,10 @@ fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(CookReportInput {
+            let remaining_budget = budget_limit
+                .as_ref()
+                .and_then(|budget| budget_remaining(budget, budget_used));
+            let mut report = cook_report(CookReportInput {
                 cook_id,
                 status: "provider_failure",
                 disposition: CookDisposition::Terminal,
@@ -5742,7 +5921,20 @@ fn run_cook_spine(
                 )),
                 exit_code: 1,
                 invocation_latest_run_id: Some(&run_id),
-            }));
+            });
+            make_provider_timeout_actionable(
+                &mut report,
+                &aggregate,
+                &plan,
+                &run_id,
+                remaining_budget,
+                agent_task_lifecycle::has_active_provider_execution_in_store(
+                    lifecycle_store,
+                    &run_id,
+                )
+                .unwrap_or(true),
+            );
+            return Ok(report);
         }
 
         if let Some(finalization) = record
@@ -8714,6 +8906,40 @@ fn rebind_baseline_continuation_workspace(
             options.source_worktree_path = Some(worktree.path().into());
         }
     }
+    Ok(())
+}
+
+/// Normalize path-spelled legacy recipes and explicit CWDs to the provider's
+/// canonical handle before any continuation admission or execution decision.
+/// Safety remains a separate admission check so a retained dirty candidate can
+/// still prove itself against its durable promotion baseline.
+fn canonicalize_cook_provider_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    let path = options.source_worktree_path.as_deref().or_else(|| {
+        std::path::Path::new(&options.to_worktree)
+            .is_dir()
+            .then_some(std::path::Path::new(&options.to_worktree))
+    });
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let config = homeboy_core::defaults::load_config();
+    let Some(identity) = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_path_from_config(path, &config)? else {
+        return Ok(());
+    };
+    if !std::path::Path::new(&options.to_worktree).is_dir()
+        && options.to_worktree != identity.handle
+    {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook source path and provider handle identify different worktrees",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    options.to_worktree = identity.handle.clone();
+    options.source_worktree_path = Some(PathBuf::from(&identity.path));
+    options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
+        serde_json::to_value(identity).expect("provider identity serializes");
     Ok(())
 }
 

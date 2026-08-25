@@ -1702,7 +1702,7 @@ fn promoted_attempt_workspace_matches(
     if sha256(&patch) != artifact_sha256 {
         return false;
     }
-    workspace_matches_staged_patch(workspace, base, &patch)
+    workspace_matches_patch(workspace, base, &patch)
 }
 
 /// A scheduler may stop after persisting authorization but before it can call
@@ -1786,20 +1786,34 @@ fn terminal_evidence_attempt_workspace_matches(
     let Ok(patch) = fs::read(path) else {
         return false;
     };
-    sha256(&patch) == expected_sha256 && workspace_matches_staged_patch(workspace, base, &patch)
+    sha256(&patch) == expected_sha256 && workspace_matches_patch(workspace, base, &patch)
 }
 
-/// Verify that a checkout contains only the supplied staged patch against its
-/// immutable base. Scheduler compaction reuses this promotion proof rather
-/// than treating a persisted patch as sufficient evidence on its own.
-pub(crate) fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
+/// Verify that a checkout contains only the supplied patch against its immutable
+/// base. Scheduler compaction reuses this promotion proof rather than treating a
+/// persisted patch as sufficient evidence on its own.
+pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
     let Ok(head) = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD") else {
         return false;
     };
     if head.trim() != base {
         return false;
     }
-    let Ok(status) = git::run_git(
+    let Ok(git_dir) = git::run_git(
+        workspace,
+        &["rev-parse", "--absolute-git-dir"],
+        "git rev-parse absolute git dir",
+    ) else {
+        return false;
+    };
+    // The path is per-worktree for linked checkouts. Never unregister a
+    // checkout while another process may own its exact index lock; a later
+    // controller-scratch pass can converge after the lock clears (#13448).
+    if Path::new(git_dir.trim()).join("index.lock").exists() {
+        return false;
+    }
+    let readonly_env = &[("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())];
+    let Ok(status) = git::run_git_with_env(
         workspace,
         &[
             "status",
@@ -1811,17 +1825,47 @@ pub(crate) fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch
             ":(exclude).homeboy/lab-at-files/**",
         ],
         "git status",
+        readonly_env,
     ) else {
         return false;
     };
-    // Harvest stages the complete candidate. Any worktree-side, untracked, or
-    // ignored path is therefore outside the authenticated patch.
-    if status.lines().any(|line| {
-        line.starts_with("??") || line.starts_with("!!") || line.as_bytes().get(1) != Some(&b' ')
-    }) {
+    // Ignored provider output is outside a Git patch and therefore outside the
+    // authenticated candidate. Tracked and untracked bytes are compared below.
+    if status.lines().any(|line| line.starts_with("!!")) {
         return false;
     }
-    git::run_git(
+    let Ok(index) = tempfile::NamedTempFile::new() else {
+        return false;
+    };
+    let index_env = &[(
+        "GIT_INDEX_FILE".to_string(),
+        index.path().display().to_string(),
+    )];
+    if git::run_git_with_env(
+        workspace,
+        &["read-tree", base],
+        "git read-tree scratch index",
+        index_env,
+    )
+    .is_err()
+        || git::run_git_with_env(
+            workspace,
+            &[
+                "add",
+                "--all",
+                "--",
+                ".",
+                ":(exclude).homeboy/runner-workspace.json",
+                ":(exclude).homeboy/lab-at-files/**",
+            ],
+            "git add scratch index",
+            index_env,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    git::run_git_with_env(
         workspace,
         &[
             "diff",
@@ -1835,7 +1879,8 @@ pub(crate) fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch
             ":(exclude).homeboy/runner-workspace.json",
             ":(exclude).homeboy/lab-at-files/**",
         ],
-        "git diff cached",
+        "git diff scratch index",
+        index_env,
     )
     .is_ok_and(|current| current.as_bytes() == patch)
 }
@@ -3782,7 +3827,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_patch_proof_rejects_extra_files_and_commits() {
+    fn patch_proof_waits_for_the_linked_index_lock_and_rejects_extra_state() {
         let root = tempfile::tempdir().expect("root");
         let lease = root.path().join("lease");
         let (_source, worktree) = attempt_worktree(root.path(), &lease);
@@ -3812,23 +3857,41 @@ mod tests {
         )
         .expect("candidate patch")
         .into_bytes();
+        run_git(&worktree, &["reset", "--quiet"]);
+
+        let index_lock = PathBuf::from(
+            git::run_git(
+                &worktree,
+                &["rev-parse", "--absolute-git-dir"],
+                "git rev-parse absolute git dir",
+            )
+            .expect("linked worktree git dir")
+            .trim(),
+        )
+        .join("index.lock");
+        fs::write(&index_lock, b"held by provider").expect("hold linked-worktree index lock");
+        assert!(
+            !workspace_matches_patch(&worktree, &base, &patch),
+            "an owned index lock must retain the linked worktree"
+        );
+        fs::remove_file(&index_lock).expect("release linked-worktree index lock");
 
         assert!(
-            workspace_matches_staged_patch(&worktree, &base, &patch),
-            "the harvested staged candidate must match exactly"
+            workspace_matches_patch(&worktree, &base, &patch),
+            "the unstaged candidate must converge after its exact lock clears"
         );
 
         fs::create_dir_all(worktree.join(".homeboy/lab-at-files")).expect("runner metadata");
         fs::write(worktree.join(".homeboy/runner-workspace.json"), "{}").expect("runner metadata");
         fs::write(worktree.join(".homeboy/lab-at-files/plan.json"), "{}").expect("runner metadata");
         assert!(
-            workspace_matches_staged_patch(&worktree, &base, &patch),
+            workspace_matches_patch(&worktree, &base, &patch),
             "Homeboy runner metadata excluded from harvest must not block compaction"
         );
 
         fs::write(worktree.join("untracked.txt"), "not in the patch\n").expect("extra file");
         assert!(
-            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            !workspace_matches_patch(&worktree, &base, &patch),
             "an untracked file is unrelated state and must retain the worktree"
         );
         fs::remove_file(worktree.join("untracked.txt")).expect("remove extra file");
@@ -3836,14 +3899,15 @@ mod tests {
         fs::create_dir_all(worktree.join("vendor/package")).expect("vendor tree");
         fs::write(worktree.join("vendor/package/index.js"), "generated\n").expect("vendor file");
         assert!(
-            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            !workspace_matches_patch(&worktree, &base, &patch),
             "an untracked dependency tree is outside the authenticated patch"
         );
         fs::remove_dir_all(worktree.join("vendor")).expect("remove vendor tree");
 
+        run_git(&worktree, &["add", "generated.rs"]);
         run_git(&worktree, &["commit", "-m", "provider commit"]);
         assert!(
-            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            !workspace_matches_patch(&worktree, &base, &patch),
             "a provider commit must remain recoverable even when its diff matches"
         );
     }

@@ -14,8 +14,8 @@ use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::worktree_providers::{
-    cleanup_worktree_providers_from_config, WorktreeProviderCleanupOptions,
-    WorktreeProviderCleanupOutput,
+    cleanup_worktree_providers_from_config, WorktreeProviderCleanupEffects,
+    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
 };
 use crate::{git, Error, Result};
 
@@ -166,7 +166,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
                 )
                 .total_bytes,
             );
-            below_reconstructable_reserve(root, reserve).then(|| (root, reserve))
+            below_reconstructable_reserve(root, reserve).then_some((root, reserve))
         })
         .collect();
     if pressured.is_empty() {
@@ -179,7 +179,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
-            &root,
+            root,
             "managed worktree",
             "worktree capacity is not measurable on this platform",
         );
@@ -188,7 +188,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
             .is_some_and(|available| available < reserve_bytes)
         {
             return Err(reconstructable_admission_error(
-                &root,
+                root,
                 budget.available_bytes,
                 budget.available_inodes,
                 reserve_bytes,
@@ -347,7 +347,7 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| unsafe {
         let stat = stat.assume_init();
-        (stat.f_bavail as u64).saturating_mul(stat.f_frsize)
+        stat.f_bavail.saturating_mul(stat.f_frsize)
     })
 }
 
@@ -386,6 +386,12 @@ pub struct ResourceCleanupOutput {
     pub artifacts: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_providers: Option<WorktreeProviderCleanupOutput>,
+    /// Normalized provider effects, projected from the untyped provider
+    /// payloads and also summed into the counts above (#9825). `None` when no
+    /// provider sweep ran; absent fields inside mean the provider did not
+    /// report that effect — never that nothing happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_provider_effects: Option<WorktreeProviderCleanupEffects>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -740,10 +746,9 @@ fn directory_has_child(target: &fs::File, mut inspect: impl FnMut(fs::File) -> b
 
 #[cfg(unix)]
 fn lock_in_directory_is_held(target: &fs::File) -> bool {
-    use std::ffi::CStr;
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    let lock = CStr::from_bytes_with_nul(b".cargo-lock\0").expect("static Cargo lock name");
+    let lock = c".cargo-lock";
     let fd = unsafe {
         libc::openat(
             target.as_raw_fd(),
@@ -1312,6 +1317,29 @@ pub fn cleanup_resources_from_config(
         (artifact_success_count, artifact_failure_count)
     };
 
+    // Provider mutations are real resources. Leaving them out of the top-level
+    // counts is what let a sweep that pruned 49 lock files report
+    // `applied_count: 0` (#9825): every count above is artifact-derived, and
+    // providers previously contributed only success/failure.
+    //
+    // An absent effect stays absent. `mutated_resource_count` folds unreported
+    // effects as zero *for the sum only*, which is correct — a provider that
+    // never reported locks pruned adds no locks. The typed effects below retain
+    // the distinction between "reported zero" and "did not report".
+    let provider_effects = providers.as_ref().map(|output| output.effects.clone());
+    let provider_mutated = provider_effects
+        .as_ref()
+        .map(|effects| effects.mutated_resource_count())
+        .unwrap_or(0);
+    let provider_bytes = provider_effects
+        .as_ref()
+        .and_then(|effects| effects.bytes_reclaimed)
+        .unwrap_or(0);
+
+    let applied_count =
+        applied_count.saturating_add(usize::try_from(provider_mutated).unwrap_or(usize::MAX));
+    let reclaimed_bytes = reclaimed_bytes.saturating_add(provider_bytes);
+
     Ok(ResourceCleanupOutput {
         command: "cleanup.resources",
         mode: options.intent.as_str(),
@@ -1325,6 +1353,7 @@ pub fn cleanup_resources_from_config(
         reclaimed_allocated_bytes,
         artifacts,
         worktree_providers: providers,
+        worktree_provider_effects: provider_effects,
     })
 }
 

@@ -465,6 +465,43 @@ impl ObservationStore {
         Ok(rows == 1)
     }
 
+    /// Atomically bind an accepted daemon job to a generic runner-exec run and
+    /// claim its foreground source lease. Keeping both mutations in one update
+    /// prevents a concurrent stale metadata projection from erasing the binding
+    /// between handoff and lease acquisition.
+    pub fn bind_and_claim_running_runner_exec_source(
+        &self,
+        run_id: &str,
+        owner_id: &str,
+        source_token: &str,
+        runner_job_id: &str,
+    ) -> Result<bool> {
+        let claim = serde_json::to_string(&serde_json::json!({
+            "owner_id": owner_id,
+            "source_token": source_token,
+            "runner_job_id": runner_job_id,
+            "expires_at_ms": chrono::Utc::now().timestamp_millis() + 30_000,
+        }))
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize runner exec source claim".to_string()),
+            )
+        })?;
+        let rows = execute_with_retry("bind and claim runner exec source", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_job_id', ?1, '$.runner_exec_source_lease', json(?2)) WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.kind') = 'runner_exec' AND (COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) IS NULL OR COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?1) AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
+                params![
+                    runner_job_id,
+                    claim,
+                    run_id,
+                    chrono::Utc::now().timestamp_millis()
+                ],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
     /// Terminalize evidence loss only for the child that still owns this exact
     /// running source/job identity. A stale child cannot overwrite a retry or a
     /// concurrently settled source record.
@@ -1357,6 +1394,84 @@ mod tests {
                     serde_json::json!({ "terminal": "fixture" }),
                 )
                 .expect("terminalize lifecycle source"));
+        });
+    }
+
+    #[test]
+    fn generic_runner_exec_binding_and_foreground_claim_are_one_update() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_id = "generic-runner-exec-source";
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("runner_execution")
+                        .metadata(serde_json::json!({
+                            "kind": "runner_exec",
+                            "runner_exec_artifact_declarations": {
+                                "artifact_dirs": ["output"]
+                            }
+                        }))
+                        .build(),
+                    run_id.to_string(),
+                )
+                .expect("generic runner exec run");
+
+            assert!(store
+                .bind_and_claim_running_runner_exec_source(
+                    run_id,
+                    "foreground-runner-exec",
+                    "source-token",
+                    "daemon-job",
+                )
+                .expect("bind and claim source"));
+
+            let run = store
+                .get_run(run_id)
+                .expect("read run")
+                .expect("persisted run");
+            assert_eq!(run.metadata_json["runner_job_id"], "daemon-job");
+            assert_eq!(
+                run.metadata_json["runner_exec_source_lease"]["source_token"],
+                "source-token"
+            );
+            assert_eq!(
+                run.metadata_json["runner_exec_artifact_declarations"]["artifact_dirs"][0],
+                "output"
+            );
+        });
+    }
+
+    #[test]
+    fn generic_runner_exec_atomic_binding_refuses_a_foreign_job() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_id = "foreign-generic-runner-exec-source";
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("runner_execution")
+                        .metadata(serde_json::json!({
+                            "kind": "runner_exec",
+                            "runner_job_id": "other-daemon-job"
+                        }))
+                        .build(),
+                    run_id.to_string(),
+                )
+                .expect("generic runner exec run");
+
+            assert!(!store
+                .bind_and_claim_running_runner_exec_source(
+                    run_id,
+                    "foreground-runner-exec",
+                    "source-token",
+                    "accepted-daemon-job",
+                )
+                .expect("foreign binding is rejected"));
+            let run = store
+                .get_run(run_id)
+                .expect("read run")
+                .expect("persisted run");
+            assert_eq!(run.metadata_json["runner_job_id"], "other-daemon-job");
+            assert!(run.metadata_json.get("runner_exec_source_lease").is_none());
         });
     }
 

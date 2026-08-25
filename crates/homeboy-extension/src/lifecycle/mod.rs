@@ -371,7 +371,7 @@ mod tests {
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
         load_extension, refresh, register_component_install_runner,
-        shared_assets_for_extension_source, source_metadata, update,
+        shared_assets_for_extension_source, source_metadata, uninstall, update,
     };
     use crate::update_all;
     use homeboy_core::component;
@@ -415,6 +415,33 @@ mod tests {
             ),
         )
         .expect("extension manifest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstalling_a_dangling_link_removes_only_its_registration() {
+        with_isolated_home(|home| {
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            let sibling = extensions_dir.join("other-runtime");
+            let shared_asset = extensions_dir.join("shared-tools/tool.sh");
+            fs::create_dir_all(&sibling).expect("sibling extension");
+            fs::write(sibling.join("other-runtime.json"), "{}").expect("sibling manifest");
+            fs::create_dir_all(shared_asset.parent().expect("shared asset parent"))
+                .expect("shared asset directory");
+            fs::write(&shared_asset, "shared").expect("shared asset");
+
+            let stale = extensions_dir.join("swift");
+            let removed_source = home.path().join("extension-sources/swift");
+            std::os::unix::fs::symlink(&removed_source, &stale).expect("dangling link");
+
+            let removed = uninstall("swift").expect("uninstall dangling extension");
+
+            assert_eq!(removed, stale);
+            assert!(fs::symlink_metadata(&stale).is_err());
+            assert!(sibling.join("other-runtime.json").is_file());
+            assert_eq!(fs::read_to_string(shared_asset).unwrap(), "shared");
+            assert!(!removed_source.exists());
+        });
     }
 
     fn write_extension_fixture_with_agent_runtime_provider(root: &Path, id: &str) {

@@ -1766,19 +1766,38 @@ fn cleanup_inventory_with_deadline(
                     },
                     config.clone(),
                 )?;
-                category_from_output(
-                    WORKTREE_PROVIDERS_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: 0,
-                        applied_count: 0,
-                        skipped_count: output.failure_count,
-                        estimated_bytes: 0,
-                        reclaimed_bytes: 0,
+                // Every other category derives its metrics from `output`. This
+                // one used to hardcode zeros and read only `failure_count`,
+                // which is how a sweep that pruned 49 lock files rendered as
+                // `applied_count: 0, reclaimed_bytes: 0, status: succeeded`
+                // (#9825) — a destructive mutation presented as a clean no-op.
+                //
+                // `candidate_count` mirrors applied here because a provider
+                // reports what it acted on, not a pre-scan population; claiming
+                // a candidate count it never published would be the same
+                // fabrication in the opposite direction.
+                let effects = output.worktree_provider_effects.as_ref();
+                let blockers = effects.and_then(|effects| effects.reconciliation_blockers);
+                let metrics = CleanupCategoryMetrics {
+                    candidate_count: output.applied_count,
+                    applied_count: output.applied_count,
+                    skipped_count: output.failure_count,
+                    estimated_bytes: 0,
+                    reclaimed_bytes: output.reclaimed_bytes,
+                };
+                category_from_output(WORKTREE_PROVIDERS_METADATA, apply, metrics, output).map(
+                    |mut category| {
+                        // The final unique inventory, not the sum of repeated
+                        // phase snapshots. The projection already collapsed
+                        // per-provider phases; history stays on the provider
+                        // rows that observed it.
+                        if let Some(blockers) = blockers {
+                            category.reconciliation_blocker_count =
+                                usize::try_from(blockers).unwrap_or(usize::MAX);
+                        }
+                        vec![category]
                     },
-                    output,
                 )
-                .map(|category| vec![category])
             },
         );
     }

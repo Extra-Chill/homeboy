@@ -2327,6 +2327,7 @@ mod tests {
             cli_tool: None,
             cli_display_name: None,
             actions: Vec::new(),
+            repair_actions: Vec::new(),
             notification_transports: Vec::new(),
             has_setup: None,
             has_ready_check: None,
@@ -2390,6 +2391,7 @@ mod tests {
                 cli_tool: None,
                 cli_display_name: None,
                 actions: Vec::new(),
+                repair_actions: Vec::new(),
                 notification_transports: Vec::new(),
                 has_setup: Some(true),
                 has_ready_check: Some(true),
@@ -2439,6 +2441,7 @@ mod tests {
                 cli_tool: None,
                 cli_display_name: None,
                 actions: Vec::new(),
+                repair_actions: Vec::new(),
                 notification_transports: Vec::new(),
                 has_setup: Some(true),
                 has_ready_check: Some(true),
@@ -2474,6 +2477,46 @@ mod tests {
                 "The extension manifest contains malformed JSON."
             );
             assert!(!error.details.to_string().contains("secret-value"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_extension_list_and_show_emit_the_same_typed_repairs() {
+        with_isolated_home(|home| {
+            let extension_id = "swift";
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            symlink(
+                home.path().join("removed-swift-extension"),
+                extensions_dir.join(extension_id),
+            )
+            .expect("broken extension link");
+
+            let (output, _) =
+                list(None, ExtensionReadinessMode::Cached).expect("list broken extension");
+            let ExtensionOutput::List { extensions, .. } = output else {
+                panic!("expected extension list output");
+            };
+            let list_actions = &extensions[0].repair_actions;
+
+            let show_error = match show_extension(extension_id, ExtensionReadinessMode::Cached) {
+                Err(error) => error,
+                Ok(_) => panic!("show should report the broken link"),
+            };
+            let show_actions: Vec<homeboy::core::error::ExecutableAction> = serde_json::from_value(
+                show_error.details[homeboy::core::error::ACTIONS_DETAILS_KEY].clone(),
+            )
+            .expect("show repair actions");
+
+            assert_eq!(list_actions, &show_actions);
+            assert_eq!(list_actions[0].id, "extension.relink");
+            assert_eq!(
+                list_actions[0].args,
+                ["extension", "relink", "swift", "<path>"]
+            );
+            assert_eq!(list_actions[1].id, "extension.uninstall");
+            assert_eq!(list_actions[1].args, ["extension", "uninstall", "swift"]);
         });
     }
 

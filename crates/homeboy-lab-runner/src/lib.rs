@@ -894,21 +894,14 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
                 .session
                 .as_ref()
                 .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-            Some(DefaultLabRunnerCandidate {
-                id: runner.id,
+            Some(lab_runner_admission_candidate(
+                &runner.id,
                 mode,
-                connected: status.connected,
-                capacity: runner.settings.concurrency_limit,
-                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
-                unverified_daemon: status.unverified_daemon().is_some(),
-                admission_fresh: status.daemon_fresh_for_admission(),
-                admission_remediation: status
-                    .admission_action()
-                    .map(|action| action.render_command()),
-                active_jobs: status.active_job_count.max(status.active_jobs.len()),
-                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+                runner.settings.concurrency_limit,
+                &status,
                 capabilities_ready,
-            })
+                lab::offload::metadata::require_exact_runner_version(&runner.settings),
+            ))
         })
         .collect();
     Ok(lab_runner_readiness_from_candidates(
@@ -924,7 +917,12 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
 pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness> {
     let preferred = defaults::load_config().lab.preferred_runner;
     let mut runner_ids = configured_lab_runner_ids()?;
-    runner_ids.sort();
+    runner_ids.sort_by_key(|runner_id| {
+        (
+            Some(runner_id.as_str()) != preferred.as_deref(),
+            runner_id.clone(),
+        )
+    });
     let deadline = std::time::Instant::now() + readonly_probe::readonly_probe_timeout();
     let mut observations = Vec::new();
     for runner_id in runner_ids.into_iter().take(DETACHED_QUEUE_REFRESH_LIMIT) {
@@ -947,21 +945,47 @@ fn observe_lab_runner_admission_candidate(
         .session
         .as_ref()
         .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-    Ok(DefaultLabRunnerCandidate {
+    Ok(lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        capabilities_ready,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    ))
+}
+
+fn lab_runner_admission_candidate(
+    runner_id: &str,
+    mode: RunnerTunnelMode,
+    capacity: Option<usize>,
+    status: &RunnerStatusReport,
+    capabilities_ready: bool,
+    exact_version: bool,
+) -> DefaultLabRunnerCandidate {
+    let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
+        lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(status, exact_version)
+    });
+    DefaultLabRunnerCandidate {
         id: runner_id.to_string(),
         mode,
         connected: status.connected,
-        capacity: runner.settings.concurrency_limit,
-        stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+        capacity,
+        stale_daemon: admission_warning.is_some(),
         unverified_daemon: status.unverified_daemon().is_some(),
-        admission_fresh: status.daemon_fresh_for_admission(),
-        admission_remediation: status
-            .admission_action()
+        admission_fresh: lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
+            status,
+            exact_version,
+        ),
+        admission_failure_reason: admission_warning
+            .map(|warning| warning.mismatch_predicate.to_string()),
+        admission_remediation: admission_warning
+            .and_then(|_| status.admission_action())
             .map(|action| action.render_command()),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
         capabilities_ready,
-    })
+    }
 }
 
 fn lab_runner_readiness_from_refresh_observations(
@@ -980,8 +1004,9 @@ fn lab_runner_readiness_from_refresh_observations(
             })),
         }
     }
+    let observed_candidate = !candidates.is_empty();
     let readiness = lab_runner_readiness_from_candidates(preferred, candidates);
-    if readiness.state == LabRunnerReadinessState::ConnectedReady || failures.is_empty() {
+    if observed_candidate || failures.is_empty() {
         return Ok(readiness);
     }
     let timeout = failures.iter().all(|failure| {
@@ -1024,21 +1049,14 @@ pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
             .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
         let capabilities_ready = runner_capability_inventory(&runner_id)
             .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-        let candidate = DefaultLabRunnerCandidate {
-            id: runner_id,
+        let candidate = lab_runner_admission_candidate(
+            &runner_id,
             mode,
-            connected: status.connected,
-            capacity: runner.settings.concurrency_limit,
-            stale_daemon: status.admission_blocking_stale_daemon().is_some(),
-            unverified_daemon: status.unverified_daemon().is_some(),
-            admission_fresh: status.daemon_fresh_for_admission(),
-            admission_remediation: status
-                .admission_action()
-                .map(|action| action.render_command()),
-            active_jobs: status.active_job_count.max(status.active_jobs.len()),
-            active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+            runner.settings.concurrency_limit,
+            &status,
             capabilities_ready,
-        };
+            lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        );
         if let Some(runner_id) = detached_queue_runner_from_candidates([candidate]) {
             return Ok(Some(runner_id));
         }
@@ -1059,21 +1077,14 @@ pub fn refresh_explicit_detached_queue_runner(runner_id: &str) -> Result<bool> {
     let capabilities_ready = runner_capability_inventory(runner_id)
         .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
     Ok(
-        detached_queue_runner_from_candidates([DefaultLabRunnerCandidate {
-            id: runner_id.to_string(),
+        detached_queue_runner_from_candidates([lab_runner_admission_candidate(
+            runner_id,
             mode,
-            connected: status.connected,
-            capacity: runner.settings.concurrency_limit,
-            stale_daemon: status.admission_blocking_stale_daemon().is_some(),
-            unverified_daemon: status.unverified_daemon().is_some(),
-            admission_fresh: status.daemon_fresh_for_admission(),
-            admission_remediation: status
-                .admission_action()
-                .map(|action| action.render_command()),
-            active_jobs: status.active_job_count.max(status.active_jobs.len()),
-            active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+            runner.settings.concurrency_limit,
+            &status,
             capabilities_ready,
-        }])
+            lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        )])
         .as_deref()
             == Some(runner_id),
     )
@@ -1178,6 +1189,7 @@ struct DefaultLabRunnerCandidate {
     /// `DefaultLabRunnerCandidate::readiness`.
     unverified_daemon: bool,
     admission_fresh: bool,
+    admission_failure_reason: Option<String>,
     admission_remediation: Option<String>,
     active_jobs: usize,
     active_jobs_available: bool,
@@ -1214,6 +1226,9 @@ impl DefaultLabRunnerCandidate {
                 .reasons
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
+        }
+        if let Some(reason) = &self.admission_failure_reason {
+            availability.reasons.push(reason.clone());
         }
         if !self.active_jobs_available
             && !availability
@@ -1309,21 +1324,14 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 .session
                 .as_ref()
                 .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-            let candidate = DefaultLabRunnerCandidate {
-                id: runner.id,
+            let candidate = lab_runner_admission_candidate(
+                &runner.id,
                 mode,
-                connected: status.connected,
-                capacity: runner.settings.concurrency_limit,
-                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
-                unverified_daemon: status.unverified_daemon().is_some(),
-                admission_fresh: status.daemon_fresh_for_admission(),
-                admission_remediation: status
-                    .admission_action()
-                    .map(|action| action.render_command()),
-                active_jobs: status.active_job_count.max(status.active_jobs.len()),
-                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+                runner.settings.concurrency_limit,
+                &status,
                 capabilities_ready,
-            };
+                lab::offload::metadata::require_exact_runner_version(&runner.settings),
+            );
             Some(candidate.availability())
         })
         .collect();
@@ -2008,11 +2016,110 @@ mod tests {
             stale_daemon: false,
             unverified_daemon: false,
             admission_fresh: true,
+            admission_failure_reason: None,
             admission_remediation: None,
             active_jobs: 0,
             active_jobs_available: true,
             capabilities_ready: true,
         }
+    }
+
+    fn skewed_runner_status(version: String) -> RunnerStatusReport {
+        let controller_version = homeboy_product_identity::product_version();
+        let controller_build_identity = format!("homeboy {controller_version}+0123456789ab");
+        let runner_build_identity = format!("homeboy {version}+0123456789ab");
+        let warning = RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            version.clone(),
+            version.clone(),
+            Some(runner_build_identity.clone()),
+            Some(runner_build_identity),
+        )
+        .with_controller_compatibility(
+            "homeboy-lab",
+            controller_version.to_string(),
+            controller_build_identity,
+            false,
+            true,
+            false,
+        );
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: Some(RunnerSession {
+                runner_id: "homeboy-lab".to_string(),
+                mode: RunnerTunnelMode::Reverse,
+                role: RunnerSessionRole::Runner,
+                server_id: None,
+                controller_id: Some("controller".to_string()),
+                broker_url: Some("http://broker.invalid".to_string()),
+                remote_daemon_address: None,
+                local_port: None,
+                local_url: None,
+                tunnel_pid: None,
+                tunnel_process_start_identity: None,
+                proxy_forward: None,
+                remote_daemon_pid: Some(42),
+                remote_daemon_lease_id: Some("lease".to_string()),
+                homeboy_version: version,
+                homeboy_build_identity: None,
+                connected_at: "2026-08-24T00:00:00Z".to_string(),
+                worker_identity: Some("worker".to_string()),
+                worker_pid: Some(43),
+                last_seen_at: Some("2026-08-24T00:00:01Z".to_string()),
+                leaseless_recovery_evidence: None,
+            }),
+            stale_daemon: Some(warning),
+            configured_job_binary_build_identity: None,
+            daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(
+                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch,
+                ),
+                restartable: true,
+                lease_id: Some("lease".to_string()),
+                pid: Some(42),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "fixture".to_string(),
+        }
+    }
+
+    fn patch_drift_version() -> String {
+        let controller = homeboy_product_identity::product_version();
+        let mut parts = controller.split('.');
+        let major = parts.next().expect("major");
+        let minor = parts.next().expect("minor");
+        let patch = parts
+            .next()
+            .and_then(|part| {
+                part.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .unwrap_or_default();
+        format!("{major}.{minor}.{}", patch.wrapping_add(1))
     }
 
     #[test]
@@ -2033,6 +2140,82 @@ mod tests {
         );
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn current_release_refresh_selects_provider_ready_compatible_skewed_runner() {
+        let status = skewed_runner_status(patch_drift_version());
+        let candidate = lab_runner_admission_candidate(
+            "homeboy-lab",
+            RunnerTunnelMode::Reverse,
+            Some(1),
+            &status,
+            true,
+            false,
+        );
+        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
+
+        assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
+        assert_eq!(readiness.available_runner_ids, ["homeboy-lab"]);
+    }
+
+    #[test]
+    fn current_release_refresh_respects_exact_version_admission() {
+        let status = skewed_runner_status(patch_drift_version());
+        let candidate = lab_runner_admission_candidate(
+            "homeboy-lab",
+            RunnerTunnelMode::Reverse,
+            Some(1),
+            &status,
+            true,
+            true,
+        );
+        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
+
+        assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
+        assert!(readiness.selected_runner_id.is_none());
+        assert!(readiness
+            .reasons
+            .iter()
+            .any(|reason| reason == "controller_version != job_command_binary_version"));
+    }
+
+    #[test]
+    fn current_release_refresh_names_incompatible_skew_predicate_and_command() {
+        let controller = homeboy_product_identity::product_version();
+        let mut parts = controller.split('.');
+        let major = parts.next().expect("major");
+        let minor = parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .expect("minor");
+        let mut status = skewed_runner_status(format!("{major}.{}.0", minor.wrapping_add(1)));
+        let freshness = status.daemon_freshness.as_mut().expect("fixture freshness");
+        freshness.fresh = true;
+        freshness.stale_reason_code = None;
+        let candidate = lab_runner_admission_candidate(
+            "homeboy-lab",
+            RunnerTunnelMode::Reverse,
+            Some(1),
+            &status,
+            true,
+            false,
+        );
+        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
+
+        assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            readiness.reasons,
+            [
+                "stale_daemon",
+                "controller_version != job_command_binary_version"
+            ]
+        );
+        assert_eq!(
+            readiness.remediation_commands,
+            ["homeboy runner refresh-homeboy homeboy-lab --ref 0123456789ab --reconnect"]
+        );
     }
 
     #[test]
@@ -2059,11 +2242,11 @@ mod tests {
     }
 
     #[test]
-    fn admission_refresh_aggregates_failures_only_when_no_runner_is_ready() {
+    fn admission_refresh_preserves_authoritative_blocked_observation() {
         let mut full = default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true);
         full.capacity = Some(1);
         full.active_jobs = 1;
-        let error = lab_runner_readiness_from_refresh_observations(
+        let readiness = lab_runner_readiness_from_refresh_observations(
             None,
             vec![
                 Err(homeboy_core::error::Error::new(
@@ -2074,7 +2257,23 @@ mod tests {
                 Ok(full),
             ],
         )
-        .expect_err("aggregate failures only after every runner is unavailable");
+        .expect("an authoritative observation must not be discarded");
+
+        assert_eq!(readiness.state, LabRunnerReadinessState::CapacityBlocked);
+        assert_eq!(readiness.reasons, ["capacity_reached"]);
+    }
+
+    #[test]
+    fn admission_refresh_reports_timeout_when_every_observation_times_out() {
+        let error = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![Err(homeboy_core::error::Error::new(
+                homeboy_core::error::ErrorCode::RemoteCommandTimeout,
+                "lab-a timed out",
+                serde_json::Value::Null,
+            ))],
+        )
+        .expect_err("no authoritative observation completed");
 
         assert_eq!(
             error.code,
@@ -2083,10 +2282,6 @@ mod tests {
         assert_eq!(
             error.details["runner_failures"][0]["code"],
             "remote.command_timeout"
-        );
-        assert_eq!(
-            error.details["observed_readiness_state"],
-            "capacity_blocked"
         );
     }
 

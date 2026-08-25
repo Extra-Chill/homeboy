@@ -718,6 +718,94 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     .unwrap();
 }
 
+#[test]
+fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
+    let mut plan = compile_options("timeout-report").initial_plan;
+    plan.options.timeout_ms = Some(1_200_000);
+    plan.tasks[0].limits.timeout_ms = Some(1_200_000);
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_timeout".to_string(),
+        message: "provider exceeded timeout_ms=1200000".to_string(),
+        data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+    }];
+    let mut report = AgentTaskRunResult {
+        value: AgentTaskCookReport {
+            schema: "homeboy/agent-task-cook/v1",
+            cook_id: "timeout-report".to_string(),
+            latest_run_id: Some("timeout-run".to_string()),
+            history_run_ids: vec!["timeout-run".to_string()],
+            invocation_run_ids: vec!["timeout-run".to_string()],
+            status: "provider_failure".to_string(),
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            intentional_no_change: None,
+            selected_candidate: None,
+            stop_reason: None,
+            terminal_phase: None,
+            terminal_failure_classification: None,
+            primary_failure: None,
+            moving_base_recovery: None,
+            failure_context: Some(AgentTaskCookFailureContext {
+                cook_id: "timeout-report".to_string(),
+                latest_run_id: "timeout-run".to_string(),
+                selected_run_id: None,
+                selected_task_id: None,
+                selected_artifact_id: None,
+                promotion_provenance: None,
+                durable_recipe_ref: "homeboy://agent-task/cooks/timeout-report/recipe".to_string(),
+                lifecycle_state: "Failed".to_string(),
+                phase: "provider".to_string(),
+                reason_code: "failed".to_string(),
+                diagnostic: None,
+                continuation_admission: None,
+                blocking_claim: None,
+                provider_budget_consumed: true,
+                provider_executions_consumed: 1,
+                recovery_legal: false,
+                recovery_reason: "generic".to_string(),
+                legal_actions: Vec::new(),
+                next_actions: Vec::new(),
+            }),
+        },
+        exit_code: 1,
+    };
+
+    make_provider_timeout_actionable(
+        &mut report,
+        &aggregate,
+        &plan,
+        "timeout-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_timeout")
+    );
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("provider"));
+    assert!(report.value.finalization.is_none());
+    let stop_reason = report.value.stop_reason.as_deref().expect("stop reason");
+    assert!(stop_reason.contains("timeout_ms=1200000"));
+    assert!(stop_reason.contains("finalization were not reached"));
+    let context = report.value.failure_context.expect("failure context");
+    assert_eq!(context.reason_code, "provider_timeout");
+    assert_eq!(
+        context.diagnostic.unwrap()["data"]["remaining_provider_executions"],
+        1
+    );
+    assert_eq!(
+        context.legal_actions[0].command,
+        "homeboy agent-task cook-continue timeout-run --timeout-ms 2400000"
+    );
+}
+
 fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
@@ -4391,6 +4479,7 @@ fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
+                    list: Some(vec![provider.display().to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -7973,6 +8062,116 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
                 .expect("successful retry")
                 .state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
+    struct ProviderTimeout;
+
+    impl AgentTaskExecutorAdapter for ProviderTimeout {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+        ) -> crate::agent_task::AgentTaskOutcome {
+            crate::agent_task::AgentTaskOutcome {
+                task_id: request.task_id,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+                failure_classification: Some(
+                    crate::agent_task::AgentTaskFailureClassification::Timeout,
+                ),
+                summary: Some("provider exceeded timeout_ms=50".to_string()),
+                diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                    class: "agent_task.provider_timeout".to_string(),
+                    message: "provider exceeded timeout_ms=50".to_string(),
+                    data: serde_json::json!({ "timeout_ms": 50 }),
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-timeout-override";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.max_attempts = 2;
+        options.initial_plan.options.timeout_ms = Some(50);
+        options.initial_plan.options.retry.max_attempts = 2;
+        // Exclude Timeout to model a historical first attempt that stopped
+        // before automatic timeout recovery was available.
+        options
+            .initial_plan
+            .options
+            .retry
+            .retryable_failure_classifications =
+            vec![crate::agent_task::AgentTaskFailureClassification::Provider];
+        options.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0);
+        options.initial_plan.tasks[0].limits.timeout_ms = Some(50);
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        let failed = crate::agent_task_service::execution::run_submitted(
+            options.initial_run_id.clone(),
+            Arc::new(ProviderTimeout),
+        )
+        .expect("record provider timeout");
+        assert_eq!(failed.exit_code, 1);
+
+        let error =
+            crate::agent_task_service::retry_with_timeout_override(&options.initial_run_id, 50)
+                .expect_err("override must increase the prior timeout");
+        assert!(error.message.contains("must increase"), "{error:?}");
+
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["provider_executions"][0]["state"] = serde_json::json!("running");
+        })
+        .expect("restore a deferred cleanup owner");
+        let owner_error =
+            crate::agent_task_service::retry_with_timeout_override(&options.initial_run_id, 100)
+                .expect_err("active deferred ownership must block retry");
+        assert!(
+            owner_error.message.contains("still owns"),
+            "{owner_error:?}"
+        );
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["provider_executions"][0]["state"] = serde_json::json!("timed_out");
+        })
+        .expect("terminalize deferred cleanup ownership");
+
+        let retry =
+            crate::agent_task_service::retry_with_timeout_override(&options.initial_run_id, 100)
+                .expect("reserve timeout override");
+        let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
+
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[0].plan.options.timeout_ms, Some(50));
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+        let override_plan = &recipe.attempts[1].plan;
+        assert_eq!(override_plan.options.timeout_ms, Some(100));
+        assert!(override_plan
+            .tasks
+            .iter()
+            .all(|task| task.limits.timeout_ms == Some(100)));
+        assert_eq!(
+            override_plan.options.execution_budget,
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0)
+        );
+        assert_eq!(
+            override_plan.metadata["cook_timeout_overrides"][0],
+            serde_json::json!({
+                "schema": "homeboy/agent-task-cook-timeout-override/v1",
+                "source_run_id": options.initial_run_id,
+                "previous_timeout_ms": 50,
+                "timeout_ms": 100,
+                "authority": "operator --timeout-ms",
+                "remaining_provider_executions": 1,
+                "remaining_same_provider_retries_after_reservation": 0,
+                "remaining_provider_rotations": 0,
+            })
         );
     });
 }
@@ -11600,6 +11799,47 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
 }
 
 #[test]
+fn transport_retry_continuation_keeps_timeout_retry_budget_on_the_typed_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-lab-timeout-continuation";
+        let run_id = "cook-lab-timeout-continuation-attempt-1-transport-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize controller-owned transport retry");
+
+        let accepted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("accepted Lab attempt returns");
+        assert_eq!(accepted.value.status, "in_flight");
+        assert_eq!(accepted.value.attempts[0].run_id, run_id);
+        assert_eq!(
+            super::super::resolve_cook_continuation_run_id(run_id)
+                .expect("printed continuation resolves exact attempt"),
+            run_id
+        );
+
+        seed_timeout_review_form_aggregate(run_id, &options.initial_plan);
+        let timed_out =
+            agent_task_lifecycle::status(run_id).expect("typed timeout remains readable");
+        assert_eq!(
+            timed_out.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+
+        let retry = crate::agent_task_service::retry(run_id, None, false, false)
+            .expect("remaining Cook retry budget is consumable");
+        let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
+        assert_eq!(retry.record.metadata["retry_of"], run_id);
+        assert_eq!(retry.record.metadata["cook_id"], cook_id);
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].attempt, 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+    });
+}
+
+#[test]
 fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-orphan-recovery";
@@ -14942,6 +15182,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
+                    resolve_path: Some(vec![provider.display().to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -14960,6 +15201,18 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
         crate::agent_task_candidate_baseline::register();
+
+        let mut legacy_path_recipe = options.clone();
+        legacy_path_recipe.to_worktree = target.display().to_string();
+        legacy_path_recipe.source_worktree_path = Some(target.clone());
+        canonicalize_cook_provider_workspace(&mut legacy_path_recipe)
+            .expect("legacy path identity remains recoverable through provider ownership");
+        assert_eq!(legacy_path_recipe.to_worktree, options.to_worktree);
+        assert_eq!(
+            legacy_path_recipe.initial_plan.metadata["cook_provision"]["workspace_identity"]
+                ["handle"],
+            options.to_worktree
+        );
 
         // Fanout coordinators re-resolve the destination from the identity
         // persisted when their child was admitted; they do not retain a CWD.
@@ -15181,6 +15434,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert!(
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "cancelled review-form attempts never authorize the bypass"
+        );
+        let preflight = preflight_cook_continuation_admission(&historical)
+            .expect_err("preflight rejects the same ineligible terminal review form");
+        assert_eq!(
+            preflight.details["continuation_admission"]["first_authoritative_denial"],
+            "terminal_review_form_eligibility",
+            "{preflight:?}"
         );
         let result = run_cook(CookContext {
             side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
