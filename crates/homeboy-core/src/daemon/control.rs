@@ -52,10 +52,9 @@ const ENSURE_RUNNING_STARTUP_WAIT: Duration = Duration::from_secs(15);
 /// store resolves to this durable store and its executable is the active binary;
 /// absent evidence remains ambiguous.
 pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
-    // macOS cannot expose another process's environment through `ps`, so a live
-    // operator daemon has no durable-store evidence there. Test harnesses opt
-    // into this debug-only namespace to exclude every process except ones that
-    // explicitly name the test store in their argv.
+    // Never request process environments here: candidates are serialized into
+    // operator diagnostics. Linux recovers bounded store identity from procfs;
+    // other platforms retain fail-closed argv-only evidence.
     let test_namespace = cfg!(debug_assertions)
         && std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE").is_some_and(|namespace| {
             jobs_path
@@ -63,7 +62,7 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
                 .is_some_and(|state_dir| Path::new(&namespace) == state_dir)
         });
     let output = Command::new("ps")
-        .args(["-axeww", "-o", "pid=", "-o", "comm=", "-o", "command="])
+        .args(["-axww", "-o", "pid=", "-o", "comm=", "-o", "command="])
         .output()
         .map_err(|error| {
             Error::internal_io(
