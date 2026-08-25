@@ -15,6 +15,7 @@ pub struct ConfigArgs {
 #[derive(Subcommand)]
 enum ConfigCommand {
     /// Display configuration (merged defaults + file)
+    #[command(visible_alias = "get")]
     Show {
         /// Show only built-in defaults (ignore homeboy.json)
         #[arg(long)]
@@ -78,6 +79,10 @@ pub fn run(args: ConfigArgs) -> CmdResult<ConfigOutput> {
     }
 }
 
+pub(crate) fn is_read(args: &ConfigArgs) -> bool {
+    matches!(args.command, ConfigCommand::Show { .. })
+}
+
 fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
     if let Some(pointer) = pointer {
         return show_pointer(builtin, pointer);
@@ -99,7 +104,7 @@ fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
             0,
         ))
     } else {
-        let config = defaults::load_config();
+        let config = defaults::load_config_for_read()?;
         let config = redacted_config_value(&config)?;
         Ok((
             ConfigOutput {
@@ -128,19 +133,23 @@ fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
         ));
     }
 
-    let config = if builtin {
-        serde_json::to_value(defaults::HomeboyConfig::default()).map_err(|error| {
-            homeboy::core::Error::internal_unexpected(format!(
-                "Failed to serialize built-in config: {error}"
-            ))
-        })?
+    let (config, file_value) = if builtin {
+        (
+            serde_json::to_value(defaults::HomeboyConfig::default()).map_err(|error| {
+                homeboy::core::Error::internal_unexpected(format!(
+                    "Failed to serialize built-in config: {error}"
+                ))
+            })?,
+            None,
+        )
     } else {
-        redacted_config_value(&defaults::load_config())?
+        let (config, file_value) = defaults::load_config_and_file_value_for_read(pointer)?;
+        (redacted_config_value(&config)?, file_value)
     };
     let value = homeboy::core::config::get_json_pointer(&config, pointer)?
         .cloned()
         .ok_or_else(|| missing_pointer_error(&config, pointer))?;
-    let source = if !builtin && defaults::config_file_value(pointer).is_some() {
+    let source = if !builtin && file_value.is_some() {
         "file"
     } else {
         "builtin"
@@ -433,6 +442,7 @@ fn path() -> CmdResult<ConfigOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn config_set_string_mode_stores_literal_string() {
@@ -483,6 +493,22 @@ mod tests {
                 .expect("valid pointer"),
             Some(&serde_json::json!("Cargo.toml"))
         );
+    }
+
+    #[test]
+    fn config_get_is_a_read_only_alias_for_show() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "config",
+            "get",
+            "/worktree_providers/dmc",
+        ])
+        .expect("config get parses");
+        let crate::cli_surface::Commands::Config(args) = cli.command else {
+            panic!("config get must select the config command");
+        };
+
+        assert!(is_read(&args));
     }
 
     #[test]
