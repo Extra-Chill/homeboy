@@ -6,7 +6,7 @@ use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::Result;
 use homeboy_core::project::Project;
 
-use super::super::effect::remote_version_after_deploy_effect;
+use super::super::effect::{remote_version_after_deploy_effect, PostDeployVerification};
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::lifecycle::DeployObservation;
 use super::super::planning::{calculate_directory_size, format_bytes};
@@ -384,7 +384,21 @@ pub(super) fn execute_artifact_deploy(
                 effect.as_ref(),
                 prepared.local_version.as_ref(),
             ) {
-                Ok(version) => version,
+                Ok(PostDeployVerification::Verified(version)) => version,
+                Ok(PostDeployVerification::AppliedUnverified(error)) => {
+                    let result = ComponentDeployResult::applied_unverified(
+                        component,
+                        base_path,
+                        prepared.local_version.clone(),
+                        prepared.remote_version.clone(),
+                        error,
+                    )
+                    .with_remote_path(install_dir.to_string())
+                    .with_artifact_inputs(artifact_input_metadata)
+                    .with_build_exit_code(prepared.build_exit_code)
+                    .with_deploy_exit_code(Some(exit_code));
+                    return with_prepared_artifact_source(result, prepared);
+                }
                 Err(error) => {
                     let result = ComponentDeployResult::failed(
                         component,

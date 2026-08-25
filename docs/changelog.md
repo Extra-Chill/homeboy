@@ -4,6 +4,46 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.5] - 2026-08-25
+
+### Changed
+- compose typed capabilities through registry
+- remove dead release payload insertion
+- cover unsupported remote stat
+- remove unreachable release insertion
+- cache readiness for fast inventory
+
+### Fixed
+- restore the non-unix digest_memo_min_hash_time fallback
+- make reverification commands explicit
+- separate applied unverified outcomes
+- scope local_path validation
+- compile the digest memo guard on non-unix
+- restore preview backend selection
+- gate digest memo timer on Unix
+- preflight manifest capabilities
+- preserve release-asset identity
+- harden remote content manifests
+- pin RunnerWorkspaceSyncMode's wire string to its serde form
+
+## [0.360.4] - 2026-08-25
+
+### Changed
+- pin JobStatus's wire string to its serde form
+- seal the crate boundary and delete what rustc exposed
+- collapse five twin report declarations onto two
+- route capabilities from parsed preflight
+
+### Fixed
+- delete four unreachable variants from the durable subsystem enums
+- stop collapsing recoverable runs into partial failure
+- restore test fixtures corrupted by the visibility narrowing
+
+## [0.360.3] - 2026-08-25
+
+### Fixed
+- stop memoizing a digest the filesystem clock cannot vouch for
+
 ## [0.360.2] - 2026-08-25
 
 ### Changed

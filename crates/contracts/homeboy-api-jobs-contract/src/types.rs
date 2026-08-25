@@ -25,6 +25,17 @@ impl JobStatus {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 
+    /// This status projected onto the observation/run-listing vocabulary,
+    /// where a finished job reads `pass`/`fail`.
+    ///
+    /// A different vocabulary, not a different format of [`JobStatus::as_str`]:
+    /// `RunStatus` spells its terminal states `Pass`/`Fail`, and
+    /// `homeboy runs list --status pass` filters on these strings. Merging the
+    /// two breaks that filter with no compile error.
+    ///
+    /// Partial in the other direction — `queued` and `cancelled` have no
+    /// `RunStatus` counterpart and pass through as themselves, so the output is
+    /// not parseable into `RunStatus`.
     pub fn run_status_label(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -35,7 +46,10 @@ impl JobStatus {
         }
     }
 
-    pub fn daemon_status_label(self) -> &'static str {
+    /// This status as its own canonical wire string — the value `serde`
+    /// already produces, pinned to it by
+    /// `job_status_matches_its_serialized_form`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
@@ -350,5 +364,40 @@ impl DaemonLeaseJobDiagnostics {
         self.matching_count()
             .saturating_sub(self.protected_count())
             .saturating_sub(self.preserved_remote_job_ids.len())
+    }
+}
+
+#[cfg(test)]
+mod job_status_label_tests {
+    use super::JobStatus;
+
+    /// `as_str` must stay the value `serde` produces. It replaced
+    /// `daemon_status_label`, which restated the same strings by hand with
+    /// nothing tying them to `#[serde(rename_all)]`. This is that tie.
+    #[test]
+    fn job_status_matches_its_serialized_form() {
+        for status in [
+            JobStatus::Queued,
+            JobStatus::Running,
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize"),
+                serde_json::json!(status.as_str()),
+                "{status:?}"
+            );
+        }
+    }
+
+    /// `run_status_label` is a different vocabulary, not a different format,
+    /// and `homeboy runs list --status pass` depends on it staying that way.
+    /// Merging it into `as_str` is a string-comparison break with no compile
+    /// error, so it fails here instead.
+    #[test]
+    fn the_run_listing_vocabulary_keeps_pass_and_fail() {
+        assert_eq!(JobStatus::Succeeded.run_status_label(), "pass");
+        assert_eq!(JobStatus::Failed.run_status_label(), "fail");
     }
 }

@@ -26,7 +26,7 @@ use super::fingerprint::FileFingerprint;
 
 /// What changed in a single file between base ref and current version.
 #[derive(Debug, Clone)]
-pub struct SymbolDiff {
+pub(crate) struct SymbolDiff {
     /// The file that changed (repo-relative path).
     pub file: String,
     /// Exports that existed in the base but are gone in current.
@@ -41,7 +41,7 @@ pub struct SymbolDiff {
 
 /// A file affected by changes in another file.
 #[derive(Debug, Clone)]
-pub struct AffectedFile {
+pub(crate) struct AffectedFile {
     /// The affected file (repo-relative path).
     pub file: String,
     /// Which changed file caused this.
@@ -52,7 +52,7 @@ pub struct AffectedFile {
 
 /// Why a file is affected by a change.
 #[derive(Debug, Clone)]
-pub enum AffectReason {
+pub(crate) enum AffectReason {
     /// File imports or references the changed type/class.
     ImportsChangedType {
         old_name: String,
@@ -413,7 +413,7 @@ pub(crate) fn find_affected_files(
 ///   3. Filter findings to changed files + affected files
 ///
 /// Returns the expanded file set and a list of affected files for logging.
-pub fn expand_scope(
+pub(crate) fn expand_scope(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],

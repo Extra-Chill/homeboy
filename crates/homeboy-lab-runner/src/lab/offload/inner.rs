@@ -2302,7 +2302,7 @@ pub(crate) fn run_lab_offload_inner(
     });
     lab_metadata["workspace_cleanliness"] = serde_json::json!({
         "schema": "homeboy/lab-workspace-cleanliness/v1",
-        "mode": sync_mode.label(),
+        "mode": sync_mode.as_str(),
         "remote_workspace": remote_cwd,
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,

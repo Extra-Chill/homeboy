@@ -42,6 +42,7 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(compact.contains("Quick start:"), "{compact}");
     assert!(compact.contains("--repo <REPO>"), "{compact}");
     assert!(compact.contains("--task-url <URL>"), "{compact}");
+    assert!(compact.contains("--backend <BACKEND>"), "{compact}");
     assert!(compact.contains("--model <MODEL>"), "{compact}");
     assert!(!compact.contains("--ai-model"), "{compact}");
     assert!(compact.contains("--preview"), "{compact}");
@@ -440,6 +441,56 @@ fn composed_options(placement: crate::cli_surface::Placement) -> ComposedLabRout
     }
 }
 
+fn composed_preflight(
+    placement: crate::cli_surface::Placement,
+) -> homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult {
+    use homeboy::core::parsed_command_preflight::{
+        ControllerExecution, DeferredWorkloadPolicy, GenericRoutePolicySnapshot, LabRouteIntent,
+        ParsedCommandIdentity, ParsedCommandPolicySnapshot, ParsedCommandPreflightInput,
+        PlacementIntent, ProvenanceRequirement, ResourceAdmissionEvidence,
+        ResourceAdmissionRequirement, RunnerIntent, RunnerNormalization,
+    };
+    let placement_intent = match placement {
+        crate::cli_surface::Placement::Auto => PlacementIntent::Auto,
+        crate::cli_surface::Placement::Local => PlacementIntent::Local,
+        crate::cli_surface::Placement::Lab => PlacementIntent::Lab,
+        crate::cli_surface::Placement::LabOrLocal => PlacementIntent::LabOrLocal,
+    };
+    homeboy::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        vec!["homeboy".to_string(), "composed-lab".to_string()],
+        ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "composed-lab".to_string(),
+                operation: Vec::new(),
+            },
+            resource_admission: ResourceAdmissionRequirement::Exempt,
+            controller_execution: ControllerExecution::Ordinary,
+            deferred_workload: DeferredWorkloadPolicy::Forbidden,
+            placement: placement_intent,
+            runner: RunnerIntent::Default,
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: true },
+            provenance: ProvenanceRequirement::CaptureExecution,
+        },
+        ParsedCommandPolicySnapshot {
+            resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: None,
+            selected_runner_id: None,
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: false,
+                selected_runner_id: None,
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted: false,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect("composed preflight resolves")
+}
+
 #[test]
 fn composed_routes_enter_generic_lab_dispatch_and_reject_local_only_lab_placement() {
     let portable = LabCommandRoute::new(
@@ -457,6 +508,7 @@ fn composed_routes_enter_generic_lab_dispatch_and_reject_local_only_lab_placemen
         composed_options(crate::cli_surface::Placement::Lab),
         &["homeboy".to_string(), "composed-lab".to_string()],
         None,
+        &composed_preflight(crate::cli_surface::Placement::Lab),
     )
     .expect_err("required Lab placement enters the generic dispatcher and requires a runner");
     assert!(error
@@ -483,6 +535,7 @@ fn composed_routes_enter_generic_lab_dispatch_and_reject_local_only_lab_placemen
         composed_options(crate::cli_surface::Placement::Lab),
         &["homeboy".to_string(), "composed-lab".to_string()],
         None,
+        &composed_preflight(crate::cli_surface::Placement::Lab),
     )
     .expect_err("local-only composed routes fail closed for explicit Lab placement");
     assert!(error

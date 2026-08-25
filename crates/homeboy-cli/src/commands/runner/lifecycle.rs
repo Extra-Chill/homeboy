@@ -276,6 +276,8 @@ fn status_label(status: RunLifecycleStatus) -> &'static str {
         RunLifecycleStatus::Queued => "queued",
         RunLifecycleStatus::Running => "running",
         RunLifecycleStatus::Succeeded => "succeeded",
+        RunLifecycleStatus::CandidateRecoverable => "candidate_recoverable",
+        RunLifecycleStatus::PartialRecoverable => "partial_recoverable",
         RunLifecycleStatus::PartialFailure => "partial_failure",
         RunLifecycleStatus::Failed => "failed",
         RunLifecycleStatus::Cancelled => "cancelled",

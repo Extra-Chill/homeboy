@@ -14,23 +14,23 @@
 #[macro_use]
 mod audit_log;
 pub mod baseline;
-pub mod baseline_merge;
+mod baseline_merge;
 mod checks;
 pub mod codebase_map;
 mod comment_blocks;
 mod comment_hygiene;
-pub mod compare;
+mod compare;
 pub mod compiler_warning_provider;
 mod compiler_warnings;
 pub mod component_provider;
 mod convention_membership;
-pub(crate) mod conventions;
+mod conventions;
 pub mod core_fingerprint;
 mod dead_code;
 mod descriptor_runtime;
 mod detectors;
 mod discovery;
-pub mod docs_audit;
+mod docs_audit;
 mod duplication;
 mod execution_plan;
 pub mod extension_manifests;
@@ -40,20 +40,20 @@ pub mod fingerprint_script_provider;
 pub mod fixability_provider;
 pub mod grammar_source_provider;
 mod idiomatic;
-pub(crate) mod impact;
-pub(crate) mod import_matching;
+mod impact;
+mod import_matching;
 pub mod naming;
-pub(crate) mod parallel;
+mod parallel;
 pub mod recorded_artifacts;
 pub mod report;
 mod requirements;
-pub mod run;
+mod run;
 mod shadow_modules;
 pub mod signature_extraction;
 mod signatures;
 mod source_locations;
 mod structural;
-pub(crate) mod test_mapping;
+mod test_mapping;
 mod test_quality;
 pub mod walker;
 
@@ -74,11 +74,10 @@ pub mod test_helpers;
 // ============================================================================
 
 pub use baseline_merge::{merge_baseline_only_conflict, BaselineMergeError, BaselineMergeResult};
-pub use checks::{CheckResult, CheckStatus};
-pub use compare::{
-    finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
-};
-pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
+
+pub use compare::{weighted_finding_score_with, AuditConvergenceScoring};
+pub use conventions::AuditFinding;
+
 pub use duplication::DuplicateGroup;
 pub use execution_plan::AuditProfile;
 pub(crate) use execution_plan::{
@@ -89,21 +88,23 @@ pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Sever
 pub use fingerprint::FileFingerprint;
 pub use homeboy_engine_primitives::test_path::is_test_path;
 pub use report::{AuditCommandOutput, AuditMeasurement};
-pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
+pub use run::AuditRunWorkflowResult;
+pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs};
 
 pub(crate) use engine::AuditExecution;
-pub use entry::{
-    audit_component, audit_path, audit_path_scoped, audit_path_with_id,
-    source_policy_findings_for_path,
-};
+
+pub use entry::{audit_path_scoped, audit_path_with_id};
 pub(crate) use entry::{
     audit_path_scoped_with_plan_and_analysis, audit_path_with_id_with_plan_and_analysis,
 };
 pub(crate) use types::{time_audit_detector_isolated, AuditAnalysisContext, AuditWithAnalysis};
-pub use types::{
-    AuditSummary, AuditTiming, AuditTimingSpan, CodeAuditResult, ConventionReport,
-    DirectoryConvention, DirectoryOutlier,
-};
+pub use types::{AuditSummary, AuditTiming, AuditTimingSpan, CodeAuditResult};
+pub use types::{ConventionReport, DirectoryConvention, DirectoryOutlier};
+
+#[allow(unused_imports)] // consumed by in-crate `#[cfg(test)]` modules
+pub(crate) use conventions::Language;
+#[allow(unused_imports)] // consumed by this crate's `#[cfg(test)]` modules
+pub(crate) use entry::audit_path;
 
 #[cfg(test)]
 mod tests {

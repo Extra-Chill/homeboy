@@ -316,60 +316,10 @@ pub(crate) struct PreparedPayloadCollection {
 }
 
 struct PreparedPayloadEntry {
-    request: ComponentPayloadPreparationRequest,
-    payload: Option<PreparedComponentPayload>,
-    release_artifact: Option<ReleaseArtifactLease>,
+    payload: PreparedComponentPayload,
 }
 
 impl PreparedPayloadCollection {
-    pub(crate) fn insert(
-        &mut self,
-        request: ComponentPayloadPreparationRequest,
-        release_artifact: Option<ReleaseArtifactLease>,
-    ) -> Result<()> {
-        let identity = request.identity();
-        match self.entries.entry(identity) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(PreparedPayloadEntry {
-                    request,
-                    payload: None,
-                    release_artifact,
-                });
-                Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let existing = entry.get_mut();
-                if let Some(payload) = existing.payload.as_ref() {
-                    return match (&payload._release_artifact, release_artifact) {
-                        (Some(existing), Some(candidate)) if **existing == *candidate => Ok(()),
-                        (_, None) => Ok(()),
-                        _ => Err(Error::validation_invalid_argument(
-                            "release_artifact",
-                            "Prepared payload cannot be rebound to a different release artifact",
-                            None,
-                            None,
-                        )),
-                    };
-                }
-                match (&existing.release_artifact, release_artifact) {
-                    (None, Some(release_artifact)) => {
-                        existing.release_artifact = Some(release_artifact);
-                        Ok(())
-                    }
-                    (Some(existing), Some(candidate)) if **existing != *candidate => {
-                        Err(Error::validation_invalid_argument(
-                            "release_artifact",
-                            "Equal payload preparation requests referenced incompatible release artifacts",
-                            None,
-                            None,
-                        ))
-                    }
-                    _ => Ok(()),
-                }
-            }
-        }
-    }
-
     /// Prepare a component once and return its immutable artifact identity. This
     /// boundary intentionally has no project or remote target inputs.
     pub(crate) fn prepare(
@@ -378,35 +328,12 @@ impl PreparedPayloadCollection {
         release_artifacts: &mut ReleaseArtifactStore,
     ) -> Result<&PreparedComponentPayload> {
         let identity = request.identity();
-        if let Some(existing) = self.entries.get_mut(&identity) {
-            if existing.payload.is_none() {
-                let release_artifact = existing.release_artifact.take();
-                existing.payload = Some(prepare_payload(
-                    &existing.request,
-                    release_artifacts,
-                    release_artifact,
-                )?);
-            }
-        } else {
+        if !self.entries.contains_key(&identity) {
             let payload = prepare_payload(&request, release_artifacts, None)?;
-            self.entries.insert(
-                identity.clone(),
-                PreparedPayloadEntry {
-                    request,
-                    payload: Some(payload),
-                    release_artifact: None,
-                },
-            );
+            self.entries
+                .insert(identity.clone(), PreparedPayloadEntry { payload });
         }
-        Ok(self.entries[&identity]
-            .payload
-            .as_ref()
-            .expect("prepared payload is populated exactly once"))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        Ok(&self.entries[&identity].payload)
     }
 }
 
@@ -896,11 +823,6 @@ mod tests {
             first_binding.deploy_strategy,
             second_binding.deploy_strategy
         );
-
-        let mut collection = PreparedPayloadCollection::default();
-        collection.insert(first, None).expect("first request");
-        collection.insert(second, None).expect("equal request");
-        assert_eq!(collection.len(), 1);
     }
 
     #[test]
@@ -942,11 +864,8 @@ mod tests {
         let entries_before = std::fs::read_dir(temp.path())
             .expect("read temp dir")
             .count();
-        let request = ComponentPayloadPreparationRequest::new(&component, &config());
-        let mut collection = PreparedPayloadCollection::default();
-        collection.insert(request, None).expect("pure insert");
+        let _request = ComponentPayloadPreparationRequest::new(&component, &config());
 
-        assert_eq!(collection.len(), 1);
         assert!(!source_path.exists());
         assert!(!artifact_path.exists());
         assert_eq!(
@@ -955,37 +874,6 @@ mod tests {
                 .count(),
             entries_before
         );
-    }
-
-    #[test]
-    fn collection_retains_release_artifact_lease_after_caller_drops_it() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let artifact_path = temp.path().join("fixture.zip");
-        std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease = homeboy_core::git::release_download::ReleaseArtifactLease::test_new(
-            homeboy_core::git::release_download::ReleaseArtifact {
-                path: artifact_path,
-                tag: "v1.0.0".to_string(),
-                commit: None,
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "hash".to_string(),
-            },
-        )
-        .expect("lease");
-        let observer = lease.clone();
-        let mut collection = PreparedPayloadCollection::default();
-        collection
-            .insert(
-                ComponentPayloadPreparationRequest::new(&component(), &config()),
-                Some(lease),
-            )
-            .expect("lease insert");
-
-        assert_eq!(observer.test_strong_count(), 2);
-        drop(collection);
-        assert_eq!(observer.test_strong_count(), 1);
     }
 
     #[test]
@@ -1066,54 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_merges_late_lease_and_rejects_conflicts() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let artifact_path = temp.path().join("fixture.zip");
-        std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease = homeboy_core::git::release_download::ReleaseArtifactLease::test_new(
-            homeboy_core::git::release_download::ReleaseArtifact {
-                path: artifact_path,
-                tag: "v1.0.0".to_string(),
-                commit: None,
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "hash".to_string(),
-            },
-        )
-        .expect("lease");
-        let observer = lease.clone();
-        let request = ComponentPayloadPreparationRequest::new(&component(), &config());
-        let mut collection = PreparedPayloadCollection::default();
-        collection.insert(request.clone(), None).expect("no lease");
-        collection
-            .insert(request.clone(), Some(lease.clone()))
-            .expect("late lease retained");
-        collection
-            .insert(request.clone(), Some(lease))
-            .expect("identical lease deduplicates");
-        assert_eq!(observer.test_strong_count(), 2);
-
-        let other_temp = tempfile::tempdir().expect("other temp dir");
-        let other_path = other_temp.path().join("fixture.zip");
-        std::fs::write(&other_path, "changed").expect("other artifact");
-        let conflicting = homeboy_core::git::release_download::ReleaseArtifactLease::test_new(
-            homeboy_core::git::release_download::ReleaseArtifact {
-                path: other_path,
-                tag: "v1.0.1".to_string(),
-                commit: Some("different".to_string()),
-                url: "https://example.test/other.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "different".to_string(),
-            },
-        )
-        .expect("conflicting lease");
-        assert!(collection.insert(request, Some(conflicting)).is_err());
-    }
-
-    #[test]
-    fn equal_inserted_request_builds_once_and_cleans_only_its_payload_copy() {
+    fn equal_preparation_request_builds_once_and_cleans_only_its_payload_copy() {
         let temp = tempfile::tempdir().expect("temp dir");
         let source_artifact = temp.path().join("build/fixture.zip");
         let build_count = temp.path().join("build-count");
@@ -1129,13 +970,10 @@ mod tests {
         });
         let request = ComponentPayloadPreparationRequest::new(&component, &config());
         let mut collection = PreparedPayloadCollection::default();
-        collection
-            .insert(request.clone(), None)
-            .expect("insert request");
 
         let payload_path = collection
             .prepare(request.clone(), &mut ReleaseArtifactStore::default())
-            .expect("prepare inserted request")
+            .expect("prepare request")
             .artifact
             .effective_path()
             .to_string();
@@ -1165,132 +1003,6 @@ mod tests {
         assert!(
             !Path::new(&payload_path).exists(),
             "dropping payload removes its owned copy"
-        );
-    }
-
-    #[test]
-    fn inserted_release_lease_is_consumed_by_equal_preparation_request() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let artifact_path = temp.path().join("fixture.zip");
-        std::fs::write(&artifact_path, "payload").expect("artifact");
-        std::fs::write(temp.path().join("package.json"), r#"{"version":"1.0.0"}"#)
-            .expect("package manifest");
-        let lease =
-            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
-                path: artifact_path.clone(),
-                tag: "v1.0.0".to_string(),
-                commit: Some("0123456789abcdef".to_string()),
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: sha256_file(&artifact_path).expect("sha"),
-            })
-            .expect("lease");
-        let observer = lease.clone();
-        let mut component = component();
-        component.local_path = temp.path().display().to_string();
-        component.build_artifact = Some("fixture.zip".to_string());
-        component.remote_url = Some("https://github.com/example/fixture".to_string());
-        component.version_targets = Some(vec![homeboy_core::component::VersionTarget {
-            file: "package.json".to_string(),
-            pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
-            artifact_path: None,
-        }]);
-        let mut deploy_config = config();
-        deploy_config.expected_version = Some("1.0.0".to_string());
-        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
-        let mut collection = PreparedPayloadCollection::default();
-        collection
-            .insert(request.clone(), Some(lease))
-            .expect("insert lease");
-
-        let payload = collection
-            .prepare(request, &mut ReleaseArtifactStore::default())
-            .expect("prepare retained lease");
-        assert_eq!(Path::new(payload.artifact.effective_path()), artifact_path);
-        assert_eq!(observer.test_strong_count(), 2, "payload retains the lease");
-
-        collection
-            .insert(
-                ComponentPayloadPreparationRequest::new(&component, &deploy_config),
-                Some(observer.clone()),
-            )
-            .expect("equal consumer reuses the verified release artifact");
-        let conflicting_temp = tempfile::tempdir().expect("conflicting temp dir");
-        let conflicting_path = conflicting_temp.path().join("conflicting.zip");
-        std::fs::write(&conflicting_path, "changed").expect("conflicting artifact");
-        let conflicting =
-            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
-                path: conflicting_path,
-                tag: "v1.0.0".to_string(),
-                commit: Some("fedcba9876543210".to_string()),
-                url: "https://example.test/conflicting.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "different".to_string(),
-            })
-            .expect("conflicting lease");
-        assert!(collection
-            .insert(
-                ComponentPayloadPreparationRequest::new(&component, &deploy_config),
-                Some(conflicting),
-            )
-            .is_err());
-        assert_eq!(
-            observer.test_strong_count(),
-            2,
-            "equal consumers do not retain a redundant lease"
-        );
-        drop(collection);
-        assert_eq!(
-            observer.test_strong_count(),
-            1,
-            "payload releases its lease"
-        );
-    }
-
-    #[test]
-    fn retained_release_mismatch_creates_no_payload_or_local_build_effect() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let artifact_path = temp.path().join("fixture.zip");
-        let build_counter = temp.path().join("build-count");
-        std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease =
-            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
-                path: artifact_path,
-                tag: "v1.0.0".to_string(),
-                commit: None,
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "wrong".to_string(),
-            })
-            .expect("lease");
-        let mut component = component();
-        component.local_path = temp.path().display().to_string();
-        component.build_artifact = Some("fixture.zip".to_string());
-        component.remote_url = Some("https://github.com/example/fixture".to_string());
-        component.scripts = Some(homeboy_core::component::ComponentScriptsConfig {
-            build: vec![format!("printf build > {}", build_counter.display())],
-            ..Default::default()
-        });
-        let mut deploy_config = config();
-        deploy_config.expected_version = Some("1.0.0".to_string());
-        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
-        let mut collection = PreparedPayloadCollection::default();
-        collection
-            .insert(request.clone(), Some(lease))
-            .expect("insert lease");
-
-        let error = match collection.prepare(request, &mut ReleaseArtifactStore::default()) {
-            Ok(_) => panic!("mismatched retained release must fail"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("does not match"));
-        assert_eq!(collection.len(), 1, "request is retained without a payload");
-        assert!(
-            !build_counter.exists(),
-            "release mismatch must not build or target"
         );
     }
 
@@ -1385,8 +1097,6 @@ mod tests {
                 .next()
                 .unwrap()
                 .payload
-                .as_ref()
-                .unwrap()
                 .artifact
                 .source_commit,
             accepted_sha

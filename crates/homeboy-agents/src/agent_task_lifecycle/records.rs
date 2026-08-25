@@ -1394,18 +1394,27 @@ impl AgentTaskRunState {
 }
 
 /// Canonical projection of a run's aggregate state onto the generic
-/// `RunExecutionState` carried by `RunLifecycleRecord`. The two enums share
-/// every agent-task variant 1:1 (`RunExecutionState` additionally models the
-/// generic `Unknown` default), so this single `From` keeps `record.state` and
-/// `record.lifecycle.execution.state` in lockstep instead of a hand-synced map.
+/// `RunExecutionState` carried by `RunLifecycleRecord`.
+///
+/// The two enums share every agent-task variant 1:1 (`RunExecutionState`
+/// additionally models the generic `Unknown` default), so this single `From`
+/// keeps `record.state` and `record.lifecycle.execution.state` in lockstep
+/// instead of a hand-synced map.
+///
+/// That 1:1 claim was false until #6761: `CandidateRecoverable` and
+/// `PartialRecoverable` both mapped to `PartialFailure`, so three run states
+/// arrived at every serialized consumer as one string and the comment saying
+/// otherwise is why it went unnoticed. The projection is now injective, and
+/// `the_projection_is_injective` below fails if a future variant re-collapses
+/// it.
 impl From<AgentTaskRunState> for RunExecutionState {
     fn from(state: AgentTaskRunState) -> Self {
         match state {
             AgentTaskRunState::Queued => RunExecutionState::Queued,
             AgentTaskRunState::Running => RunExecutionState::Running,
             AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable => RunExecutionState::PartialFailure,
-            AgentTaskRunState::PartialRecoverable => RunExecutionState::PartialFailure,
+            AgentTaskRunState::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable => RunExecutionState::PartialRecoverable,
             AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
             AgentTaskRunState::Failed => RunExecutionState::Failed,
             AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
@@ -1435,10 +1444,13 @@ impl From<AgentTaskRunState> for RunLifecycleStatus {
             AgentTaskRunState::Running => RunLifecycleStatus::Running,
             AgentTaskRunState::Succeeded => RunLifecycleStatus::Succeeded,
             // A stopped run that still holds a recoverable candidate is
-            // terminal and not successful. `PartialFailure` matches what the
-            // `RunExecutionState` projection above already says about it.
-            AgentTaskRunState::CandidateRecoverable => RunLifecycleStatus::PartialFailure,
-            AgentTaskRunState::PartialRecoverable => RunLifecycleStatus::PartialFailure,
+            // terminal and not successful, but it is not a partial failure
+            // either — the candidate is promotable. Carrying the distinction
+            // through is the whole point of #6761; both routes were changed
+            // together so this still agrees with the `RunExecutionState`
+            // projection above.
+            AgentTaskRunState::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable => RunLifecycleStatus::PartialRecoverable,
             AgentTaskRunState::PartialFailure => RunLifecycleStatus::PartialFailure,
             AgentTaskRunState::Failed => RunLifecycleStatus::Failed,
             AgentTaskRunState::Cancelled => RunLifecycleStatus::Cancelled,
@@ -1449,6 +1461,87 @@ impl From<AgentTaskRunState> for RunLifecycleStatus {
 #[cfg(test)]
 mod run_state_lifecycle_projection_tests {
     use super::*;
+
+    /// Every `AgentTaskRunState`, so a new variant is a compile error in the
+    /// tests below rather than a silently unchecked one.
+    const ALL_RUN_STATES: [AgentTaskRunState; 8] = [
+        AgentTaskRunState::Queued,
+        AgentTaskRunState::Running,
+        AgentTaskRunState::Succeeded,
+        AgentTaskRunState::CandidateRecoverable,
+        AgentTaskRunState::PartialRecoverable,
+        AgentTaskRunState::PartialFailure,
+        AgentTaskRunState::Failed,
+        AgentTaskRunState::Cancelled,
+    ];
+
+    /// The defect #6761 fixed: `CandidateRecoverable`, `PartialRecoverable`,
+    /// and `PartialFailure` all projected to `PartialFailure`, so a consumer
+    /// reading only the serialized run could not tell "there is a candidate to
+    /// promote" from "this partially failed".
+    ///
+    /// Injectivity is the property that makes the projection safe to read as
+    /// the run's state. Asserting it directly means a future variant that
+    /// reuses an existing target fails here instead of silently re-collapsing
+    /// the vocabulary.
+    #[test]
+    fn the_projection_is_injective() {
+        let mut seen: Vec<(RunExecutionState, AgentTaskRunState)> = Vec::new();
+        for state in ALL_RUN_STATES {
+            let projected = RunExecutionState::from(state);
+            if let Some((_, first)) = seen.iter().find(|(target, _)| *target == projected) {
+                panic!(
+                    "{state:?} and {first:?} both project to {projected:?}; \
+                     the projection must stay injective (#6761)"
+                );
+            }
+            seen.push((projected, state));
+        }
+        assert_eq!(seen.len(), ALL_RUN_STATES.len());
+    }
+
+    /// The same property one hop further out, where the orchestrator actually
+    /// reads it — `ActivityState` is an alias of `RunLifecycleStatus`, so a
+    /// collapse here is a collapse in `activity` output.
+    #[test]
+    fn the_lifecycle_status_projection_is_injective() {
+        let mut seen: Vec<(RunLifecycleStatus, AgentTaskRunState)> = Vec::new();
+        for state in ALL_RUN_STATES {
+            let projected = RunLifecycleStatus::from(state);
+            if let Some((_, first)) = seen.iter().find(|(target, _)| *target == projected) {
+                panic!(
+                    "{state:?} and {first:?} both project to {projected:?}; \
+                     activity could not distinguish them (#6761)"
+                );
+            }
+            seen.push((projected, state));
+        }
+        assert_eq!(seen.len(), ALL_RUN_STATES.len());
+    }
+
+    /// A recoverable run is terminal and unsuccessful, but it is not an
+    /// invitation to retry — the next action is promotion or resumption.
+    /// Reporting it retryable is how an orchestrator builds a retry loop
+    /// around a run that is waiting on a decision.
+    #[test]
+    fn recoverable_states_are_terminal_unsuccessful_and_not_retryable() {
+        for state in [
+            AgentTaskRunState::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable,
+        ] {
+            let projected = RunLifecycleStatus::from(state);
+            assert!(projected.is_terminal(), "{state:?} must be terminal");
+            assert!(!projected.is_success(), "{state:?} must not claim success");
+            assert!(
+                !projected.is_retryable(),
+                "{state:?} must not instruct a retry"
+            );
+            // Deliberately no `is_recoverable()` helper: a boolean would
+            // re-collapse `CandidateRecoverable` and `PartialRecoverable` into
+            // one bit, which is the exact loss this change removes. Consumers
+            // match the variant they care about.
+        }
+    }
 
     /// The direct projection must never diverge from composing the two that
     /// already existed. If it did, `record.state` and

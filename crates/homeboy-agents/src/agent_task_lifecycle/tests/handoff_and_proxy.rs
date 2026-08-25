@@ -2559,6 +2559,17 @@ fn run_state_bridges_one_to_one_onto_execution_state() {
         (AgentTaskRunState::Queued, RunExecutionState::Queued),
         (AgentTaskRunState::Running, RunExecutionState::Running),
         (AgentTaskRunState::Succeeded, RunExecutionState::Succeeded),
+        // These two were the exception the test name claimed did not exist:
+        // both mapped to `PartialFailure` until #6761, so the bridge was 8->6,
+        // not one-to-one. Listed explicitly now that they carry through.
+        (
+            AgentTaskRunState::CandidateRecoverable,
+            RunExecutionState::CandidateRecoverable,
+        ),
+        (
+            AgentTaskRunState::PartialRecoverable,
+            RunExecutionState::PartialRecoverable,
+        ),
         (
             AgentTaskRunState::PartialFailure,
             RunExecutionState::PartialFailure,

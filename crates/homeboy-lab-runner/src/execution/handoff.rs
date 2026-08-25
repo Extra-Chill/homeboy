@@ -39,7 +39,7 @@ pub(crate) fn lab_offload_handoff_hints(
         )],
         DaemonJobHandoffState::Terminal(status) => vec![format!(
             "Lab offload handoff: runner `{runner_id}` daemon job `{job_id}` finished with status `{}`.",
-            status.daemon_status_label()
+            status.as_str()
         )],
     };
 

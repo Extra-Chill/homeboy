@@ -36,7 +36,7 @@ pub(crate) struct SourceMasks {
 
 impl SourceMasks {
     /// Scan `content` under `language`'s lexical rules.
-    pub(crate) fn new(content: &str, language: Language) -> Self {
+    pub fn new(content: &str, language: Language) -> Self {
         Scanner::new(content, language).run()
     }
 

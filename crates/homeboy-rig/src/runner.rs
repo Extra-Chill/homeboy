@@ -41,9 +41,19 @@ use homeboy_core::resource_lifecycle_index::{
     ResourceLifecycleIndex, ResourceLifecycleResourceStatus,
 };
 
-/// Report from `rig up`.
+/// The outcome of one rig pipeline run.
+///
+/// `rig up`, `rig check` / `rig lint`, and fuzz preparation each reported these
+/// five fields from their own declaration, with identical serde attributes and
+/// no conversion between them. Three copies meant a field added for one command
+/// compiled clean and silently never reached the other two, even though all
+/// three serialize into the same `CommandReport<T>` envelope. One declaration
+/// makes that a compile error instead.
+///
+/// The per-command aliases below are kept because the names are the readable
+/// spelling at each call site and in `RigUpOutput` / `RigCheckOutput`.
 #[derive(Debug, Clone, Serialize)]
-pub struct UpReport {
+pub struct RigPipelineReport {
     pub rig_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -53,17 +63,11 @@ pub struct UpReport {
     pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
+/// Report from `rig up`.
+pub type UpReport = RigPipelineReport;
+
 /// Report from `rig check`.
-#[derive(Debug, Clone, Serialize)]
-pub struct CheckReport {
-    pub rig_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub pipeline: PipelineOutcome,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_index: Option<RigRunArtifactIndex>,
-}
+pub type CheckReport = RigPipelineReport;
 
 /// Report from a bench preparation pipeline.
 #[derive(Debug, Clone, Serialize)]
@@ -74,16 +78,7 @@ pub struct BenchPrepareReport {
 }
 
 /// Report from a fuzz preparation pipeline.
-#[derive(Debug, Clone, Serialize)]
-pub struct FuzzPrepareReport {
-    pub rig_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub pipeline: PipelineOutcome,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_index: Option<RigRunArtifactIndex>,
-}
+pub type FuzzPrepareReport = RigPipelineReport;
 
 /// Report from `rig down`.
 #[derive(Debug, Clone, Serialize)]

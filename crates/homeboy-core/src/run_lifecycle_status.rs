@@ -7,18 +7,40 @@ use crate::run_lifecycle_record::RunExecutionState;
 pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
 
 /// Canonical run lifecycle status vocabulary for cross-runtime contracts.
+///
+/// # Recoverable is not retryable
+///
+/// `CandidateRecoverable` and `PartialRecoverable` are terminal and
+/// unsuccessful, like `PartialFailure`, and like it they are **not
+/// retryable** — re-running reproduces the same stop. They are separate
+/// because the *next action* differs: a candidate can be promoted, partial
+/// work can be resumed, and a partial failure offers neither. Folding them
+/// into `PartialFailure` (which is what happened before) left a consumer
+/// holding a serialized run unable to tell those three apart.
+///
+/// # Unknown is the tolerance hatch
+///
+/// `Unknown` is `#[serde(other)]` so a payload from a newer binary degrades to
+/// "no verdict" instead of failing to parse. It deliberately claims nothing:
+/// not terminal, not successful, not retryable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RunLifecycleStatus {
-    Unknown,
     Queued,
     Running,
     Succeeded,
+    /// Stopped, unsuccessful, but a promotable candidate survived.
+    CandidateRecoverable,
+    /// Stopped, unsuccessful, but the partial work can be resumed.
+    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
     TimedOut,
     Stale,
+    /// A status minted by a producer this binary does not know. Never guessed.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RunLifecycleStatus {
@@ -26,6 +48,8 @@ impl RunLifecycleStatus {
         matches!(
             self,
             Self::Succeeded
+                | Self::CandidateRecoverable
+                | Self::PartialRecoverable
                 | Self::PartialFailure
                 | Self::Failed
                 | Self::Cancelled
@@ -50,6 +74,8 @@ impl From<RunExecutionState> for RunLifecycleStatus {
             RunExecutionState::Queued => Self::Queued,
             RunExecutionState::Running => Self::Running,
             RunExecutionState::Succeeded => Self::Succeeded,
+            RunExecutionState::CandidateRecoverable => Self::CandidateRecoverable,
+            RunExecutionState::PartialRecoverable => Self::PartialRecoverable,
             RunExecutionState::PartialFailure => Self::PartialFailure,
             RunExecutionState::Failed => Self::Failed,
             RunExecutionState::Cancelled => Self::Cancelled,
@@ -135,10 +161,12 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // Cook did not succeed either, and re-running it changes nothing.
             CookStatus::NoChanges => Self::PartialFailure,
             // A candidate exists and can still be recovered. This matches the
-            // existing `AgentTaskRunState::CandidateRecoverable ->
-            // RunExecutionState::PartialFailure` projection rather than
-            // inventing a second reading of the same situation.
-            CookStatus::CandidateRecoverable => Self::PartialFailure,
+            // `AgentTaskRunState::CandidateRecoverable ->
+            // RunExecutionState::CandidateRecoverable` projection rather than
+            // inventing a second reading of the same situation. Both used to
+            // say `PartialFailure`; they were changed together so the two
+            // routes still agree.
+            CookStatus::CandidateRecoverable => Self::CandidateRecoverable,
             // Stopped waiting on a verdict that is not this run's to produce.
             CookStatus::AwaitingAcceptance => Self::PartialFailure,
             // Re-running reproduces the block identically until the dependency
@@ -203,6 +231,11 @@ mod tests {
             (RunLifecycleStatus::Queued, false, false, false),
             (RunLifecycleStatus::Running, false, false, false),
             (RunLifecycleStatus::Succeeded, true, true, false),
+            // Terminal, unsuccessful, and NOT retryable: re-running reproduces
+            // the same stop. The next action is promotion or resumption, which
+            // is why these are separate variants rather than `PartialFailure`.
+            (RunLifecycleStatus::CandidateRecoverable, true, false, false),
+            (RunLifecycleStatus::PartialRecoverable, true, false, false),
             (RunLifecycleStatus::PartialFailure, true, false, false),
             (RunLifecycleStatus::Failed, true, false, true),
             (RunLifecycleStatus::Cancelled, true, false, false),
@@ -226,7 +259,8 @@ mod tests {
 
     #[test]
     fn source_states_project_to_canonical_status() {
-        for label in "unknown,queued,running,succeeded,partial_failure,failed,cancelled".split(',')
+        for label in "unknown,queued,running,succeeded,candidate_recoverable,partial_recoverable,partial_failure,failed,cancelled"
+            .split(',')
         {
             let source: RunExecutionState = serde_json::from_value(label.into()).unwrap();
             let expected: RunLifecycleStatus = serde_json::from_value(label.into()).unwrap();
@@ -289,7 +323,7 @@ mod tests {
                 CookStatus::NoOpGateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GateFailed => RunLifecycleStatus::Failed,
                 CookStatus::AwaitingAcceptance => RunLifecycleStatus::PartialFailure,
-                CookStatus::CandidateRecoverable => RunLifecycleStatus::PartialFailure,
+                CookStatus::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
                 CookStatus::BlockedByDependency => RunLifecycleStatus::PartialFailure,
                 CookStatus::Blocked => RunLifecycleStatus::PartialFailure,
                 CookStatus::Cancelled => RunLifecycleStatus::Cancelled,
