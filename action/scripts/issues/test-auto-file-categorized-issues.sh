@@ -91,6 +91,18 @@ run_categorizer() {
 # Issue #214: empty-input branches
 # ─────────────────────────────────────────────────────────────────────────────
 
+cat > "${TMP_ROOT}/setup.json" <<'JSON'
+{"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}
+JSON
+
+run_categorizer \
+  "setup-blocked commands preserve setup ownership" \
+  0 \
+  "Homeboy extension setup failed during install Homeboy extension; requested quality commands were not run" \
+  RESULTS='{"setup":"fail","review lint":"not_run"}' \
+  COMMANDS='review lint' \
+  HOMEBOY_SETUP_RESULT_FILE="${TMP_ROOT}/setup.json"
+
 # Case 1 — release-wrapper shape: RESULTS={}, COMMANDS empty, EXPECTED set.
 # This is the exact failure mode from the bug report. Should exit 0.
 run_categorizer \

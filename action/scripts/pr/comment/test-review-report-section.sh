@@ -86,6 +86,21 @@ assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "le
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner binary-source=fallback release binary (source build failed)" "binary-source banner passed to core"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--placement local review data-machine" "review report opts into local placement in GitHub Actions"
 
+cat > "${fake_bin}/setup.json" <<'JSON'
+{"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}
+JSON
+export HOMEBOY_SETUP_RESULT_FILE="${fake_bin}/setup.json"
+export RESULTS='{"setup":"fail","review audit":"not_run","review lint":"not_run","review test":"not_run"}'
+: > "${HOMEBOY_REVIEW_CALL_LOG}"
+build_section_body
+assert_contains "${SECTION_BODY}" "Setup failed - Homeboy extension setup" "setup-owned failure is prominent in PR summary"
+assert_contains "${SECTION_BODY}" "Diagnostic: source SHA mismatch" "PR summary preserves setup cause"
+assert_contains "${SECTION_BODY}" 'Replay: `bash install-extension.sh`' "PR summary includes setup replay command"
+assert_contains "${SECTION_BODY}" ":fast_forward: **review lint** — not run (setup failed)" "PR summary marks quality commands not run"
+assert_not_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "review --report=pr-comment" "setup failure does not invoke a command-result renderer"
+unset HOMEBOY_SETUP_RESULT_FILE
+export RESULTS='{"review audit":"fail","review lint":"pass","review test":"pass"}'
+
 export HOMEBOY_REVIEW_OUTPUT_MODE="custom"
 build_section_body
 assert_contains "${SECTION_BODY}" "Custom core-rendered markdown without action-side shape coupling" "custom core markdown is appended without report-shape checks"

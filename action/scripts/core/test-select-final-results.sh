@@ -63,6 +63,15 @@ assert_failed_results "missing current results synthesize failures" ''
 assert_failed_results "malformed current results synthesize failures" '{"review test":"fail"}}'
 assert_failed_results "incomplete current results synthesize failures" '{"review audit":"pass"}'
 
+cat > "${TMP_DIR}/setup.json" <<'JSON'
+{"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}
+JSON
+: > "${TMP_DIR}/output"
+FIRST_RESULTS='' COMMANDS='review audit,review test' HOMEBOY_SETUP_RESULT_FILE="${TMP_DIR}/setup.json" GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >"${TMP_DIR}/setup-selection.log"
+assert_equals '{"review audit":"not_run","review test":"not_run","setup":"fail"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "setup failure preserves ownership and marks commands not_run"
+grep -Fq 'Homeboy extension setup failed during install Homeboy extension' "${TMP_DIR}/setup-selection.log" || { printf 'FAIL: setup reconciliation omitted the owning subsystem\n'; exit 1; }
+
 : > "${TMP_DIR}/output"
 FIRST_RESULTS='{"review test":"pass"}' COMMANDS='review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
   GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
