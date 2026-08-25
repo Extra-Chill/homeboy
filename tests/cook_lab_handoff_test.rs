@@ -179,7 +179,7 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 }
 
 /// A local detached Cook whose child exits before attempt materialization is
-/// rejected rather than falsely accepted (#12290).
+/// rejected without publishing a zero-task durable run (#12290, #13512).
 ///
 /// The launcher hands the Cook to a process in its own session, then observes
 /// whether it materializes the durable attempt. It performs no worktree or
@@ -220,24 +220,9 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
             std::fs::File::create(&stderr_path).expect("create detached Cook stderr"),
         ));
     let mut child = command.spawn().expect("start detached Cook launcher");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        if stderr.contains("durable run id `local-detach-exits-before-attempt`") {
-            assert!(
-                child.try_wait().expect("poll detached Cook launcher").is_none(),
-                "the launcher must still be crossing child admission after it emits the durable parent identity"
-            );
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the parent identity was not emitted after daemon compatibility admission completed: {stderr}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
     let status = child.wait().expect("wait for detached Cook launcher");
     let stdout = std::fs::read_to_string(&stdout_path).expect("read detached Cook stdout");
+    let stderr = std::fs::read_to_string(&stderr_path).expect("read detached Cook stderr");
     assert!(!status.success(), "{stdout}");
     assert!(
         !stdout.contains("cannot detach after handoff with --placement local"),
@@ -245,8 +230,13 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     );
     assert!(!stdout.contains("worktree provider"), "{stdout}");
     assert!(
-        stdout.contains("detached Cook exited before materializing its first attempt"),
-        "{stdout}"
+        stdout.contains("detached Cook exited before materializing an executable plan"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("empty_detached_plan"), "{stdout}");
+    assert!(
+        !stderr.contains("durable run id `local-detach-exits-before-attempt`"),
+        "a rejected empty plan must never be announced as durable: {stderr}"
     );
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
     status.args([
@@ -257,25 +247,9 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     ]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
-    assert!(status.status.success(), "{status_stdout}");
     assert!(
-        status_stdout.contains("\"admission_state\": \"failed\""),
-        "an abandoned admission must terminalize truthfully: {status_stdout}"
-    );
-    let status: serde_json::Value =
-        serde_json::from_str(&status_stdout).expect("status is structured JSON");
-    assert_eq!(status["subject_state"], "failed", "{status_stdout}");
-    assert_eq!(
-        status["data"]["metadata"]["task_count"], 0,
-        "{status_stdout}"
-    );
-    assert_eq!(
-        status["data"]["metadata"]["provider_executions_consumed"], 0,
-        "{status_stdout}"
-    );
-    assert_eq!(
-        status["data"]["metadata"]["detached_cook_handoff"]["state"], "exited_before_handoff",
-        "{status_stdout}"
+        !status.status.success(),
+        "a rejected empty plan must not remain externally visible: {status_stdout}"
     );
 }
 
@@ -438,6 +412,10 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         .unwrap_or_else(|| panic!("accepted handoff names an attempt\n{stdout}"))
         .to_string();
     assert_ne!(attempt_id, cook_id, "{stdout}");
+    let supervisor_job_id = handoff["controller_job"]["job_id"]
+        .as_str()
+        .and_then(|job_id| uuid::Uuid::parse_str(job_id).ok())
+        .unwrap_or_else(|| panic!("accepted handoff names its controller job\n{stdout}"));
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
     status.args(["agent-task", "status", &attempt_id, "--full"]);
     let status = bounded_output(status);
@@ -445,6 +423,32 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     assert!(status.status.success(), "{status_stdout}");
     assert!(status_stdout.contains(&attempt_id), "{status_stdout}");
     assert!(!status_stdout.contains("\"tasks\": []"), "{status_stdout}");
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let attempt_record = lifecycle_store
+        .read_record(&attempt_id)
+        .expect("read accepted attempt record");
+    assert_eq!(
+        attempt_record.metadata["local_cook_supervisor"]["job_id"],
+        supervisor_job_id.to_string(),
+        "the executable run and controller job are linked before acceptance"
+    );
+    assert!(
+        lifecycle_store.read_record(cook_id).is_err(),
+        "local detach must not persist a zero-task handoff parent"
+    );
+    let job_store = JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json"))
+        .expect("open controller job store");
+    assert!(
+        job_store
+            .events(supervisor_job_id)
+            .expect("read controller job events")
+            .iter()
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| { data["durable_run_id"].as_str() == Some(cook_id) })),
+        "controller job admission must carry its durable Cook identity"
+    );
 
     // Cancel through the durable Cook alias, then wait on the returned attempt.
     // The controller job owns process-tree termination and reaping; this keeps
@@ -471,6 +475,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
                     "/data/state",
                     "/data/child_run_state",
                     "/data/lifecycle/execution/state",
+                    "/data/status_scope/queried_attempt/state",
                 ]
                 .iter()
                 .filter_map(|pointer| status.pointer(pointer).and_then(serde_json::Value::as_str))
