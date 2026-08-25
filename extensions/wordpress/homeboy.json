@@ -59,7 +59,6 @@
       "bash scripts/lint/fix-results-smoke.sh",
       "bash scripts/lint/lint-gitignore-discovery-smoke.sh",
       "bash scripts/lint/lint-producers-smoke.sh",
-      "bash scripts/lint/lint-summary-label-smoke.sh",
       "bash scripts/lint/phpcbf-readonly-smoke.sh",
       "bash scripts/lint/phpstan-scoped-smoke.sh",
       "bash scripts/lint/scoped-fix-only-smoke.sh",

@@ -161,10 +161,14 @@ exit 0
 SH
 chmod +x "${EXTENSION_DIR}/vendor/bin/phpcs"
 
-# ESLint + PHPStan stubs that pass, so the aggregate exit reflects PHPCS only.
+# ESLint + PHPStan stubs pass by default, so the six PHPCS cases remain isolated.
 cat > "${EXTENSION_DIR}/scripts/lint/eslint-runner.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${ESLINT_FIXTURE_MODE:-pass}" = "error" ]; then
+    echo "ESLINT SUMMARY: 1 errors, 0 warnings"
+    exit 1
+fi
 echo "ESLint linting passed"
 exit 0
 SH
@@ -173,6 +177,10 @@ chmod +x "${EXTENSION_DIR}/scripts/lint/eslint-runner.sh"
 cat > "${EXTENSION_DIR}/scripts/lint/phpstan-runner.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${PHPSTAN_FIXTURE_MODE:-pass}" = "error" ]; then
+    echo "PHPSTAN SUMMARY: 2 errors at level 7"
+    exit 1
+fi
 echo "PHPStan linting passed"
 exit 0
 SH
@@ -229,6 +237,15 @@ assert_contains() {
     fi
 }
 
+assert_no_generic_summary() {
+    local label="$1"
+    if grep -Eq '^LINT SUMMARY:' "$OUTPUT_FILE"; then
+        echo "FAIL: ${label}: generic LINT SUMMARY label found" >&2
+        sed 's/^/  /' "$OUTPUT_FILE" >&2
+        fail=1
+    fi
+}
+
 # 1. warnings-only, default knob, SUMMARY mode => exit 0, warning still reported.
 run_lint warnings "" 1
 assert_exit "warnings-only / default / summary mode" 0
@@ -255,6 +272,31 @@ assert_contains "errors / default / summary mode" "PHPCS SUMMARY: 2 errors, 0 wa
 # 6. errors present, default knob, FULL mode => exit 1 (gate still blocks).
 run_lint error "" 0
 assert_exit "errors / default / full mode" 1
+
+# 7. PHPCS passes its warnings-only gate while ESLint and PHPStan fail aggregate lint.
+: > "$OUTPUT_FILE"
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="phpcs-warnings-gate" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+HOMEBOY_RUNTIME_DETECT_COMPONENT="$DETECT_COMPONENT_HELPER" \
+HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_HELPER" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+PHPCS_FIXTURE_MODE=warnings \
+ESLINT_FIXTURE_MODE=error \
+PHPSTAN_FIXTURE_MODE=error \
+HOMEBOY_SUMMARY_MODE=1 \
+bash "$RUNNER" >"$OUTPUT_FILE" 2>&1
+LINT_EXIT=$?
+set -e
+
+assert_exit "producer labels / aggregate summary mode" 1
+assert_contains "producer labels / aggregate summary mode" "PHPCS SUMMARY: 0 errors, 3 warnings"
+assert_contains "producer labels / aggregate summary mode" "ESLINT SUMMARY: 1 errors, 0 warnings"
+assert_contains "producer labels / aggregate summary mode" "PHPSTAN SUMMARY: 2 errors at level 7"
+assert_no_generic_summary "producer labels / aggregate summary mode"
 
 if [ "$fail" -ne 0 ]; then
     echo "phpcs-warnings-gate lint smoke FAILED" >&2
