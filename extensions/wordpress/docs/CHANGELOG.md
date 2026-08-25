@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.8] - 2026-08-25
+
+### Fixed
+- bootstrap setup from extension source
+
 ## [3.38.7] - 2026-08-25
 
 ### Changed
