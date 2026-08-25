@@ -167,6 +167,47 @@ static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileId
 /// replacing it moves its inode. A hit therefore means nothing has touched
 /// those bytes since this process hashed them. The memo is process local and
 /// never persisted, so it cannot outlive the observation it was derived from.
+/// How long a hash must take before its result may be memoized.
+///
+/// The memo is only sound while the observed identity distinguishes the bytes
+/// that were hashed. Inode and size do that for a replacement or a resize;
+/// modification and change time are what carry an in-place, same-size rewrite.
+/// Those come from the kernel's coarse timestamp clock, which advances every
+/// 1ms on this ext4 host -- so a rewrite landing in the same tick as the hash
+/// moves no observed field at all, and the memo would answer for bytes that no
+/// longer exist.
+///
+/// Hash duration closes that window without needing to know the granularity:
+/// if hashing outlasts a tick, any write racing it necessarily lands in a later
+/// tick and moves `mtime`. If hashing is faster than a tick the observation is
+/// not durable and is not memoized -- which costs nothing, because a file that
+/// hashes that fast is cheap to hash again. The controller binaries this memo
+/// exists for are hundreds of megabytes and take seconds.
+#[cfg(unix)]
+const DIGEST_MEMO_MIN_HASH_TIME: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Test override for [`DIGEST_MEMO_MIN_HASH_TIME`], in milliseconds.
+///
+/// The guard is defined in terms of a duration no unit-test-sized file can
+/// reach, so memoization itself is unreachable in a test without a seam. Tests
+/// that are about the memo lower this; the test that is about the guard leaves
+/// it alone.
+#[cfg(all(test, unix))]
+static DIGEST_MEMO_MIN_HASH_TIME_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[cfg(unix)]
+fn digest_memo_min_hash_time() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let configured = DIGEST_MEMO_MIN_HASH_TIME_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if configured != u64::MAX {
+            return std::time::Duration::from_millis(configured);
+        }
+    }
+    DIGEST_MEMO_MIN_HASH_TIME
+}
+
 #[cfg(unix)]
 static EXECUTABLE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileIdentity, String>>> =
     OnceLock::new();
@@ -2662,13 +2703,16 @@ fn executable_digest(path: &Path) -> Result<String> {
     // hash it, in a process that is about to fork a controller runtime.
     #[cfg(all(test, unix))]
     EXECUTABLE_DIGEST_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let hashing_started = std::time::Instant::now();
     let digest = content_hash::sha256_file(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("hash pinned controller executable".to_string()),
         )
     })?;
-    memoize_executable_digest(identity, &digest);
+    if hashing_started.elapsed() >= digest_memo_min_hash_time() {
+        memoize_executable_digest(identity, &digest);
+    }
     Ok(digest)
 }
 
@@ -4226,6 +4270,99 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Lower the digest memo's settle threshold for one test, restoring it on
+    /// drop.
+    ///
+    /// Leaking this would re-enable memoization for every later test in the
+    /// process, which is precisely the condition that let a stale digest be
+    /// reused -- so it is restored on unwind, not at the end of a happy path.
+    #[cfg(unix)]
+    struct SettleThresholdOverride;
+
+    #[cfg(unix)]
+    impl SettleThresholdOverride {
+        fn of_millis(millis: u64) -> Self {
+            DIGEST_MEMO_MIN_HASH_TIME_MS.store(millis, std::sync::atomic::Ordering::Relaxed);
+            Self
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SettleThresholdOverride {
+        fn drop(&mut self) {
+            DIGEST_MEMO_MIN_HASH_TIME_MS.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The regression test for the memo returning a digest for bytes that no
+    /// longer exist.
+    ///
+    /// `ctime`/`mtime` come from a coarse clock that advances every 1ms here, so
+    /// an in-place same-size rewrite issued in the same tick as the hash moves
+    /// no observed identity field. Both writes below are twelve bytes, which is
+    /// exactly the shape that slipped past `publication_is_no_clobber_and_idempotent`:
+    /// a size change would have been caught, and an identical size was not.
+    #[test]
+    #[cfg(unix)]
+    fn a_hash_faster_than_the_timestamp_clock_is_not_memoized() {
+        crate::test_support::with_isolated_home(|_| {
+            EXECUTABLE_DIGESTS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .expect("controller executable digest memo is not poisoned")
+                .clear();
+
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let executable = temporary.path().join("homeboy");
+
+            fs::write(&executable, b"generation-a").expect("write first generation");
+            let first = executable_digest(&executable).expect("hash first generation");
+
+            // Same length, same inode, same tick: nothing the identity observes
+            // has changed.
+            fs::write(&executable, b"generation-b").expect("write second generation");
+            let second = executable_digest(&executable).expect("hash second generation");
+
+            assert_ne!(
+                first, second,
+                "a same-size rewrite inside one timestamp tick must not reuse the prior digest"
+            );
+        });
+    }
+
+    /// `chmod` `path` to `mode` and return once the change is visible in the
+    /// file's observed identity.
+    ///
+    /// `ctime` comes from the kernel's coarse timestamp clock, which advances
+    /// every 1ms on this ext4 host. A `chmod` issued in the same tick as the
+    /// operation before it produces a byte-identical `ExecutableFileIdentity`,
+    /// and the digest memo then hits -- correctly, because the bytes did not
+    /// change.
+    ///
+    /// So a test asserting that a chmod is *observed* is asserting something
+    /// about the clock, not about the cache, and it fails on any machine fast
+    /// enough to fit both operations in one tick. Waiting for the clock states
+    /// that precondition instead of racing it.
+    #[cfg(unix)]
+    fn chmod_until_observable(path: &Path, mode: u32) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let before = fs::metadata(path).expect("stat candidate before chmod");
+        let before = (before.ctime(), before.ctime_nsec());
+
+        for _ in 0..5_000 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("change candidate mode");
+            let after = fs::metadata(path).expect("stat candidate after chmod");
+            if (after.ctime(), after.ctime_nsec()) != before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+
+        panic!("chmod never became observable in the candidate's change time");
+    }
+
     #[test]
     fn test_fixture_identity_cache_reuses_sealed_candidates_and_invalidates_changes() {
         use std::os::unix::fs::PermissionsExt;
@@ -4253,8 +4390,7 @@ mod tests {
                 "source and sealed candidate avoid additional full reads"
             );
 
-            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
-                .expect("change candidate mode");
+            chmod_until_observable(&candidate, 0o700);
             validate_pin(&runtime).expect("chmod preserves valid candidate bytes");
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -4312,6 +4448,11 @@ mod tests {
                 .expect("controller executable digest memo is not poisoned")
                 .clear();
             EXECUTABLE_DIGEST_COMPUTATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+            // This test is about the memo, not about the settle guard: a
+            // unit-test-sized file can never hash for long enough to be
+            // memoized under the production threshold. Restored on drop so a
+            // panic here cannot silently re-enable memoization elsewhere.
+            let _settle_override = SettleThresholdOverride::of_millis(0);
 
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let executable = temporary.path().join("homeboy");
