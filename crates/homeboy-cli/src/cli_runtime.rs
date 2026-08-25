@@ -1,10 +1,11 @@
-use clap::{ArgMatches, Command};
+use clap::{ArgMatches, Command, CommandFactory};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
+use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
     Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
@@ -222,7 +223,7 @@ pub(crate) fn select_unmaterialized_cook_runner(
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
-    capabilities: &'static [&'static dyn CliCapability],
+    capabilities: CommandCapabilityRegistry,
 }
 
 struct ExtensionCliCommand {
@@ -581,10 +582,22 @@ impl CliRuntime {
     }
 
     pub fn with_capabilities(capabilities: &'static [&'static dyn CliCapability]) -> Self {
-        Self {
+        Self::try_with_required_capabilities(capabilities, &[])
+            .expect("CLI capability composition must be valid")
+    }
+
+    pub fn try_with_required_capabilities(
+        capabilities: &'static [&'static dyn CliCapability],
+        required: &[&str],
+    ) -> crate::core::Result<Self> {
+        Ok(Self {
             extension_discovery: OnceLock::new(),
-            capabilities,
-        }
+            capabilities: CommandCapabilityRegistry::compose(
+                capabilities,
+                required,
+                &Cli::command(),
+            )?,
+        })
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
@@ -598,8 +611,11 @@ impl CliRuntime {
         register_startup_providers_before_reconcile();
         if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
             let config = crate::core::defaults::load_config();
-            if register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
-                .is_err()
+            if register_startup_providers_after_reconcile(
+                &config.agent_task,
+                &self.capabilities.capabilities(),
+            )
+            .is_err()
             {
                 return std::process::ExitCode::from(2);
             }
@@ -654,9 +670,10 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
-        if let Err(error) =
-            register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
-        {
+        if let Err(error) = register_startup_providers_after_reconcile(
+            &config.agent_task,
+            &self.capabilities.capabilities(),
+        ) {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
@@ -700,6 +717,13 @@ impl CliRuntime {
             {
                 Ok(matches) => matches,
                 Err(err) => {
+                    if matches!(
+                        err.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ) {
+                        err.exit();
+                    }
                     if let Some(output) = try_augment_clap_error(
                         &err,
                         &diagnostic_args,
@@ -1335,14 +1359,18 @@ impl CliRuntime {
 
     fn build_augmented_command(&self) -> Command {
         let discovery = self.extension_discovery();
+        self.capabilities
+            .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
+            .expect("dynamic and typed capability command names must not conflict");
         let mut command = build_augmented_command(&discovery.info, &discovery.health);
-        for capability in self.capabilities {
-            command = command.subcommand(capability.command());
+        for entry in self.capabilities.entries() {
+            command = command.subcommand(entry.command.clone());
         }
         let support = self
             .capabilities
+            .entries()
             .iter()
-            .filter_map(|capability| capability.lab_command_route_support())
+            .filter_map(|entry| entry.capability.lab_command_route_support())
             .collect::<Vec<_>>();
         crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
     }
@@ -1353,9 +1381,7 @@ impl CliRuntime {
     ) -> Option<(&'a dyn CliCapability, &'a ArgMatches)> {
         let (name, sub_matches) = matches.subcommand()?;
         self.capabilities
-            .iter()
-            .copied()
-            .find(|capability| capability.name() == name)
+            .find(name)
             .map(|capability| (capability, sub_matches))
     }
 
