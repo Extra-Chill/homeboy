@@ -265,6 +265,10 @@ else
     echo "Expected portable sha256 helper to support shasum and sha256sum" >&2
     exit 1
 fi
+if ! grep -q 'git clone --quiet --no-checkout -- "$SOURCE" "$CANDIDATE_DIR"' "${SCRIPT}"; then
+    echo "Expected cache updater clone to delimit source options" >&2
+    exit 1
+fi
 case "$LOCAL_DRY_RUN_OUTPUT" in
     *"Fetching WP Codebox ref"*) ;;
     *)

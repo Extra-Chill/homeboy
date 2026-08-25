@@ -12,17 +12,6 @@ set -euo pipefail
 
 EXTENSION_PATH="$(pwd)"
 
-sha256_file() {
-    if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "WP Codebox source install requires shasum or sha256sum to bind the managed CLI." >&2
-        return 1
-    fi
-}
-
 install_wp_codebox() {
     write_github_env() {
         local name="$1"
@@ -402,6 +391,9 @@ NODE
     ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
     repo_dir="${install_root}/source"
     download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}"
+    if [ -e "${source}" ]; then
+        source="$(cd "$(dirname -- "${source}")" && printf '%s/%s' "$(pwd -P)" "$(basename -- "${source}")")"
+    fi
     source_authority_label="managed source ref ${ref}"
     expected_source_ref="${ref}"
     expected_source_commit="${WP_CODEBOX_SOURCE_SHA:-}"
@@ -512,69 +504,26 @@ EOF
     echo "Installing WP Codebox CLI from ${source_authority_label}..."
     mkdir -p "${install_root}" "${bin_dir}"
 
-    if [ ! -d "${repo_dir}/.git" ]; then
-        rm -rf "${repo_dir}"
-        git clone --quiet -- "${source}" "${repo_dir}"
-    else
-        # This is a Homeboy-owned cache, so converge a stale or dead origin to
-        # the caller's requested source before fetching its requested ref.
-        git -C "${repo_dir}" remote set-url -- origin "${source}"
-    fi
+    local script_dir source_sha source_bin_path
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    bash "${script_dir}/update-wp-codebox-cache.sh" --source "${source}" --ref "${ref}" --cache-dir "${repo_dir}"
 
-    git -C "${repo_dir}" fetch --quiet origin "${ref}"
-
-    # ${repo_dir} is a homeboy-managed cache clone that homeboy itself cloned
-    # under ${install_root}, so it can never hold user work. Converge it the
-    # same deterministic way as the sibling scripts/update-wp-codebox-cache.sh:
-    # hard-reset to the fetched ref and drop untracked build residue (stale
-    # dist output, node_modules left by an earlier npm ci) that would poison a
-    # rebuild. This is safe ONLY for this owned cache; do not copy the pattern
-    # to the extension source checkout or any other repo that can hold user
-    # work.
-    git -C "${repo_dir}" reset --hard --quiet FETCH_HEAD || {
-        echo "Failed to reset WP Codebox cache checkout to FETCH_HEAD: ${repo_dir}" >&2
-        exit 1
-    }
-    git -C "${repo_dir}" clean -ffdx --quiet || {
-        echo "Failed to clean untracked build residue from WP Codebox cache checkout: ${repo_dir}" >&2
-        exit 1
-    }
-
-    if [ ! -f "${repo_dir}/package-lock.json" ] && [ ! -f "${repo_dir}/npm-shrinkwrap.json" ]; then
-        echo "WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci from the configured source authority" >&2
-        exit 1
-    fi
-
-    local source_sha
     source_sha="$(git -C "${repo_dir}" rev-parse HEAD)"
     export WP_CODEBOX_SOURCE_REF="${ref}"
     export WP_CODEBOX_SOURCE_SHA="${source_sha}"
     write_github_env "WP_CODEBOX_SOURCE_REF" "${ref}"
     write_github_env "WP_CODEBOX_SOURCE_SHA" "${source_sha}"
 
-    npm --prefix "${repo_dir}" ci --quiet --no-fund --no-audit --include=optional
-    npm --prefix "${repo_dir}" run build --silent
-
     resolve_core_module_from_known_locations || {
         echo "Built WP Codebox source did not contain the @automattic/wp-codebox-core package entrypoint" >&2
         exit 1
     }
 
-    local source_bin_path
     source_bin_path="${repo_dir}/packages/cli/dist/index.js"
     if [ ! -x "${source_bin_path}" ]; then
         echo "Built WP Codebox source did not contain an executable CLI at ${source_bin_path}" >&2
         exit 1
     fi
-
-    # Bind the built CLI bytes and checkout revision to this managed cache.
-    # Runner readiness verifies both before it accepts the cache.
-    local cli_sha256
-    cli_sha256="$(sha256_file "${source_bin_path}")" || {
-        echo "Failed to hash built WP Codebox CLI: ${source_bin_path}" >&2
-        exit 1
-    }
-    printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"${source_sha}\",\"cli_sha256\":\"${cli_sha256}\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "${repo_dir}/.homeboy-runtime-identity.json"
 
     probe_wp_codebox_runtime "${source_bin_path}" || {
         echo "Built WP Codebox source CLI runtime is not ready" >&2

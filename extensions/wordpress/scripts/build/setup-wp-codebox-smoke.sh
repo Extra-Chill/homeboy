@@ -17,10 +17,10 @@ MISSING_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/missing-release-github-env"
 OVERRIDE_GITHUB_ENV_FILE="${TMPDIR}/override-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
-REAL_GIT_BIN="${TMPDIR}/real-git-bin"
+UPDATE_CALLS="${TMPDIR}/update-calls"
+export UPDATE_CALLS
 
-mkdir -p "${FAKE_BIN}" "${REAL_GIT_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ROOT_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
-ln -s "$(command -v git)" "${REAL_GIT_BIN}/git"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ROOT_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
 
 # Reproduce Homeboy's setup generation: setup executes from a copied extension
 # source while shared runtimes are already materialized, but the final
@@ -104,94 +104,67 @@ cp "${ARTIFACT_PATH}" "\${4}"
 SH
 chmod +x "${FAKE_BIN}/curl"
 
-cat > "${FAKE_BIN}/git" <<'SH'
+cat > "${ROOT_DIR}/scripts/build/update-wp-codebox-cache.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE_SHA="0123456789abcdef0123456789abcdef01234567"
-
-case "$1" in
-    clone)
-        dest="${@: -1}"
-        mkdir -p "${dest}/.git"
-        if [ "${FAKE_WP_CODEBOX_NO_LOCKFILE:-}" != "1" ]; then
-            printf '%s\n' '{}' > "${dest}/package-lock.json"
-        fi
-        ;;
-    -C)
-        if [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "HEAD" ]; then
-            printf '%s\n' "${SOURCE_SHA}"
-        fi
-        exit 0
-        ;;
-    *)
-        printf 'unexpected git invocation: %s\n' "$*" >&2
-        exit 1
-        ;;
-esac
-SH
-chmod +x "${FAKE_BIN}/git"
-
-cat > "${FAKE_BIN}/npm" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-prefix=""
+source=""
+ref=""
+cache_dir=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --prefix)
-            prefix="$2"
-            shift 2
-            ;;
-        ci)
-            if [[ " $* " != *" --include=optional "* ]]; then
-                printf 'expected wp-codebox source install to include optional dependencies: %s\n' "$*" >&2
-                exit 1
-            fi
-            if [[ " $* " == *" --omit=optional "* ]]; then
-                printf 'wp-codebox source install must not omit optional dependencies: %s\n' "$*" >&2
-                exit 1
-            fi
-            mkdir -p "${prefix}/node_modules/sharp"
-            printf '%s\n' 'module.exports = require("./native.js");' > "${prefix}/node_modules/sharp/index.js"
-            printf '%s\n' 'module.exports = { native: true };' > "${prefix}/node_modules/sharp/native.js"
-            exit 0
-            ;;
-        run)
-            if [ -n "${FAKE_EXPECT_WP_CODEBOX_CLI+x}" ] && [ "${WP_CODEBOX_CLI:-}" != "${FAKE_EXPECT_WP_CODEBOX_CLI}" ]; then
-                printf 'expected explicit external WP_CODEBOX_CLI to survive source fallback: %s\n' "${WP_CODEBOX_CLI:-}" >&2
-                exit 1
-            fi
-            if [ -n "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE+x}" ] && [ "${WP_CODEBOX_CORE_MODULE:-}" != "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE}" ]; then
-                printf 'expected explicit external WP_CODEBOX_CORE_MODULE to survive source fallback: %s\n' "${WP_CODEBOX_CORE_MODULE:-}" >&2
-                exit 1
-            fi
-            mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
-            mkdir -p "${prefix}/packages/cli/dist"
-            printf '%s\n' 'module.exports = { fixture: true };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
-            printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
-cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
+        --source) source="$2"; shift 2 ;;
+        --ref) ref="$2"; shift 2 ;;
+        --cache-dir) cache_dir="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+if [ -n "${FAKE_EXPECT_WP_CODEBOX_CLI+x}" ] && [ "${WP_CODEBOX_CLI:-}" != "${FAKE_EXPECT_WP_CODEBOX_CLI}" ]; then
+    printf 'expected explicit external WP_CODEBOX_CLI to survive source fallback: %s\n' "${WP_CODEBOX_CLI:-}" >&2
+    exit 1
+fi
+if [ -n "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE+x}" ] && [ "${WP_CODEBOX_CORE_MODULE:-}" != "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE}" ]; then
+    printf 'expected explicit external WP_CODEBOX_CORE_MODULE to survive source fallback: %s\n' "${WP_CODEBOX_CORE_MODULE:-}" >&2
+    exit 1
+fi
+
+printf '%s|%s|%s\n' "$source" "$ref" "$cache_dir" >> "$UPDATE_CALLS"
+release_dir="${cache_dir}.releases/fixture.$$"
+rm -rf "$cache_dir" "$release_dir"
+mkdir -p "$release_dir"
+git init --quiet "$release_dir"
+git -C "$release_dir" config user.email smoke@example.com
+git -C "$release_dir" config user.name Smoke
+git -C "$release_dir" remote add origin "$source"
+printf '%s\n' '{}' > "$release_dir/package-lock.json"
+git -C "$release_dir" add package-lock.json
+git -C "$release_dir" commit --quiet -m 'promoted source fixture'
+source_sha="$(git -C "$release_dir" rev-parse HEAD)"
+
+mkdir -p "$release_dir/node_modules/@automattic/wp-codebox-core/dist" "$release_dir/node_modules/sharp" "$release_dir/packages/cli/dist"
+printf '%s\n' 'module.exports = { fixture: true };' > "$release_dir/node_modules/@automattic/wp-codebox-core/dist/index.js"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "$release_dir/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
+printf '%s\n' 'module.exports = require("./native.js");' > "$release_dir/node_modules/sharp/index.js"
+printf '%s\n' 'module.exports = { native: true };' > "$release_dir/node_modules/sharp/native.js"
+cat > "$release_dir/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
 if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (process.argv.includes('doctor') && process.argv.includes('--json')) {
   const ref = process.env.WP_CODEBOX_SOURCE_REF ?? 'main';
-  const commit = process.env.WP_CODEBOX_SOURCE_SHA ?? '0123456789abcdef0123456789abcdef01234567';
+  const commit = process.env.WP_CODEBOX_SOURCE_SHA ?? '';
   process.stdout.write(JSON.stringify({ schema: 'wp-codebox/doctor/v1', status: 'ok', checks: [{ id: 'wp-codebox.source', status: 'ok', message: 'source provenance verified; no configured upstream is available and remote fetch was not attempted', details: { provenance: { schema: 'wp-codebox/cli-build-provenance/v1', package: { name: '@automattic/wp-codebox-cli', version: process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0' }, dist: { sha256: 'source-dist' }, git: { ref, commit } }, git: { evidence: 'unavailable', reason: 'no configured upstream', remoteFetch: 'not-attempted' } } }] }) + '\n');
   process.exit(0);
 }
 console.log('wp-codebox source stub');
 NODE
-            chmod +x "${prefix}/packages/cli/dist/index.js"
-            exit 0
-            ;;
-        *)
-            shift
-            ;;
-    esac
-done
+chmod +x "$release_dir/packages/cli/dist/index.js"
+cli_sha256="$(shasum -a 256 "$release_dir/packages/cli/dist/index.js" | awk '{print $1}')"
+printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$source_sha\",\"cli_sha256\":\"$cli_sha256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$release_dir/.homeboy-runtime-identity.json"
+ln -s "$release_dir" "$cache_dir"
 SH
-chmod +x "${FAKE_BIN}/npm"
+chmod +x "${ROOT_DIR}/scripts/build/update-wp-codebox-cache.sh"
 
 (
     cd "${EXTENSION_DIR}"
@@ -297,119 +270,38 @@ if [ ! -f "${source_wp_codebox_core_module}" ]; then
     exit 1
 fi
 
-# A prior setup may have left the managed source cache pointing at a removed or
-# different repository. Source setup must replace that origin and its checked
-# out ref with the requested source before building.
-STALE_ORIGIN_INSTALL_DIR="${TMPDIR}/stale-origin-install"
-STALE_ORIGIN_GITHUB_ENV_FILE="${TMPDIR}/stale-origin-github-env"
-STALE_ORIGIN_REPO_DIR="${STALE_ORIGIN_INSTALL_DIR}/source"
-REQUESTED_SOURCE="-requested-wp-codebox.git"
-REQUESTED_SOURCE_PATH="${STALE_ORIGIN_REPO_DIR}/${REQUESTED_SOURCE}"
-REQUESTED_WORKTREE="${TMPDIR}/requested-wp-codebox-worktree"
-DIFFERENT_SOURCE="${TMPDIR}/different-wp-codebox.git"
-DIFFERENT_WORKTREE="${TMPDIR}/different-wp-codebox-worktree"
-
-git init --bare --quiet "${DIFFERENT_SOURCE}"
-git clone --quiet "${DIFFERENT_SOURCE}" "${DIFFERENT_WORKTREE}"
-git -C "${DIFFERENT_WORKTREE}" config user.email smoke@example.com
-git -C "${DIFFERENT_WORKTREE}" config user.name Smoke
-printf '%s\n' 'different source' > "${DIFFERENT_WORKTREE}/fixture.txt"
-git -C "${DIFFERENT_WORKTREE}" add fixture.txt
-git -C "${DIFFERENT_WORKTREE}" commit --quiet -m 'different source fixture'
-DIFFERENT_SHA="$(git -C "${DIFFERENT_WORKTREE}" rev-parse HEAD)"
-git -C "${DIFFERENT_WORKTREE}" push --quiet origin HEAD:main
-mkdir -p "${STALE_ORIGIN_INSTALL_DIR}"
-git clone --quiet --branch main "${DIFFERENT_SOURCE}" "${STALE_ORIGIN_REPO_DIR}"
-
-if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" rev-parse HEAD)" != "${DIFFERENT_SHA}" ]; then
-    echo "Expected stale cache fixture to start at the different source ref" >&2
+if [ ! -L "${TMPDIR}/source-install/source" ]; then
+    echo "Expected setup to consume the updater's stable source pointer" >&2
+    exit 1
+fi
+if ! grep -q "^https://example.test/wp-codebox.git|main|${TMPDIR}/source-install/source$" "${UPDATE_CALLS}"; then
+    echo "Expected source fallback to delegate source, ref, and cache path to the updater" >&2
+    cat "${UPDATE_CALLS}" >&2
     exit 1
 fi
 
-# The source is deliberately relative and begins with a dash. Its bare fixture
-# lives in the managed checkout because `git -C "${STALE_ORIGIN_REPO_DIR}"`
-# resolves relative remotes from that controlled working directory.
-git init --bare --quiet "${REQUESTED_SOURCE_PATH}"
-git clone --quiet "${REQUESTED_SOURCE_PATH}" "${REQUESTED_WORKTREE}"
-git -C "${REQUESTED_WORKTREE}" config user.email smoke@example.com
-git -C "${REQUESTED_WORKTREE}" config user.name Smoke
-printf '%s\n' '{"scripts":{"build":"node -e 0"}}' > "${REQUESTED_WORKTREE}/package.json"
-printf '%s\n' '{"lockfileVersion":3,"packages":{}}' > "${REQUESTED_WORKTREE}/package-lock.json"
-git -C "${REQUESTED_WORKTREE}" add package.json package-lock.json
-git -C "${REQUESTED_WORKTREE}" commit --quiet -m 'requested source fixture'
-REQUESTED_SHA="$(git -C "${REQUESTED_WORKTREE}" rev-parse HEAD)"
-git -C "${REQUESTED_WORKTREE}" push --quiet origin HEAD:main
-
-# Newer Git versions accept `--` as an option separator in either position.
-# Keep the fixture's positional contract deterministic while its successful
-# setup run uses the real Git binary below.
-git() {
-    if [ "${1:-}" = "-C" ] && [ "${3:-}" = "remote" ] && [ "${4:-}" = "set-url" ] && [ "${5:-}" = "origin" ] && [ "${6:-}" = "--" ] && [ "${7:-}" = "${REQUESTED_SOURCE}" ]; then
-        return 1
-    fi
-    command git "$@"
-}
-
-# `--` after the remote name is parsed as the replacement URL, not an option
-# terminator. Keep this fixture dash-prefixed so the old ordering must fail.
-if git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url origin -- "${REQUESTED_SOURCE}"; then
-    echo "Expected the previous git remote set-url delimiter ordering to fail" >&2
-    exit 1
-fi
-
-if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" remote get-url origin)" != "${DIFFERENT_SOURCE}" ]; then
-    echo "Expected failed delimiter ordering to leave the stale origin unchanged" >&2
-    exit 1
-fi
-
-git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${REQUESTED_SOURCE}"
-if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" remote get-url origin)" != "${REQUESTED_SOURCE}" ]; then
-    echo "Expected corrected git remote set-url delimiter ordering to replace the stale origin" >&2
-    exit 1
-fi
-
-# Restore the stale cache so setup itself must perform the same repair.
-git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${DIFFERENT_SOURCE}"
-
-# Git 2.50 rejects a local transport pathname beginning with `-`. Preserve the
-# stored dash-prefixed relative source while rewriting only the transport path.
-command git -C "${STALE_ORIGIN_REPO_DIR}" config "url../${REQUESTED_SOURCE}.insteadOf" "${REQUESTED_SOURCE}"
-
+# Resolve a caller-relative local source before delegation. The updater always
+# receives one authority independent of its candidate checkout location.
+RELATIVE_SOURCE="-requested-wp-codebox.git"
+RELATIVE_SOURCE_PATH="${EXTENSION_DIR}/${RELATIVE_SOURCE}"
+RELATIVE_INSTALL_DIR="${TMPDIR}/relative-source-install"
+RELATIVE_GITHUB_ENV_FILE="${TMPDIR}/relative-source-github-env"
+mkdir -p "${RELATIVE_SOURCE_PATH}"
 (
     cd "${EXTENSION_DIR}"
-    HOME="${TMPDIR}/stale-origin-home" \
-    PATH="${REAL_GIT_BIN}:${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
-    GITHUB_ENV="${STALE_ORIGIN_GITHUB_ENV_FILE}" \
+    HOME="${TMPDIR}/relative-source-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${RELATIVE_GITHUB_ENV_FILE}" \
     HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
-    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${STALE_ORIGIN_INSTALL_DIR}" \
-    HOMEBOY_WP_CODEBOX_SOURCE="${REQUESTED_SOURCE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${RELATIVE_INSTALL_DIR}" \
+    HOMEBOY_WP_CODEBOX_SOURCE="${RELATIVE_SOURCE}" \
     HOMEBOY_WP_CODEBOX_REF="main" \
-    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/stale-origin-setup.out"
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/relative-source-setup.out"
 )
 
-command git -C "${STALE_ORIGIN_REPO_DIR}" config --unset-all "url../${REQUESTED_SOURCE}.insteadOf"
-
-stale_origin_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${STALE_ORIGIN_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
-stale_origin_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${STALE_ORIGIN_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
-if [ "${stale_origin_wp_codebox_bin}" != "${STALE_ORIGIN_REPO_DIR}/packages/cli/dist/index.js" ] || [ "$("${stale_origin_wp_codebox_bin}" --version)" != "0.21.0" ]; then
-    echo "Expected stale-origin repair to install a minimum-compatible source CLI" >&2
-    cat "${TMPDIR}/stale-origin-setup.out" >&2
-    exit 1
-fi
-
-if [ "${stale_origin_wp_codebox_core_module}" != "${STALE_ORIGIN_REPO_DIR}/node_modules/@automattic/wp-codebox-core/dist/contracts.js" ] || [ ! -f "${stale_origin_wp_codebox_core_module}" ]; then
-    echo "Expected stale-origin repair to install the source core module" >&2
-    cat "${TMPDIR}/stale-origin-setup.out" >&2
-    exit 1
-fi
-
-if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" remote get-url origin)" != "${REQUESTED_SOURCE}" ]; then
-    echo "Expected stale managed cache origin to be replaced with requested local source" >&2
-    exit 1
-fi
-
-if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" rev-parse HEAD)" != "${REQUESTED_SHA}" ]; then
-    echo "Expected stale managed cache HEAD to converge to the requested source ref" >&2
+if ! grep -q "^${RELATIVE_SOURCE_PATH}|main|${RELATIVE_INSTALL_DIR}/source$" "${UPDATE_CALLS}"; then
+    echo "Expected setup to resolve the caller-relative source before updater delegation" >&2
+    cat "${UPDATE_CALLS}" >&2
     exit 1
 fi
 
@@ -502,7 +394,8 @@ if ! grep -q '^WP_CODEBOX_SOURCE_REF=main$' "${SOURCE_GITHUB_ENV_FILE}"; then
     exit 1
 fi
 
-if ! grep -q '^WP_CODEBOX_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567$' "${SOURCE_GITHUB_ENV_FILE}"; then
+promoted_source_sha="$(git -C "${TMPDIR}/source-install/source" rev-parse HEAD)"
+if ! grep -q "^WP_CODEBOX_SOURCE_SHA=${promoted_source_sha}$" "${SOURCE_GITHUB_ENV_FILE}"; then
     echo "Expected source fallback to export the resolved WP Codebox SHA" >&2
     cat "${SOURCE_GITHUB_ENV_FILE}" >&2
     exit 1
@@ -581,29 +474,6 @@ fi
 if ! grep -q 'Explicit WP Codebox core module override is not a file' "${EXTERNAL_CORE_ERROR}"; then
     echo "Expected an explicit external core override diagnostic" >&2
     cat "${EXTERNAL_CORE_ERROR}" >&2
-    exit 1
-fi
-
-NO_LOCKFILE_OUTPUT="${TMPDIR}/no-lockfile.out"
-NO_LOCKFILE_ERROR="${TMPDIR}/no-lockfile.err"
-if (
-    cd "${EXTENSION_DIR}"
-    HOME="${TMPDIR}/no-lockfile-home" \
-    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
-    GITHUB_ENV="${TMPDIR}/no-lockfile-github-env" \
-    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
-    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/no-lockfile-install" \
-    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/custom-wp-codebox.git" \
-    FAKE_WP_CODEBOX_NO_LOCKFILE="1" \
-    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${NO_LOCKFILE_OUTPUT}" 2> "${NO_LOCKFILE_ERROR}"
-); then
-    echo "Source setup without a lockfile must fail" >&2
-    exit 1
-fi
-
-if ! grep -q 'WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci from the configured source authority' "${NO_LOCKFILE_ERROR}"; then
-    echo "Expected a deterministic lockfile diagnostic for custom WP Codebox sources" >&2
-    cat "${NO_LOCKFILE_ERROR}" >&2
     exit 1
 fi
 
