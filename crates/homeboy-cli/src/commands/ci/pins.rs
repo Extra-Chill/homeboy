@@ -245,6 +245,74 @@ pub fn discover_in_file(
     pins
 }
 
+/// One pin rewrite: what would change, or what did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PinBump {
+    pub file: String,
+    pub line: usize,
+    pub repository: String,
+    pub from: String,
+    pub to: String,
+    /// The release the new commit belongs to, for the commit message.
+    pub release: String,
+}
+
+/// Which pins a bump would touch.
+///
+/// Only `Behind` pins qualify. `Unresolved` is excluded by construction rather
+/// than by a filter: it carries no `target_commit`, because a target is only
+/// recorded after the pin has been verified reachable in the repository it was
+/// attributed to. A bump therefore cannot act on an attribution guess, which is
+/// the one way this command could do real damage.
+pub fn plan_bumps(pins: &[ResolvedPin]) -> Vec<PinBump> {
+    pins.iter()
+        .filter(|pin| pin.status == PinStatus::Behind)
+        .filter_map(|pin| {
+            Some(PinBump {
+                file: pin.pin.file.clone(),
+                line: pin.pin.line,
+                repository: pin.pin.repository.clone()?,
+                from: pin.pin.reference.clone(),
+                to: pin.target_commit.clone()?,
+                release: pin.latest_release.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Apply bumps to one file's text.
+///
+/// Replacement is anchored to `(line, from)` rather than done globally: the
+/// same SHA legitimately appears on several lines -- `uses:` and `action-ref:`
+/// carry the identical commit -- and each is a distinct pin that must be
+/// rewritten on its own terms. A global replace would also rewrite the SHA
+/// where it appears in a prose comment, which is not a pin and may be a
+/// deliberate historical reference.
+///
+/// A bump whose line no longer contains `from` is skipped and reported, rather
+/// than applied to whatever moved into that position.
+pub fn apply_bumps_to_text(contents: &str, bumps: &[PinBump]) -> (String, Vec<PinBump>) {
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let mut applied = Vec::new();
+    for bump in bumps {
+        let Some(line) = lines.get_mut(bump.line.saturating_sub(1)) else {
+            continue;
+        };
+        if !line.contains(&bump.from) {
+            continue;
+        }
+        *line = line.replace(&bump.from, &bump.to);
+        applied.push(bump.clone());
+    }
+    let mut out = lines.join("\n");
+    // `str::lines` drops the trailing newline; YAML files carry one and losing
+    // it would put a spurious hunk in every bump diff.
+    if contents.ends_with('\n') {
+        out.push('\n');
+    }
+    (out, applied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +480,142 @@ mod tests {
         assert!(discover_in_file("ci.yml", yaml, &no_mapping()).is_empty());
     }
 
+    fn resolved(
+        file: &str,
+        line: usize,
+        repository: Option<&str>,
+        reference: &str,
+        status: PinStatus,
+        target: Option<&str>,
+    ) -> ResolvedPin {
+        ResolvedPin {
+            pin: DiscoveredPin {
+                file: file.to_string(),
+                line,
+                source: PinSource::Uses,
+                repository: repository.map(str::to_string),
+                attribution: PinAttribution::Declared,
+                reference: reference.to_string(),
+                form: PinForm::CommitSha,
+            },
+            status,
+            latest_release: Some("v2.15.9".to_string()),
+            target_commit: target.map(str::to_string),
+            commits_behind: Some(6),
+            detail: String::new(),
+        }
+    }
+
+    /// The safety property. An `unresolved` pin is one whose repository could
+    /// not be verified, so rewriting it would be acting on a guess. It carries
+    /// no `target_commit`, so it cannot be planned even if the filter were
+    /// wrong -- both guards are asserted here.
+    #[test]
+    fn only_behind_pins_are_bumped_and_unresolved_ones_carry_no_target() {
+        let pins = vec![
+            resolved(
+                "ci.yml",
+                1,
+                Some("o/r"),
+                "a".repeat(40).as_str(),
+                PinStatus::Behind,
+                Some(&"b".repeat(40)),
+            ),
+            resolved(
+                "ci.yml",
+                2,
+                Some("o/r"),
+                "c".repeat(40).as_str(),
+                PinStatus::Current,
+                Some(&"c".repeat(40)),
+            ),
+            resolved(
+                "ci.yml",
+                3,
+                Some("o/r"),
+                "d".repeat(40).as_str(),
+                PinStatus::Unresolved,
+                None,
+            ),
+        ];
+        let bumps = plan_bumps(&pins);
+        assert_eq!(bumps.len(), 1, "only the behind pin is bumped");
+        assert_eq!(bumps[0].line, 1);
+        assert!(
+            pins[2].target_commit.is_none(),
+            "an unresolved pin must never carry a rewrite target"
+        );
+    }
+
+    /// `uses:` and `action-ref:` carry the identical SHA on different lines.
+    /// Each is a separate pin, and a global replace would conflate them with
+    /// any other occurrence -- including one inside a prose comment.
+    #[test]
+    fn the_same_sha_on_several_lines_is_rewritten_per_line() {
+        let old = "b".repeat(40);
+        let new = "c".repeat(40);
+        let yaml = format!(
+            "    uses: o/r@{old}\n    with:\n      action-ref: {old}\n    # historical: {old}\n"
+        );
+        let bumps = vec![
+            PinBump {
+                file: "ci.yml".into(),
+                line: 1,
+                repository: "o/r".into(),
+                from: old.clone(),
+                to: new.clone(),
+                release: "v1".into(),
+            },
+            PinBump {
+                file: "ci.yml".into(),
+                line: 3,
+                repository: "o/r".into(),
+                from: old.clone(),
+                to: new.clone(),
+                release: "v1".into(),
+            },
+        ];
+        let (out, applied) = apply_bumps_to_text(&yaml, &bumps);
+        assert_eq!(applied.len(), 2);
+        assert_eq!(out.matches(&new).count(), 2, "both pins rewritten");
+        assert!(
+            out.contains(&format!("# historical: {old}")),
+            "the comment occurrence is untouched"
+        );
+    }
+
+    /// A stale plan must not be applied to whatever moved into that line.
+    #[test]
+    fn a_bump_whose_line_no_longer_matches_is_skipped() {
+        let bumps = vec![PinBump {
+            file: "ci.yml".into(),
+            line: 1,
+            repository: "o/r".into(),
+            from: "b".repeat(40),
+            to: "c".repeat(40),
+            release: "v1".into(),
+        }];
+        let (out, applied) = apply_bumps_to_text("    uses: o/r@v6\n", &bumps);
+        assert!(applied.is_empty());
+        assert_eq!(out, "    uses: o/r@v6\n");
+    }
+
+    /// Losing the trailing newline would put a spurious hunk in every diff.
+    #[test]
+    fn the_trailing_newline_survives_a_bump() {
+        let old = "b".repeat(40);
+        let bumps = vec![PinBump {
+            file: "ci.yml".into(),
+            line: 1,
+            repository: "o/r".into(),
+            from: old.clone(),
+            to: "c".repeat(40),
+            release: "v1".into(),
+        }];
+        let (out, _) = apply_bumps_to_text(&format!("    uses: o/r@{old}\n"), &bumps);
+        assert!(out.ends_with('\n'));
+    }
+
     /// The real shape of the file this check exists for: three pins, two
     /// repositories, one of which only configuration can attribute.
     #[test]
@@ -500,6 +704,13 @@ pub struct ResolvedPin {
     pub status: PinStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_release: Option<String>,
+    /// The commit `latest_release` points at, and what a bump writes.
+    ///
+    /// Only ever set once the pin has been verified reachable in the attributed
+    /// repository, so an `unresolved` pin cannot carry a rewrite target. That is
+    /// the property that keeps `--apply` from acting on a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commits_behind: Option<u64>,
     /// Why this status, in one sentence, so a failing gate is actionable
@@ -520,6 +731,14 @@ pub struct PinsReport {
     /// Highest `commits_behind` across all pins, which is what a threshold is
     /// compared against.
     pub max_commits_behind: u64,
+    /// Whether this run planned the rewrites or performed them.
+    pub mutation_mode: crate::commands::utils::args::MutationMode,
+    /// Every rewrite a bump would make. Populated in both modes, so a plan run
+    /// shows exactly what `--apply` would do.
+    pub bumps: Vec<PinBump>,
+    /// The subset actually written. Empty in plan mode, and a strict subset of
+    /// `bumps` in apply mode when a planned line no longer matched.
+    pub applied: Vec<PinBump>,
     pub remediation: Vec<String>,
 }
 
@@ -575,6 +794,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
             pin,
             status: PinStatus::Floating,
             latest_release: None,
+            target_commit: None,
             commits_behind: None,
         };
     }
@@ -591,6 +811,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
             pin,
             status: PinStatus::Unresolved,
             latest_release: None,
+            target_commit: None,
             commits_behind: None,
         };
     };
@@ -603,6 +824,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
                 pin,
                 status: PinStatus::Unresolved,
                 latest_release: None,
+                target_commit: None,
                 commits_behind: None,
             }
         }
@@ -634,6 +856,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
                 pin,
                 status: PinStatus::Unresolved,
                 latest_release: Some(label),
+                target_commit: None,
                 commits_behind: None,
             };
         }
@@ -645,6 +868,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
             pin,
             status: PinStatus::Unresolved,
             latest_release: Some(label),
+            target_commit: None,
             commits_behind: None,
         };
     };
@@ -663,6 +887,7 @@ pub fn resolve_pin(pin: DiscoveredPin) -> ResolvedPin {
         pin,
         status,
         latest_release: Some(label),
+        target_commit: Some(target),
         commits_behind: Some(behind),
         detail,
     }

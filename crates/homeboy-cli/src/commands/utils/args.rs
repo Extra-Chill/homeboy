@@ -1570,7 +1570,12 @@ mod presentation_args_tests {
 // deciding a polarity, which is a behavior change.
 
 /// Which side of the plan/execute boundary a run lands on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` so a structured command result can state which side it landed
+/// on. Derived rather than restated by a hand-written label, so the wire
+/// spelling cannot drift from the variant (#13400).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MutationMode {
     /// Report the plan; mutate nothing.
     Plan,
