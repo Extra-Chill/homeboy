@@ -71,7 +71,7 @@ impl RunnerEvidenceProvider for RunnerEvidence {
                         durable_run_id: job.durable_run_id,
                         runner_id: job.runner_id,
                         job_id: job.job_id,
-                        status: job.status.daemon_status_label().to_string(),
+                        status: job.status.as_str().to_string(),
                         lifecycle_state: job.lifecycle_state,
                         stale_reason: job.stale_reason,
                         retryable: job.retryable,
