@@ -283,7 +283,7 @@ jobs:
     # (bounded action setup subprocesses), and suffixed measurement commands.
     #
     # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, and #13437.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@83110d6638ec1c2f63352fcb004920524add0377
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@95924a6c4841d1db8d6dedc8a337fa07c6ac7b6a
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -302,7 +302,7 @@ jobs:
       # workflow checks out to run the gate itself — it is what surfaces as
       # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
       # old `apply-differential-gate.py` even with a newer workflow.
-      action-ref: 83110d6638ec1c2f63352fcb004920524add0377
+      action-ref: 95924a6c4841d1db8d6dedc8a337fa07c6ac7b6a
       # v3.38.8. Must move with the action pin, not after it: the action consumes
       # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
       # failed test identities`, released in rust v1.37.2) is what produces them.
