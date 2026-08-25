@@ -8,6 +8,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from rust_test_identity import inventory_test
+
 SCHEMA = "homeboy/test-inventory/v1"
 MANIFEST_SCHEMA = "homeboy/test-shard-manifest/v1"
 CHANGED_SELECTION_SCHEMA = "homeboy/rust-changed-test-selection/v2"
@@ -104,15 +106,12 @@ def cargo_inventory(workspace_root, packages):
         for test_line in listed.stdout.splitlines():
             name, separator, _kind = test_line.partition(": ")
             if separator and name:
-                test_id = f"{package}::{target_kind}::{target['name']}::{name}"
-                tests[test_id] = {
-                    "id": test_id,
-                    "package": package,
-                    "target": target["name"],
-                    "target_kind": target_kind,
-                    "name": name,
-                    "expected_outcome": "skipped" if name in ignored_names else "executed",
-                }
+                item = inventory_test(
+                    package, target_kind, target["name"], name,
+                    "skipped" if name in ignored_names else "executed",
+                )
+                item["executable"] = str(Path(message["executable"]).resolve())
+                tests[item["id"]] = item
     return list(tests.values())
 
 
@@ -172,20 +171,16 @@ def nextest_inventory(workspace_root):
                 fail("nextest emitted an invalid testcase identity")
             if testcase.get("filter-match", {}).get("status") != "matches":
                 continue
-            tests.append({
-                "id": f"{package}::{target_kind}::{target}::{name}",
-                "package": package,
-                "target": target,
-                "target_kind": target_kind,
-                "name": name,
+            tests.append(inventory_test(
+                package, target_kind, target, name,
                 # nextest list is the canonical source for tests that its
                 # default run policy intentionally skips without a terminal.
-                "expected_outcome": "skipped" if testcase.get("ignored") else "executed",
-            })
+                "skipped" if testcase.get("ignored") else "executed",
+            ))
     return tests
 
 
-def inventory(project, runner):
+def inventory(project, runner, failure_map_path=None):
     metadata, workspace_root, _component_root = cargo_metadata_roots(project, "while building inventory")
     packages = {package["id"]: package["name"] for package in metadata["packages"]}
     tests = nextest_inventory(workspace_root) if runner == "nextest" else cargo_inventory(workspace_root, packages)
@@ -208,14 +203,17 @@ def inventory(project, runner):
             name, separator, _kind = stripped.partition(": ")
             if not separator or not name or not doc_package:
                 continue
-            tests.append({
-                "id": f"{doc_package}::doc::doc::{name}",
-                "package": doc_package,
-                "target": "doc",
-                "target_kind": "doc",
-                "name": name,
-                "expected_outcome": "executed",
-            })
+            tests.append(inventory_test(doc_package, "doc", "doc", name))
+    if failure_map_path:
+        failure_map = {
+            "tests": [
+                {key: value for key, value in test.items() if key != "expected_outcome"}
+                for test in tests
+            ]
+        }
+        Path(failure_map_path).write_text(json.dumps(failure_map, indent=2) + "\n")
+    for test in tests:
+        test.pop("executable", None)
     tests.sort(key=lambda item: item["id"])
     if len({item["id"] for item in tests}) != len(tests):
         fail("cargo produced duplicate fully qualified test identities")
@@ -373,12 +371,13 @@ def main():
     parser.add_argument("--manifest")
     parser.add_argument("--changed-selection-file")
     parser.add_argument("--inventory-only", action="store_true")
+    parser.add_argument("--failure-map-output")
     args = parser.parse_args()
     if args.manifest and args.changed_selection_file:
         fail("shard manifest and changed test selection are mutually exclusive")
     if args.inventory_only and args.manifest:
         fail("inventory-only mode does not accept a shard manifest")
-    current = inventory(args.project, args.runner)
+    current = inventory(args.project, args.runner, args.failure_map_output)
     output = current
     if args.manifest:
         output = {"inventory": current, "selected": validate(args.manifest, current)}

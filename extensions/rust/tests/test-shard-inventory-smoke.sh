@@ -841,7 +841,7 @@ PATH="$BIN_DIR:$PATH" \
 bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/batched-failure.out" 2>&1
 BATCH_FAILURE_EXIT=$?
 set -e
-python3 - "$WORK_DIR/batched-failure.log" "$WORK_DIR/batched-failure-results.json" "$WORK_DIR/batched-failure-evidence.json" "$BATCH_FAILURE_EXIT" <<'PY'
+python3 - "$WORK_DIR/batched-failure.log" "$WORK_DIR/batched-failure-results.json" "$WORK_DIR/batched-failure-evidence.json" "$BATCH_FAILURE_EXIT" "$INVENTORY_NEXTEST" <<'PY'
 import json
 import re
 import sys
@@ -853,7 +853,9 @@ assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::w
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
 evidence = json.load(open(sys.argv[3]))
-assert [record["test_name"] for record in evidence] == ["pre-existing failure", "shard-smoke::shard_smoke$unit::beta"], evidence
+assert [record["test_name"] for record in evidence] == ["pre-existing failure", "shard-smoke::lib::shard_smoke::unit::beta"], evidence
+inventory_ids = {test["id"] for test in json.load(open(sys.argv[5]))["tests"]}
+assert evidence[-1]["test_id"] in inventory_ids, (evidence, inventory_ids)
 PY
 
 # A list validation failure is preflight-only: no batch run may have started.
@@ -1133,7 +1135,7 @@ import sys
 
 assert int(sys.argv[3]) != 0, sys.argv[3]
 assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
-assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::shard_smoke$unit::alpha"]
+assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::lib::shard_smoke::unit::alpha"]
 PY
 
 # A sidecar merge failure remains the runner's failure status while retaining
@@ -1190,7 +1192,7 @@ import sys
 
 assert int(sys.argv[3]) != 0, sys.argv[3]
 assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
-assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::shard_smoke$unit::alpha"]
+assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::lib::shard_smoke::unit::alpha"]
 PY
 
 # A non-object JSON record is diagnostic-only. Planned terminal IDs remain the
@@ -1444,6 +1446,7 @@ HOMEBOY_FAKE_CARGO_LOG="$WORK_DIR/failing-cargo.log" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
 HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/failing-test-results.json" \
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/failing-test-failures.json" \
 HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
 HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
@@ -1456,7 +1459,7 @@ if [ "$FAIL_EXIT" -eq 0 ]; then
   exit 1
 fi
 
-python3 - "$WORK_DIR/failing-test-results.json" "$WORK_DIR/annotations/rust-test-shard.json" <<'PY'
+python3 - "$WORK_DIR/failing-test-results.json" "$WORK_DIR/annotations/rust-test-shard.json" "$WORK_DIR/failing-test-failures.json" "$INVENTORY_A" <<'PY'
 import json
 import sys
 
@@ -1466,6 +1469,10 @@ record = json.load(open(sys.argv[2]))[0]
 assert record["status"] == "failed", record
 assert (record["total"], record["executed"], record["passed"], record["failed"], record["skipped"]) == (7, 7, 5, 1, 1), record
 assert record["duration_ms"] >= 0, record
+failures = json.load(open(sys.argv[3]))
+inventory_ids = {test["id"] for test in json.load(open(sys.argv[4]))["tests"]}
+assert [failure["test_id"] for failure in failures] == ["shard-smoke::lib::shard_smoke::unit::beta"], failures
+assert {failure["test_id"] for failure in failures} <= inventory_ids, (failures, inventory_ids)
 PY
 
 for invalid in duplicate stale missing runner; do

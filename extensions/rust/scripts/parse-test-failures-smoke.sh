@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT="$(mktemp "${TMPDIR:-/tmp}/rust-test-failures-output.XXXXXX")"
 RESULTS="$(mktemp "${TMPDIR:-/tmp}/rust-test-failures-json.XXXXXX")"
-trap 'rm -f "$OUTPUT" "$RESULTS"' EXIT
+IDENTITIES="$(mktemp "${TMPDIR:-/tmp}/rust-test-failure-identities.XXXXXX")"
+trap 'rm -f "$OUTPUT" "$RESULTS" "$IDENTITIES"' EXIT
 
 cat > "$OUTPUT" <<'EOF'
 running 2 tests
@@ -111,6 +112,43 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 assert record["test_id"] == "cargo test", record
 assert record["failure_type"] == "infrastructure", record
+PY
+
+# Cargo's compiler-artifact map disambiguates identical names across packages
+# and targets. Sidecar IDs must be byte-for-byte inventory IDs.
+cat > "$IDENTITIES" <<'EOF'
+{"tests":[
+  {"id":"alpha::lib::alpha::tests::duplicate","package":"alpha","target":"alpha","target_kind":"lib","name":"tests::duplicate","executable":"/target/debug/deps/alpha-a1"},
+  {"id":"alpha::test::api::tests::duplicate","package":"alpha","target":"api","target_kind":"test","name":"tests::duplicate","executable":"/target/debug/deps/api-a2"},
+  {"id":"beta::test::api::tests::duplicate","package":"beta","target":"api","target_kind":"test","name":"tests::duplicate","executable":"/target/debug/deps/api-b1"}
+]}
+EOF
+cat > "$OUTPUT" <<'EOF'
+     Running unittests src/lib.rs (/target/debug/deps/alpha-a1)
+test tests::duplicate ... FAILED
+failures:
+    tests::duplicate
+test result: FAILED. 0 passed; 1 failed
+     Running tests/api.rs (/target/debug/deps/api-a2)
+test tests::duplicate ... FAILED
+failures:
+    tests::duplicate
+test result: FAILED. 0 passed; 1 failed
+     Running tests/api.rs (/target/debug/deps/api-b1)
+test tests::duplicate ... FAILED
+failures:
+    tests::duplicate
+test result: FAILED. 0 passed; 1 failed
+EOF
+python3 "$SCRIPT_DIR/parse-test-failures.py" /project "$OUTPUT" "$RESULTS" "$IDENTITIES"
+python3 - "$RESULTS" "$IDENTITIES" <<'PY'
+import json
+import sys
+
+records = json.load(open(sys.argv[1], encoding="utf-8"))
+inventory_ids = {item["id"] for item in json.load(open(sys.argv[2], encoding="utf-8"))["tests"]}
+assert {record["test_id"] for record in records} == inventory_ids, records
+assert all(record["test_id"] == record["test_name"] for record in records), records
 PY
 
 printf 'Rust test-failure parser smoke passed\n'
