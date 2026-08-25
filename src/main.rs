@@ -27,7 +27,11 @@ fn main() -> std::process::ExitCode {
     if args.get(1).map(String::as_str) == Some("__homeboy_status_probe") {
         return homeboy::commands::status::run_status_probe_child(args.get(2));
     }
-    let runtime = CliRuntime::with_capabilities(&PRODUCT_CAPABILITIES);
+    let runtime = CliRuntime::try_with_required_capabilities(
+        &PRODUCT_CAPABILITIES,
+        &[homeboy_triage::COMMAND_NAME],
+    )
+    .expect("standard product capability composition must be complete");
     if let Some(exit_code) = runtime.run_startup_fast_path(&args) {
         return exit_code;
     }

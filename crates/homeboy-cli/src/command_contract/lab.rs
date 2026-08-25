@@ -83,6 +83,7 @@ fn scope_cook_help(command: Command) -> Command {
         "goal",
         "repo",
         "task_url",
+        "backend",
         "model",
         "to_worktree",
         "cwd",

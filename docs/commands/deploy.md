@@ -82,7 +82,7 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
   "results": [
     {
       "id": "<component_id>",
-      "status": "deployed|failed|skipped|planned|checked",
+      "status": "deployed|applied_unverified|failed|skipped|planned|checked",
       "deploy_reason": "explicitly_selected|all_selected|version_mismatch|unknown_local_version|unknown_remote_version",
       "component_status": "up_to_date|version_up_to_date_content_unverified|needs_update|behind_remote|behind_upstream|source_stale|remote_modified|missing|mixed_drift|unknown",
       "local_version": "<v>|null",
@@ -113,6 +113,7 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
 Notes:
 
 - `deploy_reason` is omitted when not applicable.
+- `status: "applied_unverified"` means the artifact mutation completed, but Homeboy could not complete a post-deploy verification read from the applied tree after bounded retries. Treat it as terminal-no-retry for mutation, inspect the preserved artifact and exit-code evidence, and reverify with `homeboy deploy <project> --check`.
 - `component_status` is only present when using `--check` or `--check --dry-run`.
 - `artifact_path` is the component build artifact path as configured; it may be relative but must include a filename.
 - Deploy output does not include `build_command`. Builds are resolved from the linked extension, and deploy records only build/deploy exit codes plus the artifact path used.
@@ -187,7 +188,7 @@ When using `--projects`, the output structure differs:
   "projects": [
     {
       "project_id": "extra-chill",
-      "status": "deployed|failed|planned|checked",
+      "status": "deployed|applied_unverified|failed|planned|checked",
       "error": "<string>|null",
       "results": [...],
       "summary": { "total": 1, "succeeded": 1, "skipped": 0, "failed": 0 }

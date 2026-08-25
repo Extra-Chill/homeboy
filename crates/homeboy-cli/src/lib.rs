@@ -30,6 +30,7 @@ pub use homeboy_lab_runner as runner;
 // across this layer resolve at the crate root.
 pub use homeboy_core::{is_zero, is_zero_u32, log_status};
 
+pub mod capability_registry;
 pub mod cli_runtime;
 pub mod cli_surface;
 pub mod command_capability;
