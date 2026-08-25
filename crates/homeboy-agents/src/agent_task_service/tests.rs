@@ -52,16 +52,15 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     .run(plan);
 
     let usage = execution_budget_usage(&aggregate);
-    let remaining = budget_remaining(
-        &crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1),
-        usage,
-    )
-    .expect("remaining total budget");
+    let mut budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1);
+    budget.deadline_unix_ms = Some(u64::MAX);
+    let remaining = budget_remaining(&budget, usage).expect("remaining total budget");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(usage.executions, 2);
     assert_eq!(usage.provider_rotations, 1);
     assert_eq!(remaining.max_provider_executions, 1);
     assert_eq!(remaining.max_provider_rotations, 0);
+    assert_eq!(remaining.deadline_unix_ms, budget.deadline_unix_ms);
 }
 
 #[test]

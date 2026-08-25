@@ -687,22 +687,6 @@ impl AgentTaskScheduleSupport {
             }
 
             let mut task = running.remove(index);
-            if let Some(run_id) = task.run_id.as_deref() {
-                // The timeout terminal record belongs to the same exactly-once
-                // sequence as the reservation this task holds, so it is written
-                // only through the store the caller resolved. Falling back to the
-                // environment here could record the timeout in a different
-                // installation than the one holding the reservation, which is the
-                // divergence this record exists to close (#7505).
-                if let Some(store) = lifecycle_store {
-                    let _ = store.record_provider_execution_terminal(
-                        run_id,
-                        &task.task_id,
-                        task.attempt,
-                        "timed_out",
-                    );
-                }
-            }
             let mut outcome =
                 deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");
             outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -736,7 +720,8 @@ impl AgentTaskScheduleSupport {
             quarantined.push(QuarantinedTask {
                 workspace_key: task.workspace_key.clone(),
             });
-            if let (Some(join_handle), Some(action_path)) = (task.join_handle.take(), action_path) {
+            let lifecycle_store = lifecycle_store.cloned();
+            if let Some(join_handle) = task.join_handle.take() {
                 // Deferred cleanup outlives the scheduler thread, so it must
                 // carry the caller's route to keep recovery attributable.
                 let notification_route = homeboy_core::notification_route::capture();
@@ -775,10 +760,29 @@ impl AgentTaskScheduleSupport {
                                 .map(|workspace| workspace.cleanup())
                                 .unwrap_or(Ok(()))
                         });
-                        let receipt = super::complete_deferred_cleanup_recovery(
-                            &action_path,
-                            &recovered,
-                            cleanup,
+                        // Publish terminal execution ownership before making the
+                        // cleanup receipt observable. A terminal receipt must
+                        // never authorize a retry while the durable provider
+                        // ledger still says this owner is running.
+                        if let (Some(store), Some(run_id)) =
+                            (lifecycle_store.as_ref(), task.run_id.as_deref())
+                        {
+                            let _ = store.record_provider_execution_terminal(
+                                run_id,
+                                &task.task_id,
+                                task.attempt,
+                                "timed_out",
+                            );
+                        }
+                        let receipt = action_path.as_deref().map_or(
+                            Err("deferred cleanup descriptor was not persisted".to_string()),
+                            |action_path| {
+                                super::complete_deferred_cleanup_recovery(
+                                    action_path,
+                                    &recovered,
+                                    cleanup,
+                                )
+                            },
                         );
                         // Keep the scratch lease active until both checkout
                         // cleanup and its durable receipt have reached a
@@ -1533,7 +1537,6 @@ impl AgentTaskScheduleSupport {
                 AgentTaskOutcomeStatus::Succeeded
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
-                    | AgentTaskOutcomeStatus::Timeout
                     | AgentTaskOutcomeStatus::CandidateRecoverable
             )
     }

@@ -635,6 +635,8 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn timeout_quarantines_only_its_workspace_without_starving_unrelated_work() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let run_id = "deferred-timeout-owner";
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         let unrelated = temp.path().join("unrelated");
@@ -645,19 +647,21 @@ pub(super) mod concurrency_tests {
         let attempt_roots = Arc::new(Mutex::new(Vec::new()));
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
         let scratch_active_while_running = Arc::new(AtomicBool::new(false));
-        let scheduler = AgentTaskScheduler::new(Arc::new(LateMutatingExecutor {
-            events: Arc::clone(&events),
-            finished: Arc::clone(&finished),
-            attempt_roots: Arc::clone(&attempt_roots),
-            scratch_roots: Arc::clone(&scratch_roots),
-            scratch_active_while_running: Arc::clone(&scratch_active_while_running),
-        }));
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.tasks[0].limits.timeout_ms = Some(1);
         plan.tasks[1].workspace.root = Some(workspace.display().to_string());
         plan.tasks[2].workspace.root = Some(unrelated.display().to_string());
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
+        let scheduler = AgentTaskScheduler::new(Arc::new(LateMutatingExecutor {
+            events: Arc::clone(&events),
+            finished: Arc::clone(&finished),
+            attempt_roots: Arc::clone(&attempt_roots),
+            scratch_roots: Arc::clone(&scratch_roots),
+            scratch_active_while_running: Arc::clone(&scratch_active_while_running),
+        }))
+        .with_run_id(run_id);
 
         // No wall-clock bound here. "Without starving unrelated work" is asserted
         // structurally further down — `task-3-started` proves the unrelated
@@ -667,11 +671,22 @@ pub(super) mod concurrency_tests {
         // event assertions still held. Same reasoning as the deferred-cleanup
         // bound below, which was already relaxed for exactly this (#7505).
         let aggregate = scheduler.run(plan);
+        let lifecycle_store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        assert!(
+            crate::agent_task_lifecycle::has_active_provider_execution_in_store(
+                &lifecycle_store,
+                run_id,
+            )
+            .expect("deferred provider remains active"),
+            "the timeout must not make a still-live cleanup owner retryable"
+        );
         wait_until("the late-mutating executor to finish", || {
             finished.load(Ordering::SeqCst)
         });
         let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
-        let run_id = scratch_root
+        let scratch_run_id = scratch_root
             .ancestors()
             .nth(4)
             .and_then(std::path::Path::file_name)
@@ -681,7 +696,7 @@ pub(super) mod concurrency_tests {
             .nth(6)
             .expect("controller scratch root")
             .join("test-indexes")
-            .join(run_id)
+            .join(scratch_run_id)
             .join("resources.json");
         assert!(scratch_active_while_running.load(Ordering::SeqCst));
         let cleanup_action = aggregate
@@ -737,6 +752,20 @@ pub(super) mod concurrency_tests {
         assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
             .as_array()
             .is_some_and(|artifacts| !artifacts.is_empty()));
+        assert!(
+            !crate::agent_task_lifecycle::has_active_provider_execution_in_store(
+                &lifecycle_store,
+                run_id,
+            )
+            .expect("completed deferred provider is inactive")
+        );
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("durable timeout")
+                .metadata["provider_executions"][0]["state"],
+            "timed_out"
+        );
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
