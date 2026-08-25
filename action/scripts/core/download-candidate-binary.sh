@@ -34,12 +34,16 @@ if [ ! -f "${binary}" ]; then
 fi
 
 chmod +x "${binary}"
+if ! cli_revision="$("${binary}" --version 2>/dev/null)" || [ -z "${cli_revision}" ] || [[ "${cli_revision}" == *$'\n'* ]]; then
+  echo "::error::Selected candidate binary from ${selected} did not report a single-line CLI revision with '--version'."
+  exit 1
+fi
 if command -v sha256sum >/dev/null 2>&1; then
   digest="$(sha256sum "${binary}" | cut -d' ' -f1)"
 else
   digest="$(shasum -a 256 "${binary}" | cut -d' ' -f1)"
 fi
 
-printf 'binary-path=%s\nbinary-sha256=%s\nartifact-name=%s\n' \
-  "${binary}" "${digest}" "${selected}" >> "${GITHUB_OUTPUT}"
-echo "Selected ${selected} (${digest})."
+printf 'binary-path=%s\nbinary-sha256=%s\ncli-revision=%s\nartifact-name=%s\n' \
+  "${binary}" "${digest}" "${cli_revision}" "${selected}" >> "${GITHUB_OUTPUT}"
+echo "Selected ${selected} (${digest}; ${cli_revision})."
