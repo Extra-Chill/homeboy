@@ -1,4 +1,7 @@
-use super::{resolve_multi_args, resume_deploy_command, run, DeployArgs, DeployTargetArg};
+use super::{
+    has_retryable_multi_target_failures, resolve_multi_args, resume_deploy_command, run,
+    DeployArgs, DeployTargetArg,
+};
 use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use std::collections::BTreeMap;
@@ -259,6 +262,19 @@ fn generated_resume_action_round_trips_all_multi_target_identity_inputs() {
     assert!(parsed_config.allow_stale_source);
     assert!(parsed_config.allow_downgrade);
     assert!(parsed_config.head);
+}
+
+#[test]
+fn applied_unverified_projects_do_not_count_as_retryable_multi_target_failures() {
+    assert!(!has_retryable_multi_target_failures([
+        "applied_unverified",
+        "deployed",
+        "skipped",
+    ]));
+    assert!(has_retryable_multi_target_failures([
+        "applied_unverified",
+        "failed",
+    ]));
 }
 
 #[test]

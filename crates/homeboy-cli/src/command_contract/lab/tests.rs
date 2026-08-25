@@ -42,6 +42,7 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(compact.contains("Quick start:"), "{compact}");
     assert!(compact.contains("--repo <REPO>"), "{compact}");
     assert!(compact.contains("--task-url <URL>"), "{compact}");
+    assert!(compact.contains("--backend <BACKEND>"), "{compact}");
     assert!(compact.contains("--model <MODEL>"), "{compact}");
     assert!(!compact.contains("--ai-model"), "{compact}");
     assert!(compact.contains("--preview"), "{compact}");

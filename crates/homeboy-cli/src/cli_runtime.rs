@@ -1,10 +1,11 @@
-use clap::{ArgMatches, Command};
+use clap::{ArgMatches, Command, CommandFactory};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
+use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
     Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
@@ -24,6 +25,7 @@ use homeboy::extension::{
     ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
 };
 use homeboy_agents::agent_task_service::cook_continue_command;
+#[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
@@ -222,7 +224,7 @@ pub(crate) fn select_unmaterialized_cook_runner(
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
-    capabilities: &'static [&'static dyn CliCapability],
+    capabilities: CommandCapabilityRegistry,
 }
 
 struct ExtensionCliCommand {
@@ -581,10 +583,22 @@ impl CliRuntime {
     }
 
     pub fn with_capabilities(capabilities: &'static [&'static dyn CliCapability]) -> Self {
-        Self {
+        Self::try_with_required_capabilities(capabilities, &[])
+            .expect("CLI capability composition must be valid")
+    }
+
+    pub fn try_with_required_capabilities(
+        capabilities: &'static [&'static dyn CliCapability],
+        required: &[&str],
+    ) -> crate::core::Result<Self> {
+        Ok(Self {
             extension_discovery: OnceLock::new(),
-            capabilities,
-        }
+            capabilities: CommandCapabilityRegistry::compose(
+                capabilities,
+                required,
+                &Cli::command(),
+            )?,
+        })
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
@@ -598,8 +612,11 @@ impl CliRuntime {
         register_startup_providers_before_reconcile();
         if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
             let config = crate::core::defaults::load_config();
-            if register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
-                .is_err()
+            if register_startup_providers_after_reconcile(
+                &config.agent_task,
+                &self.capabilities.capabilities(),
+            )
+            .is_err()
             {
                 return std::process::ExitCode::from(2);
             }
@@ -654,9 +671,10 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
-        if let Err(error) =
-            register_startup_providers_after_reconcile(&config.agent_task, self.capabilities)
-        {
+        if let Err(error) = register_startup_providers_after_reconcile(
+            &config.agent_task,
+            &self.capabilities.capabilities(),
+        ) {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
@@ -700,6 +718,13 @@ impl CliRuntime {
             {
                 Ok(matches) => matches,
                 Err(err) => {
+                    if matches!(
+                        err.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ) {
+                        err.exit();
+                    }
                     if let Some(output) = try_augment_clap_error(
                         &err,
                         &diagnostic_args,
@@ -1079,19 +1104,21 @@ impl CliRuntime {
 
         if let Commands::AgentTask(agent_task) = &cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
-                if let Err(err) =
-                    crate::commands::agent_task::run::validate_cook_request_with_provenance(
-                        cook,
-                        Some(&command_provenance),
-                    )
-                {
-                    output_runtime::emit_json_result_for_identity(
-                        Err(err),
-                        output_file.as_deref(),
-                        2,
-                        &command_identity,
-                    );
-                    return std::process::ExitCode::from(2);
+                if !cook.preview {
+                    if let Err(err) =
+                        crate::commands::agent_task::run::validate_cook_request_with_provenance(
+                            cook,
+                            Some(&command_provenance),
+                        )
+                    {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(err),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
                 }
             }
         }
@@ -1335,14 +1362,18 @@ impl CliRuntime {
 
     fn build_augmented_command(&self) -> Command {
         let discovery = self.extension_discovery();
+        self.capabilities
+            .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
+            .expect("dynamic and typed capability command names must not conflict");
         let mut command = build_augmented_command(&discovery.info, &discovery.health);
-        for capability in self.capabilities {
-            command = command.subcommand(capability.command());
+        for entry in self.capabilities.entries() {
+            command = command.subcommand(entry.command.clone());
         }
         let support = self
             .capabilities
+            .entries()
             .iter()
-            .filter_map(|capability| capability.lab_command_route_support())
+            .filter_map(|entry| entry.capability.lab_command_route_support())
             .collect::<Vec<_>>();
         crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
     }
@@ -1353,9 +1384,7 @@ impl CliRuntime {
     ) -> Option<(&'a dyn CliCapability, &'a ArgMatches)> {
         let (name, sub_matches) = matches.subcommand()?;
         self.capabilities
-            .iter()
-            .copied()
-            .find(|capability| capability.name() == name)
+            .find(name)
             .map(|capability| (capability, sub_matches))
     }
 
@@ -2047,7 +2076,7 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
 /// Neither reads readiness, so the rendered `--help` surface and the augmented
 /// parser are byte-identical either way (#10616).
 fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
-    collect_extension_cli_info_with(ExtensionReadinessMode::Skip)
+    collect_extension_cli_info_with(ExtensionReadinessMode::Cached)
 }
 
 fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> ExtensionCliDiscovery {
@@ -2158,28 +2187,28 @@ fn extension_command_manifest(
 
 fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
     // An extension whose `ready_check` was never run is `unknown`, not `ready`.
-    // `ExtensionReadinessMode::Skip` reports `ready: true` so that inventory
-    // output is not mistaken for a *failed* probe, but a command-health
-    // contract that copied that through would be asserting a readiness nobody
-    // measured — the fail-open defect class in #10685. Report the absence of a
-    // measurement as an absence. (#10616)
-    let readiness_skipped = summary.ready_reason.as_deref() == Some(READY_CHECK_SKIPPED_REASON);
+    // A command-health contract that treated an absent measurement as ready
+    // would reproduce the fail-open defect class in #10685. (#10616)
+    let readiness_unknown =
+        summary.readiness == homeboy_extension::ExtensionReadinessState::Unknown;
 
     let status = if summary.error.is_some() {
         "error"
     } else if !summary.compatible {
         "incompatible"
-    } else if readiness_skipped {
+    } else if readiness_unknown {
         "unknown"
-    } else if summary.ready {
+    } else if summary.ready == Some(true) {
         "ready"
+    } else if summary.readiness == homeboy_extension::ExtensionReadinessState::TimedOut {
+        "timed_out"
     } else {
         "not_ready"
     };
 
     ExtensionCommandHealth {
         status: status.to_string(),
-        ready: summary.ready && !readiness_skipped,
+        ready: summary.ready == Some(true),
         compatible: summary.compatible,
         linked: summary.linked,
         reason: summary
@@ -4468,6 +4497,28 @@ mod tests {
                 "Cook validation failures must precede ambient discovery"
             );
         });
+    }
+
+    #[test]
+    fn cook_preview_reaches_backend_resolution_before_runtime_validation() {
+        std::thread::Builder::new()
+            .name("cook-preview-runtime-routing".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                crate::test_support::with_isolated_home(|_| {
+                    let preview = CliRuntime::new().run_from_args(argv(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--preview",
+                    ]));
+
+                    assert_eq!(preview, std::process::ExitCode::SUCCESS);
+                });
+            })
+            .expect("spawn Cook preview runtime-routing test")
+            .join()
+            .expect("Cook preview runtime-routing test");
     }
 
     #[test]
