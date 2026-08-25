@@ -666,6 +666,7 @@ process.exit(0);
 
 	const provenanceOpenCode = path.join(root, 'opencode');
 	fs.writeFileSync(provenanceOpenCode, `#!/usr/bin/env node
+const fs = require('node:fs');
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 if (process.argv[2] === 'debug') {
   const permission = Object.entries(config.agent.build.permission)
@@ -677,7 +678,11 @@ if (process.argv[2] === 'export') {
   if (process.env.HOMEBOY_TEST_HANG_EXPORT === '1') {
     setInterval(() => {}, 1_000);
   } else {
-    process.stdout.write('Exporting session\\n' + JSON.stringify({ info: { model: { providerID: 'openai', id: 'gpt-5.6-sol' } } }));
+    const exported = 'Exporting session\\n' + JSON.stringify({
+      info: { model: { providerID: 'openai', id: 'gpt-5.6-sol' } },
+      messages: [{ text: 'x'.repeat(70 * 1024) }],
+    });
+    process.stdout.write(fs.fstatSync(1).isFile() ? exported : exported.slice(0, 64 * 1024));
     process.exit(0);
   }
 } else {
@@ -689,6 +694,8 @@ if (process.argv[2] === 'export') {
 }
 `);
 	fs.chmodSync(provenanceOpenCode, 0o755);
+	const provenanceTempRoot = path.join(root, 'provenance-temp');
+	fs.mkdirSync(provenanceTempRoot);
 	const defaultModelRun = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: fixtureEnv,
@@ -699,7 +706,7 @@ if (process.argv[2] === 'export') {
 			artifacts_path: path.join(root, 'default-model-artifacts'),
 			executor: {
 				...request.executor,
-				config: { ...request.executor.config, runtime_bin: provenanceOpenCode, command_args: [] },
+				config: { ...request.executor.config, runtime_bin: provenanceOpenCode, command_args: [], runtime_env: { TMPDIR: provenanceTempRoot } },
 			},
 		}),
 	});
@@ -712,6 +719,7 @@ if (process.argv[2] === 'export') {
 	assert.deepEqual(defaultModelResult.metadata.opencode_session, {
 		status: 'captured', session_id: 'ses_default_model', model: 'openai/gpt-5.6-sol',
 	});
+	assert.deepEqual(fs.readdirSync(provenanceTempRoot).filter((name) => name.startsWith('opencode-session-export-')), []);
 	const exportStarted = Date.now();
 	const unavailableModelResult = await executeOpenCodeAgentTask({
 		...request,
