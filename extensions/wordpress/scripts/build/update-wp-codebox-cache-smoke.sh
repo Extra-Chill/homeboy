@@ -63,6 +63,10 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$prefix" ] || { echo "missing --prefix" >&2; exit 2; }
+if [ -n "${EXPECTED_WP_CODEBOX_SOURCE_SHA:-}" ]; then
+    [ "${WP_CODEBOX_SOURCE_SHA:-}" = "$EXPECTED_WP_CODEBOX_SOURCE_SHA" ] || { echo "npm inherited stale WP_CODEBOX_SOURCE_SHA: ${WP_CODEBOX_SOURCE_SHA:-}" >&2; exit 2; }
+    [ "${WP_CODEBOX_SOURCE_REF:-}" = "$EXPECTED_WP_CODEBOX_SOURCE_REF" ] || { echo "npm did not receive requested WP_CODEBOX_SOURCE_REF: ${WP_CODEBOX_SOURCE_REF:-}" >&2; exit 2; }
+fi
 case "${args[*]}" in
     ci*)
         case " ${args[*]} " in
@@ -146,7 +150,7 @@ git -C "$SOURCE_WORK" commit --quiet -m 'final wp-codebox fixture'
 FINAL_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main
 
-OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+OUTPUT="$(WP_CODEBOX_SOURCE_SHA=stale-inherited-sha EXPECTED_WP_CODEBOX_SOURCE_SHA="$INITIAL_SHA" EXPECTED_WP_CODEBOX_SOURCE_REF="$INITIAL_SHA" PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
     *)
