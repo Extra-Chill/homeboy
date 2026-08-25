@@ -2713,7 +2713,7 @@ fn cook_defers_provider_lookup_failures_until_durable_admission() {
 
 #[cfg(unix)]
 #[test]
-fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
+fn cook_defers_an_explicit_missing_destination_until_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
@@ -2760,15 +2760,29 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             "homeboy".to_string(),
             "--task-url".to_string(),
             "https://github.com/Extra-Chill/homeboy/issues/12601".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@fix-issue-12601-homeboy".to_string(),
+            "--head".to_string(),
+            "fix/issue-12601-homeboy".to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
             "--no-finalize".to_string(),
         ]))
-        .expect("derive issue destination without provisioning it");
+        .expect("retain explicit missing destination without provisioning it");
         let provision = super::super::run::provision_cook_destination(&args)
             .expect("ensure-only provider is deferred until durable Cook admission");
 
         assert_eq!(provision["action"], "lookup_pending");
+        assert_eq!(provision["handle"], "homeboy@fix-issue-12601-homeboy");
+        assert_eq!(
+            provision["provision_intent"],
+            serde_json::json!({
+                "repo": "homeboy",
+                "base": "main",
+                "head": "fix/issue-12601-homeboy",
+                "task_url": "https://github.com/Extra-Chill/homeboy/issues/12601",
+            })
+        );
         assert_eq!(
             provision["lifecycle_intent"],
             serde_json::json!({
@@ -2777,7 +2791,7 @@ fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
             })
         );
         let plan = super::super::run::compile_cook_plan(&args, provision.clone())
-            .expect("compile issue-derived Cook with its deferred provision intent");
+            .expect("compile explicit Cook with its deferred provision intent");
         assert_eq!(plan.metadata["cook_provision"], provision);
         assert_eq!(
             plan.tasks[0].metadata["worktree_provision"],

@@ -757,6 +757,10 @@ mod tests {
         assert!(help.contains("--goal"), "{help}");
         assert!(help.contains("Workspace handle the cook edits"), "{help}");
         assert!(
+            help.contains("previewing creation additionally requires"),
+            "{help}"
+        );
+        assert!(
             help.contains("Deterministic verification command"),
             "{help}"
         );
@@ -1024,10 +1028,11 @@ pub struct AgentTaskCookArgs {
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
     /// `repo@fix-1234-x`. Existing destinations are reused. Creating a missing
     /// one is not a built-in capability: it requires an enabled worktree
-    /// provider with a `commands.ensure` argv template, and without one you must
-    /// create the destination first with `homeboy worktree create`. When
-    /// omitted, an explicit --cwd is the canonical destination. Otherwise,
-    /// --repo plus --task-url derives an issue-owned destination through that
+    /// provider with a `commands.ensure` argv template; previewing creation
+    /// additionally requires its non-mutating `commands.plan` counterpart.
+    /// Without ensure, create the destination first with `homeboy worktree
+    /// create`. When omitted, an explicit --cwd is the canonical destination.
+    /// Otherwise, --repo plus --task-url derives an issue-owned destination through that
     /// same configured provider. An explicit --workspace or --cwd Git checkout
     /// can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
