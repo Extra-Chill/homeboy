@@ -38,7 +38,13 @@ fi
 
 if [ -n "${EXTENSION}" ] && command -v homeboy &>/dev/null; then
   echo "Setting up Homeboy extension dependencies (${EXTENSION})..."
-  homeboy extension setup "${EXTENSION}" 2>&1
+  # Extension installation may already have resolved a moving WP Codebox ref.
+  # Reuse that commit when setup runs again so checkout and provenance agree.
+  if [ -n "${WP_CODEBOX_SOURCE_SHA:-}" ]; then
+    HOMEBOY_WP_CODEBOX_REF="${WP_CODEBOX_SOURCE_SHA}" homeboy extension setup "${EXTENSION}" 2>&1
+  else
+    homeboy extension setup "${EXTENSION}" 2>&1
+  fi
 fi
 
 # ── npm install (Node projects) ──
